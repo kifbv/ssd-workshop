@@ -15,3 +15,6 @@ paths:
 - No account-wide CDK bootstrap: use `CliCredentialsStackSynthesizer` with the
   `ssd-workshop-cdk-assets-*` bucket.
 - A new paid AWS service or a cost estimate above $50/month is a Stop-and-ask case.
+- `cdk synth` fails with "This app contains no stacks" on an empty app; keep at least one stack.
+- aws-cdk-lib types break `exactOptionalPropertyTypes` (e.g. passing a synthesizer): assert to the
+  CDK interface at the call site (`as IStackSynthesizer`); never turn the flag off.

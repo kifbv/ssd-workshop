@@ -29,6 +29,10 @@ Run before pushing:
 - `npm run lint` (ESLint with typescript-eslint)
 - `npm run typecheck` (TypeScript strict)
 - `npm test` (vitest)
+- `npm run synth` (`cdk synth`, no AWS credentials needed)
+- `cfn-lint --regions eu-central-1 -- infra/access/access-stack.yaml`
+
+CI (`.github/workflows/ci.yml`) runs the same steps on every pull request as one check, `ci`.
 
 ## How we work
 
