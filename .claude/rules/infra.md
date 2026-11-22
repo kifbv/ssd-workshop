@@ -73,6 +73,7 @@ paths:
   a pattern without a source). Schedules use EventBridge Scheduler (`scheduler:*` on
   `ssd-workshop-*`), not schedule rules; AWS service events such as ECS task state changes are
   not available as rules (poll `DescribeTasks` or use Step Functions `.sync` instead).
+- Tagging during create: CloudFront distributions and ACM certificates are tagged by CloudFormation in the create call (`TagOnCreateThroughCloudFormation`, requires `aws:CalledVia` CloudFormation and no project tag yet). Create them only through CloudFormation, never with a direct SDK call. CloudFormation resource import is denied.
 - ACM certificates only for `workshop.rankly.games` and `*.workshop.rankly.games`
   (`acm:DomainNames`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
