@@ -131,7 +131,7 @@ Resources:
               - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:changeSet/*
           - Sid: ProtectThisStack
             Effect: Deny
-            Action: ["cloudformation:Update*", "cloudformation:Delete*", "cloudformation:CreateChangeSet", "cloudformation:ExecuteChangeSet"]
+            NotAction: ["cloudformation:Describe*", "cloudformation:List*", "cloudformation:Get*"]
             Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/ssd-workshop-access/*
           - Sid: NamedWorkshopResources
             Effect: Allow
@@ -183,11 +183,14 @@ Resources:
               StringEquals: {iam:PermissionsBoundary: !Ref BoundaryPolicy}
           - Sid: WorkshopRolesHousekeeping
             Effect: Allow
-            Action: [iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy, iam:PassRole, iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile, iam:CreateServiceLinkedRole]
+            Action: [iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy, iam:PassRole, iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile]
             Resource:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
               - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/ssd-workshop-*
-              - !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*
+          - Sid: WorkshopServiceLinkedRoles
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*
           - Sid: NoBoundaryEscape
             Effect: Deny
             Action: [iam:DeleteRolePermissionsBoundary, iam:PutRolePermissionsBoundary, iam:CreateUser, iam:CreateAccessKey, iam:CreatePolicyVersion, iam:SetDefaultPolicyVersion]
@@ -236,8 +239,11 @@ Resources:
               - cloudfront:*CachePolicy*
               - cloudfront:*OriginRequestPolicy*
               - cloudfront:*ResponseHeadersPolicy*
-              - cloudfront:*Function*
             Resource: "*"
+          - Sid: CloudFrontWorkshopFunctions
+            Effect: Allow
+            Action: cloudfront:*Function*
+            Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:function/ssd-workshop-*
           - Sid: CertificatesTagged
             Effect: Allow
             Action: [acm:RequestCertificate, acm:AddTagsToCertificate]
