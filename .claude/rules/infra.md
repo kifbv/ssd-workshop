@@ -19,7 +19,14 @@ paths:
 - Region `eu-central-1`; only CloudFront certificates live in `us-east-1`.
 - DNS: only the `workshop.rankly.games` record and its certificate validation records may change.
 - No account-wide CDK bootstrap: use `CliCredentialsStackSynthesizer` with the
-  `ssd-workshop-cdk-assets-*` bucket.
+  `ssd-workshop-cdk-assets-*` bucket for stacks with file assets. It also uploads the template
+  there, so asset-free stacks in another region (or the one creating the bucket) use
+  `LegacyStackSynthesizer` (inline template) and must keep no file assets.
+- Never use `crossRegionReferences`: it writes SSM `/cdk/exports/*` through a Lambda the boundary
+  forbids. Look resources up by fixed name instead.
+- CDK constructs that bring their own Lambda (BucketDeployment, custom resources) need explicit
+  `ssd-workshop-*` names on the function, role and layer (escape hatch): CloudFormation names a
+  layer after its logical id, outside the deploy policy.
 - A new paid AWS service or a cost estimate above $50/month is a Stop-and-ask case.
 - `cdk synth` fails with "This app contains no stacks" on an empty app; keep at least one stack.
 - aws-cdk-lib types break `exactOptionalPropertyTypes` (e.g. passing a synthesizer): assert to the
@@ -87,3 +94,9 @@ paths:
 - Custom CloudWatch metrics use the namespace `ssd-workshop`.
 - Reads of other projects' configuration are not granted (Lambda environments, task definitions,
   other stacks' outputs, other APIs and distributions): name the workshop resource when reading.
+- CDK generates names for some resources that take no name by default (e.g. the Origin Access
+  Control of `S3BucketOrigin.withOriginAccessControl`): pass an explicitly named construct. The
+  names test checks every `*Name` key at any depth.
+- `RemovalPolicy.RETAIN` also applies when a failed first create rolls back: the retained resource
+  (bucket, origin access control) stays, and the retry fails on its fixed name until it is deleted
+  or renamed.

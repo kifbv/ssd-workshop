@@ -4,7 +4,7 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig(
-  globalIgnores(["**/node_modules/", "**/cdk.out/", "**/dist/", "**/coverage/"]),
+  globalIgnores(["**/node_modules/", "**/cdk.out/", "**/dist/", "**/coverage/", ".claude/"]),
   eslint.configs.recommended,
   tseslint.configs.strict,
 );

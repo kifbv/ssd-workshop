@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONFIGURATION_SET,
   DEFAULT_MODEL_ID,
   USAGE,
   buildTestEmail,
@@ -40,6 +41,12 @@ describe("parseArgs", () => {
     expect(parseArgs([])).toHaveProperty("error");
     expect(parseArgs(["bedrock", "extra"])).toHaveProperty("error");
     expect(parseArgs(["ses", "a@b.com", "c@d.com"])).toHaveProperty("error");
+  });
+});
+
+describe("CONFIGURATION_SET", () => {
+  it("names the workshop's own SES configuration set", () => {
+    expect(CONFIGURATION_SET).toBe("ssd-workshop");
   });
 });
 

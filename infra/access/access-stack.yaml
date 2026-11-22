@@ -76,6 +76,7 @@ Resources:
             Resource:
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
+              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
           - Sid: RunBuilds
@@ -379,6 +380,7 @@ Resources:
             Resource:
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
+              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
 
@@ -635,6 +637,14 @@ Resources:
       UserName: ssd-workshop-claude
       ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge, !Ref DeployPolicyEc2, !Ref DeployPolicyRead]
       Tags: [{Key: project, Value: ssd-workshop}]
+
+  # Workshop emails name this configuration set, so SES does not fall back to the rankly.games
+  # identity's default set (rankly-dev, another project's). Created here because the deploy rights
+  # cannot create SES resources.
+  SesConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: ssd-workshop
 
   Budget:
     Type: AWS::Budgets::Budget

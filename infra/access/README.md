@@ -79,7 +79,7 @@ flowchart LR
 | `WorkshopData` | Lambda, ECS and EC2 roles read and write only `ssd-workshop-*` tables, queues, secrets and parameters, and the log groups `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` and `/ecs/ssd-workshop-*`. |
 | `WorkshopBuckets` | `ssd-workshop-*` buckets, only in this account (`aws:ResourceAccount`: bucket names are global, so someone else could own a bucket with a matching name). |
 | `Bedrock` | The platform calls Claude on Bedrock (Anthropic models and `eu.anthropic.*` inference profiles only). |
-| `SendCodes` | Sign-in codes go out by SES, only through the identities `ssd-workshop@rankly.games` and `rankly.games` (SES authorizes the domain identity when the address itself is not verified) and only from `ssd-workshop@rankly.games` (`ses:FromAddress`). |
+| `SendCodes` | Sign-in codes go out by SES, only through the identities `ssd-workshop@rankly.games` and `rankly.games` (SES authorizes the domain identity when the address itself is not verified) and only from `ssd-workshop@rankly.games` (`ses:FromAddress`), naming the configuration set `ssd-workshop` (created by this stack) so SES never falls back to the domain's default set `rankly-dev`. |
 | `RunBuilds` | Start build tasks only from `ssd-workshop-*` task definitions on `ssd-workshop-*` clusters (`ecs:cluster`). |
 | `WatchBuilds` | Stop and describe tasks on `ssd-workshop-*` clusters. |
 | `PullImages` | Pull images only from `ssd-workshop-*` repositories. |

@@ -14,6 +14,7 @@ import {
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
+  CONFIGURATION_SET,
   REGION,
   SENDER,
   USAGE,
@@ -91,6 +92,8 @@ async function smokeSes(address: string): Promise<void> {
   const response = await client.send(
     new SendEmailCommand({
       FromEmailAddress: SENDER,
+      // Without it SES uses the rankly.games identity's default set (rankly-dev), which we may not use.
+      ConfigurationSetName: CONFIGURATION_SET,
       Destination: { ToAddresses: [address] },
       Content: {
         Simple: {

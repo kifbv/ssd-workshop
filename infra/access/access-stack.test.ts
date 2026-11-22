@@ -126,15 +126,15 @@ const DEPLOY_EXCEPTIONS: Record<string, string> = {
   ...ACTION_ALLOW_LIST,
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
-  "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
-  "SesForTesting/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SesForTesting/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
 };
 // The boundary's own exceptions (same rules as the deploy policies).
 const BOUNDARY_ALLOW_LIST: Record<string, string> = {
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
-  "SendCodes/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
-  "SendCodes/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SendCodes/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SendCodes/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
   "AccountWideServiceCalls/ecr:GetAuthorizationToken": "account-wide registry login token; image pulls stay scoped to ssd-workshop-* repositories",
   "AccountWideServiceCalls/xray:PutTraceSegments": "X-Ray has no resource scope; writes trace data only",
   "WorkshopMetrics/cloudwatch:PutMetricData": "limited by cloudwatch:namespace to ssd-workshop",
@@ -497,10 +497,11 @@ function acmDomainGaps(stmts: Statement[]): string[] {
     .map((s) => s.Sid);
 }
 
-// SES: sends only through the workshop sender's identities, with ses:FromAddress pinned.
+// SES: sends only through the workshop sender's identities and the ssd-workshop configuration set, with ses:FromAddress pinned.
 const SES_IDENTITIES = [
   "arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games",
   "arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games",
+  "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop",
 ];
 function sesScopeGaps(stmts: Statement[]): string[] {
   return stmts
@@ -830,6 +831,16 @@ describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
     const old = withAll("              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games\n", '              - "*"\n');
     expect(sesScopeGaps(deployStatements(old))).toEqual(["SesForTesting"]);
     expect(sesScopeGaps(boundaryStatements(old))).toEqual(["SendCodes"]);
+  });
+
+  it("creates the ssd-workshop configuration set, so sends never fall back to another project's default set", () => {
+    const sets = Object.values(template.Resources).filter((r) => r.Type === "AWS::SES::ConfigurationSet");
+    expect(sets.map((r) => r.Properties.Name)).toEqual(["ssd-workshop"]);
+    const otherSet = withAll(
+      "              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop\n",
+      "              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/*\n",
+    );
+    expect(sesScopeGaps(deployStatements(otherSet))).toEqual(["SesForTesting"]);
   });
 });
 

@@ -2,6 +2,9 @@
 
 export const REGION = "eu-central-1";
 export const SENDER = "ssd-workshop@rankly.games";
+/** SES configuration set every workshop email names (created by the access stack). */
+export const CONFIGURATION_SET = "ssd-workshop";
+
 export const DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-4-6";
 
 export const USAGE = `Usage: npm run -s smoke -- <command>
