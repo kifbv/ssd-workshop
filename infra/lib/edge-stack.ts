@@ -5,6 +5,8 @@ import {
   Distribution,
   HttpVersion,
   PriceClass,
+  ResponseHeadersPolicy,
+  S3OriginAccessControl,
   ViewerProtocolPolicy,
 } from "aws-cdk-lib/aws-cloudfront";
 import { S3BucketOrigin } from "aws-cdk-lib/aws-cloudfront-origins";
@@ -61,9 +63,17 @@ export class EdgeStack extends Stack {
       priceClass: PriceClass.PRICE_CLASS_100,
       httpVersion: HttpVersion.HTTP2_AND_3,
       defaultBehavior: {
-        origin: S3BucketOrigin.withOriginAccessControl(bucket),
+        origin: S3BucketOrigin.withOriginAccessControl(bucket, {
+          // Named explicitly: CDK would generate a name outside ssd-workshop-*.
+          originAccessControl: new S3OriginAccessControl(this, "OriginAccessControl", {
+            originAccessControlName: `${PREFIX}-site`,
+          }),
+        }),
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+        // Managed SecurityHeadersPolicy: HSTS, nosniff, frame and referrer
+        // headers. Managed, so no new resource.
+        responseHeadersPolicy: ResponseHeadersPolicy.SECURITY_HEADERS,
       },
     });
     // CDK cannot add to an imported bucket's policy; the site stack does it.

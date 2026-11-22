@@ -25,3 +25,6 @@ paths:
 - `cdk synth` fails with "This app contains no stacks" on an empty app; keep at least one stack.
 - aws-cdk-lib types break `exactOptionalPropertyTypes` (e.g. passing a synthesizer): assert to the
   CDK interface at the call site (`as IStackSynthesizer`); never turn the flag off.
+- CDK generates names for some resources that take no name by default (e.g. the Origin Access
+  Control of `S3BucketOrigin.withOriginAccessControl`): pass an explicitly named construct. The
+  names test checks every `*Name` key at any depth.

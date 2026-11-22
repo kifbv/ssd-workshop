@@ -4,6 +4,6 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["eslint.config.mjs", "infra/**/*.ts", "platform/**/*.ts"],
+  "include": ["eslint.config.mjs", "vitest.config.ts", "infra/**/*.ts", "platform/**/*.ts"],
   "exclude": ["**/node_modules", "**/cdk.out", "**/dist"]
 }

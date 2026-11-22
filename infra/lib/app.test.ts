@@ -46,7 +46,36 @@ const NOT_TAGGABLE = [
   "Custom::CDKBucketDeployment",
 ];
 
-const NAME_PROPERTIES = ["BucketName", "FunctionName", "RoleName", "LayerName", "LogGroupName"];
+/**
+ * Keys ending in "Name" that are not a resource's physical name, so the names
+ * test skips them: DNS names, a reference to a bucket, and the name of an inline
+ * policy inside its (named) role. Every other "*Name" key, at any depth, is a name.
+ */
+const NOT_RESOURCE_NAMES = ["DomainName", "DNSName", "DestinationBucketName", "PolicyName"];
+
+/** Per type, top-level keys that are DNS names rather than resource names. */
+const DNS_NAME_PROPERTIES: Record<string, string[]> = { "AWS::Route53::RecordSet": ["Name"] };
+
+/** Every [path, value] under `value` whose key is a physical name ("Name" or "*Name"). */
+function physicalNames(value: unknown, path: string, skip: string[]): [string, unknown][] {
+  if (Array.isArray(value)) return value.flatMap((v, i) => physicalNames(v, `${path}[${i}]`, []));
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, v]): [string, unknown][] => {
+    const here = `${path}.${key}`;
+    const isName = key.endsWith("Name") && !NOT_RESOURCE_NAMES.includes(key) && !skip.includes(key);
+    return [...(isName ? [[here, v] as [string, unknown]] : []), ...physicalNames(v, here, [])];
+  });
+}
+
+/** Name keys at any depth that the template must carry (proves the walk sees nested ones). */
+const EXPECTED_NAME_PATHS = [
+  "BucketName",
+  "FunctionName",
+  "RoleName",
+  "LayerName",
+  "LogGroupName",
+  "OriginAccessControlConfig.Name",
+];
 
 let dir: string;
 let assembly: CloudAssembly;
@@ -137,17 +166,21 @@ describe("tags, boundary and names (criterion 3)", () => {
     }
   });
 
-  it("starts every explicit physical name with ssd-workshop-", () => {
-    let named = 0;
+  it("starts every physical name, nested ones included, with ssd-workshop-", () => {
+    const seen = new Set<string>();
     for (const [s, id, r] of allResources()) {
-      for (const prop of NAME_PROPERTIES) {
-        const value = r.Properties?.[prop];
-        if (value === undefined) continue;
-        named++;
-        expect(value, `${s}/${id}.${prop}`).toMatch(/^ssd-workshop-/);
+      for (const [path, value] of physicalNames(r.Properties, "", DNS_NAME_PROPERTIES[r.Type] ?? [])) {
+        seen.add(path.slice(1));
+        expect(value, `${s}/${id}${path}`).toMatch(/^ssd-workshop-/);
       }
     }
-    expect(named).toBeGreaterThan(0);
+    for (const path of EXPECTED_NAME_PATHS) expect(seen, path).toContain(path);
+  });
+
+  it("names the Origin Access Control ssd-workshop-site", () => {
+    const oacs = ofType("AWS::CloudFront::OriginAccessControl");
+    expect(oacs).toHaveLength(1);
+    expect(oacs[0]?.[2].Properties?.OriginAccessControlConfig).toMatchObject({ Name: "ssd-workshop-site" });
   });
 
   it("names every Lambda function, layer and role explicitly (the access policy allows only ssd-workshop-*)", () => {
@@ -262,6 +295,9 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
         ViewerProtocolPolicy: "redirect-to-https",
         // Managed CachingOptimized policy.
         CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6",
+        // Managed SecurityHeadersPolicy (HSTS, X-Content-Type-Options,
+        // X-Frame-Options, Referrer-Policy, X-XSS-Protection).
+        ResponseHeadersPolicyId: "67f7725c-6f97-4210-82d7-5512b31e9d03",
       },
       ViewerCertificate: {
         AcmCertificateArn: { Ref: certId },
@@ -275,6 +311,8 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
     expect(origins[0]).toMatchObject({ DomainName: SITE_BUCKET_REGIONAL_DOMAIN });
     expect(origins[0]?.OriginAccessControlId).toBeDefined();
     expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(1);
+    // The managed headers policy creates no resource of its own.
+    expect(ofType("AWS::CloudFront::ResponseHeadersPolicy")).toEqual([]);
   });
 
   it("changes only the workshop.rankly.games records (A and AAAA aliases to CloudFront)", () => {

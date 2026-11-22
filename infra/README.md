@@ -9,7 +9,7 @@ AWS CDK app (TypeScript). Nothing is deployed from a session: stacks deploy from
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 
 Deploy order: cdk-assets, then site, then edge. Nothing is passed between regions: the edge
 stack finds the site bucket by its fixed name, and the site bucket policy lets this account's
@@ -24,11 +24,13 @@ npm test        # template assertions (infra/lib/app.test.ts)
 
 Read-only; run them after the deploy workflow has finished on `main`.
 
-**Before the first deploy** (once), snapshot the zone for criterion 5:
+**Before ticket 0.5 is merged** (that merge is the first deploy), snapshot the zone once for
+criterion 5. Franck takes it, or a session with the read-only command below. Write it outside the
+repository (here `/tmp/`) so it is never committed; the same goes for `zone-after.json`.
 
 ```sh
 aws route53 list-resource-record-sets --region us-east-1 \
-  --hosted-zone-id Z0232668P02TE2FEZL28 --output json > zone-before.json
+  --hosted-zone-id Z0232668P02TE2FEZL28 --output json > /tmp/zone-before.json
 ```
 
 1. HTTPS answers 200 with the placeholder page:
@@ -65,8 +67,8 @@ aws route53 list-resource-record-sets --region us-east-1 \
 
    ```sh
    aws route53 list-resource-record-sets --region us-east-1 \
-     --hosted-zone-id Z0232668P02TE2FEZL28 --output json > zone-after.json
-   diff zone-before.json zone-after.json
+     --hosted-zone-id Z0232668P02TE2FEZL28 --output json > /tmp/zone-after.json
+   diff /tmp/zone-before.json /tmp/zone-after.json
    # expect: only added records named workshop.rankly.games. (A, AAAA)
    # and _<hash>.workshop.rankly.games. (CNAME, certificate validation)
    ```
