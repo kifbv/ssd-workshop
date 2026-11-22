@@ -22,7 +22,14 @@ npm test        # template assertions (infra/lib/app.test.ts)
 
 ## Checks after the first deploy (ticket 0.4 criteria 1, 2, 4, 5)
 
-Read-only; run them after the deploy workflow has finished on `main`.
+Read-only; run them after the deploy workflow has finished on `main`. Set the account and zone
+first, copied from `infra/lib/config.ts` (`ACCOUNT`, `HOSTED_ZONE_ID`), the one place that holds
+them:
+
+```sh
+ACCOUNT=<ACCOUNT from infra/lib/config.ts>
+ZONE_ID=<HOSTED_ZONE_ID from infra/lib/config.ts>
+```
 
 **Before ticket 0.5 is merged** (that merge is the first deploy), snapshot the zone once for
 criterion 5. Franck takes it, or a session with the read-only command below. Write it outside the
@@ -30,7 +37,7 @@ repository (here `/tmp/`) so it is never committed; the same goes for `zone-afte
 
 ```sh
 aws route53 list-resource-record-sets --region us-east-1 \
-  --hosted-zone-id Z0232668P02TE2FEZL28 --output json > /tmp/zone-before.json
+  --hosted-zone-id "$ZONE_ID" --output json > /tmp/zone-before.json
 ```
 
 1. HTTPS answers 200 with the placeholder page:
@@ -46,13 +53,13 @@ aws route53 list-resource-record-sets --region us-east-1 \
 
    ```sh
    curl -sS -o /dev/null -w '%{http_code}\n' \
-     https://ssd-workshop-site-360206963848.s3.eu-central-1.amazonaws.com/index.html
+     "https://ssd-workshop-site-$ACCOUNT.s3.eu-central-1.amazonaws.com/index.html"
    # expect: 403
    aws s3api get-bucket-policy-status --region eu-central-1 \
-     --bucket ssd-workshop-site-360206963848 --query PolicyStatus.IsPublic
+     --bucket "ssd-workshop-site-$ACCOUNT" --query PolicyStatus.IsPublic
    # expect: false
    aws s3api get-public-access-block --region eu-central-1 \
-     --bucket ssd-workshop-site-360206963848
+     --bucket "ssd-workshop-site-$ACCOUNT"
    # expect: all four settings true
    ```
 
@@ -67,7 +74,7 @@ aws route53 list-resource-record-sets --region us-east-1 \
 
    ```sh
    aws route53 list-resource-record-sets --region us-east-1 \
-     --hosted-zone-id Z0232668P02TE2FEZL28 --output json > /tmp/zone-after.json
+     --hosted-zone-id "$ZONE_ID" --output json > /tmp/zone-after.json
    diff /tmp/zone-before.json /tmp/zone-after.json
    # expect: only added records named workshop.rankly.games. (A, AAAA)
    # and _<hash>.workshop.rankly.games. (CNAME, certificate validation)

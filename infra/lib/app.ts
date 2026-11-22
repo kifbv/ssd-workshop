@@ -4,6 +4,7 @@ import { AssetsStack } from "./assets-stack.js";
 import {
   ACCOUNT,
   BOUNDARY_ARN,
+  DOMAIN,
   EDGE_REGION,
   REGION,
   STACK_NAMES,
@@ -42,7 +43,7 @@ export function buildApp(props?: AppProps): App {
   const edge = new EdgeStack(app, STACK_NAMES.edge, {
     env: { account: ACCOUNT, region: EDGE_REGION },
     synthesizer: inlineTemplateSynthesizer(),
-    description: "SSD Workshop: certificate, CloudFront and the workshop.rankly.games record",
+    description: `SSD Workshop: certificate, CloudFront and the ${DOMAIN} record`,
   });
   edge.addStackDependency(site);
 

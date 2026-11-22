@@ -132,7 +132,7 @@ describe("stacks", () => {
 
   it("uploads only the site stack's assets and template, to our assets bucket in eu-central-1", () => {
     const site = stack(STACK_NAMES.site);
-    expect(site.stackTemplateAssetObjectUrl).toMatch(/^s3:\/\/ssd-workshop-cdk-assets-/);
+    expect(site.stackTemplateAssetObjectUrl?.startsWith(`s3://${ASSETS_BUCKET_NAME}/`)).toBe(true);
     // The assets stack creates the bucket and the edge stack is in another region,
     // so both send their template inline and must have no file assets.
     for (const name of [STACK_NAMES.assets, STACK_NAMES.edge]) {
