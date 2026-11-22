@@ -46,7 +46,7 @@ describe("parseArgs", () => {
 describe("resolveModelId", () => {
   it("defaults to the EU Sonnet inference profile", () => {
     expect(resolveModelId({})).toBe(DEFAULT_MODEL_ID);
-    expect(DEFAULT_MODEL_ID).toBe("eu.anthropic.claude-sonnet-5-5");
+    expect(DEFAULT_MODEL_ID).toBe("eu.anthropic.claude-sonnet-4-6");
   });
 
   it("takes SMOKE_MODEL_ID when it is an eu.anthropic.* profile", () => {

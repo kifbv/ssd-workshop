@@ -12,6 +12,7 @@ import {
   type ServiceQuota,
 } from "@aws-sdk/client-service-quotas";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
   REGION,
   SENDER,
@@ -30,10 +31,12 @@ import {
 
 // The AWS SDK ignores HTTPS_PROXY / https_proxy. Where one is set (Claude sessions sign requests in their proxy),
 // route through it with Node's built-in proxy support (Node 22.21+); elsewhere connect directly.
+// The handler is an explicit HTTP/1.1 NodeHttpHandler: the Bedrock runtime client defaults to an HTTP/2
+// handler, which ignores an `httpsAgent` given as plain options and would bypass the proxy.
 const clientConfig = {
   region: REGION,
   ...(proxyFromEnv(process.env) !== undefined && {
-    requestHandler: { httpsAgent: new Agent({ proxyEnv: process.env } as AgentOptions) },
+    requestHandler: new NodeHttpHandler({ httpsAgent: new Agent({ proxyEnv: process.env } as AgentOptions) }),
   }),
 };
 

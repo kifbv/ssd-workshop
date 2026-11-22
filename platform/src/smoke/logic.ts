@@ -2,7 +2,7 @@
 
 export const REGION = "eu-central-1";
 export const SENDER = "ssd-workshop@rankly.games";
-export const DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-5-5";
+export const DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-4-6";
 
 export const USAGE = `Usage: npm run -s smoke -- <command>
 

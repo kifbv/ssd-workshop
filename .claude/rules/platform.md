@@ -16,3 +16,4 @@ paths:
   or calls skip the session proxy and fail with "security token ... invalid".
 - npm echoes a script's command line, arguments included: a script that takes personal data (an email
   address) is run as `npm run -s ...`, and a root script that forwards to a workspace uses `npm run -s ... -w <ws>`.
+- AWS SDK v3 clients that default to HTTP/2 (Bedrock runtime) ignore `requestHandler: { httpsAgent }` options: pass `new NodeHttpHandler({ httpsAgent })` explicitly.
