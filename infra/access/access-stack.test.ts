@@ -171,6 +171,7 @@ interface Scope {
   createAction: boolean;
   dns: boolean;
   functionArn: boolean;
+  tagOnCreate: boolean;
 }
 
 // EC2 create actions allowed only with the project tag in the request.
@@ -199,6 +200,20 @@ function dnsScoped(c: Cond | undefined): boolean {
   );
 }
 
+// Tagging a resource while CloudFormation creates it (CreateDistributionWithTags and
+// RequestCertificate with tags also authorize TagResource / AddTagsToCertificate). Safe only with
+// all three guards: the project tag in the request, no project tag on the resource yet, and the
+// call made through CloudFormation (whose resource import is denied by NoResourceImport), so an
+// existing resource of another project cannot be tagged and then taken over.
+function tagOnCreateGuarded(c: Cond | undefined): boolean {
+  return (
+    projectTag(c, "aws:RequestTag/project") &&
+    c?.Null?.["aws:ResourceTag/project"] === "true" &&
+    condValues(c, "ForAnyValue:StringEquals", "aws:CalledVia").join() === "cloudformation.amazonaws.com"
+  );
+}
+const TAG_ON_CREATE_ACTIONS = ["cloudfront:TagResource", "acm:AddTagsToCertificate"];
+
 function scopeOf(s: Statement, t: Template): Scope {
   const c = s.Condition;
   const resources = list(s.Resource).map(text);
@@ -213,6 +228,7 @@ function scopeOf(s: Statement, t: Template): Scope {
     createAction: createValues.length > 0 && createValues.every((v) => creates.has(String(v))),
     dns: dnsScoped(c),
     functionArn: fnArns.length > 0 && fnArns.every(isScopedArn),
+    tagOnCreate: tagOnCreateGuarded(c),
   };
 }
 
@@ -230,6 +246,7 @@ function unscopedWrites(t: Template, stmts: Statement[], allowList: Record<strin
     const wildcardResource = list(s.Resource).map(text).some((r) => r.includes("*"));
     for (const a of list(s.Action).filter((x) => !isRead(x))) {
       const key = `${s.Sid}/${a}`;
+      if (sc.tagOnCreate && TAG_ON_CREATE_ACTIONS.includes(a)) continue;
       if (requestTagOnly) {
         // A tag in the request says nothing about the resources the call names: with only
         // aws:RequestTag, the role could tag ANY existing resource and then change it through
@@ -552,6 +569,28 @@ describe("access stack: deploy policies (criterion 2)", () => {
     expect(deployGaps(wildcard)).toContain("CloudFrontTaggedCreate/cloudfront:Create*");
     const ec2 = withText("Action: [ec2:CreateVpc,", "Action: [ec2:CreateTags, ec2:CreateVpc,");
     expect(deployGaps(ec2)).toContain("Ec2NewTopLevel/ec2:CreateTags");
+  });
+
+  it("tags new distributions and certificates only while CloudFormation creates them (tag on create)", () => {
+    // CreateDistributionWithTags and RequestCertificate with tags also authorize the tagging action.
+    expect(deployGaps(template)).toEqual([]);
+    const sid = "TagOnCreateThroughCloudFormation";
+    // Each guard is needed: without it, an existing untagged resource of another project could
+    // be tagged and then changed through the ResourceTag statements.
+    const noCalledVia = withText("              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}\n", "");
+    expect(deployGaps(noCalledVia)).toContain(`${sid}/cloudfront:TagResource`);
+    const noNull = withText('              "Null": {aws:ResourceTag/project: "true"}\n              ForAnyValue', "              ForAnyValue");
+    expect(deployGaps(noNull)).toContain(`${sid}/acm:AddTagsToCertificate`);
+    const otherAction = withText("Action: [cloudfront:TagResource, acm:AddTagsToCertificate]", "Action: [cloudfront:TagResource, acm:AddTagsToCertificate, ec2:CreateTags]");
+    expect(deployGaps(otherAction)).toContain(`${sid}/ec2:CreateTags`);
+  });
+
+  it("denies CloudFormation resource import, so CloudFormation cannot adopt and tag another project's resource", () => {
+    const deny = deployStatements(template).find((s) => s.Sid === "NoResourceImport");
+    expect(deny?.Effect).toBe("Deny");
+    expect(list(deny?.Action)).toContain("cloudformation:CreateChangeSet");
+    expect(text(deny?.Resource as Value)).toBe("*");
+    expect(deny?.Condition?.Null?.["cloudformation:ImportResourceTypes"]).toBe("false");
   });
 
   it("fails on API Gateway writes that reach every API in the region", () => {
