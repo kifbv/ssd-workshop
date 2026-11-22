@@ -175,6 +175,48 @@ Resources:
             Effect: Allow
             Action: [apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
             Resource: !Sub arn:aws:apigateway:${AWS::Region}::/*
+          - Sid: WorkshopRolesWithBoundaryOnly
+            Effect: Allow
+            Action: [iam:CreateRole, iam:PutRolePolicy, iam:AttachRolePolicy, iam:DetachRolePolicy, iam:DeleteRolePolicy]
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
+            Condition:
+              StringEquals: {iam:PermissionsBoundary: !Ref BoundaryPolicy}
+          - Sid: WorkshopRolesHousekeeping
+            Effect: Allow
+            Action: [iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy, iam:PassRole, iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile, iam:CreateServiceLinkedRole]
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/ssd-workshop-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*
+          - Sid: NoBoundaryEscape
+            Effect: Deny
+            Action: [iam:DeleteRolePermissionsBoundary, iam:PutRolePermissionsBoundary, iam:CreateUser, iam:CreateAccessKey, iam:CreatePolicyVersion, iam:SetDefaultPolicyVersion]
+            Resource: "*"
+          - Sid: Bedrock
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - arn:aws:bedrock:*::foundation-model/anthropic.*
+              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
+          - Sid: SesForTesting
+            Effect: Allow
+            Action: [ses:SendEmail, ses:SendRawEmail]
+            Resource: "*"
+            Condition:
+              StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
+          - Sid: WorkshopBudget
+            Effect: Allow
+            Action: [budgets:ModifyBudget]
+            Resource: !Sub arn:aws:budgets::${AWS::AccountId}:budget/ssd-workshop*
+
+  # Second half of the deploy rights (IAM caps one managed policy at 6,144 characters).
+  DeployPolicyEdge:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: ssd-workshop-deploy-edge
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
           - Sid: CloudFrontTaggedCreate
             Effect: Allow
             Action: [cloudfront:CreateDistribution, cloudfront:TagResource]
@@ -264,46 +306,13 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
-          - Sid: WorkshopRolesWithBoundaryOnly
-            Effect: Allow
-            Action: [iam:CreateRole, iam:PutRolePolicy, iam:AttachRolePolicy, iam:DetachRolePolicy, iam:DeleteRolePolicy]
-            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
-            Condition:
-              StringEquals: {iam:PermissionsBoundary: !Ref BoundaryPolicy}
-          - Sid: WorkshopRolesHousekeeping
-            Effect: Allow
-            Action: [iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy, iam:PassRole, iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile, iam:CreateServiceLinkedRole]
-            Resource:
-              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
-              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/ssd-workshop-*
-              - !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*
-          - Sid: NoBoundaryEscape
-            Effect: Deny
-            Action: [iam:DeleteRolePermissionsBoundary, iam:PutRolePermissionsBoundary, iam:CreateUser, iam:CreateAccessKey, iam:CreatePolicyVersion, iam:SetDefaultPolicyVersion]
-            Resource: "*"
-          - Sid: Bedrock
-            Effect: Allow
-            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
-            Resource:
-              - arn:aws:bedrock:*::foundation-model/anthropic.*
-              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
-          - Sid: SesForTesting
-            Effect: Allow
-            Action: [ses:SendEmail, ses:SendRawEmail]
-            Resource: "*"
-            Condition:
-              StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
-          - Sid: WorkshopBudget
-            Effect: Allow
-            Action: [budgets:ModifyBudget]
-            Resource: !Sub arn:aws:budgets::${AWS::AccountId}:budget/ssd-workshop*
 
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: ssd-workshop-deploy
       MaxSessionDuration: 3600
-      ManagedPolicyArns: [!Ref DeployPolicy]
+      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge]
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -325,7 +334,7 @@ Resources:
     Type: AWS::IAM::User
     Properties:
       UserName: ssd-workshop-claude
-      ManagedPolicyArns: [!Ref DeployPolicy]
+      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge]
       Tags: [{Key: project, Value: ssd-workshop}]
 
   Budget:
