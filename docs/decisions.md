@@ -20,3 +20,12 @@ Choices made while building that the specification left open. Newest phase first
 - **Platform language:** TypeScript for infrastructure, API and web pages, so the platform is one language end to end; advanced participant apps use Python. (Franck, 2026-11-22)
 - **SES:** already in production mode for rankly.games, so codes can go to any allow-listed address; sender `ssd-workshop@rankly.games`. (Franck, 2026-11-22)
 - **Access stack split:** the deploy rights are two managed policies (`ssd-workshop-deploy` and `ssd-workshop-deploy-edge`), because IAM caps one managed policy at 6,144 characters.
+- **Workspaces:** npm workspaces `infra` and `platform`; `templates/` holds only a README and becomes a workspace when it gets code.
+- **Checks at the root:** one ESLint flat config (`@eslint/js` recommended + typescript-eslint strict), one strict `tsconfig.base.json` with a root `tsconfig.json` covering `infra/` and `platform/`, and vitest run from the root with `--passWithNoTests`. A workspace gets its own `tsconfig.json` when it gets code.
+- **Tool versions:** ESLint 10, TypeScript 5.9 (typescript-eslint supports TypeScript below 6.1), vitest 5 (vitest 3 pulls a critical `tinypool` advisory).
+- **Deny rules:** `.claude/settings.json` denies `cdk deploy/destroy/bootstrap`, `aws iam`, every CloudFormation stack write (not only `ssd-workshop-access`, since workshop stacks deploy from `main`), Route53 record changes, pushes to `main`, force pushes, and reading `.env*`, `secrets/`, keys and `~/.aws/credentials`.
+- **Plugin for every session:** `.claude/settings.json` enables `spec-driven@cadenceworks` from the `cadenceworks-dev/claude-workflow` marketplace for local sessions; cloud sessions take it from the claude.ai account.
+- **Path rules:** `.claude/rules/infra.md`, `platform.md` and `templates.md`.
+- **Allowed without asking:** `.claude/settings.json` lets Claude sessions run `npm ci`, `npm run lint`, `npm run typecheck` and `npm test` without a permission prompt, since they touch only the working tree and the npm cache.
+- **Engines:** `package.json` requires Node 22 or newer and npm 10 or newer, the versions CI and the cloud sessions use.
+- **Limits of the deny rules:** `Read(...)` denies cover Claude's file tools; a shell `cat .env` or an `aws --profile x iam ...` form is not guaranteed to be caught. The real controls are that no secrets live in the repository and that the AWS user's least-privilege policy refuses what it must not do.
