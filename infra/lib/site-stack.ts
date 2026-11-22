@@ -3,7 +3,7 @@ import { Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import { CfnRole, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { CfnFunction, CfnLayerVersion, Function as LambdaFunction } from "aws-cdk-lib/aws-lambda";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
-import { BlockPublicAccess, Bucket, BucketEncryption, type IBucket } from "aws-cdk-lib/aws-s3";
+import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership, type IBucket } from "aws-cdk-lib/aws-s3";
 import { BucketDeployment, CacheControl, Source } from "aws-cdk-lib/aws-s3-deployment";
 import type { Construct } from "constructs";
 import { ACCOUNT, PREFIX, SITE_BUCKET_NAME } from "./config.js";
@@ -26,6 +26,8 @@ export class SiteStack extends Stack {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       encryption: BucketEncryption.S3_MANAGED,
       enforceSSL: true,
+      // ACLs off (the access policy denies ACL writes); the S3 default, made explicit.
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy: RemovalPolicy.RETAIN,
     });
 

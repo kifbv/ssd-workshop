@@ -1,9 +1,8 @@
-import { App, type AppProps, Stack, Tags } from "aws-cdk-lib";
-import { ManagedPolicy, PermissionsBoundary } from "aws-cdk-lib/aws-iam";
+import { App, type AppProps, Aspects, Tags } from "aws-cdk-lib";
+import { WorkshopIamAspect } from "./aspects.js";
 import { AssetsStack } from "./assets-stack.js";
 import {
   ACCOUNT,
-  BOUNDARY_ARN,
   DOMAIN,
   EDGE_REGION,
   REGION,
@@ -20,12 +19,14 @@ export { REGION, EDGE_REGION } from "./config.js";
 /**
  * Builds the workshop CDK app: the assets bucket, the site bucket with its pages
  * (eu-central-1) and the certificate, CloudFront and DNS record (us-east-1).
- * Every resource is tagged `project=ssd-workshop` and every role carries the
- * `ssd-workshop-boundary` permissions boundary.
+ * Every resource is tagged `project=ssd-workshop`; every role has the
+ * `/ssd-workshop/` path and the `ssd-workshop-boundary` permissions boundary.
  */
 export function buildApp(props?: AppProps): App {
   const app = new App(props);
   Tags.of(app).add(TAG_KEY, TAG_VALUE);
+  // One mechanism for every role, also those CDK constructs create (see aspects.ts).
+  Aspects.of(app).add(new WorkshopIamAspect());
 
   const assets = new AssetsStack(app, STACK_NAMES.assets, {
     env: { account: ACCOUNT, region: REGION },
@@ -46,14 +47,6 @@ export function buildApp(props?: AppProps): App {
     description: `SSD Workshop: certificate, CloudFront and the ${DOMAIN} record`,
   });
   edge.addStackDependency(site);
-
-  // An imported policy must live in a stack, so the boundary is applied per stack;
-  // it reaches every role in it, including those CDK constructs create.
-  for (const stack of app.node.children.filter(Stack.isStack)) {
-    PermissionsBoundary.of(stack).apply(
-      ManagedPolicy.fromManagedPolicyArn(stack, "Boundary", BOUNDARY_ARN),
-    );
-  }
 
   return app;
 }

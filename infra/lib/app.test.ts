@@ -11,6 +11,7 @@ import {
   DOMAIN,
   EDGE_REGION,
   HOSTED_ZONE_ID,
+  IAM_PATH,
   REGION,
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
@@ -21,6 +22,8 @@ import { WEB_DIR } from "./site-stack.js";
 interface Resource {
   Type: string;
   Properties?: Record<string, unknown>;
+  DeletionPolicy?: string;
+  UpdateReplacePolicy?: string;
 }
 
 const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge];
@@ -158,11 +161,20 @@ describe("tags, boundary and names (criterion 3)", () => {
     }
   });
 
-  it("gives every IAM role the ssd-workshop-boundary permissions boundary", () => {
+  it("gives every IAM role the /ssd-workshop/ path and the ssd-workshop-boundary permissions boundary", () => {
     const roles = ofType("AWS::IAM::Role");
-    expect(roles.length).toBeGreaterThan(0);
+    // The BucketDeployment role, which CDK creates with path "/" by default.
+    expect(roles.map(([, , r]) => r.Properties?.RoleName)).toContain("ssd-workshop-site-deploy");
     for (const [s, id, r] of roles) {
+      expect(r.Properties?.Path, `${s}/${id}`).toBe(IAM_PATH);
       expect(r.Properties?.PermissionsBoundary, `${s}/${id}`).toBe(BOUNDARY_ARN);
+    }
+    expect(IAM_PATH).toBe("/ssd-workshop/");
+  });
+
+  it("puts every IAM instance profile under the /ssd-workshop/ path", () => {
+    for (const [s, id, r] of ofType("AWS::IAM::InstanceProfile")) {
+      expect(r.Properties?.Path, `${s}/${id}`).toBe(IAM_PATH);
     }
   });
 
@@ -181,6 +193,12 @@ describe("tags, boundary and names (criterion 3)", () => {
     const oacs = ofType("AWS::CloudFront::OriginAccessControl");
     expect(oacs).toHaveLength(1);
     expect(oacs[0]?.[2].Properties?.OriginAccessControlConfig).toMatchObject({ Name: "ssd-workshop-site" });
+  });
+
+  it("retains the Origin Access Control (the deploy rights cannot update or delete one)", () => {
+    const oacs = ofType("AWS::CloudFront::OriginAccessControl");
+    expect(oacs).toHaveLength(1);
+    expect(oacs[0]?.[2]).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 
   it("names every Lambda function, layer and role explicitly (the access policy allows only ssd-workshop-*)", () => {
@@ -212,8 +230,11 @@ describe("buckets (criterion 2)", () => {
     expect(names.sort()).toEqual([ASSETS_BUCKET_NAME, SITE_BUCKET_NAME].sort());
   });
 
-  it("blocks all public access and encrypts every bucket", () => {
+  it("blocks all public access, turns ACLs off and encrypts every bucket", () => {
     for (const [s, id, r] of ofType("AWS::S3::Bucket")) {
+      expect(r.Properties?.OwnershipControls, `${s}/${id}`).toEqual({
+        Rules: [{ ObjectOwnership: "BucketOwnerEnforced" }],
+      });
       expect(r.Properties?.PublicAccessBlockConfiguration, `${s}/${id}`).toEqual({
         BlockPublicAcls: true,
         BlockPublicPolicy: true,

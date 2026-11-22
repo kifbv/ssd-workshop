@@ -1,5 +1,5 @@
 import { RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
-import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
+import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 import { ASSETS_BUCKET_NAME } from "./config.js";
 
@@ -16,6 +16,8 @@ export class AssetsStack extends Stack {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       encryption: BucketEncryption.S3_MANAGED,
       enforceSSL: true,
+      // ACLs off (the access policy denies ACL writes); the S3 default, made explicit.
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy: RemovalPolicy.RETAIN,
     });
   }

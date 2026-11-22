@@ -20,6 +20,8 @@ export const TAG_VALUE = "ssd-workshop";
 /** Created by the access stack (infra/access/access-stack.yaml). */
 export const BOUNDARY_NAME = "ssd-workshop-boundary";
 export const BOUNDARY_ARN = `arn:aws:iam::${ACCOUNT}:policy/${BOUNDARY_NAME}`;
+/** IAM path of every role and instance profile: the deploy rights reach only `role/ssd-workshop/*`. */
+export const IAM_PATH = `/${PREFIX}/`;
 
 export const ASSETS_BUCKET_NAME = `${PREFIX}-cdk-assets-${ACCOUNT}`;
 export const SITE_BUCKET_NAME = `${PREFIX}-site-${ACCOUNT}`;
