@@ -27,7 +27,7 @@ Choices made while building that the specification left open. Newest phase first
 - **Plugin for every session:** `.claude/settings.json` enables `spec-driven@cadenceworks` from the `cadenceworks-dev/claude-workflow` marketplace for local sessions; cloud sessions take it from the claude.ai account.
 - **Path rules:** `.claude/rules/infra.md`, `platform.md` and `templates.md`.
 - **Allowed without asking:** `.claude/settings.json` lets Claude sessions run `npm ci`, `npm run lint`, `npm run typecheck` and `npm test` without a permission prompt, since they touch only the working tree and the npm cache.
-- **Engines:** `package.json` requires Node 22 or newer and npm 10 or newer, the versions CI and the cloud sessions use.
+- **Engines:** `package.json` requires Node 22.21 or newer (built-in `proxyEnv`, used by the smoke script behind a proxy) and npm 10 or newer, the versions CI and the cloud sessions use.
 - **Limits of the deny rules:** `Read(...)` denies cover Claude's file tools; a shell `cat .env` or an `aws --profile x iam ...` form is not guaranteed to be caught. The real controls are that no secrets live in the repository and that the AWS user's least-privilege policy refuses what it must not do.
 - **CI:** one GitHub Actions job `ci` on every pull request (npm ci, lint, type check, tests, `cdk synth`, `cfn-lint` on the access stack), so branch protection needs one required check. `permissions: contents: read` only, no AWS credentials, checkout without persisted credentials; cfn-lint pinned (`cfn-lint==1.61.0`) and installed with pip; actions pinned to major versions.
 - **CDK runner:** `tsx` runs `infra/bin/app.ts` (`cdk.json` `app`), because it runs our ESM + `NodeNext` TypeScript with no extra config, where ts-node needs an ESM loader setup.
