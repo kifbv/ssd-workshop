@@ -1,7 +1,8 @@
 name: Deploy
 
-# A merge to main deploys. No other trigger: the ssd-workshop-deploy role trusts only the
-# `repo:<owner>/<repo>:ref:refs/heads/main` OIDC subject, so any other ref could not assume it.
+# A merge to main deploys. No other trigger: once the ticket 0.3 access stack update is applied,
+# the ssd-workshop-deploy role trusts only the `repo:<owner>/<repo>:ref:refs/heads/main` OIDC
+# subject, so any other ref cannot assume it.
 # To redeploy the same commit, re-run this workflow's run from the Actions tab.
 on:
   push:
@@ -62,12 +63,14 @@ jobs:
           HEADING: ${{ steps.settings.outputs.heading }}
         run: |
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            code=$(curl -sS -o page.html -w '%{http_code}' --max-time 20 "$SITE_URL" || echo 000)
+            # On a connection failure curl prints 000 and exits non-zero; `|| true` keeps the
+            # loop going, and 000 is not 200, so the attempt counts as a failure and retries.
+            code=$(curl -sS -o page.html -w '%{http_code}' --max-time 20 "$SITE_URL" || true)
             if [ "$code" = "200" ] && grep -qF -- "$HEADING" page.html; then
               echo "OK: $SITE_URL answers 200 with \"$HEADING\""
               exit 0
             fi
-            echo "Attempt $attempt: HTTP $code, heading not found yet"
+            echo "Attempt $attempt: HTTP ${code:-000}, heading not found yet"
             sleep 30
           done
           echo "::error::$SITE_URL did not answer 200 with \"$HEADING\""

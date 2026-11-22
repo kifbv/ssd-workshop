@@ -40,8 +40,9 @@ flowchart LR
   another AWS account changes only that file. No AWS keys are stored in GitHub and the workflow
   reads no secrets (both checked by `infra/lib/deploy-workflow.test.ts`).
 - The role's trust policy (`infra/access/access-stack.yaml`) only accepts the subject of the
-  `main` branch. The workflow uses no GitHub environment, because a job with `environment:`
-  gets the subject `repo:<owner>/<repo>:environment:<name>` instead.
+  `main` branch, once the ticket 0.3 update is applied (see criterion 2 below). The workflow
+  uses no GitHub environment, because a job with `environment:` gets the subject
+  `repo:<owner>/<repo>:environment:<name>` instead.
 - After `cdk deploy --all`, the smoke step fetches `https://workshop.rankly.games/` and fails
   unless it answers 200 with the `<h1>` text of `platform/web/index.html` (retries for about
   five minutes). Pages are uploaded with `Cache-Control: public, max-age=60`, so a merged text
@@ -61,24 +62,31 @@ secrets). The workflow itself references no `secrets.` value (tested).
 
 ### Other refs cannot assume the role (criterion 2)
 
-The trust policy's `sub` condition allows `repo:kifbv/ssd-workshop:ref:refs/heads/main` (and,
-until the ticket 0.3 access stack update is applied, `environment:*`, which no workflow uses).
-`npm test` checks that no subject allows a pull request, another branch or a tag. To see it
-refused, Franck can run any workflow with `id-token: write` and
-`aws-actions/configure-aws-credentials` from another branch (not committed to this
-repository): it fails at "Configure AWS credentials" with
+Once the ticket 0.3 access stack update is applied, the trust policy's `sub` condition allows
+only `repo:kifbv/ssd-workshop:ref:refs/heads/main`; ticket 0.3's test "trusts only GitHub
+Actions of kifbv/ssd-workshop on main (no GitHub environments)" checks the template.
+
+Until that update is applied, the live role also trusts `repo:kifbv/ssd-workshop:environment:*`,
+that is any GitHub environment. A workflow on any branch can name an environment (GitHub creates
+it on first use unless deployment branch rules stop it), so today any branch could assume the
+deploy role. The update must therefore be applied before ticket 0.5 is merged (checklist step 1).
+
+To see another ref refused after the update, Franck can run any workflow with `id-token: write`
+and `aws-actions/configure-aws-credentials` from another branch (not committed to this
+repository), with and without `environment:`: both fail at "Configure AWS credentials" with
 `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
 
 ### First deploy checklist (Franck)
 
 1. Apply the `ssd-workshop-access` stack update from ticket 0.3 (removes the `environment:*`
-   subject).
-2. Take the zone "before" snapshot (`/tmp/zone-before.json`, below).
-3. Merge ticket 0.4, then ticket 0.5. The 0.5 merge is the first run of the deploy workflow
+   subject). Until then any branch could assume the deploy role (see above).
+2. Merge ticket 0.3.
+3. Take the zone "before" snapshot (`/tmp/zone-before.json`, below).
+4. Merge ticket 0.4, then ticket 0.5. The 0.5 merge is the first run of the deploy workflow
    (merging 0.4 alone deploys nothing, since the workflow does not exist yet).
-4. Watch the run in Actions, Deploy. The first run takes 15 to 30 minutes (certificate
+5. Watch the run in Actions, Deploy. The first run takes 15 to 30 minutes (certificate
    validation and CloudFront creation); "Smoke check the live page" must be green.
-5. Run the post-deploy checks below, and `gh secret list` above.
+6. Run the post-deploy checks below, and `gh secret list` above.
 
 ## Checks after the first deploy (ticket 0.4 criteria 1, 2, 4, 5)
 

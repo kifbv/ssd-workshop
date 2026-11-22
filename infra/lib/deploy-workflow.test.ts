@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { parse, type Tags, YAMLSeq } from "yaml";
+import { parse } from "yaml";
 import { ACCOUNT, DEPLOY_ROLE_ARN, DOMAIN, REGION } from "./config.js";
 import { deploySettings, firstHeading, toGitHubOutput } from "./deploy-settings.js";
 
@@ -146,64 +146,5 @@ describe("CI workflow", () => {
   it("still gets no OIDC token (pull requests never reach AWS)", () => {
     expect(JSON.stringify(ci)).not.toMatch(/id-token/);
     expect(ci.permissions).toEqual({ contents: "read" });
-  });
-});
-
-// CloudFormation short-form tags, so the access stack parses as plain data.
-const cfnTags: Tags = ["Sub", "Ref", "GetAtt", "Equals", "If", "Join", "Select", "Split"].flatMap(
-  (name) => [
-    { tag: `!${name}`, resolve: (value: string) => ({ [`Fn::${name}`]: value }) },
-    {
-      tag: `!${name}`,
-      collection: "seq" as const,
-      nodeClass: YAMLSeq,
-      resolve: (seq) => ({ [`Fn::${name}`]: (seq as YAMLSeq).toJSON() }),
-    },
-  ],
-);
-
-describe("deploy role trust (access stack)", () => {
-  const stack = parse(repoFile("infra/access/access-stack.yaml"), { customTags: cfnTags }) as {
-    Resources: Record<string, { Properties: Record<string, unknown> }>;
-  };
-  const role = stack.Resources["DeployRole"]?.Properties as {
-    RoleName: string;
-    AssumeRolePolicyDocument: {
-      Statement: { Action: string; Condition: Record<string, Record<string, unknown>> }[];
-    };
-  };
-  const statements = role.AssumeRolePolicyDocument.Statement;
-  const subjects = statements.flatMap((statement) => {
-    const like = statement.Condition["StringLike"]?.["token.actions.githubusercontent.com:sub"];
-    const equals = statement.Condition["StringEquals"]?.["token.actions.githubusercontent.com:sub"];
-    return [like, equals]
-      .flat()
-      .filter((value) => value !== undefined)
-      .map((value) => (value as { "Fn::Sub": string })["Fn::Sub"]);
-  });
-
-  it("is the role the workflow assumes", () => {
-    expect(DEPLOY_ROLE_ARN.endsWith(`:role/${role.RoleName}`)).toBe(true);
-  });
-
-  it("lets only GitHub OIDC tokens for sts.amazonaws.com in, each with a subject condition", () => {
-    for (const statement of statements) {
-      expect(statement.Action).toBe("sts:AssumeRoleWithWebIdentity");
-      expect(statement.Condition["StringEquals"]?.["token.actions.githubusercontent.com:aud"]).toBe(
-        "sts.amazonaws.com",
-      );
-    }
-    expect(subjects.length).toBeGreaterThan(0);
-  });
-
-  it("trusts the main branch and no pull request or other branch", () => {
-    expect(subjects).toContain("repo:${GitHubRepo}:ref:refs/heads/main");
-    for (const subject of subjects) {
-      expect(subject.startsWith("repo:${GitHubRepo}:")).toBe(true);
-      expect(subject).not.toMatch(/pull_request/);
-      expect(subject).not.toMatch(/refs\/heads\/(?!main$)/);
-      expect(subject).not.toMatch(/refs\/tags\//);
-      expect(subject).not.toMatch(/^repo:\$\{GitHubRepo\}:\*$/);
-    }
   });
 });

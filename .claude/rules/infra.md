@@ -32,7 +32,5 @@ paths:
   `repo:<owner>/<repo>:environment:<name>`, which the deploy role does not trust.
 - The deploy workflow reads the role ARN and region from `infra/lib/config.ts` (through
   `infra/bin/print-deploy-settings.ts`); never hard-code the account id in a workflow.
-- Parse YAML with CloudFormation short-form tags (`!Sub`, `!Ref`) by giving the `yaml` package
-  `customTags`; without them the tags are unresolved and only warn.
 - Only `deploy.yml` may ask for `id-token: write`; `ci.yml` runs on pull requests and gets no
   AWS access (tested).
