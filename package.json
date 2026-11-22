@@ -14,10 +14,12 @@
   "scripts": {
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "synth": "npm run synth -w infra"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
     "eslint": "^10.15.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.73.0",
