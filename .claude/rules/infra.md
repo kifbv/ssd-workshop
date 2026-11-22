@@ -77,7 +77,9 @@ paths:
 - ACM certificates only for `workshop.rankly.games` and `*.workshop.rankly.games`
   (`acm:DomainNames`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
-  `ssd-workshop@rankly.games`.
+  `ssd-workshop@rankly.games`, and every send names the configuration set `ssd-workshop-email`
+  (`ConfigurationSetName`): without it SES uses the domain's default set `rankly-dev` (another
+  project's), which is refused.
 - GitHub OIDC: the role trusts `refs/heads/main`, which also matches `pull_request_target`,
   `workflow_run`, `issue_comment` and `schedule` jobs on `main`. Only `.github/workflows/deploy.yml`
   may request `id-token: write` (never `write-all`), and it runs only on `push` to `main`

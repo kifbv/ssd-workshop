@@ -46,7 +46,7 @@ describe("parseArgs", () => {
 
 describe("CONFIGURATION_SET", () => {
   it("names the workshop's own SES configuration set", () => {
-    expect(CONFIGURATION_SET).toBe("ssd-workshop");
+    expect(CONFIGURATION_SET).toBe("ssd-workshop-email");
   });
 });
 

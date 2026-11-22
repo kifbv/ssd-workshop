@@ -76,7 +76,7 @@ Resources:
             Resource:
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
-              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop
+              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
           - Sid: RunBuilds
@@ -380,7 +380,7 @@ Resources:
             Resource:
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
-              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop
+              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
 
@@ -644,7 +644,8 @@ Resources:
   SesConfigurationSet:
     Type: AWS::SES::ConfigurationSet
     Properties:
-      Name: ssd-workshop
+      Name: ssd-workshop-email
+      Tags: [{Key: project, Value: ssd-workshop}]
 
   Budget:
     Type: AWS::Budgets::Budget
