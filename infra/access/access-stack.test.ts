@@ -1,7 +1,7 @@
 // Static checks of the access stack (infra/access/access-stack.yaml). The stack is applied
 // by Franck only, so these tests read the template; what only AWS can prove is listed in
 // infra/access/README.md.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parse, type Scalar, type ScalarTag, type CollectionTag, type YAMLSeq } from "yaml";
 
@@ -68,7 +68,7 @@ function statements(t: Template, logicalId: string): Statement[] {
   if (!props) throw new Error(`${logicalId} missing from the template`);
   return props.PolicyDocument.Statement;
 }
-const DEPLOY_POLICIES = ["DeployPolicy", "DeployPolicyEdge", "DeployPolicyRead"];
+const DEPLOY_POLICIES = ["DeployPolicy", "DeployPolicyEdge", "DeployPolicyEc2", "DeployPolicyRead"];
 const ALL_POLICIES = ["BoundaryPolicy", ...DEPLOY_POLICIES];
 const deployStatements = (t: Template) => DEPLOY_POLICIES.flatMap((id) => statements(t, id));
 const boundaryStatements = (t: Template) => statements(t, "BoundaryPolicy");
@@ -126,20 +126,28 @@ const DEPLOY_EXCEPTIONS: Record<string, string> = {
   ...ACTION_ALLOW_LIST,
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
-  "SesForTesting/ses:SendEmail": "limited by condition to the sender ssd-workshop@rankly.games",
-  "SesForTesting/ses:SendRawEmail": "limited by condition to the sender ssd-workshop@rankly.games",
+  "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SesForTesting/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
 };
 // The boundary's own exceptions (same rules as the deploy policies).
 const BOUNDARY_ALLOW_LIST: Record<string, string> = {
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
-  "SendCodes/ses:SendEmail": "limited by condition to the sender ssd-workshop@rankly.games",
-  "SendCodes/ses:SendRawEmail": "limited by condition to the sender ssd-workshop@rankly.games",
+  "SendCodes/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SendCodes/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
   "AccountWideServiceCalls/ecr:GetAuthorizationToken": "account-wide registry login token; image pulls stay scoped to ssd-workshop-* repositories",
   "AccountWideServiceCalls/xray:PutTraceSegments": "X-Ray has no resource scope; writes trace data only",
   "WorkshopMetrics/cloudwatch:PutMetricData": "limited by cloudwatch:namespace to ssd-workshop",
   "K3sNodeChannels/ssmmessages:*": "Session Manager channels of the calling instance; no resource scope exists",
   "K3sNodeChannels/ec2messages:*": "Run Command channel of the calling instance; no resource scope exists",
+};
+
+// Creates allowed on Resource "*" with only aws:RequestTag. A request tag is true for every
+// resource a call names, so this is safe only for actions that authorize no existing resource
+// (AWS Service Authorization Reference). Keyed "Sid/action", one line of reason each.
+const REQUEST_TAG_ON_ANY: Record<string, string> = {
+  "CloudFrontTaggedCreate/cloudfront:CreateDistribution": "authorizes no existing resource; origins and policies are not authorized by it",
+  "CertificatesTagged/acm:RequestCertificate": "authorizes no resource; domains limited by acm:DomainNames (acmDomainGaps)",
 };
 
 // Tag-adding actions. Wildcards count when they would match one of these names.
@@ -223,10 +231,13 @@ function unscopedWrites(t: Template, stmts: Statement[], allowList: Record<strin
     for (const a of list(s.Action).filter((x) => !isRead(x))) {
       const key = `${s.Sid}/${a}`;
       if (requestTagOnly) {
-        // A tag in the request says nothing about the resource being tagged: with only
+        // A tag in the request says nothing about the resources the call names: with only
         // aws:RequestTag, the role could tag ANY existing resource and then change it through
-        // the ResourceTag statements. Same for API Gateway writes under existing APIs.
+        // the ResourceTag statements. Same for API Gateway writes under existing APIs, and for
+        // any create on Resource "*" (it also covers the existing parents it names).
+        const anyResource = list(s.Resource).map(text).includes("*");
         if (addsTags(a) || (a.startsWith("apigateway:") && wildcardResource)) found.push(key);
+        else if (anyResource && !(key in REQUEST_TAG_ON_ANY)) found.push(key);
         continue;
       }
       if (sc.names || sc.resourceTag || sc.createAction || sc.dns || sc.functionArn) continue;
@@ -240,7 +251,7 @@ const boundaryGaps = (t: Template) => unscopedWrites(t, boundaryStatements(t), B
 
 // Reads whose answer holds secrets or another project's full configuration (environment
 // variables, user data, stack outputs, API keys, IAM documents, secret and parameter values,
-// origin headers, contact addresses). None may be allowed account-wide unless an explicit deny
+// origin headers, contact addresses, VPN pre-shared keys). None may be allowed account-wide unless an explicit deny
 // keeps it to the project tag.
 const SECRET_READS = [
   "lambda:ListFunctions", "lambda:GetFunction", "lambda:GetFunctionConfiguration",
@@ -249,7 +260,8 @@ const SECRET_READS = [
   "ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions",
   "iam:GetAccountAuthorizationDetails", "iam:GetRole", "iam:GetRolePolicy", "iam:GetPolicyVersion",
   "secretsmanager:GetSecretValue", "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath",
-  "cloudfront:GetDistributionConfig", "ses:ListContacts", "ses:GetContact",
+  "cloudfront:GetDistributionConfig", "ses:ListContacts", "ses:GetContact", "ses:GetAccount",
+  "ec2:DescribeVpnConnections",
 ];
 function secretReadGaps(t: Template, stmts: Statement[]): string[] {
   const covers = (s: Statement, a: string) => list(s.Action).some((p) => matches(p, a));
@@ -270,8 +282,8 @@ function secretReadGaps(t: Template, stmts: Statement[]): string[] {
   });
 }
 
-// ec2:RunInstances: images only with ec2:Owner amazon; network interfaces only new with the
-// project request tag or existing with the project resource tag.
+// ec2:RunInstances: images only with ec2:Owner amazon; network interfaces only with the project
+// resource tag (a request tag would also hold for another project's existing interface).
 const SAMPLE_IMAGE = "arn:aws:ec2:eu-central-1::image/ami-0abc";
 const SAMPLE_ENI = "arn:aws:ec2:eu-central-1:${AWS::AccountId}:network-interface/eni-0abc";
 function runInstancesGaps(t: Template): string[] {
@@ -282,7 +294,7 @@ function runInstancesGaps(t: Template): string[] {
     const owner = condValues(s.Condition, "StringEquals", "ec2:Owner");
     if (res.some((r) => matches(r, SAMPLE_IMAGE)) && !(owner.length === 1 && owner[0] === "amazon")) gaps.push(`${s.Sid}/image`);
     const sc = scopeOf(s, t);
-    if (res.some((r) => matches(r, SAMPLE_ENI)) && !(sc.requestTag || sc.resourceTag)) gaps.push(`${s.Sid}/network-interface`);
+    if (res.some((r) => matches(r, SAMPLE_ENI)) && !sc.resourceTag) gaps.push(`${s.Sid}/network-interface`);
   }
   return gaps;
 }
@@ -294,6 +306,7 @@ const PROTECTED_IDENTITIES = [
   "policy/ssd-workshop-boundary",
   "policy/ssd-workshop-deploy",
   "policy/ssd-workshop-deploy-edge",
+  "policy/ssd-workshop-deploy-ec2",
   "policy/ssd-workshop-deploy-read",
 ].map((p) => `arn:aws:iam::\${AWS::AccountId}:${p}`);
 const IAM_WRITES = [
@@ -353,8 +366,13 @@ const SHARING = [
   "ecr:SetRepositoryPolicy", "lambda:CreateFunctionUrlConfig", "lambda:UpdateFunctionUrlConfig",
   "lambda:AddLayerVersionPermission", "sqs:AddPermission", "sns:AddPermission",
   "dynamodb:PutResourcePolicy", "dynamodb:ExportTableToPointInTime", "ssm:PutResourcePolicy",
-  "logs:PutResourcePolicy", "logs:PutSubscriptionFilter",
+  "logs:PutResourcePolicy", "logs:PutSubscriptionFilter", "logs:CreateExportTask",
+  "s3:PutBucketLogging", "s3:PutInventoryConfiguration", "s3:PutAnalyticsConfiguration",
+  "s3:PutReplicationConfiguration", "s3:PutBucketNotification",
 ];
+// CDK's bucket notifications handler (a workshop role) calls PutBucketNotificationConfiguration,
+// so the boundary cannot deny it (accepted risk in the README).
+const BOUNDARY_SHARING = SHARING.filter((a) => a !== "s3:PutBucketNotification");
 const conditionalDeny = (stmts: Statement[], action: string, op: string, key: string) =>
   stmts.find((s) => s.Effect === "Deny" && list(s.Action).includes(action) && condValues(s.Condition, op, key).length > 0);
 
@@ -378,6 +396,130 @@ function resolve(v: unknown): unknown {
 const policySize = (t: Template, id: string) =>
   JSON.stringify(resolve((t.Resources[id]?.Properties as { PolicyDocument: unknown }).PolicyDocument)).length;
 
+// EC2 resource types each create action authorizes besides the one it creates, from the AWS
+// Service Authorization Reference (servicereference.us-east-1.amazonaws.com/v1/ec2/ec2.json,
+// read 2026-11-22). These are existing parents: a request tag in the call is true for them too.
+const EC2_PARENTS: Record<string, string[]> = {
+  CreateVpc: ["ipam-pool", "ipv6pool-ec2"],
+  CreateInternetGateway: [],
+  AllocateAddress: ["ipam-pool", "ipv4pool-ec2"],
+  CreateLaunchTemplate: [],
+  CreateVolume: ["snapshot"],
+  CreateNetworkInterface: ["security-group", "subnet"],
+  CreateSubnet: ["ipam-pool", "vpc"],
+  CreateSecurityGroup: ["vpc"],
+  CreateRouteTable: ["vpc"],
+  CreateNatGateway: ["elastic-ip", "subnet", "vpc"],
+  CreateVpcEndpoint: ["route-table", "security-group", "subnet", "vpc"],
+  RunInstances: [
+    "capacity-reservation", "image", "key-pair", "launch-template", "network-interface",
+    "placement-group", "security-group", "snapshot", "subnet",
+  ],
+};
+const sampleEc2Arn = (type: string) =>
+  ["image", "snapshot"].includes(type)
+    ? `arn:aws:ec2:eu-central-1::${type}/x-0abc`
+    : `arn:aws:ec2:eu-central-1:\${AWS::AccountId}:${type}/x-0abc`;
+// Every EC2 action in a request-tag-only statement must list no ARN that matches one of its
+// parents; an EC2 action missing from EC2_PARENTS fails, so the table is kept up to date.
+function ec2ParentGaps(t: Template): string[] {
+  const gaps: string[] = [];
+  for (const s of deployStatements(t)) {
+    const sc = scopeOf(s, t);
+    if (s.Effect !== "Allow" || !sc.requestTag || sc.resourceTag) continue;
+    const res = list(s.Resource).map(text);
+    for (const a of list(s.Action).filter((x) => x.startsWith("ec2:"))) {
+      const names = Object.keys(EC2_PARENTS).filter((n) => matches(a, `ec2:${n}`));
+      if (names.length === 0) gaps.push(`${s.Sid}/${a}/not-in-EC2_PARENTS`);
+      for (const n of names) {
+        for (const p of EC2_PARENTS[n] ?? []) if (res.some((r) => matches(r, sampleEc2Arn(p)))) gaps.push(`${s.Sid}/${n}/${p}`);
+      }
+    }
+  }
+  return gaps;
+}
+
+// A deny on Resource "*" of an action, with a condition, found by operator and key.
+const denyWith = (stmts: Statement[], action: string, op: string, key: string) =>
+  stmts.filter(
+    (s) => s.Effect === "Deny" && list(s.Action).some((p) => matches(p, action)) &&
+      list(s.Resource).map(text).includes("*") && condValues(s.Condition, op, key).length > 0,
+  );
+
+// ECS: a workshop task definition may run only on ssd-workshop-* clusters (ecs:cluster), for
+// every principal that has ecs:* on task definitions. Services are scoped by their ARN, which
+// holds the cluster name (service/ssd-workshop-*/*).
+function ecsClusterGaps(stmts: Statement[]): string[] {
+  return ["ecs:RunTask", "ecs:StartTask"].filter(
+    (a) => !denyWith(stmts, a, "ArnNotLike", "ecs:cluster").some((s) =>
+      condValues(s.Condition, "ArnNotLike", "ecs:cluster").map(subText).every(isScopedArn)),
+  );
+}
+
+// EventBridge: a rule may only match events whose source is ssd-workshop.*, and must name a
+// source (a pattern without one, or a schedule, could match other projects' events).
+function eventRuleGaps(stmts: Statement[]): string[] {
+  const gaps: string[] = [];
+  const sources = denyWith(stmts, "events:PutRule", "ForAnyValue:StringNotLike", "events:source");
+  if (!sources.some((s) => condValues(s.Condition, "ForAnyValue:StringNotLike", "events:source").every((v) => /^ssd-workshop\.[^*]*\*?$/.test(String(v)))))
+    gaps.push("events:source");
+  const missing = denyWith(stmts, "events:PutRule", "Null", "events:source");
+  if (!missing.some((s) => s.Condition?.Null?.["events:source"] === "true" && Object.keys(s.Condition).length === 1)) gaps.push("events:source-missing");
+  return gaps;
+}
+
+// ACM: every grant of RequestCertificate needs workshop domain names and a Null guard.
+function acmDomainGaps(stmts: Statement[]): string[] {
+  return stmts
+    .filter((s) => s.Effect === "Allow" && list(s.Action).some((p) => matches(p, "acm:RequestCertificate")))
+    .filter((s) => {
+      const names = condValues(s.Condition, "ForAllValues:StringLike", "acm:DomainNames");
+      const ok = names.length > 0 && names.every((n) => DNS_NAMES.includes(String(n)));
+      return !ok || s.Condition?.Null?.["acm:DomainNames"] !== "false";
+    })
+    .map((s) => s.Sid);
+}
+
+// SES: sends only through the workshop sender's identities, with ses:FromAddress pinned.
+const SES_IDENTITIES = [
+  "arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games",
+  "arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games",
+];
+function sesScopeGaps(stmts: Statement[]): string[] {
+  return stmts
+    .filter((s) => s.Effect === "Allow" && list(s.Action).some((p) => p.startsWith("ses:Send")))
+    .filter((s) => {
+      const res = list(s.Resource).map(text);
+      const from = condValues(s.Condition, "StringEquals", "ses:FromAddress");
+      return !(res.length > 0 && res.every((r) => SES_IDENTITIES.includes(r)) && from.length === 1 && from[0] === "ssd-workshop@rankly.games");
+    })
+    .map((s) => s.Sid);
+}
+
+// GitHub OIDC: the role trusts refs/heads/main, which also matches pull_request_target,
+// workflow_run, issue_comment and schedule jobs on main. Only deploy.yml may ask for an OIDC
+// token, and it may run only on push to main.
+function oidcWorkflowGaps(files: Record<string, string>): string[] {
+  const gaps: string[] = [];
+  for (const [name, body] of Object.entries(files)) {
+    const asksToken = /id-token:\s*write|write-all/.test(body);
+    if (name !== "deploy.yml") {
+      if (asksToken) gaps.push(`${name}/id-token`);
+      continue;
+    }
+    const on = (parse(body) as { on?: unknown }).on;
+    const triggers = typeof on === "object" && on !== null ? Object.keys(on) : list(on as string | string[] | undefined);
+    const branches = list((on as { push?: { branches?: string[] } } | undefined)?.push?.branches);
+    if (triggers.join() !== "push" || branches.join() !== "main") gaps.push(`${name}/triggers`);
+  }
+  return gaps;
+}
+const workflowsDir = new URL("../../.github/workflows/", import.meta.url);
+const workflowFiles = (): Record<string, string> =>
+  Object.fromEntries(
+    readdirSync(workflowsDir).filter((f) => /\.ya?ml$/.test(f)).map((f) => [f, readFileSync(new URL(f, workflowsDir), "utf8")]),
+  );
+
 const template = loadTemplate();
 
 describe("access stack: deploy policies (criterion 2)", () => {
@@ -389,6 +531,7 @@ describe("access stack: deploy policies (criterion 2)", () => {
     const used = (stmts: Statement[]) => stmts.flatMap((s) => list(s.Action).map((a) => `${s.Sid}/${a}`));
     expect(Object.keys(DEPLOY_EXCEPTIONS).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
     expect(Object.keys(BOUNDARY_ALLOW_LIST).filter((k) => !used(boundaryStatements(template)).includes(k))).toEqual([]);
+    expect(Object.keys(REQUEST_TAG_ON_ANY).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
   });
 
   it("fails when a write is loosened to Resource *", () => {
@@ -408,7 +551,7 @@ describe("access stack: deploy policies (criterion 2)", () => {
     const wildcard = withText("Action: cloudfront:CreateDistribution\n", "Action: cloudfront:Create*\n");
     expect(deployGaps(wildcard)).toContain("CloudFrontTaggedCreate/cloudfront:Create*");
     const ec2 = withText("Action: [ec2:CreateVpc,", "Action: [ec2:CreateTags, ec2:CreateVpc,");
-    expect(deployGaps(ec2)).toContain("Ec2CreateTagged/ec2:CreateTags");
+    expect(deployGaps(ec2)).toContain("Ec2NewTopLevel/ec2:CreateTags");
   });
 
   it("fails on API Gateway writes that reach every API in the region", () => {
@@ -522,6 +665,11 @@ describe("access stack: reads (H1)", () => {
     // ec2:Describe* stays account-wide only because user data is denied outside the project tag.
     const noDeny = withText("          - Sid: NoUserDataReads\n            Effect: Deny\n", "          - Sid: NoUserDataReads\n            Effect: Allow\n");
     expect(secretReadGaps(noDeny, deployStatements(noDeny))).toEqual(["ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions"]);
+    // VPN connections carry pre-shared keys; the SES account carries contact addresses.
+    const vpn = withText("          - Sid: NoVpnKeyReads\n            Effect: Deny\n", "          - Sid: NoVpnKeyReads\n            Effect: Allow\n");
+    expect(secretReadGaps(vpn, deployStatements(vpn))).toEqual(["ec2:DescribeVpnConnections"]);
+    const account = withText("              - ses:GetSendQuota\n", "              - ses:GetAccount\n              - ses:GetSendQuota\n");
+    expect(secretReadGaps(account, deployStatements(account))).toEqual(["ses:GetAccount"]);
   });
 
   it("explicitly denies reading API keys", () => {
@@ -544,19 +692,116 @@ describe("access stack: CloudFront parts without tags (H2)", () => {
   });
 });
 
+// The try 3 statements: creates on Resource "*" and RunInstances interfaces with a request tag.
+const OLD_EC2_CREATE =
+  "          - Sid: Ec2CreateTagged\n            Effect: Allow\n" +
+  "            Action: [ec2:CreateVpc, ec2:CreateSubnet, ec2:CreateSecurityGroup, ec2:CreateInternetGateway, ec2:CreateRouteTable, ec2:AllocateAddress, ec2:CreateLaunchTemplate, ec2:CreateVolume, ec2:CreateNatGateway, ec2:CreateVpcEndpoint]\n" +
+  '            Resource: "*"\n            Condition:\n              StringEquals: {aws:RequestTag/project: ssd-workshop}\n';
+const OLD_EC2_RUN =
+  "          - Sid: Ec2RunInstancesNewResources\n            Effect: Allow\n            Action: ec2:RunInstances\n            Resource:\n" +
+  "              - !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*\n              - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*\n" +
+  "            Condition:\n              StringEquals: {aws:RequestTag/project: ssd-workshop}\n";
+const withOldEc2 = (old: string) => withText("          - Sid: Ec2NewTopLevel\n", `${old}          - Sid: Ec2NewTopLevel\n`);
+
 describe("access stack: EC2 instances (H3)", () => {
   it("starts instances only from Amazon-owned images and with project network interfaces", () => {
     expect(runInstancesGaps(template)).toEqual([]);
     const anyImage = withText("              StringEquals: {ec2:Owner: amazon}\n", "              StringEquals: {ec2:Owner: aws-marketplace}\n");
     expect(runInstancesGaps(anyImage)).toEqual(["Ec2RunInstancesAmazonImages/image"]);
-    // Old pattern: RunInstances on "*" with only a request tag, and image/interface unconditioned.
-    const old = withText("Action: [ec2:CreateVpc,", "Action: [ec2:RunInstances, ec2:CreateVpc,");
-    expect(runInstancesGaps(old)).toEqual(["Ec2CreateTagged/image"]);
-    const oldInterface = withText(
-      "            Resource: arn:aws:ec2:*::image/*\n            Condition:\n              StringEquals: {ec2:Owner: amazon}\n",
-      "            Resource:\n              - arn:aws:ec2:*::image/*\n              - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*\n",
+    // RunInstances on "*" with only a request tag: image and interfaces unconditioned.
+    const onAny = withText("Action: [ec2:CreateVpc,", "Action: [ec2:RunInstances, ec2:CreateVpc,");
+    expect(runInstancesGaps(onAny)).toEqual(["Ec2NewTopLevel/network-interface"]);
+    expect(ec2ParentGaps(onAny)).toContain("Ec2NewTopLevel/RunInstances/network-interface");
+    const anyAll = withOldEc2(OLD_EC2_CREATE.replace("Action: [ec2:CreateVpc,", "Action: [ec2:RunInstances, ec2:CreateVpc,"));
+    expect(runInstancesGaps(anyAll)).toEqual(["Ec2CreateTagged/image", "Ec2CreateTagged/network-interface"]);
+    // Try 3: new network interfaces with only the request tag (also true for existing ones).
+    expect(runInstancesGaps(withOldEc2(OLD_EC2_RUN))).toEqual(["Ec2RunInstancesNewResources/network-interface"]);
+  });
+});
+
+describe("access stack: EC2 parents (try 4)", () => {
+  it("never covers a parent ARN of a create with only the request tag", () => {
+    expect(ec2ParentGaps(template)).toEqual([]);
+    expect(ec2ParentGaps(withOldEc2(OLD_EC2_CREATE))).toEqual([
+      "Ec2CreateTagged/CreateVpc/ipam-pool", "Ec2CreateTagged/CreateVpc/ipv6pool-ec2",
+      "Ec2CreateTagged/CreateSubnet/ipam-pool", "Ec2CreateTagged/CreateSubnet/vpc",
+      "Ec2CreateTagged/CreateSecurityGroup/vpc", "Ec2CreateTagged/CreateRouteTable/vpc",
+      "Ec2CreateTagged/AllocateAddress/ipam-pool", "Ec2CreateTagged/AllocateAddress/ipv4pool-ec2",
+      "Ec2CreateTagged/CreateVolume/snapshot",
+      "Ec2CreateTagged/CreateNatGateway/elastic-ip", "Ec2CreateTagged/CreateNatGateway/subnet", "Ec2CreateTagged/CreateNatGateway/vpc",
+      "Ec2CreateTagged/CreateVpcEndpoint/route-table", "Ec2CreateTagged/CreateVpcEndpoint/security-group",
+      "Ec2CreateTagged/CreateVpcEndpoint/subnet", "Ec2CreateTagged/CreateVpcEndpoint/vpc",
+    ]);
+    expect(ec2ParentGaps(withOldEc2(OLD_EC2_RUN))).toEqual(["Ec2RunInstancesNewResources/RunInstances/network-interface"]);
+    // A subnet in another project's VPC: CreateSubnet next to vpc/* under a request tag.
+    const subnet = withText("Action: [ec2:CreateVpc,", "Action: [ec2:CreateSubnet, ec2:CreateVpc,");
+    expect(ec2ParentGaps(subnet)).toEqual(["Ec2NewTopLevel/CreateSubnet/vpc"]);
+    // The general scope test also refuses a create on Resource "*" with only a request tag.
+    expect(deployGaps(withOldEc2(OLD_EC2_CREATE))).toContain("Ec2CreateTagged/ec2:CreateSubnet");
+  });
+
+  it("requires the project tag on every parent and refuses volumes from snapshots", () => {
+    const parents = deployStatements(template).find((s) => s.Sid === "Ec2ParentsTagged");
+    expect(scopeOf(parents as Statement, template).resourceTag).toBe(true);
+    const types = new Set(Object.values(EC2_PARENTS).flat());
+    const listed = list(parents?.Resource).map(text);
+    for (const p of ["vpc", "subnet", "security-group", "route-table", "elastic-ip", "network-interface", "launch-template"]) {
+      expect(types.has(p), p).toBe(true);
+      expect(listed.some((r) => matches(r, sampleEc2Arn(p))), p).toBe(true);
+    }
+    expect(denied(deployStatements(template), "arn:aws:ec2:*::snapshot/*", "ec2:CreateVolume")).toBe(true);
+    const noDeny = deployStatements(template).filter((s) => s.Sid !== "Ec2NoVolumesFromSnapshots");
+    expect(denied(noDeny, "arn:aws:ec2:*::snapshot/*", "ec2:CreateVolume")).toBe(false);
+  });
+});
+
+describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
+  it("runs workshop task definitions only on ssd-workshop-* clusters", () => {
+    expect(ecsClusterGaps(deployStatements(template))).toEqual([]);
+    expect(ecsClusterGaps(deployStatements(template).filter((s) => s.Sid !== "TasksOnWorkshopClustersOnly"))).toEqual(["ecs:RunTask", "ecs:StartTask"]);
+    const anyCluster = withText('ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-*"}', 'ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/*"}');
+    expect(ecsClusterGaps(deployStatements(anyCluster))).toEqual(["ecs:RunTask", "ecs:StartTask"]);
+    // Services: the ARN holds the cluster name.
+    const named = deployStatements(template).find((s) => s.Sid === "NamedWorkshopResources");
+    expect(list(named?.Resource).map(text)).toContain("arn:aws:ecs:*:${AWS::AccountId}:service/ssd-workshop-*/*");
+  });
+
+  it("lets EventBridge rules match only ssd-workshop.* sources", () => {
+    expect(eventRuleGaps(deployStatements(template))).toEqual([]);
+    const without = deployStatements(template).filter((s) => !s.Sid.startsWith("Rules"));
+    expect(eventRuleGaps(without)).toEqual(["events:source", "events:source-missing"]);
+    const awsSources = withText("{events:source: ssd-workshop.*}", '{events:source: ["ssd-workshop.*", "aws.*"]}');
+    expect(eventRuleGaps(deployStatements(awsSources))).toEqual(["events:source"]);
+  });
+
+  it("requests certificates only for workshop.rankly.games names", () => {
+    expect(acmDomainGaps(deployStatements(template))).toEqual([]);
+    const anyDomain = withText(
+      '              ForAllValues:StringLike:\n                acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]\n              "Null": {acm:DomainNames: "false"}\n',
+      "",
     );
-    expect(runInstancesGaps(oldInterface)).toEqual(["Ec2RunInstancesAmazonImages/image", "Ec2RunInstancesAmazonImages/network-interface"]);
+    expect(acmDomainGaps(deployStatements(anyDomain))).toEqual(["CertificatesTagged"]);
+    const noGuard = withText('              "Null": {acm:DomainNames: "false"}\n', "");
+    expect(acmDomainGaps(deployStatements(noGuard))).toEqual(["CertificatesTagged"]);
+  });
+
+  it("sends mail only through the workshop sender's identities", () => {
+    expect(sesScopeGaps(deployStatements(template))).toEqual([]);
+    expect(sesScopeGaps(boundaryStatements(template))).toEqual([]);
+    const old = withAll("              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games\n", '              - "*"\n');
+    expect(sesScopeGaps(deployStatements(old))).toEqual(["SesForTesting"]);
+    expect(sesScopeGaps(boundaryStatements(old))).toEqual(["SendCodes"]);
+  });
+});
+
+describe("access stack: GitHub OIDC (try 4)", () => {
+  it("lets only deploy.yml, on push to main, request an OIDC token", () => {
+    expect(oidcWorkflowGaps(workflowFiles())).toEqual([]);
+    expect(oidcWorkflowGaps({ "ci.yml": "permissions:\n  id-token: write\n" })).toEqual(["ci.yml/id-token"]);
+    expect(oidcWorkflowGaps({ "x.yml": "permissions: write-all\n" })).toEqual(["x.yml/id-token"]);
+    expect(oidcWorkflowGaps({ "deploy.yml": "on:\n  push:\n    branches: [main]\npermissions:\n  id-token: write\n" })).toEqual([]);
+    expect(oidcWorkflowGaps({ "deploy.yml": "on:\n  push:\n    branches: [main]\n  pull_request_target:\n" })).toEqual(["deploy.yml/triggers"]);
+    expect(oidcWorkflowGaps({ "deploy.yml": "on: [push, workflow_run]\n" })).toEqual(["deploy.yml/triggers"]);
   });
 });
 
@@ -586,6 +831,14 @@ describe("access stack: sharing outside the account", () => {
     expect(SHARING.filter((a) => !denied(stmts, "*", a))).toEqual([]);
     const without = stmts.filter((s) => s.Sid !== "NoExternalSharing");
     expect(SHARING.filter((a) => !denied(without, "*", a))).toEqual(SHARING);
+  });
+
+  it("carries the same denies in the boundary, for workload roles (try 4)", () => {
+    const boundary = boundaryStatements(template);
+    expect(BOUNDARY_SHARING.filter((a) => !denied(boundary, "*", a))).toEqual([]);
+    expect(denied(boundary, "*", "s3:PutBucketNotification")).toBe(false);
+    const without = boundary.filter((s) => s.Sid !== "NoExternalSharing");
+    expect(BOUNDARY_SHARING.filter((a) => !denied(without, "*", a))).toEqual(BOUNDARY_SHARING);
   });
 
   it("denies invoke permissions, event targets and subscriptions that leave the workshop", () => {
@@ -631,17 +884,17 @@ describe("access stack: self-protection (criterion 3)", () => {
     }
   });
 
-  it("attaches the same three deploy policies to the deploy role and the Claude user", () => {
+  it("attaches the same four deploy policies to the deploy role and the Claude user", () => {
     expect(statements(template, "DeployPolicy")).toContain(deny);
     for (const id of ["DeployRole", "ClaudeUser"]) {
       expect(template.Resources[id]?.Properties.ManagedPolicyArns, id).toEqual(DEPLOY_POLICIES.map((p) => ({ Ref: p })));
     }
     expect(DEPLOY_POLICIES.map((id) => template.Resources[id]?.Properties.ManagedPolicyName)).toEqual([
-      "ssd-workshop-deploy", "ssd-workshop-deploy-edge", "ssd-workshop-deploy-read",
+      "ssd-workshop-deploy", "ssd-workshop-deploy-edge", "ssd-workshop-deploy-ec2", "ssd-workshop-deploy-read",
     ]);
   });
 
-  it("explicitly denies IAM writes on the deploy role, the Claude user and the four managed policies", () => {
+  it("explicitly denies IAM writes on the deploy role, the Claude user and the five managed policies", () => {
     expect(identityGaps(deployStatements(template))).toEqual([]);
     // Old pattern: without the deny, role/ssd-workshop-* housekeeping reached the deploy role.
     const without = deployStatements(template).filter((s) => s.Sid !== "ProtectAccessIdentities");
@@ -744,6 +997,6 @@ describe("policy sizes", () => {
   it("prints the size of each managed policy", () => {
     const sizes = Object.fromEntries(ALL_POLICIES.map((id) => [id, policySize(template, id)]));
     console.log(`policy sizes (limit 6144): ${JSON.stringify(sizes)}`);
-    expect(Object.keys(sizes)).toHaveLength(4);
+    expect(Object.keys(sizes)).toHaveLength(5);
   });
 });

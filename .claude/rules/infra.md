@@ -38,15 +38,51 @@ paths:
   tags, so the deploy rights can only create them: give them `RemovalPolicy.RETAIN`, and changing
   or deleting one needs Franck (or a replacement under a new name).
 - The access stack denies, for both principals: S3 ACLs (keep `BucketOwnerEnforced`, no legacy
-  CloudFront logging bucket), Lambda function URLs, resource policies on secrets, repositories,
-  tables, parameters and log groups, DynamoDB exports, log subscription filters, SNS subscriptions
-  other than workshop Lambda functions and queues, EventBridge targets outside the account, and
-  Lambda invoke permissions for principals other than API Gateway, EventBridge, SNS and S3.
+  CloudFront logging bucket), S3 server access logging, inventory, analytics export, replication
+  and (deploy principals only) bucket notifications, Lambda function URLs, resource policies on
+  secrets, repositories, tables, parameters and log groups, DynamoDB exports, log subscription
+  filters and log export tasks, SNS subscriptions other than workshop Lambda functions and queues,
+  EventBridge targets outside the account, and Lambda invoke permissions for principals other than
+  API Gateway, EventBridge, SNS and S3. The boundary carries the same sharing denies (except bucket
+  notifications, which CDK's notifications handler needs), so workload roles cannot share either.
+- Lambda permissions for a service principal: always set `sourceArn` (or at least
+  `sourceAccount`) in CDK (`addPermission`, `grantInvoke`); IAM cannot require it, and without it
+  another account's API, rule, topic or bucket could invoke the function.
+- An `aws:RequestTag` condition is true for every resource a call names, also the existing ones it
+  only refers to. Never put a parent ARN type (or `Resource "*"`) next to a create under a
+  request tag alone: list per action only the ARN types it creates (AWS Service Authorization
+  Reference, machine-readable at
+  `servicereference.us-east-1.amazonaws.com/v1/<service>/<service>.json`), and require
+  `aws:ResourceTag/project` on the parents (VPC, subnet, security group, route table, Elastic IP,
+  network interface, launch template). The test's `EC2_PARENTS` table must name every EC2 create.
+- EC2: `RunInstances` takes only project-tagged network interfaces, and a network interface that
+  `RunInstances` creates itself has no resource tag yet: create the k3s node's interface first
+  (`CfnNetworkInterface` with the project tag) and pass its id in the launch template. Volumes
+  from snapshots are denied. k3s nodes use IMDSv2 with hop limit 1, so pods cannot reach the node
+  role.
+- ECS tasks run only on `ssd-workshop-*` clusters (`ecs:cluster` deny); service ARNs hold the
+  cluster name, so services are limited the same way.
+- EventBridge rules must name an event source `ssd-workshop.*` (deny on `events:source`, and on
+  a pattern without a source). Schedules use EventBridge Scheduler (`scheduler:*` on
+  `ssd-workshop-*`), not schedule rules; AWS service events such as ECS task state changes are
+  not available as rules (poll `DescribeTasks` or use Step Functions `.sync` instead).
+- ACM certificates only for `workshop.rankly.games` and `*.workshop.rankly.games`
+  (`acm:DomainNames`).
+- SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
+  `ssd-workshop@rankly.games`.
+- GitHub OIDC: the role trusts `refs/heads/main`, which also matches `pull_request_target`,
+  `workflow_run`, `issue_comment` and `schedule` jobs on `main`. Only `.github/workflows/deploy.yml`
+  may request `id-token: write` (never `write-all`), and it runs only on `push` to `main`
+  (tested). Follow-up: a custom OIDC subject with `job_workflow_ref`.
+- The access stack has five managed policies (the boundary and the deploy policies
+  `ssd-workshop-deploy`, `-edge`, `-ec2`, `-read`), each at most 6,144 characters minified
+  (tested). A new deploy policy must be attached to both the deploy role and the Claude user and
+  listed in `ProtectAccessIdentities`.
 - `ecs:DescribeTaskDefinition` (Resource `*` only) and `ec2:DescribeLaunchTemplateVersions` are not
   available: the first ticket that deploys an ECS task definition or an EC2 launch template brings
   this to Franck before building.
 - EC2: only Amazon-owned AMIs (`ec2:Owner` `amazon`, e.g. Amazon Linux 2023); tag specifications
-  cover the instance, its volumes and its network interfaces.
+  cover the instance and its volumes.
 - Custom CloudWatch metrics use the namespace `ssd-workshop`.
 - Reads of other projects' configuration are not granted (Lambda environments, task definitions,
   other stacks' outputs, other APIs and distributions): name the workshop resource when reading.

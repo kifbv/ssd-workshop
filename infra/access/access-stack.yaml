@@ -1,12 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  SSD Workshop - least-privilege access. Creates a permissions boundary, three deploy
+  SSD Workshop - least-privilege access. Creates a permissions boundary, four deploy
   policies, a GitHub Actions deploy role (OIDC, kifbv/ssd-workshop main only) and an IAM
   user for Claude's cloud sessions. Writes are limited to ssd-workshop-* names, the
   project=ssd-workshop tag, the /ssd-workshop/ IAM path and DNS under workshop.rankly.games;
   reads that return other projects' secrets or full configuration are not granted.
   Deploy in eu-central-1 as stack name "ssd-workshop-access". The deploy rights cannot
-  change this stack, the deploy role, the Claude user or the four managed policies.
+  change this stack, the deploy role, the Claude user or the five managed policies.
 
 Parameters:
   HostedZoneId:
@@ -73,7 +73,9 @@ Resources:
           - Sid: SendCodes
             Effect: Allow
             Action: [ses:SendEmail, ses:SendRawEmail]
-            Resource: "*"
+            Resource:
+              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
+              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
           - Sid: RunBuilds
@@ -121,6 +123,32 @@ Resources:
           - Sid: K3sNodeChannels
             Effect: Allow
             Action: [ssmmessages:*, ec2messages:*, ec2:DescribeInstances, ec2:DescribeTags]
+            Resource: "*"
+          # Same sharing and egress denies as the deploy policies, except s3:PutBucketNotification,
+          # which CDK's bucket notifications handler (a workshop role) needs.
+          - Sid: NoExternalSharing
+            Effect: Deny
+            Action:
+              - s3:PutBucketAcl
+              - s3:PutObjectAcl
+              - s3:PutObjectVersionAcl
+              - s3:PutBucketLogging
+              - s3:PutInventoryConfiguration
+              - s3:PutAnalyticsConfiguration
+              - s3:PutReplicationConfiguration
+              - secretsmanager:PutResourcePolicy
+              - ecr:SetRepositoryPolicy
+              - lambda:CreateFunctionUrlConfig
+              - lambda:UpdateFunctionUrlConfig
+              - lambda:AddLayerVersionPermission
+              - sqs:AddPermission
+              - sns:AddPermission
+              - dynamodb:PutResourcePolicy
+              - dynamodb:ExportTableToPointInTime
+              - ssm:PutResourcePolicy
+              - logs:PutResourcePolicy
+              - logs:PutSubscriptionFilter
+              - logs:CreateExportTask
             Resource: "*"
 
   # Deploy rights, part 1: stacks, named resources, IAM, and the denies that guard them.
@@ -210,6 +238,7 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-boundary
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-edge
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-ec2
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-read
           - Sid: WorkshopServiceLinkedRoles
             Effect: Allow
@@ -225,49 +254,27 @@ Resources:
             Effect: Deny
             Action: [sts:AssumeRole, sts:TagSession, sts:SetSourceIdentity]
             Resource: "*"
-          - Sid: NoExternalSharing
+          - Sid: TasksOnWorkshopClustersOnly
             Effect: Deny
-            Action:
-              - s3:PutBucketAcl
-              - s3:PutObjectAcl
-              - s3:PutObjectVersionAcl
-              - secretsmanager:PutResourcePolicy
-              - ecr:SetRepositoryPolicy
-              - lambda:CreateFunctionUrlConfig
-              - lambda:UpdateFunctionUrlConfig
-              - lambda:AddLayerVersionPermission
-              - sqs:AddPermission
-              - sns:AddPermission
-              - dynamodb:PutResourcePolicy
-              - dynamodb:ExportTableToPointInTime
-              - ssm:PutResourcePolicy
-              - logs:PutResourcePolicy
-              - logs:PutSubscriptionFilter
-            Resource: "*"
-          - Sid: InvokePermissionsForServicesOnly
-            Effect: Deny
-            Action: lambda:AddPermission
+            Action: [ecs:RunTask, ecs:StartTask]
             Resource: "*"
             Condition:
-              StringNotEquals:
-                lambda:Principal: [apigateway.amazonaws.com, events.amazonaws.com, sns.amazonaws.com, s3.amazonaws.com]
-          - Sid: EventTargetsInAccount
+              ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-*"}
+          - Sid: RulesOnWorkshopSourcesOnly
             Effect: Deny
-            Action: events:PutTargets
+            Action: events:PutRule
             Resource: "*"
             Condition:
-              ForAnyValue:ArnNotLike: {events:TargetArn: !Sub "arn:aws:*:*:${AWS::AccountId}:*"}
-          - Sid: SubscriptionsInWorkshop
+              ForAnyValue:StringNotLike: {events:source: ssd-workshop.*}
+          - Sid: RulesNeedASource
             Effect: Deny
-            Action: sns:Subscribe
+            Action: events:PutRule
             Resource: "*"
             Condition:
-              StringNotLike:
-                sns:Endpoint:
-                  - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-*
-                  - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-*
+              "Null": {events:source: "true"}
 
-  # Deploy rights, part 2: CloudFront, certificates, API Gateway, DNS, EC2, Bedrock and SES.
+  # Deploy rights, part 2: CloudFront, certificates, API Gateway, DNS, Bedrock, SES, and the
+  # denies that keep workshop data inside the account (sharing, exports, egress).
   DeployPolicyEdge:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -309,6 +316,9 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals: {aws:RequestTag/project: ssd-workshop}
+              ForAllValues:StringLike:
+                acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]
+              "Null": {acm:DomainNames: "false"}
           - Sid: CertificatesChange
             Effect: Allow
             Action: [acm:DeleteCertificate, acm:UpdateCertificateOptions, acm:AddTagsToCertificate, acm:RemoveTagsFromCertificate]
@@ -343,29 +353,123 @@ Resources:
               "Null":
                 route53:ChangeResourceRecordSetsNormalizedRecordNames: "false"
                 route53:ChangeResourceRecordSetsRecordTypes: "false"
-          - Sid: Ec2CreateTagged
+          - Sid: Bedrock
             Effect: Allow
-            Action: [ec2:CreateVpc, ec2:CreateSubnet, ec2:CreateSecurityGroup, ec2:CreateInternetGateway, ec2:CreateRouteTable, ec2:AllocateAddress, ec2:CreateLaunchTemplate, ec2:CreateVolume, ec2:CreateNatGateway, ec2:CreateVpcEndpoint]
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - arn:aws:bedrock:*::foundation-model/anthropic.*
+              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
+          - Sid: SesForTesting
+            Effect: Allow
+            Action: [ses:SendEmail, ses:SendRawEmail]
+            Resource:
+              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
+              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
+            Condition:
+              StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
+
+          - Sid: NoExternalSharing
+            Effect: Deny
+            Action:
+              - s3:PutBucketAcl
+              - s3:PutObjectAcl
+              - s3:PutObjectVersionAcl
+              - s3:PutBucketLogging
+              - s3:PutInventoryConfiguration
+              - s3:PutAnalyticsConfiguration
+              - s3:PutReplicationConfiguration
+              - s3:PutBucketNotification
+              - secretsmanager:PutResourcePolicy
+              - ecr:SetRepositoryPolicy
+              - lambda:CreateFunctionUrlConfig
+              - lambda:UpdateFunctionUrlConfig
+              - lambda:AddLayerVersionPermission
+              - sqs:AddPermission
+              - sns:AddPermission
+              - dynamodb:PutResourcePolicy
+              - dynamodb:ExportTableToPointInTime
+              - ssm:PutResourcePolicy
+              - logs:PutResourcePolicy
+              - logs:PutSubscriptionFilter
+              - logs:CreateExportTask
+            Resource: "*"
+          - Sid: InvokePermissionsForServicesOnly
+            Effect: Deny
+            Action: lambda:AddPermission
             Resource: "*"
             Condition:
-              StringEquals: {aws:RequestTag/project: ssd-workshop}
-          - Sid: Ec2RunInstancesNewResources
+              StringNotEquals:
+                lambda:Principal: [apigateway.amazonaws.com, events.amazonaws.com, sns.amazonaws.com, s3.amazonaws.com]
+          - Sid: EventTargetsInAccount
+            Effect: Deny
+            Action: events:PutTargets
+            Resource: "*"
+            Condition:
+              ForAnyValue:ArnNotLike: {events:TargetArn: !Sub "arn:aws:*:*:${AWS::AccountId}:*"}
+          - Sid: SubscriptionsInWorkshop
+            Effect: Deny
+            Action: sns:Subscribe
+            Resource: "*"
+            Condition:
+              StringNotLike:
+                sns:Endpoint:
+                  - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-*
+                  - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-*
+
+  # Deploy rights, part 3: EC2 (networks and the advanced track's k3s nodes). A request tag is
+  # true for every resource a call names, so each request-tag statement lists only ARN types that
+  # are new in every call of its actions; the existing parents a call names (VPC, subnet, security
+  # group, route table, Elastic IP, network interface, launch template) need the project tag
+  # (Ec2ParentsTagged). Resource types per action: AWS Service Authorization Reference for EC2.
+  DeployPolicyEc2:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: ssd-workshop-deploy-ec2
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Ec2NewTopLevel
             Effect: Allow
-            Action: ec2:RunInstances
+            Action: [ec2:CreateVpc, ec2:CreateInternetGateway, ec2:AllocateAddress, ec2:CreateLaunchTemplate, ec2:CreateVolume, ec2:CreateNetworkInterface]
             Resource:
-              - !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:vpc/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:internet-gateway/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:elastic-ip/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:launch-template/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
             Condition:
               StringEquals: {aws:RequestTag/project: ssd-workshop}
-          - Sid: Ec2RunInstancesTaggedNetwork
+          - Sid: Ec2NewInVpc
             Effect: Allow
-            Action: ec2:RunInstances
+            Action: [ec2:CreateSubnet, ec2:CreateSecurityGroup, ec2:CreateRouteTable]
             Resource:
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
-              - !Sub arn:aws:ec2:*:${AWS::AccountId}:launch-template/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:route-table/*
+            Condition:
+              StringEquals: {aws:RequestTag/project: ssd-workshop}
+          - Sid: Ec2NewAttached
+            Effect: Allow
+            Action: [ec2:CreateNatGateway, ec2:CreateVpcEndpoint, ec2:RunInstances]
+            Resource:
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:natgateway/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:vpc-endpoint/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+            Condition:
+              StringEquals: {aws:RequestTag/project: ssd-workshop}
+          - Sid: Ec2ParentsTagged
+            Effect: Allow
+            Action: [ec2:CreateSubnet, ec2:CreateSecurityGroup, ec2:CreateRouteTable, ec2:CreateNatGateway, ec2:CreateVpcEndpoint, ec2:CreateNetworkInterface, ec2:RunInstances]
+            Resource:
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:vpc/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:route-table/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:elastic-ip/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:launch-template/*
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
           - Sid: Ec2RunInstancesAmazonImages
@@ -374,12 +478,16 @@ Resources:
             Resource: arn:aws:ec2:*::image/*
             Condition:
               StringEquals: {ec2:Owner: amazon}
+          - Sid: Ec2NoVolumesFromSnapshots
+            Effect: Deny
+            Action: ec2:CreateVolume
+            Resource: arn:aws:ec2:*::snapshot/*
           - Sid: Ec2TagOnCreate
             Effect: Allow
             Action: ec2:CreateTags
             Resource: "*"
             Condition:
-              StringEquals: {ec2:CreateAction: [RunInstances, CreateVpc, CreateSubnet, CreateSecurityGroup, CreateInternetGateway, CreateRouteTable, AllocateAddress, CreateLaunchTemplate, CreateVolume, CreateNatGateway, CreateVpcEndpoint]}
+              StringEquals: {ec2:CreateAction: [RunInstances, CreateVpc, CreateSubnet, CreateSecurityGroup, CreateInternetGateway, CreateRouteTable, AllocateAddress, CreateLaunchTemplate, CreateVolume, CreateNatGateway, CreateVpcEndpoint, CreateNetworkInterface]}
           - Sid: Ec2ChangeTaggedOnly
             Effect: Allow
             Action:
@@ -407,20 +515,8 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
-          - Sid: Bedrock
-            Effect: Allow
-            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
-            Resource:
-              - arn:aws:bedrock:*::foundation-model/anthropic.*
-              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
-          - Sid: SesForTesting
-            Effect: Allow
-            Action: [ses:SendEmail, ses:SendRawEmail]
-            Resource: "*"
-            Condition:
-              StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
 
-  # Deploy rights, part 3: reads. Account-wide only where the answer holds no secrets and
+  # Deploy rights, part 4: reads. Account-wide only where the answer holds no secrets and
   # no other project's configuration; everything else is read on workshop names or tags.
   DeployPolicyRead:
     Type: AWS::IAM::ManagedPolicy
@@ -447,7 +543,6 @@ Resources:
               - bedrock:GetInferenceProfile
               - servicequotas:Get*
               - servicequotas:List*
-              - ses:GetAccount
               - ses:GetSendQuota
               - ses:GetEmailIdentity
               - ses:ListEmailIdentities
@@ -495,13 +590,17 @@ Resources:
             Effect: Deny
             Action: apigateway:GET
             Resource: arn:aws:apigateway:*::/apikeys*
+          - Sid: NoVpnKeyReads
+            Effect: Deny
+            Action: ec2:DescribeVpnConnections
+            Resource: "*"
 
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: ssd-workshop-deploy
       MaxSessionDuration: 3600
-      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge, !Ref DeployPolicyRead]
+      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge, !Ref DeployPolicyEc2, !Ref DeployPolicyRead]
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -520,7 +619,7 @@ Resources:
     Type: AWS::IAM::User
     Properties:
       UserName: ssd-workshop-claude
-      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge, !Ref DeployPolicyRead]
+      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge, !Ref DeployPolicyEc2, !Ref DeployPolicyRead]
       Tags: [{Key: project, Value: ssd-workshop}]
 
   Budget:
