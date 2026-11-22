@@ -1,6 +1,6 @@
 # Phase 0: Foundations
 
-Spec sections: 5 (Architecture, data, hosting and security), 5A "How it runs", 7 (Build phases, row 0), 8 (Way of working). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus). Status: draft.
+Spec sections: 5 (Architecture, data, hosting and security), 5A "How it runs", 7 (Build phases, row 0), 8 (Way of working). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus). Status: draft, questions answered.
 
 Goal: an empty but real platform. `workshop.rankly.games` serves a placeholder page, deployed from `main` by GitHub Actions with the least-privilege role, and Bedrock and SES are proven to work from the account.
 
@@ -82,7 +82,7 @@ Acceptance criteria (each starts as FAIL):
 
 ### 0.6 Bedrock and SES smoke checks
 
-A small script (`npm run smoke`) proves the account can call Claude Sonnet on Bedrock through the EU inference profile and can send a code email from `ssd-workshop@rankly.games`. It reports the model's tokens-per-minute quota and whether SES is still in sandbox mode.
+A small script (`npm run smoke`) proves the account can call Claude Sonnet on Bedrock through the EU inference profile and can send a code email from `ssd-workshop@rankly.games`. It also reports the model's tokens-per-minute quota.
 
 Depends on: 0.1, AWS access. Areas: platform.
 
@@ -91,14 +91,15 @@ Acceptance criteria (each starts as FAIL):
 - WHEN `npm run smoke -- bedrock` runs THEN it gets an answer from Claude Sonnet through an `eu.anthropic.*` inference profile and prints the latency
 - WHEN `npm run smoke -- quota` runs THEN it prints the current tokens-per-minute and requests-per-minute quotas for that model in eu-central-1
 - WHEN `npm run smoke -- ses <address>` runs with a verified address THEN a test email from `ssd-workshop@rankly.games` arrives
-- WHEN SES is in sandbox mode THEN the script says so and names the step to leave it
+- WHEN `npm run smoke -- ses <address>` runs with an unverified address THEN the email still arrives (SES is in production mode)
 
 ## Questions for Franck
 
-1. The platform (infrastructure, API and web pages) is written in TypeScript, so it uses one language end to end, while advanced participant apps stay in Python. Suggested: yes.
-2. SES is probably still in sandbox mode, which only lets codes go to verified addresses. Leaving it takes an AWS request that is usually approved within a day, and the deploy role is not allowed to make it. Suggested: once 0.6 confirms sandbox mode, Claude drafts the request text and you submit it, well before the dry-run.
+Answered on 2026-11-22 (see `docs/decisions.md`):
+
+1. The platform (infrastructure, API and web pages) is written in TypeScript; advanced participant apps stay in Python. Answer: yes.
+2. Is SES still in sandbox mode? Answer: no, SES is already in production mode for the rankly.games domain, so no request is needed.
 
 ## Blocked
 
 - 0.4, 0.5 and 0.6 wait on AWS access: the `ssd-workshop-access` stack applied and the `ssd-workshop-claude` key stored as the network secret.
-- Every pull request waits on the Claude GitHub App being installed on `kifbv/ssd-workshop`.

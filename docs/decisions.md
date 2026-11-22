@@ -17,3 +17,6 @@ Choices made while building that the specification left open. Newest phase first
 - **AWS access:** least-privilege CloudFormation stack `ssd-workshop-access` (`infra/access/access-stack.yaml`): permissions boundary, GitHub OIDC deploy role limited to `main`, IAM user for Claude's sessions, $100/month budget. Rights are limited to `ssd-workshop-*` names, the `project=ssd-workshop` tag and DNS under `workshop.rankly.games`; the stack protects itself from the deploy role.
 - **No CDK bootstrap roles:** CDK uses `CliCredentialsStackSynthesizer` with our own `ssd-workshop-cdk-assets-*` bucket, so deploys run with the least-privilege role instead of the account-wide `cdk-hnb659fds-*` roles.
 - **Licence:** MIT, since the repository is public for the pitch.
+- **Platform language:** TypeScript for infrastructure, API and web pages, so the platform is one language end to end; advanced participant apps use Python. (Franck, 2026-11-22)
+- **SES:** already in production mode for rankly.games, so codes can go to any allow-listed address; sender `ssd-workshop@rankly.games`. (Franck, 2026-11-22)
+- **Access stack split:** the deploy rights are two managed policies (`ssd-workshop-deploy` and `ssd-workshop-deploy-edge`), because IAM caps one managed policy at 6,144 characters.
