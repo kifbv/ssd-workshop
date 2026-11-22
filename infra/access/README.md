@@ -96,6 +96,7 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `WorkshopStacks` | Create, update, delete and read `ssd-workshop-*` stacks (change sets authorize against the stack). CDK names the stack when it calls `DescribeStacks`. |
+| `NoResourceImport` | Deny: CloudFormation change sets that import existing resources (`cloudformation:ImportResourceTypes`), so a workshop stack cannot adopt, tag or change another project's resource. |
 | `ProtectThisStack` | Deny: every non-read CloudFormation action on `ssd-workshop-access` (update, delete, change sets, cancel, rollback, stack policy), so the deploy rights cannot raise themselves. |
 | `NamedWorkshopResources` | Full control of the workshop's own DynamoDB, Lambda, logs (`ssd-workshop-*`, `/aws/lambda/ssd-workshop-*`, `/ecs/ssd-workshop-*`), SQS, ECR, Secrets Manager, SSM, EventBridge, Scheduler, Step Functions, SNS and ECS resources, by `ssd-workshop-*` name. ECS service and task ARNs hold the cluster name, so they are limited to `ssd-workshop-*` clusters. |
 | `WorkshopBuckets` | Full control of `ssd-workshop-*` buckets in this account only (`aws:ResourceAccount`). |
@@ -118,6 +119,7 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `CloudFrontTaggedCreate` | Create CloudFront distributions only with the `project=ssd-workshop` tag. |
+| `TagOnCreateThroughCloudFormation` | `cloudfront:TagResource` and `acm:AddTagsToCertificate`, which AWS also checks when CloudFormation creates a distribution or requests a certificate with tags. Only with the project tag in the request, no project tag on the resource yet, and the call made through CloudFormation (`aws:CalledVia`), whose resource import is denied (`NoResourceImport`): so an existing resource of another project cannot be tagged and then taken over. |
 | `CloudFrontTaggedChange` | Change, delete, invalidate, tag or untag only distributions already tagged `project=ssd-workshop` (a tag right with only a request tag would let the role tag, then take over, any distribution). |
 | `CloudFrontUntaggableParts` | Origin access controls and cache, origin-request and response-headers policies have generated ids and no tags: create and read only, so the rankly.games distributions' existing ones cannot be changed or deleted. |
 | `CloudFrontWorkshopFunctions` | CloudFront functions named `ssd-workshop-*`. |

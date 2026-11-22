@@ -167,6 +167,12 @@ Resources:
             Effect: Deny
             NotAction: ["cloudformation:Describe*", "cloudformation:List*", "cloudformation:Get*"]
             Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/ssd-workshop-access/*
+          - Sid: NoResourceImport
+            Effect: Deny
+            Action: cloudformation:CreateChangeSet
+            Resource: "*"
+            Condition:
+              "Null": {cloudformation:ImportResourceTypes: "false"}
           - Sid: NamedWorkshopResources
             Effect: Allow
             Action: [dynamodb:*, lambda:*, logs:*, sqs:*, ecr:*, secretsmanager:*, ssm:*, events:*, scheduler:*, states:*, sns:*, ecs:*]
@@ -294,6 +300,14 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
+          - Sid: TagOnCreateThroughCloudFormation
+            Effect: Allow
+            Action: [cloudfront:TagResource, acm:AddTagsToCertificate]
+            Resource: "*"
+            Condition:
+              StringEquals: {aws:RequestTag/project: ssd-workshop}
+              "Null": {aws:ResourceTag/project: "true"}
+              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}
           - Sid: CloudFrontUntaggableParts
             Effect: Allow
             Action:
