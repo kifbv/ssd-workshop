@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm ci)",
+      "Bash(npm run lint)",
+      "Bash(npm run typecheck)",
+      "Bash(npm test)"
+    ],
+    "deny": [
+      "Bash(git push origin main:*)",
+      "Bash(git push --force:*)",
+      "Bash(cdk deploy:*)",
+      "Bash(cdk destroy:*)",
+      "Bash(cdk bootstrap:*)",
+      "Bash(npx cdk deploy:*)",
+      "Bash(npx cdk destroy:*)",
+      "Bash(npx cdk bootstrap:*)",
+      "Bash(npx aws-cdk deploy:*)",
+      "Bash(npx aws-cdk destroy:*)",
+      "Bash(npm exec cdk deploy:*)",
+      "Bash(npm exec cdk destroy:*)",
+      "Bash(aws iam:*)",
+      "Bash(aws cloudformation deploy:*)",
+      "Bash(aws cloudformation create-stack:*)",
+      "Bash(aws cloudformation update-stack:*)",
+      "Bash(aws cloudformation delete-stack:*)",
+      "Bash(aws cloudformation create-change-set:*)",
+      "Bash(aws cloudformation execute-change-set:*)",
+      "Bash(aws route53 change-resource-record-sets:*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(~/.aws/credentials)"
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "cadenceworks": {
+      "source": { "source": "github", "repo": "cadenceworks-dev/claude-workflow" }
+    }
+  },
+  "enabledPlugins": {
+    "spec-driven@cadenceworks": true
+  }
+}
