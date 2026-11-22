@@ -1,5 +1,7 @@
-// `npm run smoke -- <command>`: proves the account can reach Bedrock, read its quotas and send email.
+// `npm run -s smoke -- <command>`: proves the account can reach Bedrock, read its quotas and send email.
 // The AWS calls stay thin; the rules live in ./logic.ts.
+// Always run it with `-s`: without it npm echoes the command line, so `ses <address>` would print the
+// recipient address. The root script calls this workspace with `-s` already; the outer `-s` is on you.
 import { randomInt } from "node:crypto";
 import { Agent, type AgentOptions } from "node:https";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
@@ -20,16 +22,17 @@ import {
   formatQuotaLine,
   maskEmail,
   parseArgs,
-  redactEmails,
+  proxyFromEnv,
+  redactError,
   resolveModelId,
   type QuotaEntry,
 } from "./logic.js";
 
-// The AWS SDK ignores HTTPS_PROXY. Where one is set (Claude sessions sign requests in their proxy),
+// The AWS SDK ignores HTTPS_PROXY / https_proxy. Where one is set (Claude sessions sign requests in their proxy),
 // route through it with Node's built-in proxy support (Node 22.21+); elsewhere connect directly.
 const clientConfig = {
   region: REGION,
-  ...(process.env["HTTPS_PROXY"] && {
+  ...(proxyFromEnv(process.env) !== undefined && {
     requestHandler: { httpsAgent: new Agent({ proxyEnv: process.env } as AgentOptions) },
   }),
 };
@@ -124,7 +127,7 @@ main().then(
   },
   (error: unknown) => {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    console.error(`Smoke check failed: ${redactEmails(message)}`);
+    console.error(`Smoke check failed: ${redactError(message)}`);
     process.exitCode = 1;
   },
 );

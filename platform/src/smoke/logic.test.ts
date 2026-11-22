@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MODEL_ID,
+  USAGE,
   buildTestEmail,
   findModelQuotas,
   formatLatency,
@@ -8,7 +9,10 @@ import {
   maskEmail,
   modelQuotaLabel,
   parseArgs,
+  proxyFromEnv,
   redactEmails,
+  redactError,
+  redactUrlCredentials,
   resolveModelId,
   type QuotaEntry,
 } from "./logic.js";
@@ -209,5 +213,53 @@ describe("redactEmails", () => {
 
   it("leaves a message without addresses unchanged", () => {
     expect(redactEmails("Throttling: rate exceeded")).toBe("Throttling: rate exceeded");
+  });
+});
+
+describe("redactUrlCredentials", () => {
+  it("replaces user and password in a URL with ***", () => {
+    expect(redactUrlCredentials("connect ECONNREFUSED http://bob:s3cret@proxy.local:8080/x")).toBe(
+      "connect ECONNREFUSED http://***@proxy.local:8080/x",
+    );
+  });
+
+  it("replaces a user-only credential and works on every URL in the text", () => {
+    expect(redactUrlCredentials("a https://token@h.io and socks5://u:p@10.0.0.1")).toBe(
+      "a https://***@h.io and socks5://***@10.0.0.1",
+    );
+  });
+
+  it("leaves URLs without credentials unchanged", () => {
+    const text = "https://bedrock-runtime.eu-central-1.amazonaws.com/model/x?a=b@c";
+    expect(redactUrlCredentials(text)).toBe(text);
+  });
+});
+
+describe("redactError", () => {
+  it("strips URL credentials and masks addresses in one pass", () => {
+    expect(redactError("proxy http://user:pw@proxy.example.com failed for jane@company.org")).toBe(
+      "proxy http://***@proxy.example.com failed for j***@c***.org",
+    );
+  });
+});
+
+describe("proxyFromEnv", () => {
+  it("reads HTTPS_PROXY", () => {
+    expect(proxyFromEnv({ HTTPS_PROXY: "http://p:1" })).toBe("http://p:1");
+  });
+
+  it("reads lowercase https_proxy", () => {
+    expect(proxyFromEnv({ https_proxy: "http://p:2" })).toBe("http://p:2");
+  });
+
+  it("returns undefined when neither is set or both are empty", () => {
+    expect(proxyFromEnv({})).toBeUndefined();
+    expect(proxyFromEnv({ HTTPS_PROXY: "", https_proxy: "" })).toBeUndefined();
+  });
+});
+
+describe("USAGE", () => {
+  it("tells the operator to run the command silently", () => {
+    expect(USAGE).toContain("npm run -s smoke -- <command>");
   });
 });

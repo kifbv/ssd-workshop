@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "smoke": "tsx src/smoke/main.ts",
-    "test":"vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1175.0",

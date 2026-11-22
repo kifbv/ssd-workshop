@@ -4,7 +4,7 @@ export const REGION = "eu-central-1";
 export const SENDER = "ssd-workshop@rankly.games";
 export const DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-5-5";
 
-export const USAGE = `Usage: npm run smoke -- <command>
+export const USAGE = `Usage: npm run -s smoke -- <command>
 
 Commands:
   bedrock          ask Claude on Bedrock (EU inference profile) for a short answer and print the latency
@@ -12,7 +12,9 @@ Commands:
   ses <address>    send a test email from ${SENDER} to <address>
 
 Environment:
-  SMOKE_MODEL_ID   inference profile to use (default ${DEFAULT_MODEL_ID}); must start with eu.anthropic.`;
+  SMOKE_MODEL_ID   inference profile to use (default ${DEFAULT_MODEL_ID}); must start with eu.anthropic.
+
+Keep the -s: without it npm echoes the command line, recipient address included.`;
 
 export type SmokeCommand =
   | { command: "bedrock" }
@@ -136,9 +138,27 @@ export function maskEmail(address: string): string {
   return `${local.charAt(0)}***@${domain.charAt(0)}***${domain.slice(dot)}`;
 }
 
-/** Masks every address in a text (error messages from SES can echo the recipient). */
+/**
+ * Masks every address in a text (error messages from SES can echo the recipient).
+ * `/` and `*` are not taken as part of an address, so an already redacted `scheme://***@host` stays.
+ */
 export function redactEmails(text: string): string {
-  return text.replace(/[^\s@<>"',;:()]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, (m) => maskEmail(m));
+  return text.replace(/[^\s@<>"',;:()/*]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, (m) => maskEmail(m));
+}
+
+/** "https://user:secret@host" -> "https://***@host": credentials in URLs never reach the output. */
+export function redactUrlCredentials(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, "$1***@");
+}
+
+/** Everything printed from an error goes through this: URL credentials, then addresses. */
+export function redactError(text: string): string {
+  return redactEmails(redactUrlCredentials(text));
+}
+
+/** The proxy the session asks for, upper or lower case (curl and Node read both). */
+export function proxyFromEnv(env: Readonly<Record<string, string | undefined>>): string | undefined {
+  return env["HTTPS_PROXY"] || env["https_proxy"] || undefined;
 }
 
 export function formatLatency(ms: number): string {
