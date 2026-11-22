@@ -18,3 +18,12 @@ paths:
 - `cdk synth` fails with "This app contains no stacks" on an empty app; keep at least one stack.
 - aws-cdk-lib types break `exactOptionalPropertyTypes` (e.g. passing a synthesizer): assert to the
   CDK interface at the call site (`as IStackSynthesizer`); never turn the flag off.
+- Give every named resource an explicit name starting `ssd-workshop-` (CloudFront functions, ECS
+  clusters and task definition families, schedule groups, ...): CDK's generated names drop the
+  dashes (`ssdworkshopsite...`), which the access policy refuses.
+- CDK `crossRegionReferences` writes SSM parameters under `/cdk/exports/...`, outside the allowed
+  `/ssd-workshop/*`: pass the us-east-1 certificate another way (e.g. a fixed parameter under
+  `/ssd-workshop/`).
+- API Gateway: CDK's `RestApi` creates an account-wide CloudWatch role (`PATCH /account`) unless
+  `cloudWatchRole: false`; the access policy refuses it. The deploy job uses no GitHub environment
+  (the role trusts only `refs/heads/main`).

@@ -4,8 +4,8 @@ Description: >
   policy, a GitHub Actions deploy role (OIDC, kifbv/ssd-workshop only) and an IAM
   user for Claude's cloud sessions. Nothing here can touch resources outside the
   ssd-workshop-* names / project=ssd-workshop tag, or DNS outside workshop.rankly.games.
-  Deploy in eu-central-1 as stack name "ssd-workshop-access" (this name is protected
-  from the deploy role itself).
+  Deploy in eu-central-1 as stack name "ssd-workshop-access". The deploy rights cannot
+  change this stack, the deploy role, the Claude user or the three managed policies.
 
 Parameters:
   HostedZoneId:
@@ -53,7 +53,9 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ssd-workshop-*
               - arn:aws:s3:::ssd-workshop-*
               - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:ssd-workshop-*
-              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*ssd-workshop*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:ssd-workshop-*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ssd-workshop-*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/ssd-workshop-*
               - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ssd-workshop-*
               - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ssd-workshop/*
           - Sid: Bedrock
@@ -126,9 +128,7 @@ Resources:
           - Sid: WorkshopStacks
             Effect: Allow
             Action: cloudformation:*
-            Resource:
-              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/ssd-workshop-*/*
-              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:changeSet/*
+            Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/ssd-workshop-*/*
           - Sid: ProtectThisStack
             Effect: Deny
             NotAction: ["cloudformation:Describe*", "cloudformation:List*", "cloudformation:Get*"]
@@ -141,13 +141,16 @@ Resources:
               - !Sub arn:aws:dynamodb:*:${AWS::AccountId}:table/ssd-workshop-*
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-*
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:layer:ssd-workshop-*
-              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:*ssd-workshop*
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:ssd-workshop-*
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/ssd-workshop-*
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/ecs/ssd-workshop-*
               - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-*
               - !Sub arn:aws:ecr:*:${AWS::AccountId}:repository/ssd-workshop*
               - !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:ssd-workshop-*
               - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/ssd-workshop/*
               - !Sub arn:aws:events:*:${AWS::AccountId}:rule/ssd-workshop-*
               - !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule/*/ssd-workshop-*
+              - !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule-group/ssd-workshop-*
               - !Sub arn:aws:states:*:${AWS::AccountId}:stateMachine:ssd-workshop-*
               - !Sub arn:aws:sns:*:${AWS::AccountId}:ssd-workshop-*
               - !Sub arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop*
@@ -156,25 +159,18 @@ Resources:
               - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop*:*
           - Sid: ActionsWithoutResourceScope
             Effect: Allow
-            Action:
-              - ecr:GetAuthorizationToken
-              - ecs:RegisterTaskDefinition
-              - ecs:DeregisterTaskDefinition
-              - ecs:CreateCluster
-              - lambda:CreateEventSourceMapping
-              - lambda:GetEventSourceMapping
-              - lambda:DeleteEventSourceMapping
-              - lambda:UpdateEventSourceMapping
-              - lambda:TagResource
-              - s3:ListAllMyBuckets
-              - logs:CreateLogDelivery
-              - logs:DeleteLogDelivery
-              - scheduler:CreateScheduleGroup
+            Action: [ecr:GetAuthorizationToken, ecs:DeregisterTaskDefinition, s3:ListAllMyBuckets, logs:CreateLogDelivery, logs:DeleteLogDelivery]
             Resource: "*"
-          - Sid: ApiGatewayInRegion
+          - Sid: WorkshopEventSourceMappings
             Effect: Allow
-            Action: [apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
-            Resource: !Sub arn:aws:apigateway:${AWS::Region}::/*
+            Action: [lambda:CreateEventSourceMapping, lambda:GetEventSourceMapping, lambda:DeleteEventSourceMapping, lambda:UpdateEventSourceMapping]
+            Resource: "*"
+            Condition:
+              ArnLike: {lambda:FunctionArn: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-*"}
+          - Sid: TagEventSourceMappings
+            Effect: Allow
+            Action: lambda:TagResource
+            Resource: !Sub arn:aws:lambda:*:${AWS::AccountId}:event-source-mapping:*
           - Sid: WorkshopRolesWithBoundaryOnly
             Effect: Allow
             Action: [iam:CreateRole, iam:PutRolePolicy, iam:AttachRolePolicy, iam:DetachRolePolicy, iam:DeleteRolePolicy]
@@ -183,14 +179,32 @@ Resources:
               StringEquals: {iam:PermissionsBoundary: !Ref BoundaryPolicy}
           - Sid: WorkshopRolesHousekeeping
             Effect: Allow
-            Action: [iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy, iam:PassRole, iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile]
+            Action: [iam:DeleteRole, iam:TagRole, iam:UntagRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy, iam:CreateInstanceProfile, iam:DeleteInstanceProfile, iam:AddRoleToInstanceProfile, iam:RemoveRoleFromInstanceProfile]
             Resource:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
               - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/ssd-workshop-*
+          - Sid: PassWorkshopRolesToWorkshopServices
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
+            Condition:
+              StringEquals:
+                iam:PassedToService: [lambda.amazonaws.com, ecs-tasks.amazonaws.com, ec2.amazonaws.com, states.amazonaws.com, scheduler.amazonaws.com, events.amazonaws.com]
+          - Sid: ProtectAccessIdentities
+            Effect: Deny
+            NotAction: ["iam:Get*", "iam:List*"]
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-deploy
+              - !Sub arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-boundary
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-edge
           - Sid: WorkshopServiceLinkedRoles
             Effect: Allow
             Action: iam:CreateServiceLinkedRole
-            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/*
+            Condition:
+              StringEquals: {iam:AWSServiceName: ecs.amazonaws.com}
           - Sid: NoBoundaryEscape
             Effect: Deny
             Action: [iam:DeleteRolePermissionsBoundary, iam:PutRolePermissionsBoundary, iam:CreateUser, iam:CreateAccessKey, iam:CreatePolicyVersion, iam:SetDefaultPolicyVersion]
@@ -222,13 +236,13 @@ Resources:
         Statement:
           - Sid: CloudFrontTaggedCreate
             Effect: Allow
-            Action: [cloudfront:CreateDistribution, cloudfront:TagResource]
+            Action: cloudfront:CreateDistribution
             Resource: "*"
             Condition:
               StringEquals: {aws:RequestTag/project: ssd-workshop}
           - Sid: CloudFrontTaggedChange
             Effect: Allow
-            Action: [cloudfront:UpdateDistribution, cloudfront:DeleteDistribution, cloudfront:CreateInvalidation, cloudfront:UntagResource]
+            Action: [cloudfront:UpdateDistribution, cloudfront:DeleteDistribution, cloudfront:CreateInvalidation, cloudfront:TagResource, cloudfront:UntagResource]
             Resource: "*"
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
@@ -246,14 +260,30 @@ Resources:
             Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:function/ssd-workshop-*
           - Sid: CertificatesTagged
             Effect: Allow
-            Action: [acm:RequestCertificate, acm:AddTagsToCertificate]
+            Action: acm:RequestCertificate
             Resource: "*"
             Condition:
               StringEquals: {aws:RequestTag/project: ssd-workshop}
           - Sid: CertificatesChange
             Effect: Allow
-            Action: [acm:DeleteCertificate, acm:UpdateCertificateOptions, acm:RemoveTagsFromCertificate]
+            Action: [acm:DeleteCertificate, acm:UpdateCertificateOptions, acm:AddTagsToCertificate, acm:RemoveTagsFromCertificate]
             Resource: "*"
+            Condition:
+              StringEquals: {aws:ResourceTag/project: ssd-workshop}
+          - Sid: ApiGatewayTaggedCreate
+            Effect: Allow
+            Action: apigateway:POST
+            Resource:
+              - !Sub arn:aws:apigateway:${AWS::Region}::/restapis
+              - !Sub arn:aws:apigateway:${AWS::Region}::/apis
+            Condition:
+              StringEquals: {aws:RequestTag/project: ssd-workshop}
+          - Sid: ApiGatewayTaggedChange
+            Effect: Allow
+            Action: [apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
+            Resource:
+              - !Sub arn:aws:apigateway:${AWS::Region}::/restapis/*
+              - !Sub arn:aws:apigateway:${AWS::Region}::/apis/*
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
           - Sid: DnsOnlyWorkshopSubdomain
@@ -269,16 +299,21 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals: {aws:RequestTag/project: ssd-workshop}
-          - Sid: Ec2RunInstancesSupportingResources
+          - Sid: Ec2RunInstancesTaggedNetwork
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:launch-template/*
+            Condition:
+              StringEquals: {aws:ResourceTag/project: ssd-workshop}
+          - Sid: Ec2RunInstancesImageAndInterface
             Effect: Allow
             Action: ec2:RunInstances
             Resource:
               - arn:aws:ec2:*::image/*
-              - arn:aws:ec2:*:*:subnet/*
-              - arn:aws:ec2:*:*:network-interface/*
-              - arn:aws:ec2:*:*:security-group/*
-              - arn:aws:ec2:*:*:key-pair/*
-              - arn:aws:ec2:*:*:launch-template/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
           - Sid: Ec2TagOnCreate
             Effect: Allow
             Action: ec2:CreateTags
@@ -329,10 +364,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                token.actions.githubusercontent.com:sub:
-                  - !Sub repo:${GitHubRepo}:ref:refs/heads/main
-                  - !Sub repo:${GitHubRepo}:environment:*
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:ref:refs/heads/main
 
   # Claude's cloud sessions use access keys of this user (created by Franck in the console,
   # stored as a network secret). Same rights as the deploy role, nothing more.
