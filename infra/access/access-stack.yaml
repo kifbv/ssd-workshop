@@ -579,6 +579,13 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/*
               - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/ssd-workshop/*
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-*
+          # CloudFormation calls GetRole by name before CreateRole. For a role that does not
+          # exist yet IAM checks role/<name> without the path, so role/ssd-workshop/* misses it.
+          - Sid: WorkshopRoleExistenceCheck
+            Effect: Allow
+            Action: iam:GetRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
           - Sid: WorkshopApiReads
             Effect: Allow
             Action: apigateway:GET

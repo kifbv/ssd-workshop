@@ -78,6 +78,9 @@ paths:
   (`acm:DomainNames`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
   `ssd-workshop@rankly.games`.
+- IAM roles on a path: before CreateRole, CloudFormation calls `iam:GetRole` by name, and for a
+  role that does not exist yet IAM checks `role/<name>` without the path. The access stack
+  therefore allows `iam:GetRole` (read only) on `role/ssd-workshop-*` as well as `role/ssd-workshop/*`.
 - GitHub OIDC: GitHub sends this repository's subject in the ID form
   `repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main`, not `repo:kifbv/ssd-workshop:...`;
   check CloudTrail's `AssumeRoleWithWebIdentity` `userName` when a trust condition fails.

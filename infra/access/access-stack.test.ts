@@ -949,6 +949,20 @@ describe("access stack: self-protection (criterion 3)", () => {
     expect(deployRoleWrites(deployStatements(old))).toContain("PassWorkshopRolesToWorkshopServices/iam:PassRole");
   });
 
+  it("lets CloudFormation check that a workshop role does not exist yet (iam:GetRole without the path)", () => {
+    // Before CreateRole, CloudFormation calls GetRole by name. For a role that does not exist yet,
+    // IAM checks role/<name> without the path, so role/ssd-workshop/* does not match it.
+    const allowsGetRole = (t: Template) =>
+      deployStatements(t).some(
+        (s) =>
+          s.Effect === "Allow" &&
+          list(s.Action).some((a) => matches(a, "iam:GetRole")) &&
+          list(s.Resource).map(text).some((r) => matches(r, "arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-site-deploy")),
+      );
+    expect(allowsGetRole(template)).toBe(true);
+    expect(allowsGetRole(withText(":role/ssd-workshop-*\n", ":role/ssd-workshop/*\n"))).toBe(false);
+  });
+
   it("denies assuming other roles, session tags and source identities (H4)", () => {
     for (const a of ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"]) {
       expect(denied(deployStatements(template), "*", a), a).toBe(true);
