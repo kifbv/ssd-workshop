@@ -26,3 +26,6 @@ Choices made while building that the specification left open. Newest phase first
 - **Deny rules:** `.claude/settings.json` denies `cdk deploy/destroy/bootstrap`, `aws iam`, every CloudFormation stack write (not only `ssd-workshop-access`, since workshop stacks deploy from `main`), Route53 record changes, pushes to `main`, force pushes, and reading `.env*`, `secrets/`, keys and `~/.aws/credentials`.
 - **Plugin for every session:** `.claude/settings.json` enables `spec-driven@cadenceworks` from the `cadenceworks-dev/claude-workflow` marketplace for local sessions; cloud sessions take it from the claude.ai account.
 - **Path rules:** `.claude/rules/infra.md`, `platform.md` and `templates.md`.
+- **Allowed without asking:** `.claude/settings.json` lets Claude sessions run `npm ci`, `npm run lint`, `npm run typecheck` and `npm test` without a permission prompt, since they change nothing outside the working tree.
+- **Engines:** `package.json` requires Node 22 or newer and npm 10 or newer, the versions CI and the cloud sessions use.
+- **Limits of the deny rules:** `Read(...)` denies cover Claude's file tools; a shell `cat .env` or an `aws --profile x iam ...` form is not guaranteed to be caught. The real controls are that no secrets live in the repository and that the AWS user's least-privilege policy refuses what it must not do.
