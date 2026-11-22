@@ -1,7 +1,7 @@
 # Infrastructure
 
-AWS CDK app (TypeScript). Nothing is deployed from a session: stacks deploy from `main` only
-(ticket 0.5). `infra/access/access-stack.yaml` is applied by Franck only.
+AWS CDK app (TypeScript). Nothing is deployed from a session: stacks deploy from `main` only,
+through the deploy workflow (see "How deploys work"). `infra/access/access-stack.yaml` is applied by Franck only.
 
 ## Stacks
 
@@ -19,6 +19,74 @@ CloudFront distributions read it.
 npm run synth   # cdk synth, no AWS credentials needed
 npm test        # template assertions (infra/lib/app.test.ts)
 ```
+
+## How deploys work (ticket 0.5)
+
+```mermaid
+flowchart LR
+  merge["Pull request merged<br/>(push to main)"] --> wf["deploy.yml<br/>npm ci, npm test"]
+  wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv/ssd-workshop:ref:refs/heads/main"]
+  oidc --> role["sts:AssumeRoleWithWebIdentity<br/>ssd-workshop-deploy (1 hour)"]
+  role --> cdk["cdk deploy --all<br/>assets, site, edge"]
+  cdk --> smoke["Smoke check<br/>200 + page heading"]
+  other["Any other branch,<br/>pull request or tag"] -.->|"refused: sub does not match"| role
+```
+
+- `.github/workflows/deploy.yml` runs only on a push to `main`, one run at a time (a running
+  deploy is never cancelled; the next one waits).
+- It asks GitHub for an OIDC token (`id-token: write`) and exchanges it for the
+  `ssd-workshop-deploy` role. The role ARN and region come from `infra/lib/config.ts`
+  (`DEPLOY_ROLE_ARN`, `REGION`), printed by `infra/bin/print-deploy-settings.ts`, so moving to
+  another AWS account changes only that file. No AWS keys are stored in GitHub and the workflow
+  reads no secrets (both checked by `infra/lib/deploy-workflow.test.ts`).
+- The role's trust policy (`infra/access/access-stack.yaml`) only accepts the subject of the
+  `main` branch, once the ticket 0.3 update is applied (see criterion 2 below). The workflow
+  uses no GitHub environment, because a job with `environment:` gets the subject
+  `repo:<owner>/<repo>:environment:<name>` instead.
+- After `cdk deploy --all`, the smoke step fetches `https://workshop.rankly.games/` and fails
+  unless it answers 200 with the `<h1>` text of `platform/web/index.html` (retries for about
+  five minutes). Pages are uploaded with `Cache-Control: public, max-age=60`, so a merged text
+  change is live within minutes of the merge, well inside 10 minutes.
+- To redeploy the same commit: Actions, Deploy, the run, "Re-run all jobs".
+
+### No AWS keys in GitHub (criterion 3)
+
+```sh
+gh secret list --repo kifbv/ssd-workshop
+gh variable list --repo kifbv/ssd-workshop
+# expect: no AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or other AWS key
+```
+
+Or in the browser: Settings, Secrets and variables, Actions (repository and environment
+secrets). The workflow itself references no `secrets.` value (tested).
+
+### Other refs cannot assume the role (criterion 2)
+
+Once the ticket 0.3 access stack update is applied, the trust policy's `sub` condition allows
+only `repo:kifbv/ssd-workshop:ref:refs/heads/main`; ticket 0.3's test "trusts only GitHub
+Actions of kifbv/ssd-workshop on main (no GitHub environments)" checks the template.
+
+Until that update is applied, the live role also trusts `repo:kifbv/ssd-workshop:environment:*`,
+that is any GitHub environment. A workflow on any branch can name an environment (GitHub creates
+it on first use unless deployment branch rules stop it), so today any branch could assume the
+deploy role. The update must therefore be applied before ticket 0.5 is merged (checklist step 1).
+
+To see another ref refused after the update, Franck can run any workflow with `id-token: write`
+and `aws-actions/configure-aws-credentials` from another branch (not committed to this
+repository), with and without `environment:`: both fail at "Configure AWS credentials" with
+`Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+
+### First deploy checklist (Franck)
+
+1. Apply the `ssd-workshop-access` stack update from ticket 0.3 (removes the `environment:*`
+   subject). Until then any branch could assume the deploy role (see above).
+2. Merge ticket 0.3.
+3. Take the zone "before" snapshot (`/tmp/zone-before.json`, below).
+4. Merge ticket 0.4, then ticket 0.5. The 0.5 merge is the first run of the deploy workflow
+   (merging 0.4 alone deploys nothing, since the workflow does not exist yet).
+5. Watch the run in Actions, Deploy. The first run takes 15 to 30 minutes (certificate
+   validation and CloudFront creation); "Smoke check the live page" must be green.
+6. Run the post-deploy checks below, and `gh secret list` above.
 
 ## Checks after the first deploy (ticket 0.4 criteria 1, 2, 4, 5)
 
