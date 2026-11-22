@@ -100,3 +100,9 @@ paths:
 - `RemovalPolicy.RETAIN` also applies when a failed first create rolls back: the retained resource
   (bucket, origin access control) stays, and the retry fails on its fixed name until it is deleted
   or renamed.
+- The deploy workflow must never use `environment:`: it changes the OIDC subject to
+  `repo:<owner>/<repo>:environment:<name>`, which the deploy role does not trust.
+- The deploy workflow reads the role ARN and region from `infra/lib/config.ts` (through
+  `infra/bin/print-deploy-settings.ts`); never hard-code the account id in a workflow.
+- Only `deploy.yml` may ask for `id-token: write`; `ci.yml` runs on pull requests and gets no
+  AWS access (tested).

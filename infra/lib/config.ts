@@ -33,3 +33,10 @@ export const STACK_NAMES = {
   site: `${PREFIX}-site`,
   edge: `${PREFIX}-edge`,
 } as const;
+
+/**
+ * Created by the access stack; GitHub Actions assumes it through OIDC, from `main` only.
+ * The deploy workflow reads it from here (infra/bin/print-deploy-settings.ts).
+ */
+export const DEPLOY_ROLE_NAME = `${PREFIX}-deploy`;
+export const DEPLOY_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/${DEPLOY_ROLE_NAME}`;
