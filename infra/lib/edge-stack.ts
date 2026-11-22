@@ -1,4 +1,4 @@
-import { Annotations, Stack, type StackProps } from "aws-cdk-lib";
+import { Annotations, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import { Certificate, CertificateValidation } from "aws-cdk-lib/aws-certificatemanager";
 import {
   CachePolicy,
@@ -55,6 +55,14 @@ export class EdgeStack extends Stack {
       region: REGION,
     });
 
+    // Named explicitly: CDK would generate a name outside ssd-workshop-*. Retained:
+    // origin access controls have no tags, so the deploy rights can create one but
+    // not change or delete it (see docs/decisions.md).
+    const originAccessControl = new S3OriginAccessControl(this, "OriginAccessControl", {
+      originAccessControlName: `${PREFIX}-site`,
+    });
+    originAccessControl.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
     this.distribution = new Distribution(this, "Distribution", {
       comment: `${PREFIX} site`,
       domainNames: [DOMAIN],
@@ -64,10 +72,7 @@ export class EdgeStack extends Stack {
       httpVersion: HttpVersion.HTTP2_AND_3,
       defaultBehavior: {
         origin: S3BucketOrigin.withOriginAccessControl(bucket, {
-          // Named explicitly: CDK would generate a name outside ssd-workshop-*.
-          originAccessControl: new S3OriginAccessControl(this, "OriginAccessControl", {
-            originAccessControlName: `${PREFIX}-site`,
-          }),
+          originAccessControl,
         }),
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: CachePolicy.CACHING_OPTIMIZED,

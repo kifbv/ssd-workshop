@@ -28,3 +28,6 @@ paths:
 - CDK generates names for some resources that take no name by default (e.g. the Origin Access
   Control of `S3BucketOrigin.withOriginAccessControl`): pass an explicitly named construct. The
   names test checks every `*Name` key at any depth.
+- `RemovalPolicy.RETAIN` also applies when a failed first create rolls back: the retained resource
+  (bucket, origin access control) stays, and the retry fails on its fixed name until it is deleted
+  or renamed.
