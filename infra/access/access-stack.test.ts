@@ -398,7 +398,7 @@ const SAMPLE: Record<string, string> = {
   "AWS::AccountId": "123456789012",
   "AWS::Region": "eu-central-1",
   HostedZoneId: "Z".repeat(32),
-  GitHubRepo: "kifbv/ssd-workshop",
+  GitHubRepo: "kifbv@7999713/ssd-workshop@1467373954",
 };
 function resolve(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(resolve);
@@ -1018,7 +1018,8 @@ describe("access stack: permissions boundary (criterion 4)", () => {
 
 describe("access stack: deploy role trust", () => {
   it("trusts only GitHub Actions of kifbv/ssd-workshop on main (no GitHub environments)", () => {
-    expect(template.Parameters.GitHubRepo?.Default).toBe("kifbv/ssd-workshop");
+    // GitHub sends this repository's subject in the ID form owner@ownerId/repo@repoId.
+    expect(template.Parameters.GitHubRepo?.Default).toBe("kifbv@7999713/ssd-workshop@1467373954");
     const trust = template.Resources.DeployRole?.Properties.AssumeRolePolicyDocument as { Statement: Statement[] };
     expect(trust.Statement).toHaveLength(1);
     const [s] = trust.Statement;

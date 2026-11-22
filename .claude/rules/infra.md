@@ -78,7 +78,10 @@ paths:
   (`acm:DomainNames`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
   `ssd-workshop@rankly.games`.
-- GitHub OIDC: the role trusts `refs/heads/main`, which also matches `pull_request_target`,
+- GitHub OIDC: GitHub sends this repository's subject in the ID form
+  `repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main`, not `repo:kifbv/ssd-workshop:...`;
+  check CloudTrail's `AssumeRoleWithWebIdentity` `userName` when a trust condition fails.
+  The role trusts `refs/heads/main`, which also matches `pull_request_target`,
   `workflow_run`, `issue_comment` and `schedule` jobs on `main`. Only `.github/workflows/deploy.yml`
   may request `id-token: write` (never `write-all`), and it runs only on `push` to `main`
   (tested). Follow-up: a custom OIDC subject with `job_workflow_ref`.

@@ -25,7 +25,7 @@ npm test        # template assertions (infra/lib/app.test.ts)
 ```mermaid
 flowchart LR
   merge["Pull request merged<br/>(push to main)"] --> wf["deploy.yml<br/>npm ci, npm test"]
-  wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv/ssd-workshop:ref:refs/heads/main"]
+  wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main"]
   oidc --> role["sts:AssumeRoleWithWebIdentity<br/>ssd-workshop-deploy (1 hour)"]
   role --> cdk["cdk deploy --all<br/>assets, site, edge"]
   cdk --> smoke["Smoke check<br/>200 + page heading"]
@@ -63,7 +63,7 @@ secrets). The workflow itself references no `secrets.` value (tested).
 ### Other refs cannot assume the role (criterion 2)
 
 Once the ticket 0.3 access stack update is applied, the trust policy's `sub` condition allows
-only `repo:kifbv/ssd-workshop:ref:refs/heads/main`; ticket 0.3's test "trusts only GitHub
+only `repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main`; ticket 0.3's test "trusts only GitHub
 Actions of kifbv/ssd-workshop on main (no GitHub environments)" checks the template.
 
 Until that update is applied, the live role also trusts `repo:kifbv/ssd-workshop:environment:*`,
