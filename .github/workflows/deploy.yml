@@ -1,0 +1,74 @@
+name: Deploy
+
+# A merge to main deploys. No other trigger: the ssd-workshop-deploy role trusts only the
+# `repo:<owner>/<repo>:ref:refs/heads/main` OIDC subject, so any other ref could not assume it.
+# To redeploy the same commit, re-run this workflow's run from the Actions tab.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write # OIDC token for AWS; no AWS keys are stored in GitHub
+  contents: read
+
+# One deploy at a time, in merge order; a running CloudFormation update is never cancelled.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    # The first deploy creates a certificate and a CloudFront distribution, which is slow.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      # Role ARN, region, URL and heading come from infra/lib/config.ts and platform/web.
+      - name: Read deploy settings
+        id: settings
+        run: npx tsx infra/bin/print-deploy-settings.ts >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.settings.outputs.role_arn }}
+          aws-region: ${{ steps.settings.outputs.region }}
+          role-session-name: ssd-workshop-deploy-${{ github.run_id }}
+
+      - name: CDK deploy
+        working-directory: infra
+        run: npx cdk deploy --all --require-approval never
+
+      # CloudFormation waits for CloudFront; the pages are cached up to 60 seconds,
+      # so retry for about five minutes before failing.
+      - name: Smoke check the live page
+        env:
+          SITE_URL: ${{ steps.settings.outputs.site_url }}
+          HEADING: ${{ steps.settings.outputs.heading }}
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -sS -o page.html -w '%{http_code}' --max-time 20 "$SITE_URL" || echo 000)
+            if [ "$code" = "200" ] && grep -qF -- "$HEADING" page.html; then
+              echo "OK: $SITE_URL answers 200 with \"$HEADING\""
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP $code, heading not found yet"
+            sleep 30
+          done
+          echo "::error::$SITE_URL did not answer 200 with \"$HEADING\""
+          exit 1
