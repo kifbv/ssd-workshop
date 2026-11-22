@@ -126,6 +126,7 @@ flowchart LR
 | `CloudFrontUntaggableParts` | Origin access controls and cache, origin-request and response-headers policies have generated ids and no tags: create and read only, so the rankly.games distributions' existing ones cannot be changed or deleted. |
 | `CloudFrontWorkshopFunctions` | CloudFront functions named `ssd-workshop-*`. |
 | `CertificatesTagged` | Request ACM certificates only with the project tag and only for `workshop.rankly.games` and names under it (`acm:DomainNames`, with a `Null` guard because `ForAllValues` is true when the key is missing). |
+| `CertificatesThroughCloudFormation` | The same names without a request tag, only through CloudFormation (`aws:CalledVia`): CloudFormation requests the certificate without tags and then tags it (`TagOnCreateThroughCloudFormation`). |
 | `CertificatesChange` | Change, delete, tag or untag only certificates already tagged with the project. |
 | `ApiGatewayTaggedCreate` | Create REST and HTTP APIs (`POST /restapis`, `POST /apis`) only with the project tag. |
 | `ApiGatewayTaggedChange` | Write anything under an API or change and delete it only when the API is tagged with the project; child resources inherit the API's tag for authorization. |

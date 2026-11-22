@@ -336,6 +336,17 @@ Resources:
               ForAllValues:StringLike:
                 acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]
               "Null": {acm:DomainNames: "false"}
+          # CloudFormation requests the certificate without tags and tags it right after
+          # (TagOnCreateThroughCloudFormation), so it gets the same names without a request tag.
+          - Sid: CertificatesThroughCloudFormation
+            Effect: Allow
+            Action: [acm:RequestCertificate]
+            Resource: "*"
+            Condition:
+              ForAnyValue:StringEquals: {aws:CalledVia: [cloudformation.amazonaws.com]}
+              ForAllValues:StringLike:
+                acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]
+              "Null": {acm:DomainNames: "false"}
           - Sid: CertificatesChange
             Effect: Allow
             Action: [acm:DeleteCertificate, acm:UpdateCertificateOptions, acm:AddTagsToCertificate, acm:RemoveTagsFromCertificate]

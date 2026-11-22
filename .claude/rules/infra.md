@@ -75,7 +75,9 @@ paths:
   not available as rules (poll `DescribeTasks` or use Step Functions `.sync` instead).
 - Tagging during create: CloudFront distributions and ACM certificates are tagged by CloudFormation in the create call (`TagOnCreateThroughCloudFormation`, requires `aws:CalledVia` CloudFormation and no project tag yet). Create them only through CloudFormation, never with a direct SDK call. CloudFormation resource import is denied.
 - ACM certificates only for `workshop.rankly.games` and `*.workshop.rankly.games`
-  (`acm:DomainNames`).
+  (`acm:DomainNames`). CloudFormation calls `RequestCertificate` without tags and adds them with
+  `AddTagsToCertificate` afterwards, so a request-tag condition alone refuses it
+  (`CertificatesThroughCloudFormation`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
   `ssd-workshop@rankly.games`.
 - IAM roles on a path: before CreateRole, CloudFormation calls `iam:GetRole` by name, and for a

@@ -126,6 +126,7 @@ const DEPLOY_EXCEPTIONS: Record<string, string> = {
   ...ACTION_ALLOW_LIST,
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
+  "CertificatesThroughCloudFormation/acm:RequestCertificate": "authorizes no existing resource; only through CloudFormation, which tags it in the same create (TagOnCreateThroughCloudFormation); domains limited by acm:DomainNames (acmDomainGaps)",
   "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
   "SesForTesting/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
 };
@@ -815,13 +816,29 @@ describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
 
   it("requests certificates only for workshop.rankly.games names", () => {
     expect(acmDomainGaps(deployStatements(template))).toEqual([]);
-    const anyDomain = withText(
+    const anyDomain = withAll(
       '              ForAllValues:StringLike:\n                acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]\n              "Null": {acm:DomainNames: "false"}\n',
       "",
     );
-    expect(acmDomainGaps(deployStatements(anyDomain))).toEqual(["CertificatesTagged"]);
-    const noGuard = withText('              "Null": {acm:DomainNames: "false"}\n', "");
-    expect(acmDomainGaps(deployStatements(noGuard))).toEqual(["CertificatesTagged"]);
+    expect(acmDomainGaps(deployStatements(anyDomain))).toEqual(["CertificatesTagged", "CertificatesThroughCloudFormation"]);
+    const noGuard = withAll('              "Null": {acm:DomainNames: "false"}\n', "");
+    expect(acmDomainGaps(deployStatements(noGuard))).toEqual(["CertificatesTagged", "CertificatesThroughCloudFormation"]);
+  });
+
+  it("lets CloudFormation request a certificate without tags, then tag it (live: it sends no tags)", () => {
+    // CloudFormation calls RequestCertificate without Tags and adds them with AddTagsToCertificate
+    // (TagOnCreateThroughCloudFormation), so a request-tag condition alone refuses it.
+    const viaCfn = (t: Template) =>
+      deployStatements(t).filter(
+        (s) =>
+          s.Effect === "Allow" &&
+          list(s.Action).some((a) => matches(a, "acm:RequestCertificate")) &&
+          condValues(s.Condition, "StringEquals", "aws:RequestTag/project").length === 0,
+      );
+    const [s] = viaCfn(template);
+    expect(s?.Sid).toBe("CertificatesThroughCloudFormation");
+    expect(condValues(s?.Condition, "ForAnyValue:StringEquals", "aws:CalledVia")).toEqual(["cloudformation.amazonaws.com"]);
+    expect(viaCfn(withText("ForAnyValue:StringEquals: {aws:CalledVia: [cloudformation.amazonaws.com]}", "StringEquals: {aws:RequestTag/project: ssd-workshop}"))).toEqual([]);
   });
 
   it("sends mail only through the workshop sender's identities", () => {
