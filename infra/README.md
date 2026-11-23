@@ -336,3 +336,36 @@ never hold the message, the prompt, the reply, an id or the nickname. A job the 
 later (visibility timeout 330 s); one that failed three times lands in `ssd-workshop-ai-messages-dlq`
 (14 days), and the participant sees the message as failed after 20 minutes and can send it again. At most
 5 workers run at once; more messages wait in the queue.
+
+## Check after the step 1 deploy (ticket 1.8)
+
+The first live page load proves the conversation function's new `dynamodb:Query` right and the first
+Write my spec its update of `step` (both only checked by AWS). On `https://workshop.rankly.games`, signed in
+at step 1 on a phone or a narrow window:
+
+1. Send an idea (e.g. "a tracker for my runs"). A typing indicator shows and "Safety check" and "Claude on
+   Bedrock" are highlighted in the Behind the scenes box; within about 30 seconds a reply with 3 to 5
+   numbered questions appears and the indicator goes away.
+2. Reload the page: the conversation is shown again. **Write my spec** shows under it after the first reply.
+3. Answer the questions until the AI says it has enough: **Write my spec** turns into the main button.
+4. Press **Write my spec**: the page shows "Step 2: Spec"; a reload stays there.
+
+Or with `curl`, signed in as in the 1.5 check (same `JAR`):
+
+```sh
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation
+# expect: {"step":"clarify","state":"open","messages":[...]} and 200 (the caller's own messages only)
+curl -sS -b "$JAR" -H 'content-type: application/json' --data '{"step":"spec"}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation/step
+# expect: {"step":"spec"} and 200 after at least one answered message; 409 "too-early" before
+```
+
+With Franck's own AWS credentials, the step 1 eval against the live model (about $0.02):
+
+```sh
+npm run eval -- clarify
+# expect: one PASS line per example with the reply below it, "Clarify: 5/5 passed", exit code 0
+```
+
+On a failure, `ssd-workshop-api-conversation`'s log has `"route":"history"` or `"route":"step"` lines with the
+outcome and the AWS error name (e.g. `AccessDeniedException`).

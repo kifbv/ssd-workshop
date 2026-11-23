@@ -1,0 +1,44 @@
+{
+  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer; after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec.",
+  "examples": [
+    {
+      "name": "fitness tracker",
+      "check": "first-reply",
+      "text": "I'd like a fitness tracker where I log my runs and see my weekly distance."
+    },
+    {
+      "name": "movies tracker",
+      "check": "first-reply",
+      "text": "A movie tracker: a list of films I want to watch, and I tick them off with a rating."
+    },
+    {
+      "name": "nutrition calculator",
+      "check": "first-reply",
+      "text": "Can we build a nutrition calculator that adds up the calories of what I eat in a day?"
+    },
+    {
+      "name": "change of mind: movies to plant watering",
+      "check": "change-of-mind",
+      "history": [
+        {
+          "question": "A movie tracker: a list of films I want to watch, and I tick them off with a rating.",
+          "answer": "A watchlist where you tick off films and rate them.\n1. Is it just for you, or shared with friends or family?\n2. What do you want to note for each film: title only, or also genre, year or where to stream it?\n3. How do you want to rate: stars from 1 to 5, or a simple thumbs up or down?\n4. Should the first version leave out anything, such as posters or search?"
+        }
+      ],
+      "text": "Actually, forget that. I'd rather build an app that reminds me when to water my house plants.",
+      "newKeywords": ["plant", "water"],
+      "oldKeywords": ["movie", "film", "watchlist", "rating", "rate", "stream", "genre", "poster"]
+    },
+    {
+      "name": "enough to write the spec",
+      "check": "offers-spec",
+      "history": [
+        {
+          "question": "I'd like a fitness tracker where I log my runs and see my weekly distance.",
+          "answer": "A simple log of your runs with a weekly distance total.\n1. Is it just for you, or for a group?\n2. What do you want to record for each run: distance only, or also time and date?\n3. Should it show anything besides the weekly total, such as a monthly total or your longest run?\n4. What can a first version leave out?"
+        }
+      ],
+      "text": "Just for me. For each run: the date, the distance in km and how long it took. Show this week's total distance and my longest run. Leave out maps, GPS, sharing and reminders."
+    }
+  ]
+}

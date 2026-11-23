@@ -119,6 +119,7 @@ async function run(
         historyCount: answer.historyCount,
         usage: usageOf(answer),
       },
+      ...(answer.offersSpec ? { offersSpec: true } : {}),
       ...(guardrail === undefined ? {} : { guardrail }),
     });
     return { outcome: applied ? "done" : "skipped", ...(guardrail === undefined ? {} : { verdict: guardrail.verdict }) };

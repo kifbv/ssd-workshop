@@ -631,6 +631,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/participants/{id}",
       "POST /api/conversation/messages",
       "GET /api/conversation/messages/{id}",
+      "GET /api/conversation",
+      "POST /api/conversation/step",
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
@@ -1186,8 +1188,13 @@ describe("api stack: conversation function (ticket 1.7)", () => {
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("routes POST /api/conversation/messages and GET /api/conversation/messages/{id} to it, invoked only by this API", () => {
-    expect([...CONVERSATION_ROUTE_KEYS]).toEqual(["POST /api/conversation/messages", "GET /api/conversation/messages/{id}"]);
+  it("routes the message, poll, history and step routes to it, invoked only by this API", () => {
+    expect([...CONVERSATION_ROUTE_KEYS]).toEqual([
+      "POST /api/conversation/messages",
+      "GET /api/conversation/messages/{id}",
+      "GET /api/conversation",
+      "POST /api/conversation/step",
+    ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
         IntegrationType: "AWS_PROXY",
@@ -1199,7 +1206,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
     expect(JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn)).toContain('"/*/*/*"');
   });
 
-  it("allows only its logs, GetItem on sessions and participants, updates of listed attributes in participants, and sends to the queue", () => {
+  it("allows only its logs, GetItem on sessions and participants, Query and updates of listed attributes in participants, and sends to the queue", () => {
     expect(f.statements()).toEqual([
       { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
       {
@@ -1207,6 +1214,12 @@ describe("api stack: conversation function (ticket 1.7)", () => {
         Action: "dynamodb:GetItem",
         Resource: f.tableArn(),
         Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:Query",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] } },
       },
       {
         Effect: "Allow",

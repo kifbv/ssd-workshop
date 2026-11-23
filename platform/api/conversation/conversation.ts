@@ -1,8 +1,10 @@
 // The conversation routes (ticket 1.7): `POST /api/conversation/messages` stores a message and hands
 // it to the AI worker through the queue, answering at once with its id; `GET
 // /api/conversation/messages/{id}` returns the caller's own message and, once there, its reply.
-// Both start with the one session check and read or write only the caller's own partition, so
-// another participant's message id is simply not found.
+// Ticket 1.8 adds `GET /api/conversation` (the conversation so far, for a page load) and
+// `POST /api/conversation/step` (Write my spec: from step 1 to step 2). Every route starts with the
+// one session check and reads or writes only the caller's own partition, so another participant's
+// message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
 import {
   isJsonContentType,
@@ -15,12 +17,22 @@ import {
 import { FAILED_MESSAGE, NOT_FOUND_MESSAGE } from "../participant/participant.js";
 import { requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
 import { errorName } from "../sign-in/code-request.js";
-import type { MessageStatus } from "../types.js";
-import { FAILURE_REPLY, isStale, type ConversationStore, type MessageQueue } from "./state.js";
+import type { ConversationState, MessageStatus, Step } from "../types.js";
+import {
+  FAILURE_REPLY,
+  HISTORY_PAGE_LIMIT,
+  isStale,
+  type ConversationStore,
+  type ListedItem,
+  type MessageQueue,
+  type StoredConversation,
+} from "./state.js";
 
 export const SEND_ROUTE = "POST /api/conversation/messages";
 export const POLL_ROUTE = "GET /api/conversation/messages/{id}";
-export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE] as const;
+export const HISTORY_ROUTE = "GET /api/conversation";
+export const STEP_ROUTE = "POST /api/conversation/step";
+export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE] as const;
 
 /** A message holds 1 to 2000 characters (Unicode code points) after trimming. */
 export const MAX_MESSAGE_CHARS = 2000;
@@ -32,9 +44,12 @@ export const MESSAGES = {
   busy: "Please wait for the answer to your last message.",
   waiting: "Your last message is waiting for your facilitator. You can write again once they have looked at it.",
   "no-nickname": "Please pick a nickname first.",
+  "invalid-step": 'Send a JSON body with the step "spec".',
+  "too-early": "Tell the AI about your idea and answer its questions first; then it can write your spec.",
+  "wrong-step": "You are not at step 1 any more.",
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -45,6 +60,8 @@ export type ConversationOutcome =
   | "busy"
   | "waiting"
   | "no-nickname"
+  | "too-early"
+  | "wrong-step"
   | "failed";
 
 /** The only things ever logged: route, outcome and an error name (no text, id, token or reply). */
@@ -80,10 +97,13 @@ interface Result {
   error?: string;
 }
 
-const refused = (reason: keyof typeof MESSAGES, status: number): Result => ({
-  outcome: reason === "invalid" ? "invalid-request" : reason,
-  response: jsonResponse(status, { message: MESSAGES[reason], ...(reason === "invalid" ? {} : { reason }) }),
-});
+const refused = (reason: keyof typeof MESSAGES, status: number): Result => {
+  const invalid = reason === "invalid" || reason === "invalid-step";
+  return {
+    outcome: invalid ? "invalid-request" : reason,
+    response: jsonResponse(status, { message: MESSAGES[reason], ...(invalid ? {} : { reason }) }),
+  };
+};
 
 async function send(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
   if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
@@ -130,9 +150,82 @@ async function poll(request: HttpRequest, participant: ParticipantRecord, deps: 
   return { outcome: "ok", response: jsonResponse(200, { id, status, ...(reply === undefined ? {} : { reply }) }) };
 }
 
+/** One message of the conversation as the page shows it (ticket 1.8). */
+export interface HistoryMessage {
+  /** A participant message's id, or `<message id>-r` for a reply. */
+  id: string;
+  author: "participant" | "assistant";
+  text: string;
+  /** Participant messages only (a stale pending one shows as failed). */
+  status?: MessageStatus;
+  /** Replies only, and only when true: the AI offered to write the spec. */
+  offersSpec?: true;
+}
+
+export interface History {
+  step: Step;
+  state: ConversationState;
+  messages: HistoryMessage[];
+  /** The message in flight (pending or flagged), which the page polls; absent when none. */
+  pendingId?: string;
+}
+
+/**
+ * The conversation as the page shows it: the listed items, oldest first, a stale pending message
+ * shown as failed, and the neutral failure reply after a failed message that has none. `pendingId`
+ * only while that message is really pending (not stale) or flagged.
+ */
+export function shapeHistory(step: Step, items: readonly ListedItem[], conversation: StoredConversation | undefined, nowSeconds: number): History {
+  const messages: HistoryMessage[] = [];
+  const replied = new Set(items.flatMap((i) => (i.author === "assistant" ? [i.replyTo] : [])));
+  let pendingId: string | undefined;
+  for (const item of items) {
+    if (item.author === "assistant") {
+      messages.push({ id: `${item.replyTo}-r`, author: "assistant", text: item.text, ...(item.offersSpec ? { offersSpec: true as const } : {}) });
+      continue;
+    }
+    const status: MessageStatus = isStale(item, nowSeconds) ? "failed" : item.status;
+    messages.push({ id: item.id, author: "participant", text: item.text, status });
+    if (status === "failed" && !replied.has(item.id)) messages.push({ id: `${item.id}-r`, author: "assistant", text: FAILURE_REPLY });
+    if ((status === "pending" || status === "flagged") && item.id === conversation?.pendingId) pendingId = item.id;
+  }
+  return { step, state: conversation?.state ?? "open", messages, ...(pendingId === undefined ? {} : { pendingId }) };
+}
+
+/** True when at least one participant message was answered (the spec needs something to go on). */
+export function hasAnsweredExchange(items: readonly ListedItem[]): boolean {
+  return items.some((i) => i.author === "participant" && i.status === "done");
+}
+
+async function history(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  const [items, conversation] = await Promise.all([
+    deps.store.listItems(participant.id, HISTORY_PAGE_LIMIT),
+    deps.store.getConversation(participant.id),
+  ]);
+  const nowSeconds = Math.floor(deps.now().getTime() / 1000);
+  return { outcome: "ok", response: jsonResponse(200, { ...shapeHistory(participant.step, items, conversation, nowSeconds) }) };
+}
+
+/** Write my spec: from step 1 (clarify) to step 2 (spec), once an exchange was answered and nothing is in flight. */
+async function moveStep(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  if (readJsonObject(request)?.["step"] !== "spec") return refused("invalid-step", 400);
+  if (participant.nickname === undefined || participant.step === "nickname") return refused("no-nickname", 409);
+  const moved: Result = { outcome: "ok", response: jsonResponse(200, { step: "spec" }) };
+  // Pressed twice (or in two tabs): already there is fine.
+  if (participant.step === "spec") return moved;
+  if (participant.step !== "clarify") return refused("wrong-step", 409);
+  if (!hasAnsweredExchange(await deps.store.listItems(participant.id, HISTORY_PAGE_LIMIT))) return refused("too-early", 409);
+  const now = deps.now();
+  const result = await deps.store.moveToSpec(participant.id, Math.floor(now.getTime() / 1000), now.toISOString());
+  return result === "moved" ? moved : refused(result, 409);
+}
+
 function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === SEND_ROUTE) return "send";
   if (request.routeKey === POLL_ROUTE) return "poll";
+  if (request.routeKey === HISTORY_ROUTE) return "history";
+  if (request.routeKey === STEP_ROUTE) return "step";
   return "unknown";
 }
 
@@ -145,6 +238,8 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     if (!session.ok) result = { outcome: "unauthorized", response: session.response };
     else if (route === "send") result = await send(request, session.participant, deps);
     else if (route === "poll") result = await poll(request, session.participant, deps);
+    else if (route === "history") result = await history(session.participant, deps);
+    else if (route === "step") result = await moveStep(request, session.participant, deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

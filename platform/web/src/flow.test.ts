@@ -7,7 +7,6 @@ import {
   nicknameResult,
   normalizeCode,
   screenFor,
-  stepHeading,
   verifyResult,
   type Me,
 } from "./flow.js";
@@ -130,12 +129,9 @@ describe("where a signed-in person goes", () => {
     expect(screenFor(me({ nickname: null, step: "nickname" }))).toBe("nickname");
     expect(screenFor(me({ nickname: null, step: "clarify" }))).toBe("nickname");
     expect(screenFor(me({ step: "clarify" }))).toBe("step");
-    expect(screenFor(me({ step: "spec" }))).toBe("step");
-  });
-
-  it("names step 1 Clarify", () => {
-    expect(stepHeading("clarify")).toBe("Step 1: Clarify");
-    expect(stepHeading("spec")).toBe("Welcome back");
+    // After Write my spec (ticket 1.8): the step 2 screen.
+    expect(screenFor(me({ step: "spec" }))).toBe("spec");
+    expect(screenFor(me({ step: "approved" }))).toBe("spec");
   });
 });
 
