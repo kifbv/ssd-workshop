@@ -61,5 +61,7 @@ paths:
   reports every style attribute), then show the finished SVG only as an `<img>` from a `data:` URL (ticket 1.9,
   `platform/web/src/diagram.ts`). Mermaid cannot parse flowcharts in Node.js (no DOM, "DOMPurify.addHook is not a
   function"): check diagrams with the page's own `diagram.js` in Playwright's Chromium (`platform/src/eval/diagram.ts`).
+  Draw one diagram at a time (`render` queues): two overlapping draws each save the other's swapped DOM methods
+  as the originals, and the first to finish leaves the second unpatched (CSP violations in CI, PR #24).
 - A large browser-only library goes into its own esbuild entry (`platform/web/build.ts` `SCRIPTS`), loaded only when
   needed, so the other pages stay small (ticket 1.9, `diagram.js`).

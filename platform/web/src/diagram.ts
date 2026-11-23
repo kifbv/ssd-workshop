@@ -63,8 +63,18 @@ async function parse(source: string): Promise<boolean> {
   }
 }
 
-/** The diagram as a picture; throws when Mermaid cannot draw it. */
-async function render(source: string): Promise<DiagramPicture> {
+// One drawing at a time: two overlapping `withSafeStyles` would each save the other's swapped
+// methods as the "originals", so the first to finish restores them while the second still draws.
+let queue: Promise<unknown> = Promise.resolve();
+
+/** The diagram as a picture; throws when Mermaid cannot draw it. Drawings run one after another. */
+function render(source: string): Promise<DiagramPicture> {
+  const next = queue.then(() => renderNow(source));
+  queue = next.catch(() => undefined);
+  return next;
+}
+
+async function renderNow(source: string): Promise<DiagramPicture> {
   if (!(await parse(source))) throw new Error("the diagram does not parse");
   const host = document.createElement("div");
   host.className = "diagram-work";
