@@ -171,6 +171,21 @@ curl -sS -w '\n%{http_code}\n' "$ENDPOINT/api/health"
 #         200
 ```
 
+### If the first API deploy fails
+
+The table `ssd-workshop-data` is retained and has deletion protection, so a failed first deploy
+of `ssd-workshop-api` rolls back everything except the table, and the next deploy fails with
+"already exists". Only while the table is still empty (nothing has written to it yet), Franck
+removes it, then re-runs the deploy:
+
+```sh
+aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
+# expect: "Count": 0
+aws dynamodb update-table --region eu-central-1 --table-name ssd-workshop-data \
+  --no-deletion-protection-enabled
+aws dynamodb delete-table --region eu-central-1 --table-name ssd-workshop-data
+```
+
 Criteria 1, 2 and 4 (names, tags, role path and boundary, no account-wide CloudWatch role,
 Lambda permissions scoped to the API, table settings) are proven by `npm test` on the
 synthesized templates (`infra/lib/app.test.ts`). The table, its settings and its tags can also be
