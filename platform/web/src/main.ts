@@ -192,8 +192,9 @@ function render(): void {
       item.dataset["author"] = m.author;
       if (m.status !== undefined) item.dataset["status"] = m.status;
       item.textContent = m.text;
-      // A reply that saved a spec version links back to it: the spec sits above a long conversation.
-      if (m.author === "assistant" && m.specVersion !== undefined && view.screen === "spec") {
+      // The reply that saved the shown spec version links back to it: the spec sits above a long conversation.
+      // Older versions are not shown on the page, so older replies carry no link.
+      if (m.author === "assistant" && m.specVersion !== undefined && m.specVersion === shownSpec?.version && view.screen === "spec") {
         const see = document.createElement("button");
         see.type = "button";
         see.className = "link see-spec";

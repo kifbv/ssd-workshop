@@ -616,7 +616,7 @@ const CLARIFY_DONE: MockMessage[] = [
 function fakeSpecApi(step = "spec", specs: string[] = [SPEC_1]) {
   const base = fakeConversation(
     specs.length > 0
-      ? [...CLARIFY_DONE, { id: "m2", author: "participant", text: "Please write my spec.", status: "done", step: "spec" }, { id: "m2-r", author: "assistant", text: "Here is your spec.", step: "spec" }]
+      ? [...CLARIFY_DONE, { id: "m2", author: "participant", text: "Please write my spec.", status: "done", step: "spec" }, { id: "m2-r", author: "assistant", text: "Here is your spec.", step: "spec", specVersion: 1 }]
       : CLARIFY_DONE,
     step,
   );
@@ -821,9 +821,9 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
       api.answer(`An answer to "${question}" that is long enough to take a few lines on a phone, so the page grows.`);
       await expect.poll(() => page.locator("#spec-typing").isVisible(), { timeout: 6000 }).toBe(false);
     }
-    // A question leaves the reader where they are: no jump to the spec.
+    // A question leaves the reader where they are: no jump to the spec. Only the reply that wrote version 1 links to it.
     expect(await specInView()).toBe(false);
-    expect(await page.locator("#spec-chat .bubble button").count()).toBe(0);
+    expect(await page.locator("#spec-chat .bubble button").allTextContents()).toEqual(["See version 1 of the spec"]);
 
     await page.getByRole("textbox", { name: "Ask a question or ask for a change" }).fill("Please add a screen with my longest run.");
     await page.getByRole("button", { name: "Send" }).click();
@@ -836,6 +836,8 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
     // The reply that saved the version offers a way back to it.
     const back = page.locator("#spec-chat .bubble").last().getByRole("button", { name: "See version 2 of the spec" });
     expect(await back.isVisible()).toBe(true);
+    // Older versions are not shown on the page: the reply that wrote version 1 no longer links.
+    expect(await page.locator("#spec-chat .bubble button").allTextContents()).toEqual(["See version 2 of the spec"]);
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await expect.poll(specInView).toBe(false);
     await back.click();
