@@ -10,8 +10,10 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`), Lambda `ssd-workshop-api-health` bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 
-Deploy order: cdk-assets, then site, then edge. Nothing is passed between regions: the edge
+Deploy order: cdk-assets, then site, then edge; api after cdk-assets (it needs the assets
+bucket for its Lambda code, and nothing from site or edge). Nothing is passed between regions: the edge
 stack finds the site bucket by its fixed name, and the site bucket policy lets this account's
 CloudFront distributions read it.
 
@@ -27,8 +29,8 @@ flowchart LR
   merge["Pull request merged<br/>(push to main)"] --> wf["deploy.yml<br/>npm ci, npm test"]
   wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main"]
   oidc --> role["sts:AssumeRoleWithWebIdentity<br/>ssd-workshop-deploy (1 hour)"]
-  role --> cdk["cdk deploy --all<br/>assets, site, edge"]
-  cdk --> smoke["Smoke check<br/>200 + page heading"]
+  role --> cdk["cdk deploy --all<br/>assets, site, edge, api"]
+  cdk --> smoke["Smoke checks<br/>page heading, /api/health"]
   other["Any other branch,<br/>pull request or tag"] -.->|"refused: sub does not match"| role
 ```
 
@@ -47,6 +49,8 @@ flowchart LR
   unless it answers 200 with the `<h1>` text of `platform/web/index.html` (retries for about
   five minutes). Pages are uploaded with `Cache-Control: public, max-age=60`, so a merged text
   change is live within minutes of the merge, well inside 10 minutes.
+- Then it reads the `ApiEndpoint` output of `ssd-workshop-api` and fails unless
+  `GET /api/health` on that endpoint answers 200 with `{"ok":true}` (ticket 1.1 criterion 3).
 - To redeploy the same commit: Actions, Deploy, the run, "Re-run all jobs".
 
 ### No AWS keys in GitHub (criterion 3)
@@ -152,3 +156,31 @@ aws route53 list-resource-record-sets --region us-east-1 \
    `*.workshop.rankly.games`.
 
 Criterion 3 (tags and boundary) is proven by `npm test` on the synthesized templates.
+
+## Checks after the API deploy (ticket 1.1 criterion 3)
+
+Read-only. The deploy workflow runs the same check after every deploy ("Smoke check the API
+health"). The endpoint is the API's own (`https://<api id>.execute-api.eu-central-1.amazonaws.com`);
+from ticket 1.2 the API is also reachable at `https://workshop.rankly.games/api/`.
+
+```sh
+ENDPOINT=$(aws cloudformation describe-stacks --region eu-central-1 --stack-name ssd-workshop-api \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" --output text)
+curl -sS -w '\n%{http_code}\n' "$ENDPOINT/api/health"
+# expect: {"ok":true}
+#         200
+```
+
+Criteria 1, 2 and 4 (names, tags, role path and boundary, no account-wide CloudWatch role,
+Lambda permissions scoped to the API, table settings) are proven by `npm test` on the
+synthesized templates (`infra/lib/app.test.ts`). The table, its settings and its tags can also be
+read live:
+
+```sh
+aws dynamodb describe-table --region eu-central-1 --table-name ssd-workshop-data \
+  --query 'Table.[BillingModeSummary.BillingMode,DeletionProtectionEnabled]'
+# expect: ["PAY_PER_REQUEST", true]
+aws dynamodb describe-continuous-backups --region eu-central-1 --table-name ssd-workshop-data \
+  --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus'
+# expect: "ENABLED"
+```

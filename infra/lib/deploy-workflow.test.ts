@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { ACCOUNT, DEPLOY_ROLE_ARN, DOMAIN, REGION } from "./config.js";
+import { ACCOUNT, DEPLOY_ROLE_ARN, DOMAIN, REGION, STACK_NAMES } from "./config.js";
 import { deploySettings, firstHeading, toGitHubOutput } from "./deploy-settings.js";
 
 const repoFile = (path: string): string =>
@@ -109,6 +109,18 @@ describe("deploy workflow (ticket 0.5)", () => {
     expect(env["HEADING"]).toMatch(/outputs\.heading/);
   });
 
+  it("calls GET /api/health on the API's own endpoint after the deploy (ticket 1.1 criterion 3)", () => {
+    const cdk = deploySteps.findIndex((step) => !!step.run?.includes("cdk deploy"));
+    const health = deploySteps.findIndex((step) => !!step.run?.includes("/api/health"));
+    expect(health).toBeGreaterThan(cdk);
+    const step = deploySteps[health];
+    expect(step?.env?.["API_STACK"]).toMatch(/outputs\.api_stack/);
+    // Reads only the workshop API stack's ApiEndpoint output, and expects exactly {"ok":true}.
+    expect(step?.run).toContain('--stack-name "$API_STACK"');
+    expect(step?.run).toContain("OutputKey=='ApiEndpoint'");
+    expect(step?.run).toContain(`'{"ok":true}'`);
+  });
+
   it("pins every action to a major version", () => {
     for (const step of deploySteps.filter((s) => s.uses)) {
       expect(step.uses).toMatch(/^[\w.-]+\/[\w.-]+@v\d+$/);
@@ -124,6 +136,7 @@ describe("deploy settings", () => {
     expect(settings.region).toBe(REGION);
     expect(settings.siteUrl).toBe(`https://${DOMAIN}/`);
     expect(settings.heading).toBe("SSD Workshop, coming soon");
+    expect(settings.apiStack).toBe("ssd-workshop-api");
   });
 
   it("print as GITHUB_OUTPUT lines", () => {
@@ -133,6 +146,7 @@ describe("deploy settings", () => {
       `region=${REGION}`,
       `site_url=https://${DOMAIN}/`,
       "heading=SSD Workshop, coming soon",
+      `api_stack=${STACK_NAMES.api}`,
     ]);
   });
 

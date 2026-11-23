@@ -1,4 +1,5 @@
 import { App, type AppProps, Aspects, Tags } from "aws-cdk-lib";
+import { ApiStack } from "./api-stack.js";
 import { WorkshopIamAspect } from "./aspects.js";
 import { AssetsStack } from "./assets-stack.js";
 import {
@@ -17,8 +18,9 @@ import { assetsBucketSynthesizer, inlineTemplateSynthesizer } from "./synthesize
 export { REGION, EDGE_REGION } from "./config.js";
 
 /**
- * Builds the workshop CDK app: the assets bucket, the site bucket with its pages
- * (eu-central-1) and the certificate, CloudFront and DNS record (us-east-1).
+ * Builds the workshop CDK app: the assets bucket, the site bucket with its pages,
+ * the data table and HTTP API (eu-central-1) and the certificate, CloudFront and
+ * DNS record (us-east-1).
  * Every resource is tagged `project=ssd-workshop`; every role has the
  * `/ssd-workshop/` path and the `ssd-workshop-boundary` permissions boundary.
  */
@@ -47,6 +49,14 @@ export function buildApp(props?: AppProps): App {
     description: `SSD Workshop: certificate, CloudFront and the ${DOMAIN} record`,
   });
   edge.addStackDependency(site);
+
+  // Has a file asset (the bundled Lambda code), so it uses the assets bucket.
+  const api = new ApiStack(app, STACK_NAMES.api, {
+    env: { account: ACCOUNT, region: REGION },
+    synthesizer: assetsBucketSynthesizer(),
+    description: "SSD Workshop: data table, HTTP API and its Lambda functions",
+  });
+  api.addStackDependency(assets);
 
   return app;
 }

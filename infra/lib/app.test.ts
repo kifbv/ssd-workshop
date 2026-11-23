@@ -1,21 +1,26 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudAssembly, CloudFormationStackArtifact } from "aws-cdk-lib/cx-api";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { API_THROTTLE, TTL_ATTRIBUTE } from "./api-stack.js";
 import { buildApp } from "./app.js";
 import {
   ACCOUNT,
+  API_NAME,
   ASSETS_BUCKET_NAME,
   BOUNDARY_ARN,
   DOMAIN,
   EDGE_REGION,
+  HEALTH_FUNCTION_NAME,
   HOSTED_ZONE_ID,
   IAM_PATH,
   REGION,
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
   STACK_NAMES,
+  TABLE_NAME,
 } from "./config.js";
 import { WEB_DIR } from "./site-stack.js";
 
@@ -26,7 +31,7 @@ interface Resource {
   UpdateReplacePolicy?: string;
 }
 
-const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge];
+const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api];
 
 /** Types that must carry the project tag in their own template (taggable in CloudFormation). */
 const MUST_BE_TAGGED = [
@@ -36,6 +41,9 @@ const MUST_BE_TAGGED = [
   "AWS::Lambda::Function",
   "AWS::IAM::Role",
   "AWS::Logs::LogGroup",
+  "AWS::DynamoDB::Table",
+  "AWS::ApiGatewayV2::Api",
+  "AWS::ApiGatewayV2::Stage",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -47,17 +55,35 @@ const NOT_TAGGABLE = [
   "AWS::CloudFront::OriginAccessControl",
   "AWS::Route53::RecordSet",
   "Custom::CDKBucketDeployment",
+  "AWS::ApiGatewayV2::Route",
+  "AWS::ApiGatewayV2::Integration",
+  "AWS::Lambda::Permission",
 ];
 
 /**
  * Keys ending in "Name" that are not a resource's physical name, so the names
- * test skips them: DNS names, a reference to a bucket, and the name of an inline
- * policy inside its (named) role. Every other "*Name" key, at any depth, is a name.
+ * test skips them: DNS names, a reference to a bucket, the name of an inline
+ * policy inside its (named) role, DynamoDB attribute names (`pk`, `sk`,
+ * `expiresAt`) and an API stage name (`$default`, which lives inside its named
+ * API). Every other "*Name" key, at any depth, is a name.
  */
-const NOT_RESOURCE_NAMES = ["DomainName", "DNSName", "DestinationBucketName", "PolicyName"];
+const NOT_RESOURCE_NAMES = [
+  "DomainName",
+  "DNSName",
+  "DestinationBucketName",
+  "PolicyName",
+  "AttributeName",
+  "StageName",
+];
 
-/** Per type, top-level keys that are DNS names rather than resource names. */
-const DNS_NAME_PROPERTIES: Record<string, string[]> = { "AWS::Route53::RecordSet": ["Name"] };
+/**
+ * Per type, top-level keys that are not the resource's own name: a record's DNS
+ * name, and the function a Lambda permission refers to (named on the function).
+ */
+const DNS_NAME_PROPERTIES: Record<string, string[]> = {
+  "AWS::Route53::RecordSet": ["Name"],
+  "AWS::Lambda::Permission": ["FunctionName"],
+};
 
 /** Every [path, value] under `value` whose key is a physical name ("Name" or "*Name"). */
 function physicalNames(value: unknown, path: string, skip: string[]): [string, unknown][] {
@@ -78,6 +104,8 @@ const EXPECTED_NAME_PATHS = [
   "LayerName",
   "LogGroupName",
   "OriginAccessControlConfig.Name",
+  "TableName",
+  "Name",
 ];
 
 let dir: string;
@@ -108,22 +136,27 @@ function ofType(type: string): [string, string, Resource][] {
   return allResources().filter(([, , r]) => r.Type === type);
 }
 
+/** Tags as a map: most types take a list of {Key, Value}, API Gateway v2 a JSON map. */
 function tagsOf(r: Resource): Record<string, unknown> {
-  const tags = r.Properties?.Tags as { Key: string; Value: unknown }[] | undefined;
-  return Object.fromEntries((tags ?? []).map((t) => [t.Key, t.Value]));
+  const tags = r.Properties?.Tags as { Key: string; Value: unknown }[] | Record<string, unknown> | undefined;
+  if (tags === undefined) return {};
+  if (Array.isArray(tags)) return Object.fromEntries(tags.map((t) => [t.Key, t.Value]));
+  return tags;
 }
 
 describe("stacks", () => {
-  it("synthesizes the assets and site stacks in eu-central-1 and the edge stack in us-east-1", () => {
+  it("synthesizes the assets, site and api stacks in eu-central-1 and the edge stack in us-east-1", () => {
     expect(stack(STACK_NAMES.assets).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.site).environment).toMatchObject({ account: ACCOUNT, region: REGION });
+    expect(stack(STACK_NAMES.api).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.edge).environment).toMatchObject({ account: ACCOUNT, region: EDGE_REGION });
   });
 
-  it("deploys assets, then site, then edge", () => {
+  it("deploys assets, then site, then edge; the api stack after assets", () => {
     const deps = (name: string) => stack(name).dependencies.map((d) => d.id);
     expect(deps(STACK_NAMES.site)).toContain(STACK_NAMES.assets);
     expect(deps(STACK_NAMES.edge)).toContain(STACK_NAMES.site);
+    expect(deps(STACK_NAMES.api)).toContain(STACK_NAMES.assets);
   });
 
   it.each(STACKS)("%s needs no CDK bootstrap (no BootstrapVersion parameter, no bootstrap roles)", (name) => {
@@ -133,9 +166,14 @@ describe("stacks", () => {
     expect(s.cloudFormationExecutionRoleArn).toBeUndefined();
   });
 
-  it("uploads only the site stack's assets and template, to our assets bucket in eu-central-1", () => {
-    const site = stack(STACK_NAMES.site);
-    expect(site.stackTemplateAssetObjectUrl?.startsWith(`s3://${ASSETS_BUCKET_NAME}/`)).toBe(true);
+  it("uploads only the site and api stacks' assets and templates, to our assets bucket in eu-central-1", () => {
+    for (const name of [STACK_NAMES.site, STACK_NAMES.api]) {
+      const s = stack(name);
+      expect(s.stackTemplateAssetObjectUrl?.startsWith(`s3://${ASSETS_BUCKET_NAME}/`), name).toBe(true);
+      for (const [, r] of resources(name).filter(([, r]) => r.Type === "AWS::Lambda::Function")) {
+        expect((r.Properties?.Code as { S3Bucket?: unknown }).S3Bucket, name).toBe(ASSETS_BUCKET_NAME);
+      }
+    }
     // The assets stack creates the bucket and the edge stack is in another region,
     // so both send their template inline and must have no file assets.
     for (const name of [STACK_NAMES.assets, STACK_NAMES.edge]) {
@@ -349,5 +387,195 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
       .map(([, , r]) => r.Type)
       .filter((t) => t.startsWith("AWS::Route53") || t.startsWith("Custom::"));
     expect(new Set(route53Types)).toEqual(new Set(["AWS::Route53::RecordSet", "Custom::CDKBucketDeployment"]));
+  });
+});
+
+describe("api stack: table (ticket 1.1 criterion 4)", () => {
+  it("creates one table ssd-workshop-data, on demand, with point-in-time recovery, retained", () => {
+    const tables = ofType("AWS::DynamoDB::Table");
+    expect(tables).toHaveLength(1);
+    const [s, , table] = tables[0] ?? [];
+    expect(s).toBe(STACK_NAMES.api);
+    expect(table).toMatchObject({
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+      Properties: {
+        TableName: TABLE_NAME,
+        BillingMode: "PAY_PER_REQUEST",
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+        DeletionProtectionEnabled: true,
+      },
+    });
+    expect(TABLE_NAME).toBe("ssd-workshop-data");
+  });
+
+  it("keys items by pk and sk strings, expires codes and sessions on expiresAt, and uses AWS-owned encryption", () => {
+    const table = ofType("AWS::DynamoDB::Table")[0]?.[2].Properties;
+    expect(table?.KeySchema).toEqual([
+      { AttributeName: "pk", KeyType: "HASH" },
+      { AttributeName: "sk", KeyType: "RANGE" },
+    ]);
+    expect(table?.AttributeDefinitions).toEqual([
+      { AttributeName: "pk", AttributeType: "S" },
+      { AttributeName: "sk", AttributeType: "S" },
+    ]);
+    expect(table?.TimeToLiveSpecification).toEqual({ AttributeName: TTL_ATTRIBUTE, Enabled: true });
+    expect(TTL_ATTRIBUTE).toBe("expiresAt");
+    // No customer managed key (KMS costs and key policy rights): the AWS-owned default.
+    expect(table?.SSESpecification).toEqual({ SSEEnabled: false });
+    expect(ofType("AWS::KMS::Key")).toEqual([]);
+  });
+});
+
+describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)", () => {
+  const apiResources = () => resources(STACK_NAMES.api);
+  const apiId = () => apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Api")?.[0];
+
+  it("creates one HTTP API ssd-workshop-api, without CORS", () => {
+    const apis = ofType("AWS::ApiGatewayV2::Api");
+    expect(apis).toHaveLength(1);
+    expect(apis[0]?.[2].Properties).toMatchObject({ Name: API_NAME, ProtocolType: "HTTP" });
+    expect(apis[0]?.[2].Properties?.CorsConfiguration).toBeUndefined();
+    expect(API_NAME).toBe("ssd-workshop-api");
+  });
+
+  it("tags the API and its stage project=ssd-workshop (API Gateway v2 tags are a map)", () => {
+    for (const type of ["AWS::ApiGatewayV2::Api", "AWS::ApiGatewayV2::Stage"]) {
+      for (const [s, id, r] of ofType(type)) {
+        expect(r.Properties?.Tags, `${s}/${id}`).toEqual({ project: "ssd-workshop" });
+      }
+    }
+  });
+
+  it("deploys one auto-deployed $default stage with throttling", () => {
+    const stages = ofType("AWS::ApiGatewayV2::Stage");
+    expect(stages).toHaveLength(1);
+    expect(stages[0]?.[2].Properties).toMatchObject({
+      ApiId: { Ref: apiId() },
+      StageName: "$default",
+      AutoDeploy: true,
+      DefaultRouteSettings: {
+        ThrottlingRateLimit: API_THROTTLE.rateLimit,
+        ThrottlingBurstLimit: API_THROTTLE.burstLimit,
+      },
+    });
+  });
+
+  it("routes GET /api/health to the health function", () => {
+    const routes = ofType("AWS::ApiGatewayV2::Route");
+    expect(routes.map(([, , r]) => r.Properties?.RouteKey)).toEqual(["GET /api/health"]);
+    const integrations = ofType("AWS::ApiGatewayV2::Integration");
+    expect(integrations).toHaveLength(1);
+    const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
+    expect(integrations[0]?.[2].Properties).toMatchObject({
+      IntegrationType: "AWS_PROXY",
+      PayloadFormatVersion: "2.0",
+      IntegrationUri: { "Fn::GetAtt": [fnId, "Arn"] },
+    });
+  });
+
+  it("creates no account-wide API Gateway CloudWatch role and no REST API", () => {
+    const types = allResources().map(([, , r]) => r.Type);
+    expect(types).not.toContain("AWS::ApiGateway::Account");
+    expect(types.filter((t) => t.startsWith("AWS::ApiGateway::"))).toEqual([]);
+    for (const [s, id, r] of ofType("AWS::IAM::Role")) {
+      expect(JSON.stringify(r.Properties?.AssumeRolePolicyDocument), `${s}/${id}`).not.toContain(
+        "apigateway.amazonaws.com",
+      );
+      expect(JSON.stringify(r.Properties?.ManagedPolicyArns ?? []), `${s}/${id}`).not.toContain(
+        "AmazonAPIGatewayPushToCloudWatchLogs",
+      );
+    }
+  });
+
+  it("names the API's own execute-api ARN as source of every Lambda permission", () => {
+    const permissions = ofType("AWS::Lambda::Permission");
+    expect(permissions.length).toBeGreaterThan(0);
+    for (const [s, id, r] of permissions) {
+      expect(s).toBe(STACK_NAMES.api);
+      expect(r.Properties?.Principal, `${s}/${id}`).toBe("apigateway.amazonaws.com");
+      expect(r.Properties?.SourceArn, `${s}/${id}`).toEqual({
+        "Fn::Join": [
+          "",
+          [
+            "arn:",
+            { Ref: "AWS::Partition" },
+            `:execute-api:${REGION}:${ACCOUNT}:`,
+            { Ref: apiId() },
+            expect.stringMatching(/^\/\*\/\*\/api\//),
+          ],
+        ],
+      });
+    }
+  });
+
+  it("runs the health function on Node.js 22, arm64, with code from the assets bucket", () => {
+    const fns = apiResources().filter(([, r]) => r.Type === "AWS::Lambda::Function");
+    expect(fns.map(([, r]) => r.Properties?.FunctionName)).toEqual([HEALTH_FUNCTION_NAME]);
+    expect(fns[0]?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      Handler: "index.handler",
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect(HEALTH_FUNCTION_NAME).toBe("ssd-workshop-api-health");
+  });
+
+  it("bundles the health handler into a self-contained index.js that answers 200 {\"ok\":true}", async () => {
+    // Find the bundle in the stack's asset manifest by the S3 key the function names.
+    const fn = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1];
+    const key = (fn?.Properties?.Code as { S3Key?: string } | undefined)?.S3Key;
+    const manifest = JSON.parse(readFileSync(join(dir, `${STACK_NAMES.api}.assets.json`), "utf8")) as {
+      files: Record<string, { source: { path: string }; destinations: Record<string, { objectKey: string }> }>;
+    };
+    const asset = Object.values(manifest.files).find((f) =>
+      Object.values(f.destinations).some((d) => d.objectKey === key),
+    );
+    expect(asset).toBeDefined();
+    const assetPath = asset?.source.path ?? "?";
+    const bundle = createRequire(import.meta.url)(join(dir, assetPath, "index.js")) as {
+      handler: () => Promise<{ statusCode: number; body: string }>;
+    };
+    const res = await bundle.handler();
+    expect(res).toMatchObject({ statusCode: 200, body: '{"ok":true}' });
+  });
+
+  it("sends the health function's logs to its own ssd-workshop-* log group, kept two weeks", () => {
+    const fn = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1];
+    const logGroupId = (fn?.Properties?.LoggingConfig as { LogGroup?: { Ref?: string } }).LogGroup?.Ref;
+    const logGroup = apiResources().find(([id]) => id === logGroupId)?.[1];
+    expect(logGroup).toMatchObject({
+      Type: "AWS::Logs::LogGroup",
+      DeletionPolicy: "Delete",
+      Properties: { LogGroupName: HEALTH_FUNCTION_NAME, RetentionInDays: 14 },
+    });
+  });
+
+  it("gives the health function's role no rights beyond writing its own logs", () => {
+    const role = apiResources().find(
+      ([, r]) => r.Type === "AWS::IAM::Role" && r.Properties?.RoleName === HEALTH_FUNCTION_NAME,
+    );
+    expect(role).toBeDefined();
+    expect(role?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
+    const policies = apiResources().filter(
+      ([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties?.Roles).includes(role?.[0] ?? "?"),
+    );
+    const statements = policies.flatMap(
+      ([, r]) => (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement,
+    );
+    const logGroupId = apiResources().find(([, r]) => r.Type === "AWS::Logs::LogGroup")?.[0];
+    expect(statements).toEqual([
+      {
+        Effect: "Allow",
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource: { "Fn::GetAtt": [logGroupId, "Arn"] },
+      },
+    ]);
+  });
+
+  it("outputs the API's own endpoint as ApiEndpoint (read by the post-deploy health check)", () => {
+    expect(stack(STACK_NAMES.api).template.Outputs?.ApiEndpoint).toMatchObject({
+      Value: { "Fn::GetAtt": [apiId(), "ApiEndpoint"] },
+    });
   });
 });
