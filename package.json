@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22",
+    "node": ">=22.21",
     "npm": ">=10"
   },
   "workspaces": [
@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
-    "synth": "npm run synth -w infra"
+    "synth": "npm run synth -w infra",
+    "smoke": "npm run -s smoke -w platform --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

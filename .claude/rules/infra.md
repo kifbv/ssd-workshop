@@ -79,7 +79,9 @@ paths:
   `AddTagsToCertificate` afterwards, so a request-tag condition alone refuses it
   (`CertificatesThroughCloudFormation`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
-  `ssd-workshop@rankly.games`.
+  `ssd-workshop@rankly.games`, and every send names the configuration set `ssd-workshop-email`
+  (`ConfigurationSetName`): without it SES uses the domain's default set `rankly-dev` (another
+  project's), which is refused.
 - IAM roles on a path: before CreateRole, CloudFormation calls `iam:GetRole` by name, and for a
   role that does not exist yet IAM checks `role/<name>` without the path. The access stack
   therefore allows `iam:GetRole` (read only) on `role/ssd-workshop-*` as well as `role/ssd-workshop/*`.
