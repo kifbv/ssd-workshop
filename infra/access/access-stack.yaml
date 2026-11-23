@@ -370,6 +370,18 @@ Resources:
               - !Sub arn:aws:apigateway:${AWS::Region}::/apis/*
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
+          # CloudFormation's API Gateway v2 handler tags a new API or stage through the tags
+          # endpoint (POST/PUT /tags/<url-encoded ARN>), which ApiGatewayTaggedCreate does not
+          # cover (live, first ssd-workshop-api deploy). The tags resource has no resource-tag
+          # key, so the guard is the call path: only through CloudFormation, whose resource
+          # import is denied (NoResourceImport), so only APIs a workshop stack created itself.
+          - Sid: ApiGatewayTagOnCreateThroughCloudFormation
+            Effect: Allow
+            Action: [apigateway:POST, apigateway:PUT]
+            Resource: !Sub arn:aws:apigateway:${AWS::Region}::/tags/*
+            Condition:
+              StringEquals: {aws:RequestTag/project: ssd-workshop}
+              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}
           - Sid: DnsOnlyWorkshopSubdomain
             Effect: Allow
             Action: route53:ChangeResourceRecordSets

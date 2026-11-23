@@ -120,3 +120,7 @@ paths:
   Docker) from `platform/api/handlers/`. Give each function its own named role and named log
   group (`logGroup` prop), and put the stack on `assetsBucketSynthesizer()`. API Gateway v2
   (`AWS::ApiGatewayV2::Api`, `::Stage`) takes `Tags` as a JSON map, not a list.
+- API Gateway v2 through CloudFormation also calls the tags endpoint (`apigateway:POST` on
+  `/tags/<url-encoded ARN>`) when it creates a tagged API or stage; the access stack allows it only
+  via CloudFormation (`ApiGatewayTagOnCreateThroughCloudFormation`). A new service whose
+  CloudFormation handler tags in a separate call needs the same check before its first deploy.
