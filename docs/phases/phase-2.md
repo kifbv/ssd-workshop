@@ -25,6 +25,10 @@ How the pieces hold the spec's rule "the AI that writes code has no AWS credenti
 
 Apps are served from the workshop's own address (spec item 7), so the `/apps/*` responses carry a `Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-popups` header (no `allow-same-origin`): an app runs in an opaque origin, never sees the platform's session cookie and cannot call the platform's API as the person viewing it. The cost is that apps cannot use `localStorage` or cookies; they store data only through the data API (2.4), which answers them with CORS.
 
+Models: each AI role (guardrail, clarify, spec, readiness, build) gets its own model setting with its own price, in one table in `platform/api/settings.ts` (today one `MODEL_ID` serves every role), and every eval takes `--model <id>`, so a cheaper model can be measured on the same examples before it replaces one. Any `eu.anthropic.*` model the account can use is then a one-line change; the coding agent (Claude Agent SDK) runs only Claude models.
+
+Cost of a build (estimate, to be replaced by 2.8's measured numbers): a coding agent takes about 30 to 50 model turns for a small app, re-sending its growing context each time, so roughly 0.5 to 1.5 million input tokens (mostly prompt-cache reads at a tenth of the price) and 20,000 to 40,000 output tokens. At Sonnet 4.6's EU prices ($3.30 / $16.50 per million) that is about $0.50 to $2 per build; phase 2's evals and test builds (about 30) come to $20 to $50.
+
 ## Tickets
 
 ### 2.1 Build network, cluster and image repository
