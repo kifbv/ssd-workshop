@@ -30,6 +30,8 @@ export const MAX_LIVE_CODES = 5;
 const CODE_WRITE_TRIES = 3;
 /** Larger bodies are refused before parsing (an email request is a few dozen bytes). */
 export const MAX_BODY_BYTES = 2048;
+/** The raw body is checked before any decoding (base64 inflates by 4/3, so 4 KB is ample). */
+export const MAX_RAW_BODY_BYTES = 4096;
 /** RFC 5321: 64 characters of local part, `@`, 255 of domain. */
 export const MAX_EMAIL_LENGTH = 320;
 
@@ -52,6 +54,7 @@ export function badRequestResponse(): HttpResponse {
 /** `{"email": "..."}`, possibly base64; returns the normalized address, or undefined when malformed. */
 export function parseCodeRequest(request: HttpRequest): string | undefined {
   if (typeof request.body !== "string") return undefined;
+  if (Buffer.byteLength(request.body, "utf8") > MAX_RAW_BODY_BYTES) return undefined;
   const raw = request.isBase64Encoded === true ? Buffer.from(request.body, "base64").toString("utf8") : request.body;
   if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) return undefined;
   let parsed: unknown;

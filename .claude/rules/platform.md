@@ -28,6 +28,3 @@ paths:
   or a Lambda timeout (503) tells who is listed. Test with `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })`
   and an injected `sleep`; real async work (scrypt) is not driven by fake timers, so wait for it with a
   `setImmediate` loop (`settle` in `platform/api/sign-in/fakes.ts`) before advancing the clock.
-- IAM cannot condition on a DynamoDB sort key: a role limited to a partition (`dynamodb:LeadingKeys`) can still
-  write any item in it. Limit PutItem's attribute names (`dynamodb:Attributes`) and make readers require an
-  attribute that role cannot write.

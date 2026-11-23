@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
-import { HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
+import { type CfnStage, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
 import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
@@ -23,6 +23,14 @@ export const API_HANDLERS_DIR = fileURLToPath(new URL("../../platform/api/handle
 
 /** Default-stage throttle: a cheap guard against runaway clients (the workshop needs ~15 requests/s). */
 export const API_THROTTLE = { rateLimit: 50, burstLimit: 100 } as const;
+
+/**
+ * Route throttle for `POST /api/sign-in/code` (ticket 1.4): reachable without sign-in and every
+ * well-formed request holds a Lambda for 3 s, so a flood at the stage limit would keep ~150
+ * executions busy in an account whose Lambda concurrency is shared. ~15 people need far less.
+ */
+export const SIGN_IN_CODE_ROUTE_KEY = "POST /api/sign-in/code";
+export const SIGN_IN_CODE_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 
 /** The TTL attribute (epoch seconds) of sign-in codes and sessions. */
 export const TTL_ATTRIBUTE = "expiresAt";
@@ -60,7 +68,7 @@ export class ApiStack extends Stack {
       // The stage is added below, with throttling.
       createDefaultStage: false,
     });
-    this.api.addStage("DefaultStage", {
+    const stage = this.api.addStage("DefaultStage", {
       stageName: "$default",
       autoDeploy: true,
       throttle: API_THROTTLE,
@@ -108,11 +116,19 @@ export class ApiStack extends Stack {
         conditions: { StringEquals: { "ses:FromAddress": SENDER_ADDRESS } },
       }),
     );
-    this.api.addRoutes({
+    const signInCodeRoutes = this.api.addRoutes({
       path: "/api/sign-in/code",
       methods: [HttpMethod.POST],
       integration: new HttpLambdaIntegration("SignInCodeIntegration", signInCode),
     });
+    // Route-level throttle (L1 RouteSettings; the L2 stage has no per-route option). The route must
+    // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
+    const cfnStage = stage.node.defaultChild as CfnStage;
+    cfnStage.addPropertyOverride(`RouteSettings.${SIGN_IN_CODE_ROUTE_KEY}`, {
+      ThrottlingRateLimit: SIGN_IN_CODE_THROTTLE.rateLimit,
+      ThrottlingBurstLimit: SIGN_IN_CODE_THROTTLE.burstLimit,
+    });
+    for (const route of signInCodeRoutes) cfnStage.node.addDependency(route);
 
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",

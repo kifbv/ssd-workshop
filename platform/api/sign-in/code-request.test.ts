@@ -6,6 +6,8 @@ import {
   CODE_TTL_SECONDS,
   MAX_CODES_PER_WINDOW,
   MAX_LIVE_CODES,
+  MAX_BODY_BYTES,
+  MAX_RAW_BODY_BYTES,
   addCode,
   NEUTRAL_MESSAGE,
   RATE_WINDOW_SECONDS,
@@ -82,6 +84,19 @@ describe("parseCodeRequest", () => {
   it("reads a base64 body (API Gateway sets isBase64Encoded)", () => {
     const encoded = Buffer.from(JSON.stringify({ email: LISTED })).toString("base64");
     expect(parseCodeRequest({ body: encoded, isBase64Encoded: true })).toBe(LISTED);
+  });
+
+  it("checks the raw body length before decoding: over 4 KB raw is refused even if it decodes small", () => {
+    expect(MAX_BODY_BYTES).toBe(2048);
+    expect(MAX_RAW_BODY_BYTES).toBe(4096);
+    const encoded = Buffer.from(JSON.stringify({ email: LISTED })).toString("base64");
+    // The base64 decoder skips whitespace, so this decodes to the same small, valid body.
+    const padded = `${encoded}${"\n".repeat(MAX_RAW_BODY_BYTES)}`;
+    expect(Buffer.from(padded, "base64").toString("utf8")).toBe(JSON.stringify({ email: LISTED }));
+    expect(parseCodeRequest({ body: padded, isBase64Encoded: true })).toBeUndefined();
+    // Just under the raw limit it is still read.
+    const under = `${encoded}${"\n".repeat(MAX_RAW_BODY_BYTES - encoded.length)}`;
+    expect(parseCodeRequest({ body: under, isBase64Encoded: true })).toBe(LISTED);
   });
 
   it.each([

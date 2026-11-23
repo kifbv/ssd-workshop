@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudAssembly, CloudFormationStackArtifact } from "aws-cdk-lib/cx-api";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { API_THROTTLE, TTL_ATTRIBUTE } from "./api-stack.js";
+import { API_THROTTLE, SIGN_IN_CODE_ROUTE_KEY, SIGN_IN_CODE_THROTTLE, TTL_ATTRIBUTE } from "./api-stack.js";
 import { buildApp } from "./app.js";
 import {
   ACCOUNT,
@@ -34,6 +34,7 @@ interface Resource {
   Properties?: Record<string, unknown>;
   DeletionPolicy?: string;
   UpdateReplacePolicy?: string;
+  DependsOn?: string | string[];
 }
 
 const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api];
@@ -704,6 +705,27 @@ describe("api stack: sign-in code function (ticket 1.4)", () => {
     );
     expect(permissions).toHaveLength(1);
     expect(JSON.stringify(permissions[0]?.[2].Properties?.SourceArn)).toContain("/*/*/api/sign-in/code");
+  });
+
+  it("throttles POST /api/sign-in/code at 5 requests/s, burst 10, on the $default stage (after the route exists)", () => {
+    expect(SIGN_IN_CODE_ROUTE_KEY).toBe("POST /api/sign-in/code");
+    expect(SIGN_IN_CODE_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 10 });
+    const stages = apiResources().filter(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage");
+    expect(stages).toHaveLength(1);
+    const [, stage] = stages[0] ?? [];
+    expect(stage?.Properties?.RouteSettings).toEqual({
+      "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+    });
+    const routeId = apiResources().find(
+      ([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === SIGN_IN_CODE_ROUTE_KEY,
+    )?.[0];
+    expect(routeId).toBeDefined();
+    expect([stage?.DependsOn].flat()).toContain(routeId);
+    // The stage-wide default stays as it was.
+    expect(stage?.Properties?.DefaultRouteSettings).toMatchObject({
+      ThrottlingRateLimit: API_THROTTLE.rateLimit,
+      ThrottlingBurstLimit: API_THROTTLE.burstLimit,
+    });
   });
 
   it("allows only its logs, GetItem/PutItem in EMAIL# partitions (PutItem: code attributes only) and SES sends from the workshop address", () => {
