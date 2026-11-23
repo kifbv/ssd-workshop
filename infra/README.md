@@ -450,6 +450,14 @@ Then the two subnet ids go into `infra/lib/config.ts` as constants (where the co
 `BUILDER_IMAGES_KEPT` says) for ticket 2.2, which pins `ecs:RunTask` to them. If the stack is ever
 recreated, the subnets get new ids: update the constants and the access stack.
 
+If the first deploy fails, read the CloudTrail `errorMessage` of the refused call: this is the first
+EC2 deploy under `ssd-workshop-deploy-ec2`, and a CloudFormation handler that tags in a separate call
+would need an access-stack change (Franck applies it). After a rollback, the retained, empty
+repository `ssd-workshop-builder` stays: delete it before the retry, or the create fails on its name.
+
+Build tasks must always name the `ssd-workshop-builds` security group in `RunTask`: without it, ECS
+uses the VPC's default group (all traffic out), and IAM cannot require the group (ticket 2.8 tests it).
+
 ## Start a participant's conversation over
 
 For tests and dry runs, with Franck's own AWS credentials (it reads and deletes items of one participant

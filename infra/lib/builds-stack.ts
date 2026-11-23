@@ -50,8 +50,8 @@ export class BuildsStack extends Stack {
       // it, and restricting it needs a custom-resource Lambda. Build tasks never use it.
       restrictDefaultSecurityGroup: false,
     });
-    // Subnets, route tables and the internet gateway carry their stack path as Name
-    // (`ssd-workshop-builds/Vpc/...`); the subnets get a short name of their own.
+    // Each subnet and its route table are named `ssd-workshop-builds-public-<n>` (the tag reaches
+    // the route table too); the internet gateway takes the VPC's name.
     this.vpc.publicSubnets.forEach((subnet, i) => {
       Tags.of(subnet).add("Name", `${BUILDS_VPC_NAME}-public-${String(i + 1)}`);
     });
