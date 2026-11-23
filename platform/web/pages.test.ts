@@ -898,6 +898,22 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
     await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2");
     expect(await page.locator("#spec-approved").isVisible()).toBe(false);
   }, 30_000);
+
+  it("draws two diagrams at once without a Content-Security-Policy violation", async () => {
+    const api = fakeSpecApi();
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 1");
+    await expect.poll(() => page.evaluate(() => "ssdDiagram" in window)).toBe(true);
+    const source = "flowchart LR\n  a[Open the app] --> b[Add a run] --> c[See the list]";
+    // Overlapping draws used to restore the DOM methods while the other was still drawing.
+    const drawn = await page.evaluate(async (diagram) => {
+      const api = (window as unknown as { ssdDiagram: { render(source: string): Promise<unknown> } }).ssdDiagram;
+      const pictures = await Promise.all([api.render(diagram), api.render(diagram), api.render(diagram)]);
+      return pictures.length;
+    }, source);
+    expect(drawn).toBe(3);
+  }, 30_000);
 });
 
 describe("built site", () => {
