@@ -36,10 +36,12 @@ npm run -s allowlist -- list
 ```
 
 - The CSV starts with the header `email,group,role`; one person per line, no quoted fields. Role is
-  `participant`, `facilitator` or `admin`; emails are stored trimmed and lower-cased.
+  `participant`, `facilitator` or `admin`; emails are stored trimmed and lower-cased. A group that
+  holds an `@` is rejected, so an address pasted in the wrong column is never stored.
 - Give the file as an absolute path (a relative path is refused). It must stay outside this
-  repository and outside any other git work tree: such a path is refused, symlinks included, and so
-  is a file with more than one hard link. `*.csv` is also in `.gitignore`.
+  repository and outside any other git work tree (no folder above it holds a `.git`): such a path is
+  refused, symlinks included, and so is a file with more than one hard link or a path that is not a
+  file. `*.csv` is also in `.gitignore`.
 - `import` prints how many people were added, updated and rejected, and the line number and reason
   of each rejected line; importing again updates group and role. `list` prints counts per group and
   role. Neither ever prints an address.

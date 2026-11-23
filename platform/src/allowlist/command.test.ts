@@ -138,6 +138,15 @@ describe("allowlist import", () => {
     );
   });
 
+  it("criterion 2: rejects an address pasted in the group column and never prints it", async () => {
+    writeFileSync(join(dir, "people.csv"), "email,group,role\nalpha,jane.doe@example.com,participant\nok@example.com,g,admin\n");
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(0);
+    expect([...store.items.values()].map((i) => i.group)).toEqual(["g"]);
+    expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 0\nRejected: 1\nLine 2: invalid email, group looks like an email address");
+    expect(await runAllowlist(["list"], deps())).toBe(0);
+    expect(output()).not.toMatch(/@/);
+  });
+
   it("refuses a file without the header and imports nothing", async () => {
     writeFileSync(join(dir, "people.csv"), "a@example.com,g,participant\n");
     expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(1);
@@ -211,6 +220,47 @@ describe("allowlist path refusal", () => {
       expect(await runAllowlist(["import", file], deps())).toBe(1);
       expect(stderr).toEqual(["Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git."]);
     }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a CSV below a folder whose .git is a plain file (worktree or submodule form)", async () => {
+    const other = join(dir, "worktree");
+    mkdirSync(join(other, "sub"), { recursive: true });
+    writeFileSync(join(other, ".git"), "gitdir: /somewhere/else/.git/worktrees/x\n");
+    const csv = "email,group,role\na@example.com,g,participant\n";
+    writeFileSync(join(other, "people.csv"), csv);
+    writeFileSync(join(other, "sub", "people.csv"), csv);
+    for (const file of [join(other, "people.csv"), join(other, "sub", "people.csv")]) {
+      stderr = [];
+      expect(await runAllowlist(["import", file], deps())).toBe(1);
+      expect(stderr).toEqual(["Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git."]);
+    }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a CSV inside a git work tree whatever the git environment says", async () => {
+    const other = join(dir, "other-repo");
+    mkdirSync(other);
+    execFileSync("git", ["init", "-q", other], { stdio: "ignore" });
+    writeFileSync(join(other, "people.csv"), "email,group,role\na@example.com,g,participant\n");
+    const saved = { ceiling: process.env["GIT_CEILING_DIRECTORIES"], path: process.env["PATH"] };
+    process.env["GIT_CEILING_DIRECTORIES"] = dir;
+    process.env["PATH"] = "";
+    try {
+      expect(await runAllowlist(["import", join(other, "people.csv")], deps())).toBe(1);
+    } finally {
+      if (saved.ceiling === undefined) delete process.env["GIT_CEILING_DIRECTORIES"];
+      else process.env["GIT_CEILING_DIRECTORIES"] = saved.ceiling;
+      process.env["PATH"] = saved.path;
+    }
+    expect(stderr).toEqual(["Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git."]);
+    expect(storesCreated).toBe(0);
+  });
+
+  it("refuses a CSV path that is a directory", async () => {
+    mkdirSync(join(dir, "people.csv"));
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(1);
+    expect(stderr).toEqual(["Refused: the CSV path is not a file."]);
     expect(storesCreated).toBe(0);
   });
 

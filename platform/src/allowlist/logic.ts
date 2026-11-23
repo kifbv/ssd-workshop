@@ -76,7 +76,8 @@ const HEADER = ["email", "group", "role"];
 /**
  * Reads `email,group,role` rows. The header is required (case and spaces ignored); a UTF-8 BOM,
  * CRLF line ends and blank lines are fine. No quoted fields: a row must have exactly three fields.
- * An email seen on an earlier line makes the later line a duplicate.
+ * An email seen on an earlier line makes the later line a duplicate. A group holding an `@` is
+ * rejected, so an address pasted in the group column is never stored or printed.
  */
 export function parseCsv(text: string): CsvResult {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
@@ -107,6 +108,8 @@ export function parseCsv(text: string): CsvResult {
     const reasons: string[] = [];
     if (!isValidEmail(email)) reasons.push("invalid email");
     if (group === "") reasons.push("empty group");
+    // An address pasted in the group column would be stored and printed as a group name.
+    else if (group.includes("@")) reasons.push("group looks like an email address");
     if (!isRole(role)) reasons.push("unknown role");
     if (reasons.length === 0) {
       const earlier = firstLineOf.get(email);

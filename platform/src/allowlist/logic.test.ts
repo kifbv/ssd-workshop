@@ -164,6 +164,17 @@ describe("parseCsv", () => {
     });
   });
 
+  it("criterion 2: rejects a group that holds an @, so an address in the wrong column is never stored", () => {
+    const result = parseCsv("email,group,role\nalpha,jane@example.com,participant\nb@example.com,team@x,admin\nc@example.com,ok,admin\n");
+    expect(result).toEqual({
+      entries: [{ line: 4, email: "c@example.com", group: "ok", role: "admin" }],
+      rejections: [
+        { line: 2, reason: "invalid email, group looks like an email address" },
+        { line: 3, reason: "group looks like an email address" },
+      ],
+    });
+  });
+
   it("refuses a file without the header or an empty file", () => {
     expect(parseCsv("a@example.com,g,participant\n")).toEqual({
       error: "the first line must be the header email,group,role",

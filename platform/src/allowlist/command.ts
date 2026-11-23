@@ -1,7 +1,6 @@
 // The allow-list command with its outside world passed in (file system reads, store, output),
 // so the whole flow is tested against an in-memory store. ./main.ts wires in the real ones.
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   USAGE,
@@ -39,25 +38,29 @@ export function findRepoRoot(start: string): string {
 }
 
 /**
- * True when `dir` is inside a git work tree (any repository, not only this one). No shell, output
- * ignored; GIT_DIR / GIT_WORK_TREE are dropped so only the folder itself decides. If git is missing
- * or fails, the answer is false: the check against this repository still applies.
+ * True when `dir` or any folder above it holds a `.git` entry: a folder in a normal clone, a plain
+ * file in a work tree or submodule. No git subprocess, so no git environment variable, missing git
+ * or "dubious ownership" error can turn the answer into a false "not in a repository".
  */
 export function isInGitWorkTree(dir: string): boolean {
-  const env = { ...process.env };
-  delete env["GIT_DIR"];
-  delete env["GIT_WORK_TREE"];
-  try {
-    execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { stdio: "ignore", env });
-    return true;
-  } catch {
-    return false;
+  let current = resolve(dir);
+  for (;;) {
+    const candidate = join(current, ".git");
+    // existsSync follows symlinks and says false for a broken one; lstatSync then decides the kind.
+    if (existsSync(candidate)) {
+      const stats = lstatSync(candidate, { throwIfNoEntry: false });
+      if (stats !== undefined && (stats.isDirectory() || stats.isFile() || stats.isSymbolicLink())) return true;
+    }
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
   }
 }
 
 const NOT_ABSOLUTE = "Refused: give an absolute path to the CSV file.";
 const IN_REPO = "Refused: the CSV file is inside the repository. Keep it outside, so personal data never reaches git.";
 const IN_GIT = "Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git.";
+const NOT_A_FILE = "Refused: the CSV path is not a file.";
 const HARD_LINKED = "Refused: the CSV file has more than one hard link. Use a plain copy outside any git repository.";
 
 export async function runAllowlist(args: readonly string[], deps: CommandDeps): Promise<number> {
@@ -104,8 +107,15 @@ async function importFile(file: string, deps: CommandDeps): Promise<number> {
     deps.err(IN_REPO);
     return 1;
   }
+  // A directory (or a socket, a device) is not a CSV: say so before the hard-link message, whose
+  // count means nothing for a directory.
+  const stats = statSync(real);
+  if (!stats.isFile()) {
+    deps.err(NOT_A_FILE);
+    return 1;
+  }
   // realpath does not follow hard links: a second name could sit inside a repository.
-  if (statSync(real).nlink > 1) {
+  if (stats.nlink > 1) {
     deps.err(HARD_LINKED);
     return 1;
   }
