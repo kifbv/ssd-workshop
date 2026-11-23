@@ -3,12 +3,19 @@ import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-
 import { HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
-import { Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
-import { Architecture, type IFunction, Runtime } from "aws-cdk-lib/aws-lambda";
+import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { Construct } from "constructs";
-import { API_NAME, HEALTH_FUNCTION_NAME, TABLE_NAME } from "./config.js";
+import {
+  API_NAME,
+  HEALTH_FUNCTION_NAME,
+  SENDER_ADDRESS,
+  SES_SEND_RESOURCES,
+  SIGN_IN_CODE_FUNCTION_NAME,
+  TABLE_NAME,
+} from "./config.js";
 
 /** Lambda handlers live with the rest of the API code. */
 export const API_HANDLERS_DIR = fileURLToPath(new URL("../../platform/api/handlers", import.meta.url));
@@ -66,6 +73,31 @@ export class ApiStack extends Stack {
       integration: new HttpLambdaIntegration("HealthIntegration", health),
     });
 
+    // Ticket 1.4: emails a sign-in code. Reads the allow-list and writes codes and the hourly
+    // counter (GetItem and PutItem on the table only), and sends from the workshop address only,
+    // through the workshop's identities and configuration set.
+    const signInCode = workshopFunction(this, "SignInCode", SIGN_IN_CODE_FUNCTION_NAME, "sign-in-code.ts");
+    signInCode.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+      }),
+    );
+    signInCode.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["ses:SendEmail"],
+        resources: [...SES_SEND_RESOURCES],
+        conditions: { StringEquals: { "ses:FromAddress": SENDER_ADDRESS } },
+      }),
+    );
+    this.api.addRoutes({
+      path: "/api/sign-in/code",
+      methods: [HttpMethod.POST],
+      integration: new HttpLambdaIntegration("SignInCodeIntegration", signInCode),
+    });
+
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",
       value: this.api.apiEndpoint,
@@ -75,10 +107,10 @@ export class ApiStack extends Stack {
 
 /**
  * A Node.js 22 arm64 function bundled by esbuild from platform/api/handlers, with
- * its own named role (no rights beyond writing its logs; the app's aspect adds the
- * path and boundary) and its own named log group with two weeks of retention.
+ * its own named role (only the right to write its logs; the caller adds what the
+ * function needs; the app's aspect adds the path and boundary) and its own named log group with two weeks of retention.
  */
-function workshopFunction(scope: Construct, id: string, name: string, entry: string): IFunction {
+function workshopFunction(scope: Construct, id: string, name: string, entry: string): NodejsFunction {
   const logGroup = new LogGroup(scope, `${id}Logs`, {
     logGroupName: name,
     retention: RetentionDays.TWO_WEEKS,
@@ -102,6 +134,9 @@ function workshopFunction(scope: Construct, id: string, name: string, entry: str
     timeout: Duration.seconds(10),
     role,
     logGroup,
-    bundling: { minify: true, sourceMap: false },
-  }) as IFunction;
+    // NodejsFunction leaves @aws-sdk/* out of the bundle by default on Node 18+ runtimes (the
+    // runtime has its own copy). Bundling it pins the version the tests ran with and keeps the
+    // bundle self-contained (the synth test loads it).
+    bundling: { minify: true, sourceMap: false, externalModules: [] },
+  });
 }

@@ -131,3 +131,6 @@ paths:
   `REDIRECT_TO_HTTPS` (a redirect turns POST into GET). A value from another region's stack
   (the API id for the us-east-1 edge stack) is a constant in `config.ts`; recreating that
   resource means updating the constant.
+- `NodejsFunction` on Node 18+ runtimes leaves `@aws-sdk/*` out of the bundle by default (the runtime's
+  copy is used): set `bundling.externalModules: []` so the function runs the tested SDK version and the
+  synth test can `require` the bundle on its own.

@@ -1,11 +1,12 @@
 // Pure logic of the allow-list command: no AWS calls and no file access here, so every rule is unit tested.
 // Email addresses are personal data: nothing built here for output ever contains one.
 import { isAbsolute, relative, sep } from "node:path";
+import { isValidEmail } from "../../api/email.js";
 import { normalizeEmail } from "../../api/keys.js";
 import type { Role } from "../../api/types.js";
 import { redactError, redactEmails } from "../smoke/logic.js";
 
-export { redactError };
+export { isValidEmail, redactError };
 
 export const REGION = "eu-central-1";
 /** Same value as TABLE_NAME in infra/lib/config.ts (checked by a test); platform code does not import infra. */
@@ -41,17 +42,6 @@ export function parseArgs(args: readonly string[]): AllowlistCommand | { error: 
     default:
       return { error: "unknown command" };
   }
-}
-
-/**
- * ASCII only: local part of letters, digits and `._%+-`; domain labels of letters, digits and `-`,
- * separated by dots, ending in an alphabetic TLD of 2+ letters. Kept no wider than what
- * smoke's `redactEmails` masks, so any address that can be stored can also be redacted (tested).
- */
-const EMAIL_PATTERN = /^[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/;
-
-export function isValidEmail(email: string): boolean {
-  return EMAIL_PATTERN.test(email);
 }
 
 export interface CsvEntry {

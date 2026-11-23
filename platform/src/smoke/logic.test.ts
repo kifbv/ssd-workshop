@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   CONFIGURATION_SET,
   DEFAULT_MODEL_ID,
+  SIGN_IN_CODE_URL,
   USAGE,
+  buildSignInRequest,
   buildTestEmail,
   findModelQuotas,
   formatLatency,
   formatQuotaLine,
+  formatSignInResult,
   maskEmail,
   modelQuotaLabel,
   parseArgs,
@@ -268,5 +271,61 @@ describe("proxyFromEnv", () => {
 describe("USAGE", () => {
   it("tells the operator to run the command silently", () => {
     expect(USAGE).toContain("npm run -s smoke -- <command>");
+  });
+});
+
+describe("signin (ticket 1.4 criterion 6)", () => {
+  it("parses one address, trimmed and lower-cased like the API does", () => {
+    expect(parseArgs(["signin", " Franck@Example.com "])).toEqual({ command: "signin", address: "franck@example.com" });
+  });
+
+  it("rejects a missing address, extra arguments and something the API would refuse", () => {
+    expect(parseArgs(["signin"])).toEqual({ error: "signin needs an email address" });
+    expect(parseArgs(["signin", "a@b.com", "c@d.com"])).toEqual({ error: "signin takes exactly one address" });
+    for (const bad of ["not-an-address", "a@b", "ja#ne@example.com", "jösé@example.com"]) {
+      expect(parseArgs(["signin", bad]), bad).toEqual({ error: "the signin argument is not an email address" });
+    }
+  });
+
+  it("errors never contain the address", () => {
+    const parsed = parseArgs(["signin", "secret.person@example"]);
+    expect(JSON.stringify(parsed)).not.toContain("secret");
+  });
+
+  it("POSTs {\"email\"} as JSON to the live code route", () => {
+    expect(SIGN_IN_CODE_URL).toBe("https://workshop.rankly.games/api/sign-in/code");
+    expect(buildSignInRequest("franck@example.com")).toEqual({
+      url: "https://workshop.rankly.games/api/sign-in/code",
+      init: {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"email":"franck@example.com"}',
+      },
+    });
+  });
+
+  it("prints the status and the neutral answer, the address only masked", () => {
+    const out = formatSignInResult("franck@example.com", 202, JSON.stringify({ message: "If this address is on the list..." }));
+    expect(out).toBe(
+      [
+        "Asked https://workshop.rankly.games/api/sign-in/code for a code for f***@e***.com",
+        "Status: 202",
+        "Answer: If this address is on the list...",
+      ].join("\n"),
+    );
+    expect(out).not.toContain("franck@");
+  });
+
+  it("prints a non-JSON answer shortened and redacted", () => {
+    const out = formatSignInResult("franck@example.com", 502, `<html>bad gateway for franck@example.com${"x".repeat(600)}</html>`);
+    expect(out).toContain("Status: 502");
+    expect(out).toContain("f***@e***.com");
+    expect(out).not.toContain("franck@");
+    expect(out.length).toBeLessThan(700);
+    expect(formatSignInResult("a@b.com", 500, "")).toContain("Answer: (empty)");
+  });
+
+  it("is listed in the usage text", () => {
+    expect(USAGE).toContain("signin <address>");
   });
 });

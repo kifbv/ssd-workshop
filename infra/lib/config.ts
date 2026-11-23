@@ -50,6 +50,19 @@ export const API_ID = "ut2mzqmbb4";
 export const API_ORIGIN_DOMAIN = `${API_ID}.execute-api.${REGION}.amazonaws.com`;
 /** Lambda function, role and log group of `GET /api/health`. */
 export const HEALTH_FUNCTION_NAME = `${PREFIX}-api-health`;
+/** Lambda function, role and log group of `POST /api/sign-in/code` (ticket 1.4). */
+export const SIGN_IN_CODE_FUNCTION_NAME = `${PREFIX}-api-sign-in-code`;
+
+/** The only address the workshop sends from (SES identity; it receives no mail). */
+export const SENDER_ADDRESS = "ssd-workshop@rankly.games";
+/** SES configuration set created by the access stack; every send names it. */
+export const SES_CONFIGURATION_SET = `${PREFIX}-email`;
+/** The SES resources a send names: the sender's identity, its domain identity and the configuration set. */
+export const SES_SEND_RESOURCES = [
+  `arn:aws:ses:${REGION}:${ACCOUNT}:identity/${SENDER_ADDRESS}`,
+  `arn:aws:ses:${REGION}:${ACCOUNT}:identity/${HOSTED_ZONE_NAME}`,
+  `arn:aws:ses:${REGION}:${ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET}`,
+] as const;
 
 /**
  * Created by the access stack; GitHub Actions assumes it through OIDC, from `main` only.

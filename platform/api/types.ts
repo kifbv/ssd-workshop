@@ -7,6 +7,7 @@
  * | -------------------- | ---------------------- | ------------------ | ------------------------- |
  * | Allow-list entry     | `EMAIL#<email>`        | `ALLOW`            | never                     |
  * | Sign-in code         | `EMAIL#<email>`        | `CODE`             | yes (10 minutes)          |
+ * | Code requests        | `EMAIL#<email>`        | `CODE_REQUESTS`    | yes (1 hour after last)   |
  * | Session              | `SESSION#<token hash>` | `SESSION`          | yes (8 hours)             |
  * | Participant          | `PARTICIPANT#<id>`     | `PROFILE`          | never                     |
  * | Conversation message | `PARTICIPANT#<id>`     | `MSG#<message id>` | never                     |
@@ -62,6 +63,20 @@ export interface CodeItem extends Keyed {
   attempts: number;
   /** ISO 8601. */
   createdAt: string;
+}
+
+/**
+ * When codes were sent to one allow-listed email in the last hour (ticket 1.4): at most 5.
+ * Only written for allow-listed emails, so no stranger's address is ever stored.
+ */
+export interface CodeRequestsItem extends Keyed {
+  type: "code-requests";
+  /** Epoch seconds of each code sent within the last hour, oldest first. */
+  sentAt: number[];
+  /** Bumped on every write; a write names the version it read (two requests at once cannot both pass). */
+  version: number;
+  /** Epoch seconds (TTL attribute): one hour after the newest send. */
+  expiresAt: number;
 }
 
 /** A signed-in browser (ticket 1.5). */
@@ -122,4 +137,11 @@ export interface UsageItem extends Keyed, TokenUsage {
   updatedAt: string;
 }
 
-export type TableItem = AllowListEntry | CodeItem | SessionItem | Participant | ConversationMessage | UsageItem;
+export type TableItem =
+  | AllowListEntry
+  | CodeItem
+  | CodeRequestsItem
+  | SessionItem
+  | Participant
+  | ConversationMessage
+  | UsageItem;
