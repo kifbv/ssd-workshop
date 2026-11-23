@@ -4,19 +4,30 @@
 //
 // Personal data: the email address and the code never reach a log line, an error message or the
 // response. The response is the same, byte for byte, whether the address is listed or not, is over
-// its hourly limit, or the table or SES failed, so it never tells who is on the list.
+// its hourly limit, or the table or SES failed, so it never tells who is on the list; and it is
+// sent at the same fixed time after the handler starts (ANSWER_AFTER_MS), whether the work is done,
+// failed or still running, so neither the answer's timing nor a timeout tells either.
 import { scrypt as scryptCallback, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import { isValidEmail } from "../email.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { normalizeEmail } from "../keys.js";
-import type { CodeItem } from "../types.js";
+import type { CodeEntry } from "../types.js";
 import { buildCodeEmail, type CodeEmail } from "./code-email.js";
 
+/**
+ * Every well-formed request is answered this long after the handler starts, whatever happened:
+ * the work races against this deadline and anything still running then is dropped.
+ */
+export const ANSWER_AFTER_MS = 3000;
 /** A code is valid for 10 minutes. */
 export const CODE_TTL_SECONDS = 600;
 /** At most 5 codes per email in any 60-minute window (sliding). */
 export const RATE_WINDOW_SECONDS = 3600;
 export const MAX_CODES_PER_WINDOW = 5;
+/** At most this many unexpired codes are kept (the hourly cap already keeps it there). */
+export const MAX_LIVE_CODES = 5;
+/** Tries at the conditional code write when another request wrote in between. */
+const CODE_WRITE_TRIES = 3;
 /** Larger bodies are refused before parsing (an email request is a few dozen bytes). */
 export const MAX_BODY_BYTES = 2048;
 /** RFC 5321: 64 characters of local part, `@`, 255 of domain. */
@@ -89,7 +100,7 @@ export async function hashCode(code: string, salt: Buffer): Promise<string> {
   return `scrypt$${salt.toString("hex")}$${key.toString("hex")}`;
 }
 
-/** True when `code` matches a `hashCode` result (constant-time compare; for ticket 1.5). */
+/** True when `code` matches a `hashCode` result (constant-time compare). */
 export async function verifyCode(code: string, stored: string): Promise<boolean> {
   const [scheme, saltHex, hashHex, ...rest] = stored.split("$");
   if (scheme !== "scrypt" || saltHex === undefined || hashHex === undefined || rest.length > 0) return false;
@@ -97,6 +108,31 @@ export async function verifyCode(code: string, stored: string): Promise<boolean>
   const expected = Buffer.from(hashHex, "hex");
   if (salt.length < SALT_LENGTH || expected.length !== KEY_LENGTH) return false;
   return timingSafeEqual(await scrypt(code, salt), expected);
+}
+
+/**
+ * True when `code` matches any unexpired entry (for ticket 1.5). Every unexpired entry is checked,
+ * with no early exit, so the time taken does not tell which entry matched.
+ */
+export async function verifyAnyCode(code: string, entries: readonly CodeEntry[], nowSeconds: number): Promise<boolean> {
+  const results = await Promise.all(liveCodes(entries, nowSeconds).map((e) => verifyCode(code, e.codeHash)));
+  return results.reduce((matched, r) => matched || r, false);
+}
+
+/** The entries still valid at `nowSeconds`. */
+export function liveCodes(entries: readonly CodeEntry[], nowSeconds: number): CodeEntry[] {
+  return entries.filter((e) => e.expiresAt > nowSeconds);
+}
+
+/** The codes to store after adding `entry`: the unexpired ones plus the new one, the newest 5. */
+export function addCode(entries: readonly CodeEntry[], entry: CodeEntry, nowSeconds: number): CodeEntry[] {
+  return [...liveCodes(entries, nowSeconds), entry].slice(-MAX_LIVE_CODES);
+}
+
+export interface StoredCodes {
+  codes: CodeEntry[];
+  attempts: number;
+  version: number;
 }
 
 export interface CodeRequests {
@@ -119,8 +155,13 @@ export interface SignInStore {
     expiresAt: number,
     expectedVersion: number | undefined,
   ): Promise<boolean>;
-  /** Replaces the email's code. */
-  putCode(email: string, code: Omit<CodeItem, "pk" | "sk" | "type">): Promise<void>;
+  /** The email's codes item, if any (expired entries included: the caller prunes them). */
+  getCode(email: string): Promise<StoredCodes | undefined>;
+  /**
+   * Writes the email's codes item if it is still at `expectedVersion` (undefined: it must not
+   * exist yet), with TTL `expiresAt`. False when another request wrote first.
+   */
+  putCode(email: string, codes: StoredCodes, expiresAt: number, expectedVersion: number | undefined): Promise<boolean>;
 }
 
 export interface CodeMailer {
@@ -146,6 +187,8 @@ export interface CodeRequestDeps {
   randomInt: (min: number, max: number) => number;
   randomBytes: (size: number) => Buffer;
   log: (entry: LogEntry) => void;
+  /** Resolves after `ms` milliseconds (tests pass fake timers). */
+  sleep: (ms: number) => Promise<void>;
 }
 
 /** An error's name if it looks like an identifier, else "Error": the name is all that is logged. */
@@ -154,28 +197,51 @@ export function errorName(error: unknown): string {
   return /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : "Error";
 }
 
-export async function requestCode(request: HttpRequest, deps: CodeRequestDeps): Promise<HttpResponse> {
-  const email = parseCodeRequest(request);
-  if (email === undefined) {
-    deps.log({ event: "sign-in-code", outcome: "invalid-request" });
-    return badRequestResponse();
+/**
+ * Adds a code to the email's codes item, keeping the unexpired ones (a new code cancels none). The
+ * write is conditional on the version read; on a conflict it reads again, at most 3 times.
+ */
+async function saveCode(store: SignInStore, email: string, entry: CodeEntry, nowSeconds: number): Promise<boolean> {
+  for (let i = 0; i < CODE_WRITE_TRIES; i++) {
+    const previous = await store.getCode(email);
+    const live = liveCodes(previous?.codes ?? [], nowSeconds);
+    const codes = addCode(live, entry, nowSeconds);
+    const item: StoredCodes = {
+      codes,
+      // The wrong tries carry over while earlier codes live, so new codes do not reset them.
+      attempts: live.length > 0 ? (previous?.attempts ?? 0) : 0,
+      version: (previous?.version ?? 0) + 1,
+    };
+    const expiresAt = Math.max(...codes.map((c) => c.expiresAt));
+    if (await store.putCode(email, item, expiresAt, previous?.version)) return true;
   }
+  return false;
+}
 
-  let step: Step = "allow-list";
+interface Progress {
+  step: Step;
+  /** Set at the deadline: the work, if it still runs, logs nothing more. */
+  timedOut: boolean;
+}
+
+/** The work behind a well-formed request. Never throws; logs its one outcome unless timed out. */
+async function issueCode(email: string, deps: CodeRequestDeps, progress: Progress): Promise<void> {
+  const log = (entry: LogEntry): void => {
+    if (!progress.timedOut) deps.log(entry);
+  };
   try {
     if (!(await deps.store.isAllowListed(email))) {
-      deps.log({ event: "sign-in-code", outcome: "not-listed" });
-      return neutralResponse();
+      log({ event: "sign-in-code", outcome: "not-listed" });
+      return;
     }
 
-    step = "rate-limit";
-    const now = deps.now();
-    const nowSeconds = Math.floor(now.getTime() / 1000);
+    progress.step = "rate-limit";
+    const nowSeconds = Math.floor(deps.now().getTime() / 1000);
     const previous = await deps.store.getCodeRequests(email);
     const recent = recentSends(previous?.sentAt ?? [], nowSeconds);
     if (recent.length >= MAX_CODES_PER_WINDOW) {
-      deps.log({ event: "sign-in-code", outcome: "rate-limited" });
-      return neutralResponse();
+      log({ event: "sign-in-code", outcome: "rate-limited" });
+      return;
     }
     // Counted before the send: a send that then fails still uses one of the five.
     const written = await deps.store.putCodeRequests(
@@ -185,24 +251,44 @@ export async function requestCode(request: HttpRequest, deps: CodeRequestDeps): 
       previous?.version,
     );
     if (!written) {
-      deps.log({ event: "sign-in-code", outcome: "conflict" });
-      return neutralResponse();
+      log({ event: "sign-in-code", outcome: "conflict" });
+      return;
     }
 
-    step = "code";
+    progress.step = "code";
     const code = generateCode(deps.randomInt);
-    await deps.store.putCode(email, {
-      codeHash: await hashCode(code, deps.randomBytes(SALT_LENGTH)),
-      expiresAt: nowSeconds + CODE_TTL_SECONDS,
-      attempts: 0,
-      createdAt: now.toISOString(),
-    });
+    const entry = { codeHash: await hashCode(code, deps.randomBytes(SALT_LENGTH)), expiresAt: nowSeconds + CODE_TTL_SECONDS };
+    if (!(await saveCode(deps.store, email, entry, nowSeconds))) {
+      log({ event: "sign-in-code", outcome: "conflict" });
+      return;
+    }
 
-    step = "email";
+    progress.step = "email";
     await deps.mailer.send(email, buildCodeEmail(code));
-    deps.log({ event: "sign-in-code", outcome: "sent" });
+    log({ event: "sign-in-code", outcome: "sent" });
   } catch (error) {
-    deps.log({ event: "sign-in-code", outcome: "failed", step, error: errorName(error) });
+    log({ event: "sign-in-code", outcome: "failed", step: progress.step, error: errorName(error) });
   }
+}
+
+/**
+ * A malformed request gets its 400 at once (it depends only on the input's syntax). Every other
+ * request gets the neutral 202 exactly ANSWER_AFTER_MS after the start: done, failed or still running.
+ */
+export async function requestCode(request: HttpRequest, deps: CodeRequestDeps): Promise<HttpResponse> {
+  const deadline = deps.sleep(ANSWER_AFTER_MS);
+  const email = parseCodeRequest(request);
+  if (email === undefined) {
+    deps.log({ event: "sign-in-code", outcome: "invalid-request" });
+    return badRequestResponse();
+  }
+
+  const progress: Progress = { step: "allow-list", timedOut: false };
+  const finished = await Promise.race([issueCode(email, deps, progress).then(() => true), deadline.then(() => false)]);
+  if (!finished) {
+    progress.timedOut = true;
+    deps.log({ event: "sign-in-code", outcome: "failed", step: progress.step, error: "Timeout" });
+  }
+  await deadline;
   return neutralResponse();
 }

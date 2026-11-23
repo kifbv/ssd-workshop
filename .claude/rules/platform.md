@@ -23,3 +23,11 @@ paths:
   and refuse a relative one.
 - An answer that must not reveal allow-list membership (sign-in) is the same for every outcome, failures
   included: catch table and SES errors, log only `error.name`, and return the neutral answer, never a 500.
+- Such an answer is also sent at one fixed time (sign-in: `ANSWER_AFTER_MS`), racing the work against the
+  deadline, with bounded SDK clients (`maxAttempts`, `NodeHttpHandler` timeouts): otherwise the answer time
+  or a Lambda timeout (503) tells who is listed. Test with `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })`
+  and an injected `sleep`; real async work (scrypt) is not driven by fake timers, so wait for it with a
+  `setImmediate` loop (`settle` in `platform/api/sign-in/fakes.ts`) before advancing the clock.
+- IAM cannot condition on a DynamoDB sort key: a role limited to a partition (`dynamodb:LeadingKeys`) can still
+  write any item in it. Limit PutItem's attribute names (`dynamodb:Attributes`) and make readers require an
+  attribute that role cannot write.

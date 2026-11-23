@@ -1,3 +1,4 @@
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   REGION as INFRA_REGION,
@@ -7,9 +8,9 @@ import {
 } from "../../../infra/lib/config.js";
 import type { HttpRequest } from "../http.js";
 import { CONFIGURATION_SET, REGION, SENDER_ADDRESS, TABLE_NAME } from "../settings.js";
-import type { CodeRequestDeps } from "../sign-in/code-request.js";
-import { FakeMailer, FakeStore } from "../sign-in/fakes.js";
-import { createHandler, handler, logEntry } from "./sign-in-code.js";
+import { ANSWER_AFTER_MS, type CodeRequestDeps } from "../sign-in/code-request.js";
+import { FakeMailer, FakeStore, settle } from "../sign-in/fakes.js";
+import { HTTP_TIMEOUTS, clientSettings, createHandler, handler, logEntry } from "./sign-in-code.js";
 
 const LISTED = "franck.tester@example.com";
 const STRANGER = "someone.else@example.org";
@@ -32,7 +33,11 @@ describe("settings", () => {
 describe("POST /api/sign-in/code logs (ticket 1.4 criterion 5)", () => {
   let captured: string[];
 
+  let logged = 0;
+
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    logged = 0;
     captured = [];
     const keep = (...args: unknown[]) => {
       captured.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a) ?? String(a))).join(" "));
@@ -50,6 +55,7 @@ describe("POST /api/sign-in/code logs (ticket 1.4 criterion 5)", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   function deps(store: FakeStore, mailer: FakeMailer): CodeRequestDeps {
@@ -60,7 +66,23 @@ describe("POST /api/sign-in/code logs (ticket 1.4 criterion 5)", () => {
       now: () => new Date((t += 1000)),
       randomInt: () => Number(CODE),
       randomBytes: (n) => Buffer.alloc(n, 9),
-      log: logEntry,
+      log: (entry) => {
+        logged++;
+        logEntry(entry);
+      },
+      sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    };
+  }
+
+  /** Runs one request on the fake clock: the work logs its outcome, then the deadline passes. */
+  function runner(store: FakeStore, mailer: FakeMailer): (event: HttpRequest) => Promise<unknown> {
+    const run = createHandler(deps(store, mailer));
+    return async (event) => {
+      const before = logged;
+      const pending = run(event);
+      await settle(() => logged > before);
+      await vi.advanceTimersByTimeAsync(ANSWER_AFTER_MS);
+      return pending;
     };
   }
 
@@ -73,7 +95,7 @@ describe("POST /api/sign-in/code logs (ticket 1.4 criterion 5)", () => {
 
     const store = new FakeStore([LISTED]);
     const mailer = new FakeMailer();
-    const run = createHandler(deps(store, mailer));
+    const run = runner(store, mailer);
 
     // Sent, then rate-limited (5 sends, then a sixth request).
     for (let i = 0; i < 6; i++) await run(body(LISTED.toUpperCase()));
@@ -89,10 +111,10 @@ describe("POST /api/sign-in/code logs (ticket 1.4 criterion 5)", () => {
     const failingStore = new FakeStore([LISTED]);
     failingStore.failOn = "isAllowListed";
     failingStore.failure = leaky("ResourceNotFoundException");
-    await createHandler(deps(failingStore, new FakeMailer()))(body(LISTED));
+    await runner(failingStore, new FakeMailer())(body(LISTED));
     const failingMailer = new FakeMailer();
     failingMailer.failure = leaky("MessageRejected");
-    await createHandler(deps(new FakeStore([LISTED]), failingMailer))(body(LISTED));
+    await runner(new FakeStore([LISTED]), failingMailer)(body(LISTED));
 
     const logs = captured.join("\n").toLowerCase();
     expect(logs).toContain('"outcome":"sent"');
@@ -108,6 +130,13 @@ describe("POST /api/sign-in/code logs (ticket 1.4 criterion 5)", () => {
 });
 
 describe("handler (live wiring)", () => {
+  it("bounds every SDK call: 2 attempts, 1 s to connect, 1.5 s per request, eu-central-1", () => {
+    const settings = clientSettings();
+    expect(settings).toMatchObject({ region: "eu-central-1", maxAttempts: 2 });
+    expect(settings.requestHandler).toBeInstanceOf(NodeHttpHandler);
+    expect(HTTP_TIMEOUTS).toEqual({ connectionTimeout: 1000, requestTimeout: 1500 });
+  });
+
   it("answers a malformed request 400 before any AWS call", async () => {
     const res = await handler({ body: "not json" });
     expect(res.statusCode).toBe(400);

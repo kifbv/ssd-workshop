@@ -52,6 +52,21 @@ export const API_ORIGIN_DOMAIN = `${API_ID}.execute-api.${REGION}.amazonaws.com`
 export const HEALTH_FUNCTION_NAME = `${PREFIX}-api-health`;
 /** Lambda function, role and log group of `POST /api/sign-in/code` (ticket 1.4). */
 export const SIGN_IN_CODE_FUNCTION_NAME = `${PREFIX}-api-sign-in-code`;
+/**
+ * The only attribute names the sign-in code function may write (PutItem, `dynamodb:Attributes`):
+ * those of the CODE and CODE_REQUESTS items. It cannot write an allow-list entry's `email`, which
+ * the allow-list check requires.
+ */
+export const SIGN_IN_CODE_PUT_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "codes",
+  "attempts",
+  "sentAt",
+  "version",
+  "expiresAt",
+] as const;
 
 /** The only address the workshop sends from (SES identity; it receives no mail). */
 export const SENDER_ADDRESS = "ssd-workshop@rankly.games";

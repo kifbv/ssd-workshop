@@ -72,7 +72,7 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the same email asks a sixth time within an hour THEN no email is sent and the answer is still the neutral one
 - WHEN the email is built THEN it has the "SSD Workshop" display name, the subject with the code, a text and an HTML part with the same code and the explanatory line and the "ask your facilitator" line, and no Reply-To header
 - WHEN the function's logs are read after these tests THEN no email address and no code appear in them (log capture test)
-- WHEN `npm run smoke -- signin <address>` runs against the live site with Franck's address THEN the code email arrives
+- WHEN `npm run -s smoke -- signin <address>` runs against the live site with Franck's address THEN the code email arrives
 
 ### 1.5 Code check, session and nickname
 

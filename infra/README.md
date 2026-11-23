@@ -10,7 +10,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
-| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`), Lambdas `ssd-workshop-api-health` and `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem, SES sends from `ssd-workshop@rankly.games`) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`), Lambdas `ssd-workshop-api-health` and `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 
 Deploy order: cdk-assets, then site, then edge; api after cdk-assets (it needs the assets
 bucket for its Lambda code, and nothing from site or edge). Nothing is passed between regions: the edge
@@ -229,4 +229,4 @@ npm run -s smoke -- signin <address>
 
 If no email arrives, the function's log group `ssd-workshop-api-sign-in-code` has one JSON line per
 request with its outcome (`sent`, `not-listed`, `rate-limited`, `conflict`, `failed` with the step and
-the AWS error name); it never holds the address or the code.
+the AWS error name, or `Timeout` when the work was still running at the 3-second answer time); it never holds the address or the code.

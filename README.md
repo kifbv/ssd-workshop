@@ -51,7 +51,8 @@ npm run -s allowlist -- list
 
 `POST /api/sign-in/code` with `{"email": "..."}` emails a 6-digit code (valid 10 minutes) to an
 allow-listed address, at most 5 codes per address in any hour, and answers every well-formed request
-the same way (202 and a neutral message). After the deploy, Franck checks it from his own machine
+the same way (202 and a neutral message, always 3 seconds after the request arrives). Every
+unexpired code stays valid, so asking again does not cancel a code already on its way. After the deploy, Franck checks it from his own machine
 (no AWS credentials needed; Claude sessions cannot reach the site):
 
 ```

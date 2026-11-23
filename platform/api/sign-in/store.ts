@@ -1,5 +1,9 @@
 // The sign-in code request's table access (ticket 1.4): GetItem and PutItem only, on ssd-workshop-data.
 // The calls stay thin; the rules live in ./code-request.ts.
+//
+// The function's role may only touch `EMAIL#*` partitions, and PutItem may only write the attribute
+// names of the CODE and CODE_REQUESTS items (infra/lib/api-stack.ts). An allow-list entry counts
+// only when it has an `email` attribute, which this role cannot write.
 import {
   GetItemCommand,
   PutItemCommand,
@@ -8,8 +12,8 @@ import {
   type PutItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { allowListKey, codeKey, codeRequestsKey, type ItemKey } from "../keys.js";
-import type { CodeItem } from "../types.js";
-import type { CodeRequests, SignInStore } from "./code-request.js";
+import type { CodeEntry } from "../types.js";
+import type { CodeRequests, SignInStore, StoredCodes } from "./code-request.js";
 
 /** The one method of DynamoDBClient this store uses, so tests can stub it. */
 export interface DynamoSender {
@@ -29,9 +33,14 @@ export class DynamoSignInStore implements SignInStore {
 
   async isAllowListed(email: string): Promise<boolean> {
     const output = await this.client.send(
-      new GetItemCommand({ TableName: this.tableName, Key: keyOf(allowListKey(email)), ProjectionExpression: "pk" }),
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: keyOf(allowListKey(email)),
+        ProjectionExpression: "#email",
+        ExpressionAttributeNames: { "#email": "email" },
+      }),
     );
-    return output.Item !== undefined;
+    return output.Item?.["email"]?.S !== undefined;
   }
 
   async getCodeRequests(email: string): Promise<CodeRequests | undefined> {
@@ -50,17 +59,58 @@ export class DynamoSignInStore implements SignInStore {
     expiresAt: number,
     expectedVersion: number | undefined,
   ): Promise<boolean> {
+    return this.putVersioned(
+      {
+        ...keyOf(codeRequestsKey(email)),
+        type: str("code-requests"),
+        sentAt: { L: sentAt.map(num) },
+        version: num((expectedVersion ?? 0) + 1),
+        expiresAt: num(expiresAt),
+      },
+      expectedVersion,
+    );
+  }
+
+  async getCode(email: string): Promise<StoredCodes | undefined> {
+    const output = await this.client.send(
+      new GetItemCommand({ TableName: this.tableName, Key: keyOf(codeKey(email)), ConsistentRead: true }),
+    );
+    const item = output.Item;
+    if (item === undefined) return undefined;
+    const codes: CodeEntry[] = (item["codes"]?.L ?? []).flatMap((v) => {
+      const codeHash = v.M?.["codeHash"]?.S;
+      const expiresAt = Number(v.M?.["expiresAt"]?.N);
+      return codeHash !== undefined && Number.isFinite(expiresAt) ? [{ codeHash, expiresAt }] : [];
+    });
+    return { codes, attempts: Number(item["attempts"]?.N ?? "0"), version: Number(item["version"]?.N ?? "0") };
+  }
+
+  async putCode(
+    email: string,
+    codes: StoredCodes,
+    expiresAt: number,
+    expectedVersion: number | undefined,
+  ): Promise<boolean> {
+    return this.putVersioned(
+      {
+        ...keyOf(codeKey(email)),
+        type: str("code"),
+        codes: { L: codes.codes.map((c) => ({ M: { codeHash: str(c.codeHash), expiresAt: num(c.expiresAt) } })) },
+        attempts: num(codes.attempts),
+        version: num((expectedVersion ?? 0) + 1),
+        expiresAt: num(expiresAt),
+      },
+      expectedVersion,
+    );
+  }
+
+  /** PutItem if the item is still at `expectedVersion` (undefined: absent); false on a conflict. */
+  private async putVersioned(item: Record<string, AttributeValue>, expectedVersion: number | undefined): Promise<boolean> {
     try {
       await this.client.send(
         new PutItemCommand({
           TableName: this.tableName,
-          Item: {
-            ...keyOf(codeRequestsKey(email)),
-            type: str("code-requests"),
-            sentAt: { L: sentAt.map(num) },
-            version: num((expectedVersion ?? 0) + 1),
-            expiresAt: num(expiresAt),
-          },
+          Item: item,
           ...(expectedVersion === undefined
             ? { ConditionExpression: "attribute_not_exists(pk)" }
             : {
@@ -75,21 +125,5 @@ export class DynamoSignInStore implements SignInStore {
       if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
       throw error;
     }
-  }
-
-  async putCode(email: string, code: Omit<CodeItem, "pk" | "sk" | "type">): Promise<void> {
-    await this.client.send(
-      new PutItemCommand({
-        TableName: this.tableName,
-        Item: {
-          ...keyOf(codeKey(email)),
-          type: str("code"),
-          codeHash: str(code.codeHash),
-          expiresAt: num(code.expiresAt),
-          attempts: num(code.attempts),
-          createdAt: str(code.createdAt),
-        },
-      }),
-    );
   }
 }

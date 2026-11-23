@@ -13,6 +13,7 @@ import {
   HEALTH_FUNCTION_NAME,
   SENDER_ADDRESS,
   SES_SEND_RESOURCES,
+  SIGN_IN_CODE_PUT_ATTRIBUTES,
   SIGN_IN_CODE_FUNCTION_NAME,
   TABLE_NAME,
 } from "./config.js";
@@ -73,15 +74,30 @@ export class ApiStack extends Stack {
       integration: new HttpLambdaIntegration("HealthIntegration", health),
     });
 
-    // Ticket 1.4: emails a sign-in code. Reads the allow-list and writes codes and the hourly
-    // counter (GetItem and PutItem on the table only), and sends from the workshop address only,
-    // through the workshop's identities and configuration set.
-    const signInCode = workshopFunction(this, "SignInCode", SIGN_IN_CODE_FUNCTION_NAME, "sign-in-code.ts");
+    // Ticket 1.4: emails a sign-in code. Reachable without sign-in, so its table rights stay in
+    // the `EMAIL#*` partitions: GetItem (allow-list, codes, counter) and PutItem of the CODE and
+    // CODE_REQUESTS attribute names only. It sends from the workshop address only, through the
+    // workshop's identities and configuration set. 512 MB keeps scrypt fast and predictable; the
+    // answer goes out at 3 s, well inside the 10 s timeout.
+    const signInCode = workshopFunction(this, "SignInCode", SIGN_IN_CODE_FUNCTION_NAME, "sign-in-code.ts", 512);
+    const emailPartitions = { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] } };
     signInCode.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+        actions: ["dynamodb:GetItem"],
         resources: [this.table.tableArn],
+        conditions: emailPartitions,
+      }),
+    );
+    signInCode.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          ...emailPartitions,
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SIGN_IN_CODE_PUT_ATTRIBUTES] },
+        },
       }),
     );
     signInCode.addToRolePolicy(
@@ -110,7 +126,7 @@ export class ApiStack extends Stack {
  * its own named role (only the right to write its logs; the caller adds what the
  * function needs; the app's aspect adds the path and boundary) and its own named log group with two weeks of retention.
  */
-function workshopFunction(scope: Construct, id: string, name: string, entry: string): NodejsFunction {
+function workshopFunction(scope: Construct, id: string, name: string, entry: string, memorySize = 256): NodejsFunction {
   const logGroup = new LogGroup(scope, `${id}Logs`, {
     logGroupName: name,
     retention: RetentionDays.TWO_WEEKS,
@@ -130,7 +146,7 @@ function workshopFunction(scope: Construct, id: string, name: string, entry: str
     handler: "handler",
     runtime: Runtime.NODEJS_22_X,
     architecture: Architecture.ARM_64,
-    memorySize: 256,
+    memorySize,
     timeout: Duration.seconds(10),
     role,
     logGroup,

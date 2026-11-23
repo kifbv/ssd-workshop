@@ -1,5 +1,6 @@
 import type { GetItemCommand, GetItemCommandOutput, PutItemCommand, PutItemCommandOutput } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
+import { SIGN_IN_CODE_PUT_ATTRIBUTES } from "../../../infra/lib/config.js";
 import { DynamoSignInStore, type DynamoSender } from "./store.js";
 
 type Sent = GetItemCommand | PutItemCommand;
@@ -25,15 +26,22 @@ const TABLE = "ssd-workshop-data";
 const EMAIL = "jane@example.com";
 
 describe("DynamoSignInStore", () => {
-  it("finds an allow-list entry by its key, reading only the key", async () => {
-    const { client, sent } = stubClient([{ ...meta, Item: { pk: { S: `EMAIL#${EMAIL}` } } }, meta]);
+  it("finds an allow-list entry by its key, reading only its email (which this function cannot write)", async () => {
+    const { client, sent } = stubClient([
+      { ...meta, Item: { email: { S: EMAIL } } },
+      meta,
+      // An ALLOW item without an email attribute (not written by the import) does not count.
+      { ...meta, Item: {} },
+    ]);
     const store = new DynamoSignInStore(client, TABLE);
     await expect(store.isAllowListed(EMAIL)).resolves.toBe(true);
+    await expect(store.isAllowListed(EMAIL)).resolves.toBe(false);
     await expect(store.isAllowListed(EMAIL)).resolves.toBe(false);
     expect((sent[0] as GetItemCommand).input).toEqual({
       TableName: TABLE,
       Key: { pk: { S: `EMAIL#${EMAIL}` }, sk: { S: "ALLOW" } },
-      ProjectionExpression: "pk",
+      ProjectionExpression: "#email",
+      ExpressionAttributeNames: { "#email": "email" },
     });
   });
 
@@ -87,27 +95,82 @@ describe("DynamoSignInStore", () => {
     await expect(new DynamoSignInStore(client, TABLE).putCodeRequests(EMAIL, [1], 2, undefined)).rejects.toThrow("x");
   });
 
-  it("writes the code item (hash, expiry, attempts 0), replacing any previous code", async () => {
-    const { client, sent } = stubClient([meta]);
-    await new DynamoSignInStore(client, TABLE).putCode(EMAIL, {
-      codeHash: "scrypt$aa$bb",
-      expiresAt: 1600,
-      attempts: 0,
-      createdAt: "2026-11-23T10:00:00.000Z",
+  it("reads the codes item (consistent read), keeping well-formed entries", async () => {
+    const { client, sent } = stubClient([
+      {
+        ...meta,
+        Item: {
+          codes: {
+            L: [
+              { M: { codeHash: { S: "scrypt$aa$bb" }, expiresAt: { N: "1600" } } },
+              { M: { codeHash: { S: "x" } } },
+            ],
+          },
+          attempts: { N: "2" },
+          version: { N: "4" },
+        },
+      },
+      meta,
+    ]);
+    const store = new DynamoSignInStore(client, TABLE);
+    await expect(store.getCode(EMAIL)).resolves.toEqual({
+      codes: [{ codeHash: "scrypt$aa$bb", expiresAt: 1600 }],
+      attempts: 2,
+      version: 4,
     });
-    const input = (sent[0] as PutItemCommand).input;
-    expect(input).toEqual({
+    await expect(store.getCode(EMAIL)).resolves.toBeUndefined();
+    expect((sent[0] as GetItemCommand).input).toMatchObject({
+      Key: { pk: { S: `EMAIL#${EMAIL}` }, sk: { S: "CODE" } },
+      ConsistentRead: true,
+    });
+  });
+
+  it("writes the codes item (entries, shared attempts, version, TTL) only at the version it read", async () => {
+    const conflict = Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
+    const { client, sent } = stubClient([meta, meta, conflict]);
+    const store = new DynamoSignInStore(client, TABLE);
+    const codes = {
+      codes: [
+        { codeHash: "scrypt$aa$bb", expiresAt: 1600 },
+        { codeHash: "scrypt$cc$dd", expiresAt: 1700 },
+      ],
+      attempts: 1,
+      version: 3,
+    };
+    await expect(store.putCode(EMAIL, { ...codes, version: 1 }, 1600, undefined)).resolves.toBe(true);
+    await expect(store.putCode(EMAIL, codes, 1700, 2)).resolves.toBe(true);
+    await expect(store.putCode(EMAIL, codes, 1700, 2)).resolves.toBe(false);
+    expect((sent[0] as PutItemCommand).input).toMatchObject({ ConditionExpression: "attribute_not_exists(pk)" });
+    expect((sent[1] as PutItemCommand).input).toEqual({
       TableName: TABLE,
       Item: {
         pk: { S: `EMAIL#${EMAIL}` },
         sk: { S: "CODE" },
         type: { S: "code" },
-        codeHash: { S: "scrypt$aa$bb" },
-        expiresAt: { N: "1600" },
-        attempts: { N: "0" },
-        createdAt: { S: "2026-11-23T10:00:00.000Z" },
+        codes: {
+          L: [
+            { M: { codeHash: { S: "scrypt$aa$bb" }, expiresAt: { N: "1600" } } },
+            { M: { codeHash: { S: "scrypt$cc$dd" }, expiresAt: { N: "1700" } } },
+          ],
+        },
+        attempts: { N: "1" },
+        version: { N: "3" },
+        expiresAt: { N: "1700" },
       },
+      ConditionExpression: "#version = :expected",
+      ExpressionAttributeNames: { "#version": "version" },
+      ExpressionAttributeValues: { ":expected": { N: "2" } },
     });
-    expect(input.ConditionExpression).toBeUndefined();
+  });
+
+  it("writes only the attribute names the role's PutItem condition allows", async () => {
+    const { client, sent } = stubClient([meta, meta]);
+    const store = new DynamoSignInStore(client, TABLE);
+    await store.putCodeRequests(EMAIL, [1], 2, undefined);
+    await store.putCode(EMAIL, { codes: [{ codeHash: "h", expiresAt: 2 }], attempts: 0, version: 1 }, 2, undefined);
+    for (const command of sent as PutItemCommand[]) {
+      const names = [...Object.keys(command.input.Item ?? {}), ...Object.values(command.input.ExpressionAttributeNames ?? {})];
+      for (const name of names) expect(SIGN_IN_CODE_PUT_ATTRIBUTES).toContain(name);
+    }
   });
 });

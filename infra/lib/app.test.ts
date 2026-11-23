@@ -26,6 +26,7 @@ import {
   STACK_NAMES,
   TABLE_NAME,
 } from "./config.js";
+import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_DIR } from "./site-stack.js";
 
 interface Resource {
@@ -677,6 +678,12 @@ describe("api stack: sign-in code function (ticket 1.4)", () => {
     });
   });
 
+  it("has 512 MB (scrypt runs at a predictable speed) and a 10 s timeout, well above the 3 s answer time", () => {
+    expect(fnEntry()?.[1].Properties).toMatchObject({ MemorySize: 512, Timeout: 10 });
+    expect(ANSWER_AFTER_MS).toBe(3000);
+    expect((fnEntry()?.[1].Properties?.Timeout as number) * 1000).toBeGreaterThanOrEqual(3 * ANSWER_AFTER_MS);
+  });
+
   it("gives the role the /ssd-workshop/ path and the boundary (through the aspect)", () => {
     expect(roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
     expect(roleEntry()?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
@@ -699,7 +706,7 @@ describe("api stack: sign-in code function (ticket 1.4)", () => {
     expect(JSON.stringify(permissions[0]?.[2].Properties?.SourceArn)).toContain("/*/*/api/sign-in/code");
   });
 
-  it("allows only its logs, GetItem/PutItem on the table and SES sends from the workshop address", () => {
+  it("allows only its logs, GetItem/PutItem in EMAIL# partitions (PutItem: code attributes only) and SES sends from the workshop address", () => {
     const role = roleEntry();
     const statements = apiResources()
       .filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties?.Roles).includes(role?.[0] ?? "?"))
@@ -714,8 +721,20 @@ describe("api stack: sign-in code function (ticket 1.4)", () => {
       },
       {
         Effect: "Allow",
-        Action: ["dynamodb:GetItem", "dynamodb:PutItem"],
+        Action: "dynamodb:GetItem",
         Resource: { "Fn::GetAtt": [tableId, "Arn"] },
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: { "Fn::GetAtt": [tableId, "Arn"] },
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] },
+          "ForAllValues:StringEquals": {
+            "dynamodb:Attributes": ["pk", "sk", "type", "codes", "attempts", "sentAt", "version", "expiresAt"],
+          },
+        },
       },
       {
         Effect: "Allow",
