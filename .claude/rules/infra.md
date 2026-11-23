@@ -75,12 +75,20 @@ paths:
   not available as rules (poll `DescribeTasks` or use Step Functions `.sync` instead).
 - Tagging during create: CloudFront distributions and ACM certificates are tagged by CloudFormation in the create call (`TagOnCreateThroughCloudFormation`, requires `aws:CalledVia` CloudFormation and no project tag yet). Create them only through CloudFormation, never with a direct SDK call. CloudFormation resource import is denied.
 - ACM certificates only for `workshop.rankly.games` and `*.workshop.rankly.games`
-  (`acm:DomainNames`).
+  (`acm:DomainNames`). CloudFormation calls `RequestCertificate` without tags and adds them with
+  `AddTagsToCertificate` afterwards, so a request-tag condition alone refuses it
+  (`CertificatesThroughCloudFormation`).
 - SES sends only through the identities `ssd-workshop@rankly.games` and `rankly.games`, from
   `ssd-workshop@rankly.games`, and every send names the configuration set `ssd-workshop-email`
   (`ConfigurationSetName`): without it SES uses the domain's default set `rankly-dev` (another
   project's), which is refused.
-- GitHub OIDC: the role trusts `refs/heads/main`, which also matches `pull_request_target`,
+- IAM roles on a path: before CreateRole, CloudFormation calls `iam:GetRole` by name, and for a
+  role that does not exist yet IAM checks `role/<name>` without the path. The access stack
+  therefore allows `iam:GetRole` (read only) on `role/ssd-workshop-*` as well as `role/ssd-workshop/*`.
+- GitHub OIDC: GitHub sends this repository's subject in the ID form
+  `repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main`, not `repo:kifbv/ssd-workshop:...`;
+  check CloudTrail's `AssumeRoleWithWebIdentity` `userName` when a trust condition fails.
+  The role trusts `refs/heads/main`, which also matches `pull_request_target`,
   `workflow_run`, `issue_comment` and `schedule` jobs on `main`. Only `.github/workflows/deploy.yml`
   may request `id-token: write` (never `write-all`), and it runs only on `push` to `main`
   (tested). Follow-up: a custom OIDC subject with `job_workflow_ref`.
