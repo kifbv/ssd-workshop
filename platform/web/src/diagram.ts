@@ -25,6 +25,8 @@ mermaid.initialize({
 
 let drawings = 0;
 
+// While a diagram draws, these swaps apply to the whole page: other page code must not rely on
+// `setAttribute("style", ...)` or creating a <style> element doing the usual thing in that window.
 /** Runs `work` with Mermaid's inline styles made CSP-safe (see the file comment), then restores the DOM methods. */
 async function withSafeStyles<T>(work: () => Promise<T>): Promise<T> {
   const setAttribute = Element.prototype.setAttribute;

@@ -192,6 +192,8 @@ export function checkSpec(markdown: string): string[] {
   if (spec.title.trim() === "") problems.push("no title line (# App name)");
   if (spec.diagramCount !== 1) problems.push(`${spec.diagramCount} Mermaid diagrams (expected 1)`);
   else if (!/^(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(spec.diagram)) problems.push("the diagram is not a flowchart");
+  // Links and click handlers are never needed and Mermaid draws in "loose" mode (decisions.md (1.9)).
+  else if (/^\s*(click|href|call)\b/m.test(spec.diagram)) problems.push("the diagram has a link or click line");
   const headings = spec.sections.map((s) => s.heading.toLowerCase());
   const expected = SPEC_SECTIONS.map((s) => s.toLowerCase());
   if (headings.join("|") !== expected.join("|")) problems.push(`sections are ${JSON.stringify(spec.sections.map((s) => s.heading))} (expected ${JSON.stringify(SPEC_SECTIONS)})`);

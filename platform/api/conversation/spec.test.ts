@@ -90,6 +90,9 @@ describe("the spec format (criterion 1)", () => {
     expect(checkSpec(SPEC_V1.replace("# Run log", "# Run log\nSome words before the sections."))).toContain("text before the first section");
     expect(checkSpec(SPEC_V1.replace(/```\n\n## What/, "\n## What")).join()).toContain("Mermaid diagrams");
     expect(checkSpec(SPEC_V1 + "x".repeat(8000))).toContain("longer than 8000 characters");
+    for (const line of ["click home href \"https://example.com\"", "  click home callback", "href home \"x\"", "call home()"]) {
+      expect(checkSpec(SPEC_V1.replace("flowchart TD", `flowchart TD\n${line}`))).toContain("the diagram has a link or click line");
+    }
   });
 
   it("splits an answer into its words and the spec block, and spots a cut-off block", () => {
