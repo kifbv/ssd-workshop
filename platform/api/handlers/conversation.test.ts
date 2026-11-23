@@ -93,6 +93,9 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
     await api({ routeKey: "GET /api/conversation", cookies: [`${SESSION_COOKIE}=${TOKEN}`] });
     await api({ routeKey: "POST /api/conversation/step", cookies: [`${SESSION_COOKIE}=${TOKEN}`], headers: { "content-type": "application/json" }, body: '{"step":"spec"}' });
     await api({ routeKey: "POST /api/conversation/step", cookies: [`${SESSION_COOKIE}=${TOKEN}`], headers: { "content-type": "application/json" }, body: JSON.stringify({ step: SECRET_TEXT }) });
+    // Ticket 1.9: the spec and Approve spec.
+    await api({ routeKey: "GET /api/conversation/spec", cookies: [`${SESSION_COOKIE}=${TOKEN}`], queryStringParameters: { version: SECRET_TEXT } });
+    await api({ routeKey: "POST /api/conversation/spec/approve", cookies: [`${SESSION_COOKIE}=${TOKEN}`], headers: { "content-type": "application/json" }, body: JSON.stringify({ version: SECRET_TEXT }) });
 
     const lines = captured.join("\n").split("\n").filter((l) => l.trim() !== "");
     for (const line of lines) expect(() => JSON.parse(line) as unknown, line).not.toThrow();
@@ -107,6 +110,8 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
       '"event":"conversation","route":"history","outcome":"ok"',
       '"event":"conversation","route":"step","outcome":"waiting"',
       '"event":"conversation","route":"step","outcome":"invalid-request"',
+      '"event":"conversation","route":"spec","outcome":"not-found"',
+      '"event":"conversation","route":"approve","outcome":"invalid-request"',
       '"event":"ai-worker","outcome":"done","verdict":"on-path"',
       '"event":"ai-worker","outcome":"declined","verdict":"decline"',
       '"event":"ai-worker","outcome":"failed","error":"ValidationException"',

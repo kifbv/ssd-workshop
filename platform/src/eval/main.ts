@@ -1,22 +1,28 @@
-// `npm run eval -- guardrails | clarify` (tickets 1.7 and 1.8): the real guardrail check, or the real
-// step 1 answer call, against Claude on Bedrock with your own AWS credentials. The scoring lives in
-// ./logic.ts.
+// `npm run eval -- guardrails | clarify | spec` (tickets 1.7, 1.8 and 1.9): the real guardrail check,
+// or the real step 1 or step 2 answer call, against Claude on Bedrock with your own AWS credentials.
+// The scoring lives in ./logic.ts; spec diagrams are parsed and drawn by Mermaid in Chromium (./diagram.ts).
 import { readFileSync } from "node:fs";
 import { Agent, type AgentOptions } from "node:https";
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { answerMessage } from "../../api/conversation/answer.js";
+import { answerMessage, answerRequest } from "../../api/conversation/answer.js";
+import { extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import { checkGuardrail } from "../../api/conversation/guardrail.js";
 import { BedrockModel, usageOf } from "../../api/conversation/model.js";
 import { MODEL_ID, REGION } from "../../api/settings.js";
 import { proxyFromEnv, redactError } from "../smoke/logic.js";
+import { openDiagramChecker } from "./diagram.js";
 import {
   exitCode,
   formatClarifyResult,
   formatClarifySummary,
   formatResult,
+  formatSpecResult,
+  formatSpecSummary,
   formatSummary,
   parseClarifyExamples,
+  parseSpecExamples,
+  runSpecEval,
   parseEvalArgs,
   parseGuardrailExamples,
   runClarifyEval,
@@ -43,6 +49,33 @@ async function main(): Promise<number> {
   });
   const model = new BedrockModel(client, MODEL_ID);
   const file = readFileSync(examplesFile(parsed.suite), "utf8");
+  if (parsed.suite === "spec") {
+    const examples = parseSpecExamples(file);
+    if ("error" in examples) {
+      console.error(examples.error);
+      return 1;
+    }
+    console.log(`Model: ${MODEL_ID} (${REGION}), ${examples.length} examples`);
+    const diagrams = await openDiagramChecker();
+    try {
+      const results = await runSpecEval(
+        examples,
+        async (example) => {
+          // The raw answer to the same request the AI worker sends, so a wrong one can be shown and scored.
+          const { request } = answerRequest("spec", example.history, example.text, example.currentSpec);
+          const reply = await model.converse(request);
+          const spec = extractSpec(reply.text).spec;
+          const diagram = spec === undefined ? undefined : await diagrams.check(parseSpec(spec).diagram);
+          return { text: reply.text, usage: usageOf(reply), ...(diagram === undefined ? {} : { diagram }) };
+        },
+        (result, index) => console.log(formatSpecResult(result, index)),
+      );
+      for (const line of formatSpecSummary(results)) console.log(line);
+      return exitCode(results);
+    } finally {
+      await diagrams.close();
+    }
+  }
   if (parsed.suite === "clarify") {
     const examples = parseClarifyExamples(file);
     if ("error" in examples) {

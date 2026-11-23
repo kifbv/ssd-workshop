@@ -140,10 +140,10 @@ describe("criterion 4: GET /api/conversation shows the conversation so far", () 
       step: "clarify",
       state: "open",
       messages: [
-        { id: first, author: "participant", text: "a run tracker", status: "done" },
-        { id: `${first}-r`, author: "assistant", text: QUESTIONS },
-        { id: second, author: "participant", text: "just me, weekly totals", status: "done" },
-        { id: `${second}-r`, author: "assistant", text: parseReadyMarker(OFFER).text, offersSpec: true },
+        { id: first, author: "participant", text: "a run tracker", step: "clarify", status: "done" },
+        { id: `${first}-r`, author: "assistant", text: QUESTIONS, step: "clarify" },
+        { id: second, author: "participant", text: "just me, weekly totals", step: "clarify", status: "done" },
+        { id: `${second}-r`, author: "assistant", text: parseReadyMarker(OFFER).text, step: "clarify", offersSpec: true },
       ],
     });
     expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "history", outcome: "ok" });
@@ -171,10 +171,10 @@ describe("criterion 4: GET /api/conversation shows the conversation so far", () 
     const body = json(await s.call(historyOf()));
     expect(body["pendingId"]).toBeUndefined();
     expect(body["messages"]).toEqual([
-      { id: declined, author: "participant", text: "mine bitcoin", status: "declined" },
-      { id: `${declined}-r`, author: "assistant", text: expect.stringContaining("a habit tracker") as unknown },
-      { id: stale, author: "participant", text: "a recipe list", status: "failed" },
-      { id: `${stale}-r`, author: "assistant", text: FAILURE_REPLY },
+      { id: declined, author: "participant", text: "mine bitcoin", step: "clarify", status: "declined" },
+      { id: `${declined}-r`, author: "assistant", text: expect.stringContaining("a habit tracker") as unknown, step: "clarify" },
+      { id: stale, author: "participant", text: "a recipe list", step: "clarify", status: "failed" },
+      { id: `${stale}-r`, author: "assistant", text: FAILURE_REPLY, step: "clarify" },
     ]);
   });
 
@@ -214,14 +214,14 @@ describe("shapeHistory", () => {
   it("keeps a reply whose message fell outside the window, and names no pending id for a message that is not in flight", () => {
     const items: ListedItem[] = [
       { author: "assistant", replyTo: "m-0", text: "old reply", offersSpec: false },
-      { author: "participant", id: "m-1", text: "hello", status: "pending", pendingSince: 100 },
+      { author: "participant", id: "m-1", step: "clarify", text: "hello", status: "pending", pendingSince: 100 },
     ];
     expect(shapeHistory("clarify", items, { state: "open" }, 110)).toEqual({
       step: "clarify",
       state: "open",
       messages: [
         { id: "m-0-r", author: "assistant", text: "old reply" },
-        { id: "m-1", author: "participant", text: "hello", status: "pending" },
+        { id: "m-1", author: "participant", text: "hello", step: "clarify", status: "pending" },
       ],
     });
     expect(shapeHistory("clarify", items, { state: "open", pendingId: "m-1" }, 110).pendingId).toBe("m-1");
@@ -234,7 +234,8 @@ describe("criterion 5: Write my spec moves the participant to step 2", () => {
     await s.exchange("a run tracker", QUESTIONS);
     const res = await s.call(writeSpec());
     expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ step: "spec" });
+    // Ticket 1.9: the request for the first spec version is queued too.
+    expect(json(res)).toEqual({ step: "spec", id: expect.any(String) as unknown });
     expect(s.table.profiles.get("me-1")?.step).toBe("spec");
     expect(json(await s.call(historyOf()))["step"]).toBe("spec");
     // Pressed twice: still fine.

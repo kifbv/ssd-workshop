@@ -14,6 +14,7 @@
  * | Assistant reply      | `PARTICIPANT#<id>`     | `MSG#<message id>-r` | never                     |
  * | Conversation state   | `PARTICIPANT#<id>`     | `CONVERSATION`       | never                     |
  * | Usage                | `PARTICIPANT#<id>`     | `USAGE`              | never                     |
+ * | Spec version         | `PARTICIPANT#<id>`     | `SPEC#<0001..9999>`  | never                     |
  * | Nickname claim       | `NICK#<nickname>`      | `NICK`               | never                     |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
@@ -203,6 +204,8 @@ export interface AssistantMessageItem extends Keyed {
   replyTo: string;
   /** Set (true) on an answer in which the AI offered to write the spec (ticket 1.8). */
   offersSpec?: boolean;
+  /** Set on an answer that saved a new version of the spec (ticket 1.9): that version's number. */
+  specVersion?: number;
   /** ISO 8601. */
   createdAt: string;
   /** The participant's text as sent to the model (answers only). */
@@ -236,8 +239,33 @@ export interface ConversationItem extends Keyed {
   pendingId?: string;
   /** Epoch seconds: when `pendingId` (last) became pending. */
   pendingSince?: number;
+  /** The newest spec version (ticket 1.9), written by the AI worker with the version. */
+  latestSpecVersion?: number;
+  /**
+   * The version the participant approved (ticket 1.9). Once set, no message is accepted any more
+   * (until phase 2's build flow takes over).
+   */
+  approvedSpecVersion?: number;
   /** ISO 8601. */
   updatedAt: string;
+}
+
+/**
+ * One version of a participant's spec (ticket 1.9), at `SPEC#<version, 4 digits>`. Written once by
+ * the AI worker, in the transaction that stores the answer that made it; only `approvedAt` is added
+ * later (by the approval). Readers require `specVersion`, which only the AI worker's role may write.
+ */
+export interface SpecItem extends Keyed {
+  type: "spec";
+  specVersion: number;
+  /** The spec as Markdown: a title, a Mermaid diagram and the sections (platform/api/conversation/spec.ts). */
+  text: string;
+  /** The participant message whose answer made this version. */
+  messageId: string;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601: set when the participant approved this version. */
+  approvedAt?: string;
 }
 
 /** Running totals of a participant's AI use (ticket 1.7; the $5 cap is phase 3). */
@@ -257,4 +285,5 @@ export type TableItem =
   | NicknameClaim
   | ConversationMessage
   | ConversationItem
+  | SpecItem
   | UsageItem;

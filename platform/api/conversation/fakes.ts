@@ -10,6 +10,7 @@ import {
   STALE_PENDING_SECONDS,
   textHash,
   type AiJob,
+  type ApproveResult,
   type ConversationStore,
   type CreateResult,
   type Finish,
@@ -19,6 +20,7 @@ import {
   type NewMessage,
   type StoredConversation,
   type StoredMessage,
+  type StoredSpec,
 } from "./state.js";
 
 export interface FakeMessage extends StoredMessage {
@@ -31,6 +33,7 @@ export interface FakeMessage extends StoredMessage {
 export interface FakeReply {
   text: string;
   offersSpec?: boolean;
+  specVersion?: number;
   kind: ReplyKind;
   createdAt: string;
   prompt?: string;
@@ -44,9 +47,27 @@ export interface FakeConversation {
   state: ConversationState;
   pendingId?: string;
   pendingSince?: number;
+  latestSpecVersion?: number;
+  approvedSpecVersion?: number;
+}
+
+export interface FakeSpec {
+  version: number;
+  text: string;
+  messageId: string;
+  createdAt: string;
+  approvedAt?: string;
 }
 
 type Method = keyof ConversationStore;
+
+/** The conversation without its message in flight. */
+function withoutInFlight(c: FakeConversation): FakeConversation {
+  const copy = { ...c };
+  delete copy.pendingId;
+  delete copy.pendingSince;
+  return copy;
+}
 
 export class FakeConversationTable extends FakeTable implements ConversationStore {
   /** Participant messages by participant id, then message id. */
@@ -55,6 +76,8 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   readonly replies = new Map<string, Map<string, FakeReply>>();
   readonly conversations = new Map<string, FakeConversation>();
   readonly usage = new Map<string, TokenUsage>();
+  /** Spec versions by participant id, oldest first (ticket 1.9). */
+  readonly specs = new Map<string, FakeSpec[]>();
   conversationFailOn: Method | undefined;
   /** How many calls of `conversationFailOn` fail before it works again (undefined: every call). */
   conversationFailTimes: number | undefined;
@@ -83,12 +106,13 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   async createMessage(participantId: string, message: NewMessage): Promise<CreateResult> {
     this.fail("createMessage");
     const conversation = this.conversations.get(participantId);
+    if (conversation?.approvedSpecVersion !== undefined) return "approved";
     const free =
       conversation?.pendingId === undefined ||
       (conversation.state === "open" && (conversation.pendingSince ?? 0) < message.nowSeconds - STALE_PENDING_SECONDS);
     if (!free) return conversation?.state === "waiting" ? "waiting" : "busy";
     if (this.messagesOf(participantId).has(message.id)) throw new Error("message id taken");
-    this.conversations.set(participantId, { state: "open", pendingId: message.id, pendingSince: message.nowSeconds });
+    this.conversations.set(participantId, { ...conversation, state: "open", pendingId: message.id, pendingSince: message.nowSeconds });
     this.messagesOf(participantId).set(message.id, {
       id: message.id,
       step: message.step,
@@ -124,7 +148,14 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   async getConversation(participantId: string): Promise<StoredConversation | undefined> {
     this.fail("getConversation");
     const c = this.conversations.get(participantId);
-    return c && { state: c.state, ...(c.pendingId === undefined ? {} : { pendingId: c.pendingId }) };
+    return (
+      c && {
+        state: c.state,
+        ...(c.pendingId === undefined ? {} : { pendingId: c.pendingId }),
+        ...(c.latestSpecVersion === undefined ? {} : { latestSpecVersion: c.latestSpecVersion }),
+        ...(c.approvedSpecVersion === undefined ? {} : { approvedSpecVersion: c.approvedSpecVersion }),
+      }
+    );
   }
 
   async getHistory(participantId: string, beforeMessageId: string): Promise<Exchange[]> {
@@ -142,6 +173,9 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     const conversation = this.conversations.get(participantId);
     if (message === undefined || message.status !== from || conversation?.pendingId !== messageId) return false;
     if (outcome.kind !== "flagged" && this.repliesOf(participantId).has(messageId)) return false;
+    const spec = outcome.kind === "done" ? outcome.spec : undefined;
+    const specs = this.specs.get(participantId) ?? [];
+    if (spec !== undefined && specs.some((v) => v.version === spec.version)) return false;
 
     const status: MessageStatus = outcome.kind;
     const guardrail = outcome.guardrail;
@@ -159,6 +193,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       this.repliesOf(participantId).set(messageId, {
         text: outcome.reply,
         ...(outcome.kind === "done" && outcome.offersSpec === true ? { offersSpec: true } : {}),
+        ...(spec === undefined ? {} : { specVersion: spec.version }),
         kind: outcome.kind === "done" ? "answer" : outcome.kind === "declined" ? "decline" : "failure",
         createdAt: nowIso,
         ...(answer === undefined
@@ -171,7 +206,8 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
               usage: answer.usage,
             }),
       });
-      this.conversations.set(participantId, { state: "open" });
+      this.conversations.set(participantId, { ...withoutInFlight(conversation), state: "open", ...(spec === undefined ? {} : { latestSpecVersion: spec.version }) });
+      if (spec !== undefined) this.specs.set(participantId, [...specs, { version: spec.version, text: spec.text, messageId, createdAt: nowIso }]);
     }
     for (const u of [guardrail?.usage, outcome.kind === "done" ? outcome.answer.usage : undefined]) {
       if (u !== undefined) this.add(participantId, u);
@@ -184,9 +220,14 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     const replies = this.replies.get(participantId) ?? new Map<string, FakeReply>();
     const items: { sk: string; item: ListedItem }[] = [];
     for (const m of this.messages.get(participantId)?.values() ?? []) {
-      items.push({ sk: m.id, item: { author: "participant", id: m.id, text: m.text, status: m.status, pendingSince: m.pendingSince } });
+      items.push({ sk: m.id, item: { author: "participant", id: m.id, step: m.step, text: m.text, status: m.status, pendingSince: m.pendingSince } });
       const r = replies.get(m.id);
-      if (r !== undefined) items.push({ sk: `${m.id}-r`, item: { author: "assistant", replyTo: m.id, text: r.text, offersSpec: r.offersSpec === true } });
+      if (r !== undefined) {
+        items.push({
+          sk: `${m.id}-r`,
+          item: { author: "assistant", replyTo: m.id, text: r.text, offersSpec: r.offersSpec === true, ...(r.specVersion === undefined ? {} : { specVersion: r.specVersion }) },
+        });
+      }
     }
     return items
       .sort((a, b) => (a.sk < b.sk ? -1 : 1))
@@ -204,6 +245,36 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     if (!free) return c.state === "waiting" ? "waiting" : "busy";
     this.profiles.set(participantId, { ...profile, step: "spec" });
     return "moved";
+  }
+
+  async getLatestSpec(participantId: string): Promise<StoredSpec | undefined> {
+    this.fail("getLatestSpec");
+    const spec = this.specs.get(participantId)?.at(-1);
+    return spec && { version: spec.version, text: spec.text, createdAt: spec.createdAt, approved: spec.approvedAt !== undefined };
+  }
+
+  async getSpec(participantId: string, version: number): Promise<StoredSpec | undefined> {
+    this.fail("getSpec");
+    const spec = this.specs.get(participantId)?.find((v) => v.version === version);
+    return spec && { version: spec.version, text: spec.text, createdAt: spec.createdAt, approved: spec.approvedAt !== undefined };
+  }
+
+  async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<ApproveResult> {
+    this.fail("approveSpec");
+    const profile = this.profiles.get(participantId);
+    if (profile?.step !== "spec") return "wrong-step";
+    const c = this.conversations.get(participantId);
+    if (c?.latestSpecVersion === undefined) return "no-spec";
+    if (c.latestSpecVersion !== version) return "stale";
+    if (c.approvedSpecVersion !== undefined) return "busy";
+    const free = c.pendingId === undefined || (c.state === "open" && (c.pendingSince ?? 0) < nowSeconds - STALE_PENDING_SECONDS);
+    if (!free) return c.state === "waiting" ? "waiting" : "busy";
+    const spec = this.specs.get(participantId)?.find((v) => v.version === version);
+    if (spec === undefined) return "no-spec";
+    this.conversations.set(participantId, { ...withoutInFlight(c), approvedSpecVersion: version });
+    this.profiles.set(participantId, { ...profile, step: "approved" });
+    spec.approvedAt = nowIso;
+    return "approved";
   }
 
   async addUsage(participantId: string, usage: TokenUsage): Promise<void> {
@@ -227,7 +298,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     const conversation = this.conversations.get(participantId);
     if (message?.status !== "flagged" || conversation?.state !== "waiting" || conversation.pendingId !== messageId) return false;
     this.messagesOf(participantId).set(messageId, { ...message, status: "pending", approvedTextHash: textHash(text), pendingSince: nowSeconds });
-    this.conversations.set(participantId, { state: "open", pendingId: messageId, pendingSince: nowSeconds });
+    this.conversations.set(participantId, { ...conversation, state: "open", pendingId: messageId, pendingSince: nowSeconds });
     return true;
   }
 

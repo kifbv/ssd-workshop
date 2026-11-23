@@ -13,7 +13,7 @@ import { ACCOUNT, AI_QUEUE_NAME, AI_QUEUE_URL, MODEL_ID, PRICE_PER_MILLION_TOKEN
 import { DEFAULT_MODEL_ID } from "../../src/smoke/logic.js";
 import { BedrockModel, usageOf } from "./model.js";
 import { SqsMessageQueue } from "./queue.js";
-import { FAILURE_REPLY, type Finish } from "./state.js";
+import { FAILURE_REPLY, STALE_PENDING_SECONDS, type Finish } from "./state.js";
 import { DynamoConversationStore, type ConversationSender } from "./store.js";
 
 type Sent = GetItemCommand | QueryCommand | TransactWriteItemsCommand;
@@ -84,7 +84,8 @@ describe("DynamoConversationStore", () => {
     expect(items[0]?.Update).toMatchObject({
       TableName: TABLE,
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "CONVERSATION" } },
-      ConditionExpression: "attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore)",
+      ConditionExpression:
+        "attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
       ExpressionAttributeValues: { ":open": { S: "open" }, ":pendingId": { S: ID }, ":staleBefore": { N: "800" } },
     });
     expect(items[1]?.Update).toMatchObject({
@@ -254,8 +255,9 @@ describe("DynamoConversationStore", () => {
     const { client, sent } = stubClient([
       {
         Items: [
-          { sk: { S: `MSG#${ID}-r` }, author: { S: "assistant" }, text: { S: "Ready." }, offersSpec: { BOOL: true } },
-          { sk: { S: `MSG#${ID}` }, author: { S: "participant" }, text: { S: "weekly" }, status: { S: "done" }, pendingSince: { N: "2000" } },
+          { sk: { S: `MSG#${ID}-r` }, author: { S: "assistant" }, text: { S: "Ready." }, offersSpec: { BOOL: true }, specVersion: { N: "2" } },
+          { sk: { S: `MSG#${ID}` }, author: { S: "participant" }, step: { S: "spec" }, text: { S: "weekly" }, status: { S: "done" }, pendingSince: { N: "2000" } },
+          { sk: { S: "MSG#z" }, author: { S: "participant" }, text: { S: "no step" }, status: { S: "done" }, pendingSince: { N: "1" } },
           { sk: { S: "MSG#x" }, author: { S: "participant" }, text: { S: "bad" }, status: { S: "odd" }, pendingSince: { N: "1" } },
           { sk: { S: "MSG#y-r" }, author: { S: "assistant" }, text: { S: "Who?" } },
         ],
@@ -264,8 +266,8 @@ describe("DynamoConversationStore", () => {
     const items = await new DynamoConversationStore(client, TABLE).listItems("p-1", 50);
     expect(items).toEqual([
       { author: "assistant", replyTo: "y", text: "Who?", offersSpec: false },
-      { author: "participant", id: ID, text: "weekly", status: "done", pendingSince: 2000 },
-      { author: "assistant", replyTo: ID, text: "Ready.", offersSpec: true },
+      { author: "participant", id: ID, step: "spec", text: "weekly", status: "done", pendingSince: 2000 },
+      { author: "assistant", replyTo: ID, text: "Ready.", offersSpec: true, specVersion: 2 },
     ]);
     const input = (sent[0] as QueryCommand).input;
     expect(input).toMatchObject({
@@ -308,6 +310,88 @@ describe("DynamoConversationStore", () => {
     await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).resolves.toBe("waiting");
     await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).resolves.toBe("busy");
     await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).rejects.toThrow("down");
+  });
+
+  it("stores a new spec version with its answer, the reply's specVersion and the conversation's latestSpecVersion, inside the worker's list (ticket 1.9)", async () => {
+    const { client, sent } = stubClient([{}]);
+    const spec: Finish = { ...DONE, spec: { version: 3, text: "# Run log" } } as Finish;
+    await new DynamoConversationStore(client, TABLE).finish("p-1", ID, spec, "pending", NOW_ISO);
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
+    const specItem = items.find((i) => i.Update?.Key?.["sk"]?.S === "SPEC#0003")?.Update;
+    expect(specItem).toMatchObject({
+      Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "SPEC#0003" } },
+      ConditionExpression: "attribute_not_exists(#pk)",
+      ExpressionAttributeValues: { ":type": { S: "spec" }, ":specVersion": { N: "3" }, ":text": { S: "# Run log" }, ":messageId": { S: ID }, ":createdAt": { S: NOW_ISO } },
+    });
+    const reply = items.find((i) => i.Update?.Key?.["sk"]?.S === `MSG#${ID}-r`)?.Update;
+    expect(reply?.ExpressionAttributeValues?.[":specVersion"]).toEqual({ N: "3" });
+    const conversation = items.find((i) => i.Update?.Key?.["sk"]?.S === "CONVERSATION")?.Update;
+    expect(conversation?.ExpressionAttributeValues?.[":latestSpecVersion"]).toEqual({ N: "3" });
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+  });
+
+  it("reads the newest spec version, or one by number, only from items with specVersion (ticket 1.9)", async () => {
+    const item = { sk: { S: "SPEC#0002" }, specVersion: { N: "2" }, text: { S: "# Run log" }, createdAt: { S: NOW_ISO } };
+    const { client, sent } = stubClient([
+      { Items: [item] },
+      { Items: [{ ...item, specVersion: undefined }] },
+      { Items: [] },
+      { Item: { ...item, approvedAt: { S: NOW_ISO } } },
+      { Item: item },
+      {},
+    ]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.getLatestSpec("p-1")).resolves.toEqual({ version: 2, text: "# Run log", createdAt: NOW_ISO, approved: false });
+    // A SPEC# item without specVersion (which only the worker's role may write) is not a spec.
+    await expect(store.getLatestSpec("p-1")).resolves.toBeUndefined();
+    await expect(store.getLatestSpec("p-1")).resolves.toBeUndefined();
+    await expect(store.getSpec("p-1", 2)).resolves.toEqual({ version: 2, text: "# Run log", createdAt: NOW_ISO, approved: true });
+    await expect(store.getSpec("p-1", 3)).resolves.toBeUndefined();
+    await expect(store.getSpec("p-1", 2)).resolves.toBeUndefined();
+    expect((sent[0] as QueryCommand).input).toMatchObject({
+      KeyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": { S: "PARTICIPANT#p-1" }, ":prefix": { S: "SPEC#" } },
+      ScanIndexForward: false,
+      Limit: 1,
+    });
+    expect((sent[3] as GetItemCommand).input.Key).toEqual({ pk: { S: "PARTICIPANT#p-1" }, sk: { S: "SPEC#0002" } });
+  });
+
+  it("approves a version in one transaction inside the conversation function's list, and tells why it could not (ticket 1.9)", async () => {
+    const { client, sent } = stubClient([{}]);
+    await expect(new DynamoConversationStore(client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO)).resolves.toBe("approved");
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
+    expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual(["PROFILE", "CONVERSATION", "SPEC#0002"]);
+    expect(items[0]?.Update).toMatchObject({ ConditionExpression: "#step = :spec", ExpressionAttributeValues: { ":step": { S: "approved" }, ":spec": { S: "spec" } } });
+    expect(items[1]?.Update).toMatchObject({
+      UpdateExpression: "SET #approvedSpecVersion = :approvedSpecVersion, #updatedAt = :updatedAt REMOVE #pendingId, #pendingSince",
+      ConditionExpression:
+        "#latestSpecVersion = :version AND attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+      ExpressionAttributeValues: { ":version": { N: "2" }, ":staleBefore": { N: String(5000 - STALE_PENDING_SECONDS) } },
+    });
+    expect(items[2]?.Update).toMatchObject({ UpdateExpression: "SET #approvedAt = :approvedAt", ConditionExpression: "attribute_exists(#pk)" });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+
+    const conv = (fields: Record<string, unknown>) => ({ Item: { state: { S: "open" }, ...fields } });
+    const cases: [string[], Record<string, unknown> | undefined, string][] = [
+      [["ConditionalCheckFailed", "None", "None"], undefined, "wrong-step"],
+      [["None", "ConditionalCheckFailed", "None"], conv({}), "no-spec"],
+      [["None", "ConditionalCheckFailed", "None"], conv({ latestSpecVersion: { N: "3" } }), "stale"],
+      [["None", "ConditionalCheckFailed", "None"], conv({ latestSpecVersion: { N: "2" }, state: { S: "waiting" } }), "waiting"],
+      [["None", "ConditionalCheckFailed", "None"], conv({ latestSpecVersion: { N: "2" }, pendingId: { S: ID } }), "busy"],
+    ];
+    for (const [codes, read, expected] of cases) {
+      const stub = stubClient(read === undefined ? [cancelled(codes)] : [cancelled(codes), read]);
+      await expect(new DynamoConversationStore(stub.client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO), expected).resolves.toBe(expected);
+    }
+    const down = stubClient([Object.assign(new Error("x"), { name: "InternalServerError" })]);
+    await expect(new DynamoConversationStore(down.client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO)).rejects.toThrow("x");
+  });
+
+  it("refuses a message once the spec is approved (ticket 1.9)", async () => {
+    const { client } = stubClient([cancelled(["ConditionalCheckFailed", "None"]), { Item: { state: { S: "open" }, approvedSpecVersion: { N: "2" } } }]);
+    const msg = { id: ID, step: "spec" as const, text: "x", createdAt: "x", nowSeconds: 1 };
+    await expect(new DynamoConversationStore(client, TABLE).createMessage("p-1", msg)).resolves.toBe("approved");
   });
 
   it("answers false on a lost race and throws anything else", async () => {

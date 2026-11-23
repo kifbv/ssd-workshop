@@ -19,6 +19,12 @@ import {
   runGuardrailEval,
   type GuardrailExample,
   type GuardrailOutcome,
+  formatSpecResult,
+  formatSpecSummary,
+  parseSpecExamples,
+  runSpecEval,
+  scoreSpec,
+  type SpecExample,
 } from "./logic.js";
 
 function must<T>(value: T | undefined): T {
@@ -33,7 +39,8 @@ describe("parseEvalArgs", () => {
     expect(parseEvalArgs(["guardrails"])).toEqual({ suite: "guardrails" });
     expect(parseEvalArgs([])).toEqual({ error: "no suite given" });
     expect(parseEvalArgs(["clarify"])).toEqual({ suite: "clarify" });
-    expect(parseEvalArgs(["spec"])).toEqual({ error: "unknown suite" });
+    expect(parseEvalArgs(["spec"])).toEqual({ suite: "spec" });
+    expect(parseEvalArgs(["specs"])).toEqual({ error: "unknown suite" });
     expect(parseEvalArgs(["guardrails", "x"])).toEqual({ error: "guardrails takes no arguments" });
   });
 });
@@ -205,5 +212,65 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
     ]);
     expect(exitCode(results)).toBe(1);
     expect(exitCode(results.filter((r) => r.pass))).toBe(0);
+  });
+});
+
+describe("spec suite (ticket 1.9)", () => {
+  const SPEC = readFileSync(new URL("../../api/eval/spec.json", import.meta.url), "utf8");
+  const examples = parseSpecExamples(SPEC) as SpecExample[];
+  const current = must(examples.find((e) => e.currentSpec !== undefined)?.currentSpec);
+  const newSpec: SpecExample = { name: "n", check: "new-spec", history: [], text: "Please write my spec.", keywords: ["run"] };
+  const question: SpecExample = { name: "q", check: "keeps-spec", history: [], text: "Why?", currentSpec: current, keywords: [] };
+  const usage = usageOf({ inputTokens: 1000, outputTokens: 400 });
+  const ok = { parses: true, draws: true };
+  const wrapped = (spec: string, words = "Here it is.") => `${words}\n<spec>\n${spec}\n</spec>`;
+
+  it("reads the examples file: the three ideas as first specs, two questions and a change", () => {
+    expect(examples.map((e) => [e.check, e.name])).toEqual([
+      ["new-spec", "fitness tracker: first spec"],
+      ["new-spec", "movies tracker: first spec"],
+      ["new-spec", "nutrition calculator: first spec"],
+      ["keeps-spec", "question about the diagram"],
+      ["keeps-spec", "question about a word"],
+      ["new-spec", "change: add a screen"],
+    ]);
+    expect(parseSpecExamples("{}")).toEqual({ error: "the examples file has no examples list" });
+    expect(parseSpecExamples(JSON.stringify({ examples: [{ name: "x", check: "keeps-spec", text: "Why?" }] }))).toHaveProperty("error");
+    expect(parseSpecExamples(JSON.stringify({ examples: [{ name: "x", check: "new-spec", text: "Go", currentSpec: "# Not a spec" }] }))).toHaveProperty("error");
+  });
+
+  it("passes a new spec of the right shape whose diagram parses and draws and that names the keywords", () => {
+    const text = wrapped(current);
+    expect(scoreSpec(newSpec, { text, usage, diagram: ok })).toEqual({ pass: true, detail: '"Run log": What it does, Screens, Data it keeps and a diagram that parses and draws' });
+    expect(scoreSpec(newSpec, { text, usage, diagram: { parses: false, draws: false } })).toEqual({ pass: false, detail: "the diagram does not parse" });
+    expect(scoreSpec(newSpec, { text, usage, diagram: { parses: true, draws: false } })).toEqual({ pass: false, detail: "the diagram does not draw" });
+    expect(scoreSpec({ ...newSpec, keywords: ["kite"] }, { text, usage, diagram: ok }).detail).toBe("the spec never names kite");
+    expect(scoreSpec(newSpec, { text: "I need more details first.", usage }).detail).toBe("no new spec");
+    expect(scoreSpec(newSpec, { text: `x\n<spec>\n${current}`, usage }).detail).toBe("the spec block is not closed");
+    expect(scoreSpec(newSpec, { text: wrapped(current.replace("## Screens", "## Pages")), usage, diagram: ok }).detail).toContain("sections are");
+  });
+
+  it("passes a question answered without a new spec, and fails one that rewrote the spec", () => {
+    expect(scoreSpec(question, { text: "It is where your runs are kept.", usage })).toEqual({ pass: true, detail: "answered, spec unchanged" });
+    expect(scoreSpec(question, { text: wrapped(current, "Sure."), usage, diagram: ok }).detail).toBe("wrote a new spec for a question");
+    expect(scoreSpec(question, { text: "", usage }).detail).toBe("no answer");
+  });
+
+  it("runs every example, counts errors as failures, prints the answers and sums the cost", async () => {
+    const lines: string[] = [];
+    const results = await runSpecEval(
+      [newSpec, question],
+      async (example) => {
+        if (example.check === "keeps-spec") throw Object.assign(new Error("x"), { name: "ThrottlingException" });
+        return { text: wrapped(current), usage, diagram: ok };
+      },
+      (result, index) => lines.push(formatSpecResult(result, index)),
+    );
+    expect(results.map((r) => r.pass)).toEqual([true, false]);
+    expect(lines[0]).toContain("PASS  1 [new-spec] n:");
+    expect(lines[0]).toContain("     | <spec>");
+    expect(lines[1]).toBe("FAIL  2 [keeps-spec] q: error ThrottlingException");
+    expect(formatSpecSummary(results)).toEqual(["Spec: 1/2 passed", `Tokens: 1000 in, 400 out, cost $${usage.costUsd.toFixed(4)}`, "  new-spec: 1/1", "  keeps-spec: 0/1"]);
+    expect(exitCode(results)).toBe(1);
   });
 });
