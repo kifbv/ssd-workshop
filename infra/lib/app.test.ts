@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudAssembly, CloudFormationStackArtifact } from "aws-cdk-lib/cx-api";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { API_THROTTLE, SIGN_IN_CODE_ROUTE_KEY, SIGN_IN_CODE_THROTTLE, TTL_ATTRIBUTE } from "./api-stack.js";
+import {
+  API_THROTTLE,
+  SIGN_IN_CODE_ROUTE_KEY,
+  SIGN_IN_CODE_THROTTLE,
+  SIGN_IN_VERIFY_ROUTE_KEY,
+  SIGN_IN_VERIFY_THROTTLE,
+  TTL_ATTRIBUTE,
+} from "./api-stack.js";
 import { buildApp } from "./app.js";
 import {
   ACCOUNT,
@@ -20,12 +27,15 @@ import {
   SENDER_ADDRESS,
   SES_CONFIGURATION_SET,
   SIGN_IN_CODE_FUNCTION_NAME,
+  SIGN_IN_VERIFY_FUNCTION_NAME,
+  PARTICIPANT_FUNCTION_NAME,
   REGION,
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
   STACK_NAMES,
   TABLE_NAME,
 } from "./config.js";
+import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_DIR } from "./site-stack.js";
 
@@ -537,13 +547,20 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
 
   it("routes GET /api/health to the health function", () => {
     const routes = ofType("AWS::ApiGatewayV2::Route");
-    expect(routes.map(([, , r]) => r.Properties?.RouteKey)).toEqual(["GET /api/health", "POST /api/sign-in/code"]);
+    expect(routes.map(([, , r]) => r.Properties?.RouteKey)).toEqual([
+      "GET /api/health",
+      "POST /api/sign-in/code",
+      "POST /api/sign-in/verify",
+      "GET /api/me",
+      "POST /api/me/nickname",
+      "GET /api/participants/{id}",
+    ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(2);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(4);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -580,7 +597,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
             { Ref: "AWS::Partition" },
             `:execute-api:${REGION}:${ACCOUNT}:`,
             { Ref: apiId() },
-            expect.stringMatching(/^\/\*\/\*\/api\//),
+            // One route (`/*/*/api/...`), or any route of this API for a function behind several.
+            expect.stringMatching(/^\/\*\/\*\/(api\/.*|\*)$/),
           ],
         ],
       });
@@ -589,7 +607,12 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
 
   it("runs the health function on Node.js 22, arm64, with code from the assets bucket", () => {
     const fns = apiResources().filter(([, r]) => r.Type === "AWS::Lambda::Function");
-    expect(fns.map(([, r]) => r.Properties?.FunctionName)).toEqual([HEALTH_FUNCTION_NAME, SIGN_IN_CODE_FUNCTION_NAME]);
+    expect(fns.map(([, r]) => r.Properties?.FunctionName)).toEqual([
+      HEALTH_FUNCTION_NAME,
+      SIGN_IN_CODE_FUNCTION_NAME,
+      SIGN_IN_VERIFY_FUNCTION_NAME,
+      PARTICIPANT_FUNCTION_NAME,
+    ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
       Runtime: "nodejs22.x",
       Architectures: ["arm64"],
@@ -713,7 +736,7 @@ describe("api stack: sign-in code function (ticket 1.4)", () => {
     const stages = apiResources().filter(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage");
     expect(stages).toHaveLength(1);
     const [, stage] = stages[0] ?? [];
-    expect(stage?.Properties?.RouteSettings).toEqual({
+    expect(stage?.Properties?.RouteSettings).toMatchObject({
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
     });
     const routeId = apiResources().find(
@@ -792,5 +815,228 @@ describe("api stack: sign-in code function (ticket 1.4)", () => {
     } finally {
       console.log = log;
     }
+  });
+});
+
+/** Resources, policy statements and bundle of one API function (ticket 1.5 blocks). */
+function apiFunction(name: string) {
+  const apiResources = () => resources(STACK_NAMES.api);
+  const fnEntry = () => apiResources().find(([, r]) => r.Properties?.FunctionName === name);
+  const roleEntry = () => apiResources().find(([, r]) => r.Type === "AWS::IAM::Role" && r.Properties?.RoleName === name);
+  const statements = () =>
+    apiResources()
+      .filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties?.Roles).includes(roleEntry()?.[0] ?? "?"))
+      .flatMap(([, r]) => (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement);
+  const logGroupId = () => (fnEntry()?.[1].Properties?.LoggingConfig as { LogGroup?: { Ref?: string } }).LogGroup?.Ref;
+  const tableArn = () => ({ "Fn::GetAtt": [apiResources().find(([, r]) => r.Type === "AWS::DynamoDB::Table")?.[0], "Arn"] });
+  const bundle = <T>(): T => {
+    const key = (fnEntry()?.[1].Properties?.Code as { S3Key?: string } | undefined)?.S3Key;
+    const manifest = JSON.parse(readFileSync(join(dir, `${STACK_NAMES.api}.assets.json`), "utf8")) as {
+      files: Record<string, { source: { path: string }; destinations: Record<string, { objectKey: string }> }>;
+    };
+    const asset = Object.values(manifest.files).find((f) => Object.values(f.destinations).some((d) => d.objectKey === key));
+    expect(asset).toBeDefined();
+    return createRequire(import.meta.url)(join(dir, asset?.source.path ?? "?", "index.js")) as T;
+  };
+  const integrationOf = (routeKey: string) => {
+    const route = ofType("AWS::ApiGatewayV2::Route").find(([, , r]) => r.Properties?.RouteKey === routeKey);
+    const target = route?.[2].Properties?.Target as { "Fn::Join": [string, unknown[]] } | undefined;
+    const id = (target?.["Fn::Join"][1][1] as { Ref: string } | undefined)?.Ref;
+    return apiResources().find(([rid]) => rid === id)?.[1].Properties;
+  };
+  const permissions = () =>
+    ofType("AWS::Lambda::Permission").filter(
+      ([, , r]) => JSON.stringify(r.Properties?.FunctionName) === JSON.stringify({ "Fn::GetAtt": [fnEntry()?.[0], "Arn"] }),
+    );
+  return { apiResources, fnEntry, roleEntry, statements, logGroupId, tableArn, bundle, integrationOf, permissions };
+}
+
+const quietly = async <T>(work: () => Promise<T>): Promise<T> => {
+  const log = console.log;
+  console.log = () => undefined;
+  try {
+    return await work();
+  } finally {
+    console.log = log;
+  }
+};
+
+describe("api stack: sign-in verify function (ticket 1.5)", () => {
+  const f = apiFunction(SIGN_IN_VERIFY_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-sign-in-verify; 512 MB, 10 s, Node.js 22 arm64", () => {
+    expect(SIGN_IN_VERIFY_FUNCTION_NAME).toBe("ssd-workshop-api-sign-in-verify");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: 512,
+      Timeout: 10,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect((f.fnEntry()?.[1].Properties?.Timeout as number) * 1000).toBeGreaterThanOrEqual(3 * ANSWER_AFTER_MS);
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({
+      LogGroupName: SIGN_IN_VERIFY_FUNCTION_NAME,
+      RetentionInDays: 14,
+    });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(f.roleEntry()?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
+  });
+
+  it("routes POST /api/sign-in/verify to the function, invoked only by this API from that route", () => {
+    expect(f.integrationOf(SIGN_IN_VERIFY_ROUTE_KEY)).toMatchObject({
+      IntegrationType: "AWS_PROXY",
+      PayloadFormatVersion: "2.0",
+      IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+    });
+    expect(f.permissions()).toHaveLength(1);
+    expect(JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn)).toContain("/*/*/api/sign-in/verify");
+  });
+
+  it("throttles POST /api/sign-in/verify at 5 requests/s, burst 10, on the $default stage (after the route exists)", () => {
+    expect(SIGN_IN_VERIFY_ROUTE_KEY).toBe("POST /api/sign-in/verify");
+    expect(SIGN_IN_VERIFY_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 10 });
+    const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
+    expect(stage?.Properties?.RouteSettings).toEqual({
+      "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+      "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+    });
+    const routeId = f
+      .apiResources()
+      .find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === SIGN_IN_VERIFY_ROUTE_KEY)?.[0];
+    expect([stage?.DependsOn].flat()).toContain(routeId);
+  });
+
+  it("allows only its logs; in EMAIL# GetItem, DeleteItem and UpdateItem of attempts/version/participantId; profile updates without nickname; session puts", () => {
+    expect(f.statements()).toEqual([
+      {
+        Effect: "Allow",
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "attempts", "version", "participantId"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:DeleteItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": {
+            "dynamodb:Attributes": ["pk", "sk", "type", "id", "role", "group", "step", "createdAt"],
+          },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+          "ForAllValues:StringEquals": {
+            "dynamodb:Attributes": ["pk", "sk", "type", "tokenHash", "participantId", "createdAt", "expiresAt"],
+          },
+        },
+      },
+    ]);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers a request without the JSON content type 415", async () => {
+    const bundle = f.bundle<{ handler: (event: { body?: string }) => Promise<{ statusCode: number }> }>();
+    await expect(quietly(() => bundle.handler({ body: "{}" }))).resolves.toMatchObject({ statusCode: 415 });
+  });
+});
+
+describe("api stack: participant function (ticket 1.5)", () => {
+  const f = apiFunction(PARTICIPANT_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-participant; Node.js 22 arm64", () => {
+    expect(PARTICIPANT_FUNCTION_NAME).toBe("ssd-workshop-api-participant");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: 256,
+      Timeout: 10,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({
+      LogGroupName: PARTICIPANT_FUNCTION_NAME,
+      RetentionInDays: 14,
+    });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+  });
+
+  it("routes GET /api/me, POST /api/me/nickname and GET /api/participants/{id} to it, invoked only by this API", () => {
+    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}"]);
+    for (const routeKey of PARTICIPANT_ROUTE_KEYS) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({
+        IntegrationType: "AWS_PROXY",
+        PayloadFormatVersion: "2.0",
+        IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+      });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
+    expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
+    expect(source).toContain('"/*/*/*"');
+  });
+
+  it("allows only its logs, GetItem on sessions and profiles, nickname claim puts and profile updates of nickname and step", () => {
+    expect(f.statements()).toEqual([
+      {
+        Effect: "Allow",
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["NICK#*"] },
+          "ForAllValues:StringEquals": {
+            "dynamodb:Attributes": ["pk", "sk", "type", "nickname", "participantId", "createdAt"],
+          },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "nickname", "step"] },
+        },
+      },
+    ]);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
+    await expect(quietly(() => bundle.handler({ routeKey: "GET /api/me" }))).resolves.toMatchObject({ statusCode: 401 });
   });
 });

@@ -9,7 +9,7 @@
 // failed or still running, so neither the answer's timing nor a timeout tells either.
 import { scrypt as scryptCallback, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import { isValidEmail } from "../email.js";
-import type { HttpRequest, HttpResponse } from "../http.js";
+import { JSON_HEADERS, MAX_BODY_BYTES, MAX_RAW_BODY_BYTES, readJsonObject, type HttpRequest, type HttpResponse } from "../http.js";
 import { normalizeEmail } from "../keys.js";
 import type { CodeEntry } from "../types.js";
 import { buildCodeEmail, type CodeEmail } from "./code-email.js";
@@ -28,14 +28,10 @@ export const MAX_CODES_PER_WINDOW = 5;
 export const MAX_LIVE_CODES = 5;
 /** Tries at the conditional code write when another request wrote in between. */
 const CODE_WRITE_TRIES = 3;
-/** Larger bodies are refused before parsing (an email request is a few dozen bytes). */
-export const MAX_BODY_BYTES = 2048;
-/** The raw body is checked before any decoding (base64 inflates by 4/3, so 4 KB is ample). */
-export const MAX_RAW_BODY_BYTES = 4096;
+/** Body limits, shared with the other JSON routes (../http.ts). */
+export { MAX_BODY_BYTES, MAX_RAW_BODY_BYTES };
 /** RFC 5321: 64 characters of local part, `@`, 255 of domain. */
 export const MAX_EMAIL_LENGTH = 320;
-
-const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" } as const;
 
 export const NEUTRAL_MESSAGE =
   "If this address is on the workshop list, a sign-in code is on its way. It can take a minute; check your Junk folder too.";
@@ -53,18 +49,11 @@ export function badRequestResponse(): HttpResponse {
 
 /** `{"email": "..."}`, possibly base64; returns the normalized address, or undefined when malformed. */
 export function parseCodeRequest(request: HttpRequest): string | undefined {
-  if (typeof request.body !== "string") return undefined;
-  if (Buffer.byteLength(request.body, "utf8") > MAX_RAW_BODY_BYTES) return undefined;
-  const raw = request.isBase64Encoded === true ? Buffer.from(request.body, "base64").toString("utf8") : request.body;
-  if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const email = (parsed as Record<string, unknown>)["email"];
+  return parseEmailField(readJsonObject(request)?.["email"]);
+}
+
+/** A well-formed address, normalized, or undefined (shared with the code check, ticket 1.5). */
+export function parseEmailField(email: unknown): string | undefined {
   if (typeof email !== "string") return undefined;
   const trimmed = email.trim().toLowerCase();
   if (trimmed.length > MAX_EMAIL_LENGTH || !isValidEmail(trimmed)) return undefined;

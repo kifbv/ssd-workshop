@@ -139,3 +139,10 @@ paths:
   attribute that role cannot write. A PutItem still replaces a whole item, so such a role can overwrite another
   item of the partition with only the allowed attributes (sign-in: an `ALLOW` entry, taking that person off the
   list, a denial of service, never added rights); when that matters, give the role its own partition (`CODE#`).
+- `HttpLambdaIntegration` writes a route's path into the Lambda permission's source ARN as is, so a path
+  parameter route (`/api/participants/{id}`) gets a literal `{id}`: for a function behind such a route use
+  `scopePermissionToRoute: false` (one permission, `<api id>/*/*/*`, still this API only).
+- DynamoDB `TransactWriteItems` has no IAM action of its own: each item is authorized as `PutItem`,
+  `UpdateItem`, `DeleteItem` or `ConditionCheckItem`, with its own `LeadingKeys`/`Attributes` conditions.
+  Under a `dynamodb:Attributes` list, return only `UPDATED_NEW`/`UPDATED_OLD`/`NONE` (`ALL_NEW` could
+  return attributes outside it), and list `pk`/`sk` plus every name an expression uses, conditions included.

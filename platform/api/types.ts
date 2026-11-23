@@ -12,10 +12,12 @@
  * | Participant          | `PARTICIPANT#<id>`     | `PROFILE`          | never                     |
  * | Conversation message | `PARTICIPANT#<id>`     | `MSG#<message id>` | never                     |
  * | Usage                | `PARTICIPANT#<id>`     | `USAGE`            | never                     |
+ * | Nickname claim       | `NICK#<nickname>`      | `NICK`             | never                     |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
  *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email`,
  *   and are never logged, shown to other participants or published.
+ * - `<nickname>` in a `NICK#` key is lower-cased, so a nickname is unique regardless of case.
  * - A participant's profile, conversation and usage share one partition, so every
  *   read by a participant names their own id and cannot reach another's items.
  * - Message ids sort by time (they start with the ISO creation time), so a query on
@@ -116,6 +118,19 @@ export interface Participant extends Keyed {
   createdAt: string;
 }
 
+/**
+ * The claim on a nickname (ticket 1.5), keyed by its lower-cased form, so a nickname is unique
+ * regardless of case. Written in one transaction with the participant's nickname.
+ */
+export interface NicknameClaim extends Keyed {
+  type: "nick";
+  /** As the participant typed it. */
+  nickname: string;
+  participantId: string;
+  /** ISO 8601. */
+  createdAt: string;
+}
+
 export type MessageAuthor = "participant" | "assistant";
 
 /** One message of a participant's conversation with the AI (ticket 1.7). */
@@ -155,5 +170,6 @@ export type TableItem =
   | CodeRequestsItem
   | SessionItem
   | Participant
+  | NicknameClaim
   | ConversationMessage
   | UsageItem;

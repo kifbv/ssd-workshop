@@ -25,6 +25,16 @@ const str = (value: string): AttributeValue => ({ S: value });
 const num = (value: number): AttributeValue => ({ N: String(value) });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
 
+/** The codes item as read from the table, keeping only well-formed entries (shared with the code check). */
+export function codesFromItem(item: Record<string, AttributeValue>): StoredCodes {
+  const codes: CodeEntry[] = (item["codes"]?.L ?? []).flatMap((v) => {
+    const codeHash = v.M?.["codeHash"]?.S;
+    const expiresAt = Number(v.M?.["expiresAt"]?.N);
+    return codeHash !== undefined && Number.isFinite(expiresAt) ? [{ codeHash, expiresAt }] : [];
+  });
+  return { codes, attempts: Number(item["attempts"]?.N ?? "0"), version: Number(item["version"]?.N ?? "0") };
+}
+
 export class DynamoSignInStore implements SignInStore {
   constructor(
     private readonly client: DynamoSender,
@@ -75,14 +85,7 @@ export class DynamoSignInStore implements SignInStore {
     const output = await this.client.send(
       new GetItemCommand({ TableName: this.tableName, Key: keyOf(codeKey(email)), ConsistentRead: true }),
     );
-    const item = output.Item;
-    if (item === undefined) return undefined;
-    const codes: CodeEntry[] = (item["codes"]?.L ?? []).flatMap((v) => {
-      const codeHash = v.M?.["codeHash"]?.S;
-      const expiresAt = Number(v.M?.["expiresAt"]?.N);
-      return codeHash !== undefined && Number.isFinite(expiresAt) ? [{ codeHash, expiresAt }] : [];
-    });
-    return { codes, attempts: Number(item["attempts"]?.N ?? "0"), version: Number(item["version"]?.N ?? "0") };
+    return output.Item === undefined ? undefined : codesFromItem(output.Item);
   }
 
   async putCode(
