@@ -293,3 +293,7 @@ The headers policy cannot be changed in place (the deploy rights create custom p
 update or delete them): to change a header, bump `PAGES_HEADERS_POLICY_VERSION` in `infra/lib/config.ts`
 (new name and new logical id, so CloudFormation creates a replacement); the old one stays behind, unused,
 until Franck deletes it.
+
+If the first deploy of this policy fails and rolls back, the retained `ssd-workshop-pages-v1` stays behind
+and the retry fails on its name: delete it in the CloudFront console (Policies, Response headers) or bump
+`PAGES_HEADERS_POLICY_VERSION`, then re-run the deploy.

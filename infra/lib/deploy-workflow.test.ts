@@ -108,6 +108,8 @@ describe("deploy workflow (ticket 0.5)", () => {
     const env = deploySteps[smoke]?.env ?? {};
     expect(env["SITE_URL"]).toMatch(/outputs\.site_url/);
     expect(env["HEADING"]).toMatch(/outputs\.heading/);
+    // Ticket 1.6: the heading also matched the placeholder, so the page's script must answer 200 too.
+    expect(deploySteps[smoke]?.run).toContain('"${SITE_URL}app.js"');
   });
 
   it("calls GET /api/health on the API's own endpoint after the deploy (ticket 1.1 criterion 3)", () => {
