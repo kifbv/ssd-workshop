@@ -159,5 +159,5 @@ Acceptance criteria (each starts as FAIL):
 ## Blocked
 
 - None of the tickets waits on someone else once the questions are answered. The full allow-list waits on Franck, but his own address is enough to test every ticket.
-- Ticket 0.6 (Bedrock and SES smoke checks, pull request #4) is still open, not merged. Tickets 1.4 and 1.7 extend its `npm run smoke` script, so it should be merged first.
+- Ticket 0.6 (Bedrock and SES smoke checks, pull request #4) is still open, not merged. Ticket 1.4 extends its `npm run smoke` script, so it should be merged first.
 - Code emails landing in Junk at the work address also wait on IT allowlisting `ssd-workshop@rankly.games`; ticket 1.4 improves the email itself.
