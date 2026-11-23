@@ -127,3 +127,7 @@ paths:
   A tagged stage is also checked as `apigateway:TagResource` (an action missing from the Service
   Authorization Reference) on `/apis/<id>/stages` (`ApiGatewayTagStagesOnCreate`): AWS error
   messages, not the reference, are the source of truth for tag-on-create actions.
+- CloudFront behaviours that take writes (`/api/*`): viewer protocol `HTTPS_ONLY`, never
+  `REDIRECT_TO_HTTPS` (a redirect turns POST into GET). A value from another region's stack
+  (the API id for the us-east-1 edge stack) is a constant in `config.ts`; recreating that
+  resource means updating the constant.

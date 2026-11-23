@@ -9,6 +9,7 @@ import { buildApp } from "./app.js";
 import {
   ACCOUNT,
   API_NAME,
+  API_ORIGIN_DOMAIN,
   ASSETS_BUCKET_NAME,
   BOUNDARY_ARN,
   DOMAIN,
@@ -365,10 +366,13 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
       },
     });
 
+    // Two origins: the site bucket (default) and, from ticket 1.2, the HTTP API.
     const origins = config.Origins as Record<string, unknown>[];
-    expect(origins).toHaveLength(1);
-    expect(origins[0]).toMatchObject({ DomainName: SITE_BUCKET_REGIONAL_DOMAIN });
-    expect(origins[0]?.OriginAccessControlId).toBeDefined();
+    expect(origins).toHaveLength(2);
+    const siteOrigin = origins.find((o) => o.DomainName === SITE_BUCKET_REGIONAL_DOMAIN);
+    expect(siteOrigin).toBeDefined();
+    expect(siteOrigin?.OriginAccessControlId).toBeDefined();
+    expect((config.DefaultCacheBehavior as Record<string, unknown>).TargetOriginId).toBe(siteOrigin?.Id);
     expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(1);
     // The managed headers policy creates no resource of its own.
     expect(ofType("AWS::CloudFront::ResponseHeadersPolicy")).toEqual([]);
@@ -387,6 +391,71 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
       .map(([, , r]) => r.Type)
       .filter((t) => t.startsWith("AWS::Route53") || t.startsWith("Custom::"));
     expect(new Set(route53Types)).toEqual(new Set(["AWS::Route53::RecordSet", "Custom::CDKBucketDeployment"]));
+  });
+});
+
+describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
+  const distributionConfig = (): Record<string, unknown> =>
+    ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as Record<string, unknown>;
+  const apiBehaviour = (): Record<string, unknown> | undefined =>
+    (distributionConfig().CacheBehaviors as Record<string, unknown>[] | undefined)?.find(
+      (b) => b.PathPattern === "/api/*",
+    );
+
+  it("derives the API origin domain from the live API id in eu-central-1", () => {
+    expect(API_ORIGIN_DOMAIN).toBe(`ut2mzqmbb4.execute-api.${REGION}.amazonaws.com`);
+  });
+
+  it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
+    const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
+    expect(behaviours).toHaveLength(1);
+    const behaviour = apiBehaviour();
+    expect(behaviour).toMatchObject({
+      PathPattern: "/api/*",
+      // Managed CachingDisabled.
+      CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+      // Managed AllViewerExceptHostHeader: cookies, query strings and headers except Host.
+      OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac",
+      // Managed SecurityHeadersPolicy, as on the pages.
+      ResponseHeadersPolicyId: "67f7725c-6f97-4210-82d7-5512b31e9d03",
+      // A redirect would turn a POST into a GET: refuse plain HTTP instead.
+      ViewerProtocolPolicy: "https-only",
+    });
+    expect([...(behaviour?.AllowedMethods as string[])].sort()).toEqual(
+      ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"].sort(),
+    );
+    expect(behaviour?.ForwardedValues).toBeUndefined();
+
+    const origins = distributionConfig().Origins as Record<string, unknown>[];
+    const apiOrigin = origins.find((o) => o.Id === behaviour?.TargetOriginId);
+    expect(apiOrigin).toMatchObject({
+      DomainName: API_ORIGIN_DOMAIN,
+      CustomOriginConfig: { OriginProtocolPolicy: "https-only" },
+    });
+    expect(apiOrigin?.OriginAccessControlId).toBeUndefined();
+  });
+
+  it("uses managed policies only (no new untaggable CloudFront resource)", () => {
+    for (const type of [
+      "AWS::CloudFront::CachePolicy",
+      "AWS::CloudFront::OriginRequestPolicy",
+      "AWS::CloudFront::ResponseHeadersPolicy",
+      "AWS::CloudFront::Function",
+    ]) {
+      expect(ofType(type), type).toEqual([]);
+    }
+  });
+
+  it("still creates exactly the A and AAAA records for workshop.rankly.games, and no other Route53 record", () => {
+    const records = ofType("AWS::Route53::RecordSet");
+    expect(records).toHaveLength(2);
+    expect(records.every(([s]) => s === STACK_NAMES.edge)).toBe(true);
+    expect(records.map(([, , r]) => `${String(r.Properties?.Type)} ${String(r.Properties?.Name)}`).sort()).toEqual([
+      `A ${DOMAIN}.`,
+      `AAAA ${DOMAIN}.`,
+    ]);
+    expect(ofType("AWS::Route53::RecordSetGroup")).toEqual([]);
+    expect(ofType("AWS::Route53::HostedZone")).toEqual([]);
   });
 });
 
