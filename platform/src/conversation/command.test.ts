@@ -236,7 +236,7 @@ describe("npm run conversation -- reset <nickname>", () => {
     expect(err[1]).toBe("Ada has not reached step 1 yet; there is nothing to reset.");
   });
 
-  it("WHEN the table fails THEN it prints the redacted error and how to finish, and never a message text", async () => {
+  it("WHEN the table fails THEN it prints only the error's name and how to finish, and never a message text", async () => {
     const { deps, out, err, store } = setup();
     store.deleteItems = async () => {
       throw Object.assign(new Error(`throttled near ${SECRET}; key PARTICIPANT#p-ada MSG#2026-11-23T09:00:00.000Z`), {
