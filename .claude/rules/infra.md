@@ -153,3 +153,12 @@ paths:
   and the logical id (a new name alone is an in-place update), or the deploy fails on `UpdateResponseHeadersPolicy`.
 - The site stack builds the pages (`buildWeb`, esbuild) at synth time into `cdk.out/ssd-workshop-web` and uploads that
   folder, not `platform/web`: a new static file must be added to `STATIC_FILES` in `platform/web/build.ts`.
+- A Lambda function cannot invoke another (the boundary has no `lambda:InvokeFunction`, and invoke permissions
+  are only for API Gateway, EventBridge, SNS and S3): hand work off through an `ssd-workshop-*` SQS queue and an
+  event source mapping (ticket 1.7), with identity-based rights only (no queue policy: `sqs:AddPermission` is denied).
+- An SQS-fed Lambda (batch size 1) gets a visibility timeout just above its timeout, and the last redelivery
+  (`(maxReceiveCount - 1) x visibility + timeout`) must end before any "stale" cutoff the code uses, or retries find
+  the work stale and the dead-letter queue never fills (ticket 1.7, tested in `app.test.ts`). Cap workers that call
+  Bedrock with `maxConcurrency` on the event source.
+- In tests, `expect.not.arrayContaining([a, b])` passes unless all of `a` and `b` are present: check each forbidden
+  name with its own `not.toContain`.

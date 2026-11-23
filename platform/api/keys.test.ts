@@ -11,6 +11,10 @@ import {
   participantKey,
   sessionKey,
   usageKey,
+  conversationKey,
+  MESSAGE_ID_PATTERN,
+  newMessageId,
+  replyId,
 } from "./keys.js";
 
 describe("normalizeEmail", () => {
@@ -76,5 +80,37 @@ describe("item keys", () => {
       expect(String(e)).not.toContain("secret");
       expect(String(e)).not.toContain("example.com");
     }
+  });
+});
+
+describe("conversation keys (ticket 1.7)", () => {
+  const NOW = new Date("2026-11-23T10:00:00.000Z");
+
+  it("makes time-sortable message ids from the clock and 8 random bytes", () => {
+    const id = newMessageId(NOW, (n) => Buffer.alloc(n, 0xab));
+    expect(id).toBe("2026-11-23T10:00:00.000Z-abababababababab");
+    expect(id).toMatch(MESSAGE_ID_PATTERN);
+    const later = newMessageId(new Date("2026-11-23T10:00:00.001Z"), (n) => Buffer.alloc(n, 0));
+    expect([later, id].sort()).toEqual([id, later]);
+    expect(() => newMessageId(NOW, () => Buffer.alloc(4))).toThrow(/length/);
+  });
+
+  it("refuses anything but a message id in the pattern", () => {
+    for (const bad of ["", "x", "2026-11-23T10:00:00.000Z", "2026-11-23T10:00:00.000Z-ABABABABABABABAB", "2026-11-23T10:00:00.000Z-abababababababab-r"]) {
+      expect(MESSAGE_ID_PATTERN.test(bad), bad).toBe(false);
+    }
+  });
+
+  it("sorts a reply right after its message and before the next message", () => {
+    const first = newMessageId(NOW, (n) => Buffer.alloc(n, 0xff));
+    const next = newMessageId(new Date("2026-11-23T10:00:00.001Z"), (n) => Buffer.alloc(n, 0));
+    expect(replyId(first)).toBe(`${first}-r`);
+    expect([next, replyId(first), first].sort()).toEqual([first, replyId(first), next]);
+    expect(messageKey("p-1", replyId(first))).toEqual({ pk: "PARTICIPANT#p-1", sk: `MSG#${first}-r` });
+  });
+
+  it("keeps the conversation state in the participant's partition", () => {
+    expect(conversationKey("p-1")).toEqual({ pk: "PARTICIPANT#p-1", sk: "CONVERSATION" });
+    expect(() => conversationKey("a#b")).toThrow(/separator/);
   });
 });

@@ -17,7 +17,9 @@
     "test": "vitest run --passWithNoTests",
     "synth": "npm run synth -w infra",
     "smoke": "npm run -s smoke -w platform --",
-    "allowlist": "npm run -s allowlist -w platform --"
+    "allowlist": "npm run -s allowlist -w platform --",
+    "flags": "npm run -s flags -w platform --",
+    "eval": "npm run -s eval -w platform --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

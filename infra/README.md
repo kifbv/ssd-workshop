@@ -297,3 +297,42 @@ until Franck deletes it.
 If the first deploy of this policy fails and rolls back, the retained `ssd-workshop-pages-v1` stays behind
 and the retry fails on its name: delete it in the CloudFront console (Policies, Response headers) or bump
 `PAGES_HEADERS_POLICY_VERSION`, then re-run the deploy.
+
+## Check after the conversation deploy (ticket 1.7)
+
+The first live message proves the new roles' rights (DynamoDB attribute conditions, the queue, the event
+source mapping and Bedrock through the EU profile are only checked by AWS). From Franck's machine, signed
+in as in the 1.5 check (same `JAR` cookie jar, before it is removed), until ticket 1.8's page exists:
+
+```sh
+curl -sS -b "$JAR" -H 'content-type: application/json' --data '{"text":"I would like a habit tracker for my runs"}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation/messages
+# expect: {"id":"2026-...Z-<16 hex>"} and 202, at once
+ID=<the id above>
+curl -sS -b "$JAR" -w '\n%{http_code}\n' "https://workshop.rankly.games/api/conversation/messages/$ID"
+# expect: {"id":"...","status":"pending"} and 200 at first; within about 30 seconds
+#         {"id":"...","status":"done","reply":"<a short question about the idea>"} and 200
+curl -sS -b "$JAR" -w '\n%{http_code}\n' "https://workshop.rankly.games/api/conversation/messages/2026-01-01T00:00:00.000Z-0000000000000000"
+# expect: {"message":"Not found."} and 404
+```
+
+Then, with Franck's own AWS credentials, the guardrail eval against the live model (about $0.05):
+
+```sh
+npm run eval -- guardrails
+# expect: one PASS line per example, "Guardrails: 20/20 passed", exit code 0
+npm run flags -- list
+# expect: "Waiting for a decision: 0" (or each flagged participant's nickname, message and the guardrail's reason)
+```
+
+A flagged message (e.g. "an app that tells people which medicine to take") shows `"status":"flagged"`;
+`npm run flags -- approve <nickname>` lets it through to the AI, `npm run flags -- reject <nickname>`
+declines it politely; either way the participant can write again.
+
+On a failure, the log groups `ssd-workshop-api-conversation` and `ssd-workshop-api-ai-worker` have one
+JSON line per request or job with its outcome and the AWS error name (e.g. `AccessDeniedException`); they
+never hold the message, the prompt, the reply, an id or the nickname. A job the worker throws back
+(`"outcome":"error"`, e.g. after the final write failed 3 times) is delivered again by SQS about 5.5 minutes
+later (visibility timeout 330 s); one that failed three times lands in `ssd-workshop-ai-messages-dlq`
+(14 days), and the participant sees the message as failed after 20 minutes and can send it again. At most
+5 workers run at once; more messages wait in the queue.
