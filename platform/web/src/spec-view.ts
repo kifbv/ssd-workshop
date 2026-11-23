@@ -22,6 +22,7 @@ export const SPEC_TEXTS = {
   noDiagram: "The diagram could not be drawn. Ask the AI to fix it, or read it as text below.",
   diagramText: "Diagram as text",
   empty: "Please write a message first.",
+  seeVersion: (version: number): string => `See version ${version} of the spec`,
 } as const;
 
 const show = (message: string, tone: Tone = "error"): Show => ({ kind: "show", message, tone });

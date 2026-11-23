@@ -315,6 +315,7 @@ interface MockMessage {
   status?: string;
   offersSpec?: boolean;
   step?: string;
+  specVersion?: number;
 }
 
 const QUESTIONS = "A run log for you.\n1. Who is it for?\n2. What do you record?\n3. What can wait?";
@@ -366,7 +367,7 @@ function fakeConversation(start: MockMessage[] = [], step = "clarify") {
     const reply = state.messages.find((m) => m.id === `${id}-r`);
     return { status: 200, body: { id, status: message?.status ?? "pending", ...(reply ? { reply: reply.text } : {}) } };
   };
-  for (let n = 1; n <= 5; n++) handlers[pollPath(`m${n}`)] = pollHandler(`m${n}`);
+  for (let n = 1; n <= 9; n++) handlers[pollPath(`m${n}`)] = pollHandler(`m${n}`);
   return { state, handlers, answer, flag };
 }
 
@@ -624,7 +625,10 @@ function fakeSpecApi(step = "spec", specs: string[] = [SPEC_1]) {
   const answer = (reply: string, newSpec?: string) => {
     base.answer(reply);
     must(base.state.messages.at(-1)).step = "spec";
-    if (newSpec !== undefined) spec.versions.push(newSpec);
+    if (newSpec !== undefined) {
+      spec.versions.push(newSpec);
+      must(base.state.messages.at(-1)).specVersion = spec.versions.length;
+    }
   };
   const conversationBody = () => {
     const body = must(base.handlers["GET /api/conversation"])({ method: "GET", path: "", contentType: undefined, body: null }).body as Record<string, unknown>;
@@ -668,7 +672,8 @@ function fakeSpecApi(step = "spec", specs: string[] = [SPEC_1]) {
   return { ...base, spec, handlers, answer };
 }
 
-const specBubbles = () => page.locator("#spec-chat .bubble").allTextContents();
+/** Each bubble's words, without the "See version n" button a reply that saved a version carries. */
+const specBubbles = () => page.locator("#spec-chat .bubble").evaluateAll((items) => items.map((item) => item.firstChild?.textContent ?? ""));
 
 /** The diagram is a decoded picture with pixels drawn, within the card, above the spec's sections. */
 async function expectDiagramPicture(viewportWidth: number): Promise<void> {
@@ -796,6 +801,47 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
     expect(await page.getByRole("button", { name: "Approve spec" }).isEnabled()).toBe(true);
     await expectNoSideScroll();
   }, 30_000);
+
+  it("WHEN a change saves a new version THEN the page scrolls the new spec into view, and the reply links back to it (live check fix)", async () => {
+    const api = fakeSpecApi();
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 1");
+    const specInView = () =>
+      page.locator("#spec-doc").evaluate((el) => {
+        const box = el.getBoundingClientRect();
+        return box.top >= -1 && box.top < window.innerHeight;
+      });
+
+    // A few questions first, so the conversation pushes the spec far above the form on a phone.
+    for (const question of ["What does the cylinder mean?", "What is a screen?", "Why four screens at most?"]) {
+      await page.getByRole("textbox", { name: "Ask a question or ask for a change" }).fill(question);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+      api.answer(`An answer to "${question}" that is long enough to take a few lines on a phone, so the page grows.`);
+      await expect.poll(() => page.locator("#spec-typing").isVisible(), { timeout: 6000 }).toBe(false);
+    }
+    // A question leaves the reader where they are: no jump to the spec.
+    expect(await specInView()).toBe(false);
+    expect(await page.locator("#spec-chat .bubble button").count()).toBe(0);
+
+    await page.getByRole("textbox", { name: "Ask a question or ask for a change" }).fill("Please add a screen with my longest run.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    expect(await specInView()).toBe(false);
+    api.answer("I added a Longest run screen. Here is the updated spec!", SPEC_2);
+    await expect.poll(() => page.locator("#spec-version").textContent(), { timeout: 6000 }).toBe("Version 2");
+    await expect.poll(specInView).toBe(true);
+
+    // The reply that saved the version offers a way back to it.
+    const back = page.locator("#spec-chat .bubble").last().getByRole("button", { name: "See version 2 of the spec" });
+    expect(await back.isVisible()).toBe(true);
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await expect.poll(specInView).toBe(false);
+    await back.click();
+    await expect.poll(specInView).toBe(true);
+    await expectNoSideScroll();
+  }, 40_000);
 
   it("WHEN the participant presses Approve spec THEN the version is approved, the page says the build comes next, and changes are closed (criterion 4)", async () => {
     const api = fakeSpecApi("spec", [SPEC_1, SPEC_2]);
