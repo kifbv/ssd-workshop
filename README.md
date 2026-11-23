@@ -24,4 +24,27 @@ npm run typecheck
 npm test
 ```
 
+## Allow-list (ticket 1.3)
+
+Only people on the allow-list can sign in. Franck loads it from his own machine, with his own AWS
+credentials (default credential chain; they need `dynamodb:UpdateItem` and `dynamodb:Scan` on the
+`ssd-workshop-data` table in `eu-central-1`):
+
+```
+npm run -s allowlist -- import /path/outside/the/repo/people.csv
+npm run -s allowlist -- list
+```
+
+- The CSV starts with the header `email,group,role`; one person per line, no quoted fields. Role is
+  `participant`, `facilitator` or `admin`; emails are stored trimmed and lower-cased. A group that
+  holds an `@` is rejected, so an address pasted in the wrong column is never stored.
+- Give the file as an absolute path (a relative path is refused). It must stay outside this
+  repository and outside any other git work tree (no folder above it holds a `.git`): such a path is
+  refused, symlinks included, and so is a file with more than one hard link or a path that is not a
+  file. `*.csv` is also in `.gitignore`. A "bare" dotfiles repository (`git --git-dir=~/.cfg
+  --work-tree=~`) leaves no `.git` to find, so keep the file out of any such work tree yourself.
+- `import` prints how many people were added, updated and rejected, and the line number and reason
+  of each rejected line; importing again updates group and role. `list` prints counts per group and
+  role. Neither ever prints an address.
+
 Licence: [MIT](LICENSE).

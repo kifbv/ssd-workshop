@@ -1,0 +1,305 @@
+import { execFileSync } from "node:child_process";
+import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { findRepoRoot, runAllowlist, type CommandDeps } from "./command.js";
+import type { GroupRole } from "./logic.js";
+import type { AllowListInput, AllowListStore } from "./store.js";
+
+/** In-memory allow-list with the same contract as the DynamoDB store. */
+class FakeStore implements AllowListStore {
+  readonly items = new Map<string, AllowListInput & { createdAt: string; participantId?: string }>();
+  private clock = 0;
+
+  async upsert(entry: AllowListInput): Promise<"added" | "updated"> {
+    const existing = this.items.get(entry.email);
+    if (existing) {
+      this.items.set(entry.email, { ...existing, group: entry.group, role: entry.role });
+      return "updated";
+    }
+    this.items.set(entry.email, { ...entry, createdAt: `t${this.clock++}` });
+    return "added";
+  }
+
+  async listAll(): Promise<GroupRole[]> {
+    return [...this.items.values()].map(({ group, role }) => ({ group, role }));
+  }
+}
+
+const repoRoot = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
+
+let dir: string;
+let store: FakeStore;
+let stdout: string[];
+let stderr: string[];
+let storesCreated: number;
+
+function deps(overrides: Partial<CommandDeps> = {}): CommandDeps {
+  return {
+    repoRoot,
+    createStore: () => {
+      storesCreated++;
+      return store;
+    },
+    out: (line) => stdout.push(line),
+    err: (line) => stderr.push(line),
+    ...overrides,
+  };
+}
+
+const output = (): string => [...stdout, ...stderr].join("\n");
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "ssd-workshop-allowlist-"));
+  store = new FakeStore();
+  stdout = [];
+  stderr = [];
+  storesCreated = 0;
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const PEOPLE = [
+  "email,group,role",
+  "  Jane.Doe@Example.COM ,alpha,participant",
+  "bob@example.org,alpha,facilitator",
+  "not-an-email,alpha,participant",
+  "carol@example.com,beta,boss",
+  "dave@example.com,,admin",
+  "erin@example.com,beta,admin",
+  "jane.doe@example.com,beta,admin",
+  "",
+].join("\n");
+const ADDRESSES = ["jane.doe@example.com", "Jane.Doe@Example.COM", "bob@example.org", "not-an-email", "carol@example.com", "dave@example.com", "erin@example.com"];
+
+describe("findRepoRoot", () => {
+  it("finds the monorepo root (the package.json with workspaces)", () => {
+    expect(relative(repoRoot, fileURLToPath(import.meta.url))).toBe(join("platform", "src", "allowlist", "command.test.ts"));
+  });
+});
+
+describe("allowlist import", () => {
+  it("criterion 1: stores each row once, lower-cased and trimmed, and prints only counts", async () => {
+    writeFileSync(join(dir, "people.csv"), PEOPLE);
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(0);
+
+    expect([...store.items.keys()].sort()).toEqual(["bob@example.org", "erin@example.com", "jane.doe@example.com"]);
+    expect(store.items.get("jane.doe@example.com")).toMatchObject({ group: "alpha", role: "participant" });
+    expect(stdout.join("\n")).toBe(
+      [
+        "Added: 3",
+        "Updated: 0",
+        "Rejected: 4",
+        "Line 4: invalid email",
+        "Line 5: unknown role",
+        "Line 6: empty group",
+        "Line 8: duplicate of line 2",
+      ].join("\n"),
+    );
+    expect(stderr).toEqual([]);
+  });
+
+  it("criterion 1: a second import updates group and role and keeps createdAt", async () => {
+    const file = join(dir, "people.csv");
+    writeFileSync(file, "email,group,role\na@example.com,alpha,participant\n");
+    await runAllowlist(["import", file], deps());
+    const createdAt = store.items.get("a@example.com")?.createdAt;
+
+    writeFileSync(file, "email,group,role\nA@example.com,beta,facilitator\nb@example.com,beta,participant\n");
+    stdout = [];
+    expect(await runAllowlist(["import", file], deps())).toBe(0);
+    expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 1\nRejected: 0");
+    expect(store.items.get("a@example.com")).toEqual({ email: "a@example.com", group: "beta", role: "facilitator", createdAt });
+    expect(store.items.size).toBe(2);
+  });
+
+  it("criterion 2: bad rows are rejected with their line numbers while the others are imported", async () => {
+    writeFileSync(join(dir, "people.csv"), "email,group,role\nbad,g,participant\nok@example.com,g,admin\nok2@example.com,g,root\nok3@example.com, ,admin\n");
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(0);
+    expect([...store.items.keys()]).toEqual(["ok@example.com"]);
+    expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 0\nRejected: 3\nLine 2: invalid email\nLine 4: unknown role\nLine 5: empty group");
+  });
+
+  it("criteria 1 and 3: import then list print no email address from the file", async () => {
+    writeFileSync(join(dir, "people.csv"), PEOPLE);
+    await runAllowlist(["import", join(dir, "people.csv")], deps());
+    await runAllowlist(["import", join(dir, "people.csv")], deps());
+    expect(await runAllowlist(["list"], deps())).toBe(0);
+
+    const text = output();
+    for (const address of ADDRESSES) expect(text).not.toContain(address);
+    expect(text).not.toMatch(/@/);
+    expect(stdout.at(-1)).toBe(
+      ["Group  Role         Count", "alpha  participant      1", "alpha  facilitator      1", "beta   admin            1", "Total                   3"].join("\n"),
+    );
+  });
+
+  it("criterion 2: rejects an address pasted in the group column and never prints it", async () => {
+    writeFileSync(join(dir, "people.csv"), "email,group,role\nalpha,jane.doe@example.com,participant\nok@example.com,g,admin\n");
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(0);
+    expect([...store.items.values()].map((i) => i.group)).toEqual(["g"]);
+    expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 0\nRejected: 1\nLine 2: invalid email, group looks like an email address");
+    expect(await runAllowlist(["list"], deps())).toBe(0);
+    expect(output()).not.toMatch(/@/);
+  });
+
+  it("refuses a file without the header and imports nothing", async () => {
+    writeFileSync(join(dir, "people.csv"), "a@example.com,g,participant\n");
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(1);
+    expect(stderr).toEqual(["Nothing imported: the first line must be the header email,group,role."]);
+    expect(storesCreated).toBe(0);
+  });
+
+  it("refuses a missing file before any AWS call", async () => {
+    expect(await runAllowlist(["import", join(dir, "missing.csv")], deps())).toBe(1);
+    expect(stderr).toEqual(["CSV file not found."]);
+    expect(storesCreated).toBe(0);
+  });
+
+  it("prints a store error redacted, after the counts so far, and exits 1", async () => {
+    writeFileSync(join(dir, "people.csv"), "email,group,role\na@example.com,g,participant\nb@example.com,g,participant\n");
+    const failing: AllowListStore = {
+      upsert: async (entry) => {
+        if (entry.email === "b@example.com") throw new Error(`AccessDenied on EMAIL#${entry.email}`);
+        return "added";
+      },
+      listAll: async () => [],
+    };
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps({ createStore: () => failing }))).toBe(1);
+    expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 0\nRejected: 0");
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toBe("Allow-list import failed: Error: AccessDenied on E***@e***.com");
+    expect(output()).not.toContain("b@example.com");
+  });
+});
+
+describe("allowlist path refusal", () => {
+  it("criterion 4: refuses a CSV path inside the repository, even one that does not exist", async () => {
+    for (const file of [join(repoRoot, "people.csv"), join(repoRoot, "docs", "people.csv"), join(repoRoot, "package.json")]) {
+      stderr = [];
+      expect(await runAllowlist(["import", file], deps())).toBe(1);
+      expect(stderr[0]).toMatch(/^Refused: the CSV file is inside the repository/);
+    }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a relative path, wherever it leads, before reading it", async () => {
+    writeFileSync(join(dir, "people.csv"), "email,group,role\na@example.com,g,participant\n");
+    for (const file of ["platform/package.json", "people.csv", "../people.csv", "./people.csv"]) {
+      stderr = [];
+      expect(await runAllowlist(["import", file], deps())).toBe(1);
+      expect(stderr).toEqual(["Refused: give an absolute path to the CSV file."]);
+    }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a path into the repository written in another letter case", async () => {
+    for (const file of [join(repoRoot.toUpperCase(), "people.csv"), join(repoRoot.toLowerCase(), "Docs", "People.CSV")]) {
+      stderr = [];
+      expect(await runAllowlist(["import", file], deps())).toBe(1);
+      expect(stderr[0]).toMatch(/^Refused: the CSV file is inside the repository/);
+    }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a CSV inside any other git work tree, also through a symlink", async () => {
+    const other = join(dir, "other-repo");
+    mkdirSync(join(other, "sub"), { recursive: true });
+    execFileSync("git", ["init", "-q", other], { stdio: "ignore" });
+    const csv = "email,group,role\na@example.com,g,participant\n";
+    writeFileSync(join(other, "people.csv"), csv);
+    writeFileSync(join(other, "sub", "people.csv"), csv);
+    const link = join(dir, "link.csv");
+    symlinkSync(join(other, "sub", "people.csv"), link);
+    for (const file of [join(other, "people.csv"), join(other, "sub", "people.csv"), link]) {
+      stderr = [];
+      expect(await runAllowlist(["import", file], deps())).toBe(1);
+      expect(stderr).toEqual(["Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git."]);
+    }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a CSV below a folder whose .git is a plain file (worktree or submodule form)", async () => {
+    const other = join(dir, "worktree");
+    mkdirSync(join(other, "sub"), { recursive: true });
+    writeFileSync(join(other, ".git"), "gitdir: /somewhere/else/.git/worktrees/x\n");
+    const csv = "email,group,role\na@example.com,g,participant\n";
+    writeFileSync(join(other, "people.csv"), csv);
+    writeFileSync(join(other, "sub", "people.csv"), csv);
+    for (const file of [join(other, "people.csv"), join(other, "sub", "people.csv")]) {
+      stderr = [];
+      expect(await runAllowlist(["import", file], deps())).toBe(1);
+      expect(stderr).toEqual(["Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git."]);
+    }
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a CSV inside a git work tree whatever the git environment says", async () => {
+    const other = join(dir, "other-repo");
+    mkdirSync(other);
+    execFileSync("git", ["init", "-q", other], { stdio: "ignore" });
+    writeFileSync(join(other, "people.csv"), "email,group,role\na@example.com,g,participant\n");
+    const saved = { ceiling: process.env["GIT_CEILING_DIRECTORIES"], path: process.env["PATH"] };
+    process.env["GIT_CEILING_DIRECTORIES"] = dir;
+    process.env["PATH"] = "";
+    try {
+      expect(await runAllowlist(["import", join(other, "people.csv")], deps())).toBe(1);
+    } finally {
+      if (saved.ceiling === undefined) delete process.env["GIT_CEILING_DIRECTORIES"];
+      else process.env["GIT_CEILING_DIRECTORIES"] = saved.ceiling;
+      process.env["PATH"] = saved.path;
+    }
+    expect(stderr).toEqual(["Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git."]);
+    expect(storesCreated).toBe(0);
+  });
+
+  it("refuses a CSV path that is a directory", async () => {
+    mkdirSync(join(dir, "people.csv"));
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(1);
+    expect(stderr).toEqual(["Refused: the CSV path is not a file."]);
+    expect(storesCreated).toBe(0);
+  });
+
+  it("criterion 4: refuses a file with more than one hard link (realpath cannot follow them)", async () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "ssd-workshop-allowlist-"));
+    try {
+      const original = join(elsewhere, "people.csv");
+      writeFileSync(original, "email,group,role\na@example.com,g,participant\n");
+      linkSync(original, join(dir, "people.csv"));
+      for (const file of [join(dir, "people.csv"), original]) {
+        stderr = [];
+        expect(await runAllowlist(["import", file], deps())).toBe(1);
+        expect(stderr).toEqual(["Refused: the CSV file has more than one hard link. Use a plain copy outside any git repository."]);
+      }
+      expect(storesCreated).toBe(0);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("criterion 4: refuses a symlink outside the repository that points into it", async () => {
+    const link = join(dir, "people.csv");
+    symlinkSync(join(repoRoot, "package.json"), link);
+    expect(await runAllowlist(["import", link], deps())).toBe(1);
+    expect(stderr[0]).toMatch(/^Refused/);
+    expect(storesCreated).toBe(0);
+  });
+
+  it("accepts a file in a temporary directory outside the repository", async () => {
+    writeFileSync(join(dir, "people.csv"), "email,group,role\na@example.com,g,participant\n");
+    expect(await runAllowlist(["import", join(dir, "people.csv")], deps())).toBe(0);
+    expect(storesCreated).toBe(1);
+  });
+});
+
+describe("allowlist usage", () => {
+  it("prints usage and exits 1 on an unknown command, before any AWS call", async () => {
+    expect(await runAllowlist(["remove"], deps())).toBe(1);
+    expect(stderr[0]).toMatch(/^unknown command\n\nUsage: npm run -s allowlist -- <command>/);
+    expect(storesCreated).toBe(0);
+  });
+});
