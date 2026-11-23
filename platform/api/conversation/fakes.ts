@@ -8,6 +8,7 @@ import type { Exchange } from "./answer.js";
 import type { ModelClient, ModelReply, ModelRequest } from "./model.js";
 import {
   STALE_PENDING_SECONDS,
+  textHash,
   type AiJob,
   type ConversationStore,
   type CreateResult,
@@ -52,9 +53,16 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   readonly conversations = new Map<string, FakeConversation>();
   readonly usage = new Map<string, TokenUsage>();
   conversationFailOn: Method | undefined;
+  /** How many calls of `conversationFailOn` fail before it works again (undefined: every call). */
+  conversationFailTimes: number | undefined;
 
   private fail(method: Method): void {
-    if (this.conversationFailOn === method) throw Object.assign(new Error("table down"), { name: "InternalServerError" });
+    if (this.conversationFailOn !== method) return;
+    if (this.conversationFailTimes !== undefined) {
+      if (this.conversationFailTimes <= 0) return;
+      this.conversationFailTimes--;
+    }
+    throw Object.assign(new Error("table down"), { name: "InternalServerError" });
   }
 
   private messagesOf(participantId: string): Map<string, FakeMessage> {
@@ -84,7 +92,6 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       text: message.text,
       status: "pending",
       pendingSince: message.nowSeconds,
-      approved: false,
       createdAt: message.createdAt,
     });
     return "created";
@@ -100,8 +107,9 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       text: m.text,
       status: m.status,
       pendingSince: m.pendingSince,
-      approved: m.approved,
+      ...(m.approvedTextHash === undefined ? {} : { approvedTextHash: m.approvedTextHash }),
       ...(m.suggestion === undefined ? {} : { suggestion: m.suggestion }),
+      ...(m.verdictReason === undefined ? {} : { verdictReason: m.verdictReason }),
     };
   }
 
@@ -161,26 +169,33 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       });
       this.conversations.set(participantId, { state: "open" });
     }
-    const added = [guardrail?.usage, outcome.kind === "done" ? outcome.answer.usage : undefined];
-    for (const u of added) {
-      if (u === undefined) continue;
-      const total = this.usage.get(participantId) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
-      this.usage.set(participantId, {
-        inputTokens: total.inputTokens + u.inputTokens,
-        outputTokens: total.outputTokens + u.outputTokens,
-        costUsd: total.costUsd + u.costUsd,
-      });
+    for (const u of [guardrail?.usage, outcome.kind === "done" ? outcome.answer.usage : undefined]) {
+      if (u !== undefined) this.add(participantId, u);
     }
     return true;
   }
 
-  /** Like the flags command's approval: the flagged message goes back to pending, approved. */
-  async approve(participantId: string, messageId: string, nowSeconds: number): Promise<boolean> {
+  async addUsage(participantId: string, usage: TokenUsage): Promise<void> {
+    this.fail("addUsage");
+    if (usage.inputTokens + usage.outputTokens > 0) this.add(participantId, usage);
+  }
+
+  private add(participantId: string, u: TokenUsage): void {
+    const total = this.usage.get(participantId) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    this.usage.set(participantId, {
+      inputTokens: total.inputTokens + u.inputTokens,
+      outputTokens: total.outputTokens + u.outputTokens,
+      costUsd: total.costUsd + u.costUsd,
+    });
+  }
+
+  /** Like the flags command's approval: the flagged message goes back to pending, approved for its text. */
+  async approve(participantId: string, messageId: string, text: string, nowSeconds: number): Promise<boolean> {
     this.fail("finish");
     const message = this.messages.get(participantId)?.get(messageId);
     const conversation = this.conversations.get(participantId);
     if (message?.status !== "flagged" || conversation?.state !== "waiting" || conversation.pendingId !== messageId) return false;
-    this.messagesOf(participantId).set(messageId, { ...message, status: "pending", approved: true, pendingSince: nowSeconds });
+    this.messagesOf(participantId).set(messageId, { ...message, status: "pending", approvedTextHash: textHash(text), pendingSince: nowSeconds });
     this.conversations.set(participantId, { state: "open", pendingId: messageId, pendingSince: nowSeconds });
     return true;
   }

@@ -133,7 +133,7 @@ export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
  * The attribute names the conversation function may update in `PARTICIPANT#*` (UpdateItem only, so
  * it can never replace or empty an item): a new message, the conversation's state and message in
  * flight, and the failure reply when the queue refuses a message. Never `role`, `group`, `nickname`,
- * `id` or `approved`.
+ * `id` or `approvedTextHash`.
  */
 export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "pk",
@@ -156,8 +156,8 @@ export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
 /**
  * The attribute names the AI worker may update in `PARTICIPANT#*` (UpdateItem only): a message's
  * status and guardrail result, the reply with its prompt, tokens and cost, the conversation's state
- * and the usage totals. Never `step`, `role`, `group`, `nickname`, `id` or `approved` (only a
- * facilitator's approval sets it, and it skips the guardrail check).
+ * and the usage totals. Never `step`, `role`, `group`, `nickname`, `id` or `approvedTextHash` (only a
+ * facilitator's approval sets it, and it skips the guardrail check for that exact text).
  */
 export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { GetItemCommand, ScanCommand, TransactWriteItemsCommand, type TransactWriteItem } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
 import { handleConversationRequest, POLL_ROUTE, SEND_ROUTE, type ConversationDeps } from "../../api/conversation/conversation.js";
@@ -8,7 +9,7 @@ import { processJob } from "../../api/conversation/worker.js";
 import type { HttpRequest } from "../../api/http.js";
 import { hashToken, SESSION_COOKIE } from "../../api/session/session.js";
 import { MODEL_ID } from "../../api/settings.js";
-import { parseFlagsArgs, runFlags, type FlagsDeps } from "./command.js";
+import { parseFlagsArgs, runFlags, terminalSafe, type FlagsDeps } from "./command.js";
 import { DynamoFlagsStore, type FlagsSender } from "./store.js";
 
 const NOW = new Date("2026-11-23T10:00:00.000Z");
@@ -100,12 +101,29 @@ describe("criterion 4: npm run flags -- approve|reject <nickname>", () => {
     expect(s.queue.sent).toHaveLength(0);
   });
 
-  it("lists the waiting nicknames with a count, never a text, an id or an email", async () => {
+  it("lists each waiting nickname with the flagged message and the guardrail's reason, never an id or an email", async () => {
     const s = await setupFlagged();
     expect(await runFlags(["list"], s.deps)).toBe(0);
-    expect(s.out).toEqual(["Waiting for a decision: 1", "  Ada"]);
+    expect(s.out).toEqual(["Waiting for a decision: 1", "", "Ada", `  Message: ${TEXT}`, "  Flagged because: medical advice"]);
     const printed = [...s.out, ...s.err].join("\n");
-    for (const secret of [TEXT, "pills", "p-ada", s.id]) expect(printed).not.toContain(secret);
+    for (const secret of ["p-ada", s.id, "@"]) expect(printed).not.toContain(secret);
+  });
+
+  it("prints a participant's text without terminal control characters", async () => {
+    const s = await setupFlagged();
+    const message = s.table.messages.get("p-ada")?.get(s.id);
+    if (message) message.text = "pills\u001b[2J\nfor all\u202e";
+    expect(await runFlags(["list"], s.deps)).toBe(0);
+    expect(s.out[3]).toBe("  Message: pills [2J for all ");
+    expect(terminalSafe("a\tb\rc\u0007d")).toBe("a b c d");
+  });
+
+  it("lists nothing when no one is waiting", async () => {
+    const s = await setupFlagged();
+    await runFlags(["reject", "Ada"], s.deps);
+    s.out.length = 0;
+    expect(await runFlags(["list"], s.deps)).toBe(0);
+    expect(s.out).toEqual(["Waiting for a decision: 0"]);
   });
 
   it("refuses usage errors before creating a store", async () => {
@@ -177,15 +195,18 @@ describe("DynamoFlagsStore", () => {
     expect((sent[0] as ScanCommand).input).toMatchObject({ ProjectionExpression: "#pk", FilterExpression: "#type = :conversation AND #state = :waiting" });
   });
 
-  it("approves in one transaction: the message back to pending and approved, the conversation open", async () => {
+  it("approves in one transaction: the message back to pending, approved for its text's SHA-256, the conversation open", async () => {
     const { store, sent } = stub([{}]);
-    await expect(store.approve("p-1", "m-1", 1000, "2026-11-23T10:00:00.000Z")).resolves.toBe(true);
+    await expect(store.approve("p-1", "m-1", "a weather app", 1000, "2026-11-23T10:00:00.000Z")).resolves.toBe(true);
     const items = ((sent[0] as TransactWriteItemsCommand).input.TransactItems ?? []) as TransactWriteItem[];
+    const hash = createHash("sha256").update("a weather app").digest("hex");
     expect(items[0]?.Update).toMatchObject({
       Key: { sk: { S: "MSG#m-1" } },
       ConditionExpression: "#status = :flagged",
-      ExpressionAttributeValues: { ":status": { S: "pending" }, ":approved": { BOOL: true }, ":pendingSince": { N: "1000" } },
+      ExpressionAttributeValues: { ":status": { S: "pending" }, ":approvedTextHash": { S: hash }, ":pendingSince": { N: "1000" } },
     });
+    expect(JSON.stringify(items)).not.toContain("a weather app");
+    expect(JSON.stringify(items)).not.toContain(":approved\"");
     expect(items[1]?.Update).toMatchObject({
       Key: { sk: { S: "CONVERSATION" } },
       ConditionExpression: "#state = :waiting AND #pendingId = :messageId",

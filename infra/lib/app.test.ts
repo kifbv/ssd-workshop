@@ -13,8 +13,11 @@ import {
   TTL_ATTRIBUTE,
   AI_QUEUE_MAX_RECEIVES,
   AI_QUEUE_VISIBILITY_SECONDS,
+  AI_WORKER_MAX_CONCURRENCY,
   AI_WORKER_TIMEOUT_SECONDS,
 } from "./api-stack.js";
+import { STALE_PENDING_SECONDS } from "../../platform/api/conversation/state.js";
+import { WRITE_RESERVE_MS } from "../../platform/api/handlers/ai-worker.js";
 import { CONVERSATION_ROUTES as CONVERSATION_ROUTE_KEYS } from "../../platform/api/conversation/conversation.js";
 import { buildApp } from "./app.js";
 import {
@@ -1133,22 +1136,35 @@ describe("api stack: conversation queue (ticket 1.7)", () => {
     expect(ofType("AWS::SQS::QueuePolicy")).toEqual([]);
   });
 
-  it("hides a job for six times the worker's timeout and moves it to the dead-letter queue after 3 receives", () => {
+  it("hides a job just longer than the worker's timeout and moves it to the dead-letter queue after 3 receives", () => {
     expect(AI_WORKER_TIMEOUT_SECONDS).toBe(300);
     expect(queue(AI_QUEUE_NAME)?.[1].Properties).toMatchObject({
       VisibilityTimeout: AI_QUEUE_VISIBILITY_SECONDS,
       RedrivePolicy: { deadLetterTargetArn: { "Fn::GetAtt": [queue(AI_DLQ_NAME)?.[0], "Arn"] }, maxReceiveCount: AI_QUEUE_MAX_RECEIVES },
     });
-    expect(AI_QUEUE_VISIBILITY_SECONDS).toBe(1800);
+    expect(AI_QUEUE_VISIBILITY_SECONDS).toBe(330);
     expect(AI_QUEUE_MAX_RECEIVES).toBe(3);
   });
 
-  it("feeds the worker one job at a time through a tagged event source mapping", () => {
+  it("delivers a crashed job again, up to the last receive, while its message is still pending (not stale)", () => {
+    // SQS refuses a Lambda source whose visibility timeout is shorter than the function's timeout.
+    expect(AI_QUEUE_VISIBILITY_SECONDS).toBeGreaterThan(AI_WORKER_TIMEOUT_SECONDS);
+    // The last delivery starts after (receives - 1) visibility timeouts and may run the full timeout.
+    const lastRunEnds = (AI_QUEUE_MAX_RECEIVES - 1) * AI_QUEUE_VISIBILITY_SECONDS + AI_WORKER_TIMEOUT_SECONDS;
+    expect(lastRunEnds).toBe(960);
+    expect(lastRunEnds).toBeLessThan(STALE_PENDING_SECONDS);
+    // The AI calls stop before the timeout, leaving the write reserve for the final write and its retries.
+    expect(WRITE_RESERVE_MS).toBeLessThan(AI_WORKER_TIMEOUT_SECONDS * 1000);
+  });
+
+  it("feeds the worker one job at a time, at most 5 workers at once, through a tagged event source mapping", () => {
     const mappings = ofType("AWS::Lambda::EventSourceMapping");
     expect(mappings).toHaveLength(1);
     const worker = apiFunction(AI_WORKER_FUNCTION_NAME);
+    expect(AI_WORKER_MAX_CONCURRENCY).toBe(5);
     expect(mappings[0]?.[2].Properties).toMatchObject({
       BatchSize: 1,
+      ScalingConfig: { MaximumConcurrency: 5 },
       EventSourceArn: { "Fn::GetAtt": [queue(AI_QUEUE_NAME)?.[0], "Arn"] },
       FunctionName: { Ref: worker.fnEntry()?.[0] },
       Tags: [{ Key: "project", Value: "ssd-workshop" }],
@@ -1245,7 +1261,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": expect.not.arrayContaining(["approved", "step", "role", "group", "nickname", "id"]) },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": expect.not.arrayContaining(["approved", "approvedTextHash", "step", "role", "group", "nickname", "id"]) },
         },
       },
       {
@@ -1262,6 +1278,18 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         Resource: queueArn,
       },
     ]);
+    // Each forbidden name on its own (not.arrayContaining only fails when all of them are listed). The
+    // approval marker skips the guardrail check: neither Lambda role may write it.
+    const workerUpdate = f.statements().find((st) => st.Action === "dynamodb:UpdateItem") as
+      | { Condition: { "ForAllValues:StringEquals": { "dynamodb:Attributes": string[] } } }
+      | undefined;
+    const conversationUpdate = apiFunction(CONVERSATION_FUNCTION_NAME).statements().find((st) => st.Action === "dynamodb:UpdateItem") as typeof workerUpdate;
+    for (const update of [workerUpdate, conversationUpdate]) {
+      const names = update?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
+      expect(names?.length).toBeGreaterThan(5);
+      for (const forbidden of ["approved", "approvedTextHash", "role", "group", "nickname", "id"]) expect(names, forbidden).not.toContain(forbidden);
+    }
+    expect(workerUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"]).not.toContain("step");
   });
 
   it("bundles the handler into a self-contained index.js that skips a malformed job without any AWS call", async () => {

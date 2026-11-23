@@ -17,7 +17,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { conversationKey, MESSAGE_PREFIX, messageKey, replyId, REPLY_SUFFIX, usageKey, type ItemKey } from "../keys.js";
 import { isStep } from "../session/session.js";
-import type { ConversationState, MessageStatus } from "../types.js";
+import type { ConversationState, MessageStatus, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 import { addUsage } from "./model.js";
 import {
@@ -159,14 +159,17 @@ export class DynamoConversationStore implements ConversationStore {
       return undefined;
     }
     const suggestion = item["suggestion"]?.S;
+    const verdictReason = item["verdictReason"]?.S;
+    const approvedTextHash = item["approvedTextHash"]?.S;
     return {
       id: messageId,
       step,
       text,
       status,
       pendingSince,
-      approved: item["approved"]?.BOOL === true,
+      ...(approvedTextHash === undefined ? {} : { approvedTextHash }),
       ...(suggestion === undefined ? {} : { suggestion }),
+      ...(verdictReason === undefined ? {} : { verdictReason }),
     };
   }
 
@@ -285,17 +288,7 @@ export class DynamoConversationStore implements ConversationStore {
       );
     }
     const total = addUsage(guardrail?.usage, outcome.kind === "done" ? outcome.answer.usage : undefined);
-    if (total.inputTokens + total.outputTokens > 0) {
-      items.push(
-        setItem(
-          this.tableName,
-          usageKey(participantId),
-          { type: str("usage"), participantId: str(participantId), updatedAt: str(nowIso) },
-          undefined,
-          { add: { inputTokens: num(total.inputTokens), outputTokens: num(total.outputTokens), costUsd: num(total.costUsd) } },
-        ),
-      );
-    }
+    if (total.inputTokens + total.outputTokens > 0) items.push(this.usageItem(participantId, total, nowIso));
     try {
       await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));
       return true;
@@ -303,5 +296,21 @@ export class DynamoConversationStore implements ConversationStore {
       if (conditionFailed(error)) return false;
       throw error;
     }
+  }
+
+  async addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void> {
+    if (usage.inputTokens + usage.outputTokens === 0) return;
+    await this.client.send(new TransactWriteItemsCommand({ TransactItems: [this.usageItem(participantId, usage, nowIso)] }));
+  }
+
+  /** The atomic ADD of tokens and cost to the participant's `USAGE` totals. */
+  private usageItem(participantId: string, usage: TokenUsage, nowIso: string): TransactWriteItem {
+    return setItem(
+      this.tableName,
+      usageKey(participantId),
+      { type: str("usage"), participantId: str(participantId), updatedAt: str(nowIso) },
+      undefined,
+      { add: { inputTokens: num(usage.inputTokens), outputTokens: num(usage.outputTokens), costUsd: num(usage.costUsd) } },
+    );
   }
 }

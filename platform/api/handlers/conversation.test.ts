@@ -3,7 +3,7 @@ import { FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "../co
 import type { HttpRequest } from "../http.js";
 import { hashToken, SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
-import { aiDeadlineMs, createHandler as createWorker, logEntry as workerLogEntry, WRITE_RESERVE_MS } from "./ai-worker.js";
+import { aiDeadlineMs, createHandler as createWorker, JOB_FAILED, logEntry as workerLogEntry, WRITE_RESERVE_MS } from "./ai-worker.js";
 import { createHandler, handler, logEntry } from "./conversation.js";
 
 const NOW = new Date("2026-11-23T10:00:00.000Z");
@@ -76,6 +76,18 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
     await runQueued();
     await api(send(SECRET_TEXT));
     await api({ ...send("x"), body: `{"text": "${SECRET_TEXT}", oops}` });
+    // A job whose table read throws an error carrying the text: logged by name only, rethrown bare.
+    const failing = createWorker({
+      store: { getMessage: async () => Promise.reject(Object.assign(new Error(`read failed: ${SECRET_TEXT}`), { name: "ProvisionedThroughputExceededException" })) } as never,
+      model,
+      modelId: MODEL_ID,
+      now: () => clock,
+      log: workerLogEntry,
+    });
+    const thrown = await failing({ Records: [{ body: JSON.stringify({ participantId: "p-secret-id", messageId: first.id }) }] }).catch((e: unknown) => e);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(JOB_FAILED);
+    expect(JSON.stringify(thrown) + String((thrown as Error).stack) + String((thrown as Error).cause)).not.toContain(SECRET_TEXT);
     await api({ routeKey: "GET /api/conversation/messages/{id}", cookies: [`${SESSION_COOKIE}=${TOKEN}`], pathParameters: { id: SECRET_TEXT } });
 
     const lines = captured.join("\n").split("\n").filter((l) => l.trim() !== "");
@@ -92,6 +104,7 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
       '"event":"ai-worker","outcome":"declined","verdict":"decline"',
       '"event":"ai-worker","outcome":"failed","error":"ValidationException"',
       '"event":"ai-worker","outcome":"flagged","verdict":"flag"',
+      '{"event":"ai-worker","outcome":"error","error":"ProvisionedThroughputExceededException"}',
     ]) {
       expect(logs, expected).toContain(expected);
     }

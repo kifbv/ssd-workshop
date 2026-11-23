@@ -1,13 +1,22 @@
 // The conversation's records and the store interface shared by the API routes, the AI worker and
 // the flags command (ticket 1.7). The DynamoDB adapter is ./store.ts; tests use ./fakes.ts.
+import { createHash } from "node:crypto";
 import type { ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 
 /**
  * A pending message older than this counts as failed (shown so, and no longer blocking a new
- * message): the worker is done in at most 5 minutes, so only a crashed worker leaves one behind.
+ * message). A worker run takes at most 5 minutes, and SQS starts a crashed job again after the
+ * queue's visibility timeout (330 s), at most 3 times in all: the last run starts by about
+ * 2 x 330 s and ends by about 960 s, so only a job that crashed 3 times (or waited long in the
+ * queue) leaves a message pending this long. infra/lib/app.test.ts checks the timings fit.
  */
-export const STALE_PENDING_SECONDS = 600;
+export const STALE_PENDING_SECONDS = 1200;
+
+/** The SHA-256 (hex) of a message text: what a facilitator's approval is tied to. */
+export function textHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
 
 /** The neutral reply when the AI call fails. */
 export const FAILURE_REPLY = "Sorry, something went wrong. Please send your message again.";
@@ -20,8 +29,11 @@ export interface StoredMessage {
   status: MessageStatus;
   /** Epoch seconds. */
   pendingSince: number;
-  approved: boolean;
+  /** The SHA-256 of the text a facilitator approved (see textHash), if any. */
+  approvedTextHash?: string;
   suggestion?: string;
+  /** The guardrail's reason, for the facilitator. */
+  verdictReason?: string;
 }
 
 export interface StoredConversation {
@@ -93,6 +105,11 @@ export interface ConversationStore {
    * conversation's message in flight (nothing written).
    */
   finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean>;
+  /**
+   * Adds tokens and cost to the participant's usage totals on their own: only when the final write
+   * failed for good, so tokens already spent are still counted.
+   */
+  addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void>;
 }
 
 /** Hands a stored message to the AI worker: ids only, never the text. */

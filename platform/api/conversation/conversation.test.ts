@@ -15,7 +15,7 @@ import {
 import { FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "./fakes.js";
 import { GUARDRAIL_SYSTEM_PROMPT } from "./guardrail.js";
 import { FAILURE_REPLY, STALE_PENDING_SECONDS, jobBody, parseJob } from "./state.js";
-import { processJob, type WorkerDeps, type WorkerLogEntry } from "./worker.js";
+import { FINISH_ATTEMPTS, FINISH_BACKOFF_MS, processJob, type WorkerDeps, type WorkerLogEntry } from "./worker.js";
 
 /** The value, or a thrown error when it is missing (instead of a non-null assertion). */
 function must<T>(value: T | undefined): T {
@@ -49,7 +49,17 @@ function setup() {
     randomBytes: (n) => Buffer.alloc(n, ++counter),
     log: (e) => logs.push(e),
   };
-  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, now: () => clock, log: (e) => workerLogs.push(e) };
+  const sleeps: number[] = [];
+  const workerDeps: WorkerDeps = {
+    store: table,
+    model,
+    modelId: MODEL_ID,
+    now: () => clock,
+    log: (e) => workerLogs.push(e),
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+  };
   const advance = (seconds: number) => {
     clock = new Date(clock.getTime() + seconds * 1000);
   };
@@ -59,7 +69,7 @@ function setup() {
     while (queue.sent.length > 0) outcomes.push(await processJob(parseJob(jobBody(must(queue.sent.shift()))), workerDeps));
     return outcomes;
   };
-  return { table, queue, model, logs, workerLogs, deps, workerDeps, advance, drain };
+  return { table, queue, model, logs, workerLogs, deps, workerDeps, advance, drain, sleeps };
 }
 
 const send = (text: unknown, t: string = MINE, contentType = "application/json"): HttpRequest => ({
@@ -227,8 +237,8 @@ describe("criterion 3: a flagged message waits for the facilitator", () => {
     expect(s.table.conversations.get("me-1")).toMatchObject({ state: "waiting", pendingId: id });
     expect(json(await handleConversationRequest(poll(id), s.deps))).toEqual({ id, status: "flagged" });
 
-    // Refused while waiting, also long after (a flag never goes stale).
-    for (const wait of [1, STALE_PENDING_SECONDS * 3]) {
+    // Refused while waiting, also long after (a flag never goes stale; the session lasts an hour).
+    for (const wait of [1, STALE_PENDING_SECONDS * 2]) {
       s.advance(wait);
       const refused = await handleConversationRequest(send("hello?"), s.deps);
       expect(refused.statusCode).toBe(409);
@@ -253,12 +263,27 @@ describe("criterion 3: a flagged message waits for the facilitator", () => {
     const id = json(await handleConversationRequest(send("an app with a weather API"), s.deps))["id"] as string;
     s.model.push(verdictReply("flag"));
     await s.drain();
-    expect(await s.table.approve("me-1", id, START_S + 60)).toBe(true);
+    expect(await s.table.approve("me-1", id, "an app with a weather API", START_S + 60)).toBe(true);
     s.queue.sent.push({ participantId: "me-1", messageId: id });
     s.model.push(ANSWER);
     expect(await s.drain()).toEqual(["done"]);
     expect(s.model.requests.map((r) => r.system)).toEqual([GUARDRAIL_SYSTEM_PROMPT, CLARIFY_SYSTEM_PROMPT]);
     expect(json(await handleConversationRequest(poll(id), s.deps))).toMatchObject({ status: "done", reply: ANSWER.text });
+  });
+
+  it("checks an approved message again when its text changed after the approval", async () => {
+    const s = setup();
+    const id = json(await handleConversationRequest(send("an app with a weather API"), s.deps))["id"] as string;
+    s.model.push(verdictReply("flag"));
+    await s.drain();
+    expect(await s.table.approve("me-1", id, "an app with a weather API", START_S + 60)).toBe(true);
+    // Someone rewrites the approved message's text before the worker runs.
+    must(s.table.messages.get("me-1")?.get(id)).text = "mine bitcoin on the workshop servers";
+    s.queue.sent.push({ participantId: "me-1", messageId: id });
+    s.model.push(verdictReply("decline", "a quiz about coins"));
+    expect(await s.drain()).toEqual(["declined"]);
+    expect(s.model.requests.map((r) => r.system)).toEqual([GUARDRAIL_SYSTEM_PROMPT, GUARDRAIL_SYSTEM_PROMPT]);
+    expect(s.model.requests[1]?.messages.at(-1)?.text).toContain("mine bitcoin");
   });
 });
 
@@ -317,6 +342,65 @@ describe("criterion 5: prompt, reply, tokens and cost are stored per participant
     expect(s.table.conversations.get("me-1")).toEqual({ state: "open" });
   });
 
+  it("retries a failed final write with a short backoff and stores the outcome when a later try works", async () => {
+    const s = setup();
+    const id = json(await handleConversationRequest(send("a habit tracker"), s.deps))["id"] as string;
+    s.model.push(verdictReply("on-path"), ANSWER);
+    s.table.conversationFailOn = "finish";
+    s.table.conversationFailTimes = FINISH_ATTEMPTS - 1;
+    expect(await s.drain()).toEqual(["done"]);
+    expect(s.sleeps).toEqual([...FINISH_BACKOFF_MS]);
+    expect(json(await handleConversationRequest(poll(id), s.deps))).toMatchObject({ status: "done", reply: ANSWER.text });
+    expect(s.table.usage.get("me-1")?.inputTokens).toBe(1300);
+  });
+
+  it("after the last try of the final write, still adds the spent tokens to the usage, then throws", async () => {
+    const s = setup();
+    const id = json(await handleConversationRequest(send("a habit tracker"), s.deps))["id"] as string;
+    s.model.push(verdictReply("on-path"), ANSWER);
+    s.table.conversationFailOn = "finish";
+    await expect(s.drain()).rejects.toThrow("table down");
+    expect(FINISH_ATTEMPTS).toBe(3);
+    expect(s.sleeps).toEqual([200, 800]);
+    expect(s.table.usage.get("me-1")).toEqual({ inputTokens: 1300, outputTokens: 150, costUsd: 0.006765 });
+    expect(s.table.messages.get("me-1")?.get(id)?.status).toBe("pending");
+
+    // A decline's guardrail tokens are counted the same way; a failing usage write does not hide the error.
+    const t = setup();
+    await handleConversationRequest(send("mine bitcoin"), t.deps);
+    t.model.push(verdictReply("decline", "a quiz", "r", { input: 400, output: 30 }));
+    t.table.conversationFailOn = "finish";
+    await expect(t.drain()).rejects.toThrow("table down");
+    expect(t.table.usage.get("me-1")?.inputTokens).toBe(400);
+    const u = setup();
+    await handleConversationRequest(send("a habit tracker"), u.deps);
+    u.model.push(verdictReply("on-path"), ANSWER);
+    u.table.conversationFailOn = "finish";
+    u.table.addUsage = async () => Promise.reject(new Error("usage down"));
+    await expect(u.drain()).rejects.toThrow("table down");
+  });
+
+  it("answers a crashed job on SQS's later deliveries while the message is still pending", async () => {
+    const s = setup();
+    const id = json(await handleConversationRequest(send("a habit tracker"), s.deps))["id"] as string;
+    const job = must(s.queue.sent[0]);
+    s.model.push(verdictReply("on-path"), ANSWER, verdictReply("on-path"), ANSWER);
+    s.table.conversationFailOn = "finish";
+    await expect(s.drain()).rejects.toThrow("table down");
+    // The second delivery comes one visibility timeout (330 s) later, and also fails.
+    s.advance(330);
+    s.queue.sent.push(job);
+    await expect(s.drain()).rejects.toThrow("table down");
+    // The third and last comes another 330 s later, and may run its full 300 s: still not stale.
+    s.advance(330 + 299);
+    s.table.conversationFailOn = undefined;
+    s.queue.sent.push(job);
+    s.model.push(verdictReply("on-path"), ANSWER);
+    expect(await s.drain()).toEqual(["done"]);
+    expect(json(await handleConversationRequest(poll(id), s.deps))).toMatchObject({ status: "done" });
+    expect(2 * 330 + 300).toBeLessThan(STALE_PENDING_SECONDS);
+  });
+
   it("throws a table failure on the final write, so SQS delivers the job again", async () => {
     const s = setup();
     await handleConversationRequest(send("a habit tracker"), s.deps);
@@ -342,7 +426,7 @@ describe("criterion 5: prompt, reply, tokens and cost are stored per participant
 });
 
 describe("a worker that never finished (stale pending message)", () => {
-  it("shows the message as failed after 10 minutes and lets the participant send again", async () => {
+  it("shows the message as failed after 20 minutes and lets the participant send again", async () => {
     const s = setup();
     const id = json(await handleConversationRequest(send("a habit tracker"), s.deps))["id"] as string;
     s.queue.sent.length = 0;

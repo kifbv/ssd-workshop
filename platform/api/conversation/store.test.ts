@@ -77,7 +77,7 @@ describe("DynamoConversationStore", () => {
     const { client, sent } = stubClient([{}]);
     const store = new DynamoConversationStore(client, TABLE);
     await expect(
-      store.createMessage("p-1", { id: ID, step: "clarify", text: "a habit tracker", createdAt: "2026-11-23T10:00:00.000Z", nowSeconds: 1000 }),
+      store.createMessage("p-1", { id: ID, step: "clarify", text: "a habit tracker", createdAt: "2026-11-23T10:00:00.000Z", nowSeconds: 2000 }),
     ).resolves.toBe("created");
     const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
     expect(items.every((i) => i.Update !== undefined)).toBe(true);
@@ -85,7 +85,7 @@ describe("DynamoConversationStore", () => {
       TableName: TABLE,
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "CONVERSATION" } },
       ConditionExpression: "attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore)",
-      ExpressionAttributeValues: { ":open": { S: "open" }, ":pendingId": { S: ID }, ":staleBefore": { N: "400" } },
+      ExpressionAttributeValues: { ":open": { S: "open" }, ":pendingId": { S: ID }, ":staleBefore": { N: "800" } },
     });
     expect(items[1]?.Update).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: `MSG#${ID}` } },
@@ -108,7 +108,7 @@ describe("DynamoConversationStore", () => {
   it("reads the caller's own message by key with a consistent read, refusing malformed items", async () => {
     const item = { author: { S: "participant" }, step: { S: "clarify" }, text: { S: "hi" }, status: { S: "flagged" }, pendingSince: { N: "5" } };
     const { client, sent } = stubClient([
-      { Item: { ...item, approved: { BOOL: true }, suggestion: { S: "a quiz" } } },
+      { Item: { ...item, approvedTextHash: { S: "ab12" }, suggestion: { S: "a quiz" }, verdictReason: { S: "medical advice" } } },
       { Item: { ...item, author: { S: "assistant" } } },
       { Item: { ...item, status: { S: "odd" } } },
       {},
@@ -120,8 +120,9 @@ describe("DynamoConversationStore", () => {
       text: "hi",
       status: "flagged",
       pendingSince: 5,
-      approved: true,
+      approvedTextHash: "ab12",
       suggestion: "a quiz",
+      verdictReason: "medical advice",
     });
     for (let i = 0; i < 3; i++) await expect(store.getMessage("p-1", ID)).resolves.toBeUndefined();
     expect(sent[0]?.input).toEqual({ TableName: TABLE, Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: `MSG#${ID}` } }, ConsistentRead: true });
@@ -195,9 +196,29 @@ describe("DynamoConversationStore", () => {
     });
     expect(items[3]?.ConditionExpression).toBeUndefined();
     for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
-    expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("approved");
+    // The marker of a facilitator's approval (it skips the guardrail check) is written by neither role.
+    for (const marker of ["approved", "approvedTextHash"]) {
+      expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain(marker);
+      expect(CONVERSATION_UPDATE_ATTRIBUTES).not.toContain(marker);
+    }
     expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("step");
-    expect(CONVERSATION_UPDATE_ATTRIBUTES).not.toContain("approved");
+  });
+
+  it("adds spent tokens to the usage totals on their own, inside the worker's attribute list", async () => {
+    const { client, sent } = stubClient([{}]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await store.addUsage("p-1", usage(400, 30), NOW_ISO);
+    await store.addUsage("p-1", usage(0, 0), NOW_ISO);
+    expect(sent).toHaveLength(1);
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems.map((i) => i.Update);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "USAGE" } },
+      UpdateExpression: "SET #type = :type, #participantId = :participantId, #updatedAt = :updatedAt ADD #inputTokens :add_inputTokens, #outputTokens :add_outputTokens, #costUsd :add_costUsd",
+      ExpressionAttributeValues: { ":add_inputTokens": { N: "400" }, ":add_outputTokens": { N: "30" } },
+    });
+    expect(items[0]?.ConditionExpression).toBeUndefined();
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
   });
 
   it("pauses a flagged message (no reply) and stays inside the worker's attribute list", async () => {

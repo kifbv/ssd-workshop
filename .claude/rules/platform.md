@@ -42,3 +42,8 @@ paths:
 - SQS delivers a job at least once: the worker skips a message that is no longer `pending` and stores the outcome in
   one transaction conditional on it still being pending (ticket 1.7). DynamoDB refuses an expression with an undefined
   `:value`/`#name` (or an unused one): `store.test.ts` checks every transaction item's placeholders both ways.
+- An approval that lets something skip a check is tied to the content, not the record: store a hash of the approved
+  content (`approvedTextHash`, SHA-256 of the text) in an attribute no Lambda role may write, and skip only while the
+  current content has that hash (ticket 1.7).
+- The Lambda runtime writes an uncaught error's message and stack to CloudWatch: a handler whose errors may carry
+  personal data logs only `errorName(error)` and throws a bare `new Error(...)` (no `cause`), as `ai-worker.ts` does.

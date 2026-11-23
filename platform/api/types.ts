@@ -167,10 +167,14 @@ export interface ParticipantMessageItem extends Keyed {
   status: MessageStatus;
   /** ISO 8601. */
   createdAt: string;
-  /** Epoch seconds when it (last) became pending: a pending message older than 10 minutes counts as failed. */
+  /** Epoch seconds when it (last) became pending: a pending message older than 20 minutes counts as failed. */
   pendingSince: number;
-  /** Set by a facilitator's approval of a flagged message: the worker answers it without a new check. */
-  approved?: boolean;
+  /**
+   * Set by a facilitator's approval of a flagged message: the SHA-256 (hex) of the approved text. The
+   * worker answers without a new check only while the text still has this hash. No Lambda role may
+   * write it (only the flags command, with the owner's credentials).
+   */
+  approvedTextHash?: string;
   verdict?: GuardrailVerdict;
   /** The guardrail's short reason (for facilitators; never logged). */
   verdictReason?: string;

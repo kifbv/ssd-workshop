@@ -1,7 +1,8 @@
 // `npm run flags -- list | approve <nickname> | reject <nickname>` (ticket 1.7): the stand-in for the
 // phase 3 facilitator dashboard. The flow with its outside world passed in (store, queue, clock,
-// output), so it is tested against in-memory fakes; ./main.ts wires in the real ones. It prints
-// nicknames and counts only: never an email address, a message text or a participant id.
+// output), so it is tested against in-memory fakes; ./main.ts wires in the real ones. `list` prints,
+// on the owner's own terminal only, each waiting nickname with the flagged message's text and the
+// guardrail's reason, so a decision is never blind; nothing prints an email address or an id.
 import { declineReply } from "../../api/conversation/guardrail.js";
 import type { MessageQueue } from "../../api/conversation/state.js";
 import { redactError } from "../smoke/logic.js";
@@ -10,7 +11,8 @@ import type { FlagsStore } from "./store.js";
 export const USAGE = `Usage: npm run flags -- <command>
 
 Commands:
-  list                 the nicknames whose last message waits for a decision
+  list                 the nicknames whose last message waits for a decision, with that message
+                       and the guardrail's reason
   approve <nickname>   let the waiting message through: the AI answers it (no new guardrail check)
   reject <nickname>    decline the waiting message with a polite sentence; the participant can write again
 
@@ -50,11 +52,28 @@ export interface FlagsDeps {
   err: (line: string) => void;
 }
 
+/** Text typed by a participant, made safe for a terminal: control and format characters (escape sequences, line breaks, direction overrides) become spaces. */
+export function terminalSafe(text: string): string {
+  return text.replace(/[\p{Cc}\p{Cf}]/gu, " ");
+}
+
 async function list(store: FlagsStore, out: (line: string) => void): Promise<number> {
   const ids = await store.listWaiting();
-  const nicknames = await Promise.all(ids.map(async (id) => (await store.getNickname(id)) ?? "(no nickname)"));
-  out(`Waiting for a decision: ${nicknames.length}`);
-  for (const nickname of nicknames.sort((a, b) => a.localeCompare(b))) out(`  ${nickname}`);
+  const waiting = await Promise.all(
+    ids.map(async (id) => {
+      const nickname = (await store.getNickname(id)) ?? "(no nickname)";
+      const pendingId = (await store.getConversation(id))?.pendingId;
+      const message = pendingId === undefined ? undefined : await store.getMessage(id, pendingId);
+      return { nickname, text: message?.text ?? "(message not found)", reason: message?.verdictReason ?? "(no reason given)" };
+    }),
+  );
+  out(`Waiting for a decision: ${waiting.length}`);
+  for (const w of waiting.sort((a, b) => a.nickname.localeCompare(b.nickname))) {
+    out("");
+    out(w.nickname);
+    out(`  Message: ${terminalSafe(w.text)}`);
+    out(`  Flagged because: ${terminalSafe(w.reason)}`);
+  }
   return 0;
 }
 
@@ -81,7 +100,7 @@ async function decide(command: "approve" | "reject", nickname: string, deps: Fla
     deps.out(`Rejected: ${nickname}'s message got a polite decline, and ${nickname} can write again.`);
     return 0;
   }
-  const approved = await store.approve(participantId, messageId, Math.floor(now.getTime() / 1000), now.toISOString());
+  const approved = await store.approve(participantId, messageId, message.text, Math.floor(now.getTime() / 1000), now.toISOString());
   if (!approved) {
     deps.err(`${nickname}'s message was decided meanwhile; nothing changed.`);
     return 1;
@@ -90,7 +109,7 @@ async function decide(command: "approve" | "reject", nickname: string, deps: Fla
     await deps.createQueue().send({ participantId, messageId });
   } catch (error) {
     deps.err(`Approved, but the queue refused the message (${redactError(errorText(error))}).`);
-    deps.err(`${nickname} sees it fail within 10 minutes and can send it again.`);
+    deps.err(`${nickname} sees it fail within 20 minutes and can send it again.`);
     return 1;
   }
   deps.out(`Approved: ${nickname}'s message goes to the AI now; the answer appears on their page.`);

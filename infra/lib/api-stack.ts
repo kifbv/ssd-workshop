@@ -77,10 +77,17 @@ export const CONVERSATION_ROUTES = [
  * room; the AI calls are cut off 30 s before it, so the outcome is always stored.
  */
 export const AI_WORKER_TIMEOUT_SECONDS = 300;
-/** Six times the worker's timeout, as AWS recommends for a queue that feeds a Lambda function. */
-export const AI_QUEUE_VISIBILITY_SECONDS = 6 * AI_WORKER_TIMEOUT_SECONDS;
+/**
+ * Just above the worker's timeout, so SQS delivers a crashed job again while its message is still
+ * pending: the last of AI_QUEUE_MAX_RECEIVES runs starts by about 2 x 330 s and ends by about 960 s,
+ * within the platform's STALE_PENDING_SECONDS (1200 s; tested). AWS's advice of six times the timeout
+ * is for batches with partial retries; with batch size 1 and maxConcurrency there is no such case.
+ */
+export const AI_QUEUE_VISIBILITY_SECONDS = AI_WORKER_TIMEOUT_SECONDS + 30;
 /** A job whose worker crashed this many times goes to the dead-letter queue. */
 export const AI_QUEUE_MAX_RECEIVES = 3;
+/** At most this many workers at once (AWS's minimum is 2), so a burst of messages queues instead of hitting Bedrock throttling. */
+export const AI_WORKER_MAX_CONCURRENCY = 5;
 
 /** The model the AI worker may call: the EU inference profile and the foundation model it routes to in each EU region. */
 export const BEDROCK_INVOKE_RESOURCES = [
@@ -352,8 +359,9 @@ export class ApiStack extends Stack {
     worker.addToRolePolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["bedrock:InvokeModel"], resources: [...BEDROCK_INVOKE_RESOURCES] }),
     );
-    // One job per invocation; the source grants the role the consume rights on this queue only.
-    worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1 }));
+    // One job per invocation, at most AI_WORKER_MAX_CONCURRENCY at once; the source grants the role the
+    // consume rights on this queue only.
+    worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1, maxConcurrency: AI_WORKER_MAX_CONCURRENCY }));
 
     // Route-level throttles (L1 RouteSettings; the L2 stage has no per-route option). A route must
     // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.

@@ -322,7 +322,7 @@ Then, with Franck's own AWS credentials, the guardrail eval against the live mod
 npm run eval -- guardrails
 # expect: one PASS line per example, "Guardrails: 20/20 passed", exit code 0
 npm run flags -- list
-# expect: "Waiting for a decision: 0" (or the nicknames of flagged participants)
+# expect: "Waiting for a decision: 0" (or each flagged participant's nickname, message and the guardrail's reason)
 ```
 
 A flagged message (e.g. "an app that tells people which medicine to take") shows `"status":"flagged"`;
@@ -331,6 +331,8 @@ declines it politely; either way the participant can write again.
 
 On a failure, the log groups `ssd-workshop-api-conversation` and `ssd-workshop-api-ai-worker` have one
 JSON line per request or job with its outcome and the AWS error name (e.g. `AccessDeniedException`); they
-never hold the message, the prompt, the reply, an id or the nickname. A job whose worker crashed three
-times lands in `ssd-workshop-ai-messages-dlq` (14 days); the participant sees the message as failed after
-10 minutes and can send it again.
+never hold the message, the prompt, the reply, an id or the nickname. A job the worker throws back
+(`"outcome":"error"`, e.g. after the final write failed 3 times) is delivered again by SQS about 5.5 minutes
+later (visibility timeout 330 s); one that failed three times lands in `ssd-workshop-ai-messages-dlq`
+(14 days), and the participant sees the message as failed after 20 minutes and can send it again. At most
+5 workers run at once; more messages wait in the queue.
