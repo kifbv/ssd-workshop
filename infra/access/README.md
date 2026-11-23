@@ -42,7 +42,7 @@ flowchart LR
    | --- | --- |
    | `HostedZoneId` | the Route53 hosted zone of `rankly.games` |
    | `CreateGitHubOidcProvider` | `yes`, or `no` if IAM already lists the provider `token.actions.githubusercontent.com` |
-   | `GitHubRepo` | keep `kifbv/ssd-workshop` |
+   | `GitHubRepo` | keep `kifbv@7999713/ssd-workshop@1467373954` (the ID form GitHub sends for this repository) |
    | `BudgetEmail` | the address that should get budget alerts |
    | `MonthlyBudgetUsd` | keep `100` |
 
@@ -55,9 +55,11 @@ flowchart LR
 7. Deactivate the admin access keys used so far (IAM, your user, Security credentials, Deactivate),
    so the only long-lived key the workshop uses is the least-privilege one.
 8. Nothing to set up in GitHub: the role trusts only the OIDC subject
-   `repo:kifbv/ssd-workshop:ref:refs/heads/main`. The deploy workflow (ticket 0.5) must not use a
+   `repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main` (GitHub sends this repository's
+   subject in the ID form `owner@ownerId/repo@repoId`; the plain `kifbv/ssd-workshop` form is
+   refused, as the first deploy showed). The deploy workflow (ticket 0.5) must not use a
    GitHub environment, because a job with an environment gets the subject
-   `repo:kifbv/ssd-workshop:environment:<name>`, which the role refuses.
+   `repo:kifbv@7999713/ssd-workshop@1467373954:environment:<name>`, which the role refuses.
 
 ## Update it
 
@@ -124,6 +126,7 @@ flowchart LR
 | `CloudFrontUntaggableParts` | Origin access controls and cache, origin-request and response-headers policies have generated ids and no tags: create and read only, so the rankly.games distributions' existing ones cannot be changed or deleted. |
 | `CloudFrontWorkshopFunctions` | CloudFront functions named `ssd-workshop-*`. |
 | `CertificatesTagged` | Request ACM certificates only with the project tag and only for `workshop.rankly.games` and names under it (`acm:DomainNames`, with a `Null` guard because `ForAllValues` is true when the key is missing). |
+| `CertificatesThroughCloudFormation` | The same names without a request tag, only through CloudFormation (`aws:CalledVia`): CloudFormation requests the certificate without tags and then tags it (`TagOnCreateThroughCloudFormation`). |
 | `CertificatesChange` | Change, delete, tag or untag only certificates already tagged with the project. |
 | `ApiGatewayTaggedCreate` | Create REST and HTTP APIs (`POST /restapis`, `POST /apis`) only with the project tag. |
 | `ApiGatewayTaggedChange` | Write anything under an API or change and delete it only when the API is tagged with the project; child resources inherit the API's tag for authorization. |
@@ -267,7 +270,7 @@ follow-up.
     (bucket, object key, size) to an SNS topic, SQS queue or Lambda function of another account
     that accepts it. The deploy principals are denied it. Check: IAM Access Analyzer (risk 2)
     and the bucket's notification configuration in the stack output.
-13. **GitHub OIDC subject.** The deploy role trusts `repo:kifbv/ssd-workshop:ref:refs/heads/main`,
+13. **GitHub OIDC subject.** The deploy role trusts `repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main`,
     which every job that runs on `main` gets, also jobs started by `pull_request_target`,
     `workflow_run`, `issue_comment` or `schedule`. Check: the test lets only `deploy.yml` request
     `id-token: write` (or `write-all`), and `deploy.yml` may only run on `push` to `main`; review

@@ -19,7 +19,10 @@ Parameters:
     Description: Say "no" if the account already has the token.actions.githubusercontent.com OIDC provider
   GitHubRepo:
     Type: String
-    Default: kifbv/ssd-workshop
+    Default: kifbv@7999713/ssd-workshop@1467373954
+    Description: >
+      Repository part of the OIDC subject, as GitHub sends it (ID form owner@ownerId/repo@repoId,
+      seen in CloudTrail AssumeRoleWithWebIdentity events)
   BudgetEmail:
     Type: String
     Description: Address that receives budget alerts
@@ -333,6 +336,17 @@ Resources:
               ForAllValues:StringLike:
                 acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]
               "Null": {acm:DomainNames: "false"}
+          # CloudFormation requests the certificate without tags and tags it right after
+          # (TagOnCreateThroughCloudFormation), so it gets the same names without a request tag.
+          - Sid: CertificatesThroughCloudFormation
+            Effect: Allow
+            Action: [acm:RequestCertificate]
+            Resource: "*"
+            Condition:
+              ForAnyValue:StringEquals: {aws:CalledVia: [cloudformation.amazonaws.com]}
+              ForAllValues:StringLike:
+                acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]
+              "Null": {acm:DomainNames: "false"}
           - Sid: CertificatesChange
             Effect: Allow
             Action: [acm:DeleteCertificate, acm:UpdateCertificateOptions, acm:AddTagsToCertificate, acm:RemoveTagsFromCertificate]
@@ -576,6 +590,13 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/*
               - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/ssd-workshop/*
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-*
+          # CloudFormation calls GetRole by name before CreateRole. For a role that does not
+          # exist yet IAM checks role/<name> without the path, so role/ssd-workshop/* misses it.
+          - Sid: WorkshopRoleExistenceCheck
+            Effect: Allow
+            Action: iam:GetRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-*
           - Sid: WorkshopApiReads
             Effect: Allow
             Action: apigateway:GET

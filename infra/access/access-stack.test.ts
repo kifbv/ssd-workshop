@@ -126,6 +126,7 @@ const DEPLOY_EXCEPTIONS: Record<string, string> = {
   ...ACTION_ALLOW_LIST,
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
+  "CertificatesThroughCloudFormation/acm:RequestCertificate": "authorizes no existing resource; only through CloudFormation, which tags it in the same create (TagOnCreateThroughCloudFormation); domains limited by acm:DomainNames (acmDomainGaps)",
   "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
   "SesForTesting/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games only, sender pinned by ses:FromAddress (sesScopeGaps)",
 };
@@ -398,7 +399,7 @@ const SAMPLE: Record<string, string> = {
   "AWS::AccountId": "123456789012",
   "AWS::Region": "eu-central-1",
   HostedZoneId: "Z".repeat(32),
-  GitHubRepo: "kifbv/ssd-workshop",
+  GitHubRepo: "kifbv@7999713/ssd-workshop@1467373954",
 };
 function resolve(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(resolve);
@@ -815,13 +816,29 @@ describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
 
   it("requests certificates only for workshop.rankly.games names", () => {
     expect(acmDomainGaps(deployStatements(template))).toEqual([]);
-    const anyDomain = withText(
+    const anyDomain = withAll(
       '              ForAllValues:StringLike:\n                acm:DomainNames: [workshop.rankly.games, "*.workshop.rankly.games"]\n              "Null": {acm:DomainNames: "false"}\n',
       "",
     );
-    expect(acmDomainGaps(deployStatements(anyDomain))).toEqual(["CertificatesTagged"]);
-    const noGuard = withText('              "Null": {acm:DomainNames: "false"}\n', "");
-    expect(acmDomainGaps(deployStatements(noGuard))).toEqual(["CertificatesTagged"]);
+    expect(acmDomainGaps(deployStatements(anyDomain))).toEqual(["CertificatesTagged", "CertificatesThroughCloudFormation"]);
+    const noGuard = withAll('              "Null": {acm:DomainNames: "false"}\n', "");
+    expect(acmDomainGaps(deployStatements(noGuard))).toEqual(["CertificatesTagged", "CertificatesThroughCloudFormation"]);
+  });
+
+  it("lets CloudFormation request a certificate without tags, then tag it (live: it sends no tags)", () => {
+    // CloudFormation calls RequestCertificate without Tags and adds them with AddTagsToCertificate
+    // (TagOnCreateThroughCloudFormation), so a request-tag condition alone refuses it.
+    const viaCfn = (t: Template) =>
+      deployStatements(t).filter(
+        (s) =>
+          s.Effect === "Allow" &&
+          list(s.Action).some((a) => matches(a, "acm:RequestCertificate")) &&
+          condValues(s.Condition, "StringEquals", "aws:RequestTag/project").length === 0,
+      );
+    const [s] = viaCfn(template);
+    expect(s?.Sid).toBe("CertificatesThroughCloudFormation");
+    expect(condValues(s?.Condition, "ForAnyValue:StringEquals", "aws:CalledVia")).toEqual(["cloudformation.amazonaws.com"]);
+    expect(viaCfn(withText("ForAnyValue:StringEquals: {aws:CalledVia: [cloudformation.amazonaws.com]}", "StringEquals: {aws:RequestTag/project: ssd-workshop}"))).toEqual([]);
   });
 
   it("sends mail only through the workshop sender's identities", () => {
@@ -949,6 +966,20 @@ describe("access stack: self-protection (criterion 3)", () => {
     expect(deployRoleWrites(deployStatements(old))).toContain("PassWorkshopRolesToWorkshopServices/iam:PassRole");
   });
 
+  it("lets CloudFormation check that a workshop role does not exist yet (iam:GetRole without the path)", () => {
+    // Before CreateRole, CloudFormation calls GetRole by name. For a role that does not exist yet,
+    // IAM checks role/<name> without the path, so role/ssd-workshop/* does not match it.
+    const allowsGetRole = (t: Template) =>
+      deployStatements(t).some(
+        (s) =>
+          s.Effect === "Allow" &&
+          list(s.Action).some((a) => matches(a, "iam:GetRole")) &&
+          list(s.Resource).map(text).some((r) => matches(r, "arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-site-deploy")),
+      );
+    expect(allowsGetRole(template)).toBe(true);
+    expect(allowsGetRole(withText(":role/ssd-workshop-*\n", ":role/ssd-workshop/*\n"))).toBe(false);
+  });
+
   it("denies assuming other roles, session tags and source identities (H4)", () => {
     for (const a of ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"]) {
       expect(denied(deployStatements(template), "*", a), a).toBe(true);
@@ -1018,7 +1049,8 @@ describe("access stack: permissions boundary (criterion 4)", () => {
 
 describe("access stack: deploy role trust", () => {
   it("trusts only GitHub Actions of kifbv/ssd-workshop on main (no GitHub environments)", () => {
-    expect(template.Parameters.GitHubRepo?.Default).toBe("kifbv/ssd-workshop");
+    // GitHub sends this repository's subject in the ID form owner@ownerId/repo@repoId.
+    expect(template.Parameters.GitHubRepo?.Default).toBe("kifbv@7999713/ssd-workshop@1467373954");
     const trust = template.Resources.DeployRole?.Properties.AssumeRolePolicyDocument as { Statement: Statement[] };
     expect(trust.Statement).toHaveLength(1);
     const [s] = trust.Statement;
