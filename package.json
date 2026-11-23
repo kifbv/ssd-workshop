@@ -16,7 +16,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "synth": "npm run synth -w infra",
-    "smoke": "npm run -s smoke -w platform --"
+    "smoke": "npm run -s smoke -w platform --",
+    "allowlist": "npm run -s allowlist -w platform --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

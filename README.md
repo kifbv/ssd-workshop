@@ -24,4 +24,23 @@ npm run typecheck
 npm test
 ```
 
+## Allow-list (ticket 1.3)
+
+Only people on the allow-list can sign in. Franck loads it from his own machine, with his own AWS
+credentials (default credential chain; they need `dynamodb:UpdateItem` and `dynamodb:Scan` on the
+`ssd-workshop-data` table in `eu-central-1`):
+
+```
+npm run -s allowlist -- import /path/outside/the/repo/people.csv
+npm run -s allowlist -- list
+```
+
+- The CSV starts with the header `email,group,role`; one person per line, no quoted fields. Role is
+  `participant`, `facilitator` or `admin`; emails are stored trimmed and lower-cased.
+- The file must stay outside the repository: a path inside it (symlinks included) is refused. A
+  relative path is read from the repository root; an absolute path is clearest.
+- `import` prints how many people were added, updated and rejected, and the line number and reason
+  of each rejected line; importing again updates group and role. `list` prints counts per group and
+  role. Neither ever prints an address.
+
 Licence: [MIT](LICENSE).
