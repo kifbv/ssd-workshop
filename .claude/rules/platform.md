@@ -19,4 +19,5 @@ paths:
 - AWS SDK v3 clients that default to HTTP/2 (Bedrock runtime) ignore `requestHandler: { httpsAgent }` options: pass `new NodeHttpHandler({ httpsAgent })` explicitly.
 - A root script that forwards to a workspace (`npm run -s x -w platform --`) starts the inner npm from the
   repository root, so the script sees `INIT_CWD` = repository root, not the folder where the command was typed:
-  relative file arguments resolve from the root (document it, or advise absolute paths).
+  relative file arguments resolve from the root, not from where the user typed them: take absolute paths only
+  and refuse a relative one.

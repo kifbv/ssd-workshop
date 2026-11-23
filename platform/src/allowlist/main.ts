@@ -21,10 +21,6 @@ const clientConfig = {
 
 runAllowlist(process.argv.slice(2), {
   repoRoot: findRepoRoot(dirname(fileURLToPath(import.meta.url))),
-  // npm runs workspace scripts from the workspace folder; INIT_CWD is where npm started. Through the root
-  // script that is the repository root (the root script starts the workspace npm from there), so a relative
-  // path is read from the repository root wherever the command was typed. An absolute path is clearest.
-  cwd: process.env["INIT_CWD"] ?? process.cwd(),
   createStore: () => new DynamoAllowListStore(new DynamoDBClient(clientConfig), TABLE_NAME),
   out: (line) => console.log(line),
   err: (line) => console.error(line),

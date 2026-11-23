@@ -8,6 +8,7 @@ import {
   isValidEmail,
   parseArgs,
   parseCsv,
+  redactError,
 } from "./logic.js";
 
 describe("TABLE_NAME", () => {
@@ -37,12 +38,63 @@ describe("isValidEmail", () => {
     expect(isValidEmail("a@mail.example.org")).toBe(true);
   });
 
-  it.each(["", "jane", "jane@", "@example.com", "jane@example", "jane doe@example.com", "jane@@example.com", "ja#ne@example.com", "jane@example."])(
+  it.each([
+    "",
+    "jane",
+    "jane@",
+    "@example.com",
+    "jane@example",
+    "jane doe@example.com",
+    "jane@@example.com",
+    "ja#ne@example.com",
+    "jane@example.",
+    "alice@mail_srv.com",
+    "bob@exämple.de",
+    "c(x)@a.com",
+    "jösé@example.com",
+    "a/b@example.com",
+    "a*b@example.com",
+    "a@example.c0m",
+    "a@example.c",
+    "a@-.",
+  ])(
     "refuses %j",
     (email) => {
       expect(isValidEmail(email)).toBe(false);
     },
   );
+});
+
+const ACCEPTED = [
+  "jane.doe+ws@example.com",
+  "a@mail.example.org",
+  "x@a.io",
+  "_under_score@b-c.de",
+  "per%cent@example.com",
+  "-dash-@example.com",
+  ".dot.@example.com",
+  "9876@123.example.museum",
+  "obrien@example.ie",
+  "very.long.local.part+tag-1_2%3@sub-1.sub2.example.co.uk",
+];
+
+describe("isValidEmail and redactError agree", () => {
+  it.each(ACCEPTED)("every accepted address %j is valid and fully masked by redactError", (email) => {
+    expect(isValidEmail(email)).toBe(true);
+    const at = email.lastIndexOf("@");
+    const domain = email.slice(at + 1);
+    const masked = `${email.charAt(0)}***@${domain.charAt(0)}***${domain.slice(domain.lastIndexOf("."))}`;
+    for (const [before, after] of [
+      ["", ""],
+      ["Error on ", " failed"],
+      ["to <", ">."],
+      ['"', '"'],
+      ["user: ", ", retry"],
+      ["(", ")"],
+    ] as const) {
+      expect(redactError(`${before}${email}${after}`)).toBe(`${before}${masked}${after}`);
+    }
+  });
 });
 
 describe("parseCsv", () => {
@@ -127,6 +179,14 @@ describe("isInside", () => {
     expect(isInside("/repo", "/repo-other/people.csv")).toBe(false);
     expect(isInside("/repo", "/home/franck/people.csv")).toBe(false);
     expect(isInside("/repo", "/repo/..people.csv")).toBe(true);
+  });
+
+  it("criterion 4: ignores letter case (macOS file systems do), so a refusal is never missed", () => {
+    expect(isInside("/Users/Franck/SSD-Workshop", "/users/franck/ssd-workshop/People.csv")).toBe(true);
+    expect(isInside("/users/franck/ssd-workshop", "/Users/Franck/SSD-WORKSHOP/docs/people.CSV")).toBe(true);
+    expect(isInside("/Users/Franck/Repo", "/USERS/FRANCK/REPO")).toBe(true);
+    expect(isInside("/Users/Franck/Repo", "/Users/Franck/Repo-Other/people.csv")).toBe(false);
+    expect(isInside("/Users/Franck/Repo", "/Users/Franck/Desktop/people.csv")).toBe(false);
   });
 });
 

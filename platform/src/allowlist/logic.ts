@@ -16,10 +16,11 @@ export const ROLES: readonly Role[] = ["participant", "facilitator", "admin"];
 export const USAGE = `Usage: npm run -s allowlist -- <command>
 
 Commands:
-  import <file.csv>   add or update the people in the file (header: email,group,role)
-  list                print how many people are allow-listed, per group and role
+  import </absolute/path/file.csv>   add or update the people in the file (header: email,group,role)
+  list                               print how many people are allow-listed, per group and role
 
-The CSV file must stay outside the repository. The command prints counts, never addresses.
+Give the CSV file as an absolute path, outside this repository and any other git work tree.
+The command prints counts, never addresses.
 Run it with your own AWS credentials (dynamodb:UpdateItem and dynamodb:Scan on ${TABLE_NAME}).`;
 
 export type AllowlistCommand = { command: "import"; file: string } | { command: "list" };
@@ -42,8 +43,12 @@ export function parseArgs(args: readonly string[]): AllowlistCommand | { error: 
   }
 }
 
-/** something@domain.tld: no spaces, no second @, no # (the key separator), no comma. */
-const EMAIL_PATTERN = /^[^\s@#,]+@[^\s@#,.]+(?:\.[^\s@#,.]+)+$/;
+/**
+ * ASCII only: local part of letters, digits and `._%+-`; domain labels of letters, digits and `-`,
+ * separated by dots, ending in an alphabetic TLD of 2+ letters. Kept no wider than what
+ * smoke's `redactEmails` masks, so any address that can be stored can also be redacted (tested).
+ */
+const EMAIL_PATTERN = /^[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/;
 
 export function isValidEmail(email: string): boolean {
   return EMAIL_PATTERN.test(email);
@@ -122,9 +127,13 @@ function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
 }
 
-/** True when `target` is `dir` itself or anywhere below it (both absolute, already resolved). */
+/**
+ * True when `target` is `dir` itself or anywhere below it (both absolute, already resolved).
+ * Letter case is ignored: macOS file systems ignore it and `realpath` does not fix it, and a false
+ * refusal on a case-sensitive file system is harmless.
+ */
 export function isInside(dir: string, target: string): boolean {
-  const rel = relative(dir, target);
+  const rel = relative(dir.toLowerCase(), target.toLowerCase());
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 

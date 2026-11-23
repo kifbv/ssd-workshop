@@ -7,3 +7,5 @@ coverage/
 *.tsbuildinfo
 .claude/settings.local.json
 .claude/worktrees/
+# Allow-list CSVs hold email addresses (ticket 1.3): never in git.
+*.csv

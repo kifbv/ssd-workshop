@@ -1,7 +1,8 @@
 // The allow-list command with its outside world passed in (file system reads, store, output),
 // so the whole flow is tested against an in-memory store. ./main.ts wires in the real ones.
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   USAGE,
   formatImportReport,
@@ -14,10 +15,8 @@ import {
 import type { AllowListStore } from "./store.js";
 
 export interface CommandDeps {
-  /** Real path of the repository root: CSV files inside it are refused. */
+  /** Real path of the repository root: CSV files inside it are refused, with or without git. */
   repoRoot: string;
-  /** Directory relative CSV paths are resolved against. */
-  cwd: string;
   /** Called only once the arguments and the file are accepted, so a refusal makes no AWS call. */
   createStore: () => AllowListStore;
   out: (line: string) => void;
@@ -31,7 +30,7 @@ export function findRepoRoot(start: string): string {
     const manifest = join(dir, "package.json");
     if (existsSync(manifest)) {
       const parsed = JSON.parse(readFileSync(manifest, "utf8")) as { workspaces?: unknown };
-      if (parsed.workspaces !== undefined) return realpathSync(dir);
+      if (parsed.workspaces !== undefined) return realpathSync.native(dir);
     }
     const parent = dirname(dir);
     if (parent === dir) throw new Error("repository root not found");
@@ -39,7 +38,27 @@ export function findRepoRoot(start: string): string {
   }
 }
 
+/**
+ * True when `dir` is inside a git work tree (any repository, not only this one). No shell, output
+ * ignored; GIT_DIR / GIT_WORK_TREE are dropped so only the folder itself decides. If git is missing
+ * or fails, the answer is false: the check against this repository still applies.
+ */
+export function isInGitWorkTree(dir: string): boolean {
+  const env = { ...process.env };
+  delete env["GIT_DIR"];
+  delete env["GIT_WORK_TREE"];
+  try {
+    execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { stdio: "ignore", env });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const NOT_ABSOLUTE = "Refused: give an absolute path to the CSV file.";
 const IN_REPO = "Refused: the CSV file is inside the repository. Keep it outside, so personal data never reaches git.";
+const IN_GIT = "Refused: the CSV file is inside a git repository. Keep it outside, so personal data never reaches git.";
+const HARD_LINKED = "Refused: the CSV file has more than one hard link. Use a plain copy outside any git repository.";
 
 export async function runAllowlist(args: readonly string[], deps: CommandDeps): Promise<number> {
   const parsed = parseArgs(args);
@@ -61,21 +80,37 @@ export async function runAllowlist(args: readonly string[], deps: CommandDeps): 
 }
 
 async function importFile(file: string, deps: CommandDeps): Promise<number> {
-  // Checked twice: as written (also catches a file that does not exist yet), then with symlinks resolved.
-  const asWritten = resolve(deps.cwd, file);
+  // Every check runs before the file is read and before any AWS client exists.
+  // Absolute only: a relative path would resolve from wherever npm started (the repository root
+  // through the root script), not from where the command was typed.
+  if (!isAbsolute(file)) {
+    deps.err(NOT_ABSOLUTE);
+    return 1;
+  }
+  // Checked as written (also catches a file that does not exist yet), then with symlinks resolved.
+  const asWritten = resolve(file);
   if (isInside(deps.repoRoot, asWritten)) {
     deps.err(IN_REPO);
     return 1;
   }
   let real: string;
   try {
-    real = realpathSync(asWritten);
+    real = realpathSync.native(asWritten);
   } catch {
     deps.err("CSV file not found.");
     return 1;
   }
   if (isInside(deps.repoRoot, real)) {
     deps.err(IN_REPO);
+    return 1;
+  }
+  // realpath does not follow hard links: a second name could sit inside a repository.
+  if (statSync(real).nlink > 1) {
+    deps.err(HARD_LINKED);
+    return 1;
+  }
+  if (isInGitWorkTree(dirname(real))) {
+    deps.err(IN_GIT);
     return 1;
   }
 
