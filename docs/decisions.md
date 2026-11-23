@@ -12,6 +12,17 @@ Choices made while building that the specification left open. Newest phase first
 - **Spec deltas:** a change to signed-off behaviour is recorded here as ADDED, CHANGED or REMOVED,
   with the date and the pull request.
 
+## Phase 1: sign in and talk
+
+- **Paid services (Franck, 2026-11-23):** API Gateway HTTP API, Lambda and DynamoDB on demand are approved for phase 1 (estimate under $2 a month at rest, about $10 to $20 of Bedrock for tests and evals).
+- **Model (Franck, 2026-11-23):** phase 1 uses Claude Sonnet 4.6 (`eu.anthropic.claude-sonnet-4-6`), set in one config value; Sonnet 5.5's quota in the account is 0, and raising it is Franck's call.
+- **Spec delta, CHANGED (Franck, 2026-11-23, PR #10):** section 5, Security: "facilitators only see their own group" becomes "facilitators see all participants; participants see only their own data", matching the global facilitator dashboard of section 4.
+- **Allow-list loading (Franck, 2026-11-23):** Franck imports it with `npm run allowlist -- import <file.csv>` (`email,group,role`) from his own machine; the file stays outside the repository and the addresses never pass through a Claude session or GitHub. An admin page follows in phase 3.
+- **Code email without Reply-To (2026-11-23):** `ssd-workshop@rankly.games` receives no mail and the system expects no replies, so the email has no Reply-To and ends with "Questions? Ask your facilitator." A Reply-To on a different domain than the sender is a spam signal. Other measures against Junk: "SSD Workshop" display name, subject with the code, HTML and text parts, a line on why the person gets it, a Junk-folder hint on the code screen, and IT allowlisting the sender (asked by Franck).
+- **Asynchronous AI replies:** a message is stored and answered by a worker Lambda, and the page polls every 2 seconds, because API Gateway stops requests after 30 seconds and Lambda response streaming needs function URLs, which the access stack denies.
+- **API at `/api/*`:** CloudFront routes `workshop.rankly.games/api/*` to the HTTP API, so pages and API share one origin (no CORS, no new DNS record). The API id becomes a constant in `infra/lib/config.ts` after its first deploy, since the us-east-1 edge stack cannot read it across regions.
+- **Flags before the dashboard:** until phase 3, flagged messages are approved or rejected with `npm run flags -- approve|reject <nickname>`.
+
 ## Phase 0: foundations
 
 - **AWS access:** least-privilege CloudFormation stack `ssd-workshop-access` (`infra/access/access-stack.yaml`): permissions boundary, GitHub OIDC deploy role limited to `main`, IAM user for Claude's sessions, $100/month budget. Rights are limited to `ssd-workshop-*` names, the `project=ssd-workshop` tag and DNS under `workshop.rankly.games`; the stack protects itself from the deploy role.
