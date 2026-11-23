@@ -41,6 +41,11 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # The browser tests of the sign-in pages (ticket 1.6) need Chromium; the version follows the
+      # exact playwright version in platform/package.json.
+      - name: Install the test browser
+        run: npx playwright install --with-deps chromium
+
       - name: Unit tests
         run: npm test
 

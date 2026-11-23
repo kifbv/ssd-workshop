@@ -48,6 +48,29 @@ export const API_NAME = `${PREFIX}-api`;
 export const API_ID = "ut2mzqmbb4";
 /** Origin of CloudFront's `/api/*` behaviour: the API's own execute-api address. */
 export const API_ORIGIN_DOMAIN = `${API_ID}.execute-api.${REGION}.amazonaws.com`;
+/**
+ * Version of the pages' response headers policy (ticket 1.6). Custom policies have no tags, so the
+ * deploy rights can create one but never update or delete it: it is retained, and any change to its
+ * headers must bump this version. The version is in both the name and the logical id: a new name
+ * alone would be an in-place update, a new logical id makes CloudFormation create a replacement.
+ */
+export const PAGES_HEADERS_POLICY_VERSION = 1;
+export const PAGES_HEADERS_POLICY_NAME = `${PREFIX}-pages-v${PAGES_HEADERS_POLICY_VERSION}`;
+/**
+ * Content-Security-Policy of the pages: scripts, styles, connections and images from the site
+ * itself only (no inline scripts or styles), no framing, no plugins.
+ */
+export const PAGES_CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'",
+].join("; ");
 /** Lambda function, role and log group of `GET /api/health`. */
 export const HEALTH_FUNCTION_NAME = `${PREFIX}-api-health`;
 /** Lambda function, role and log group of `POST /api/sign-in/code` (ticket 1.4). */

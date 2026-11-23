@@ -3,74 +3,74 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="SSD Workshop: from a one-sentence idea to a live web app, guided by AI. Coming soon." />
+    <meta name="description" content="SSD Workshop: from a one-sentence idea to a live web app, guided by AI." />
     <meta name="color-scheme" content="light dark" />
-    <title>SSD Workshop, coming soon</title>
-    <style>
-      :root {
-        --bg: #f7f7f4;
-        --fg: #1d1d1b;
-        --muted: #55554f;
-        --accent: #b4441f;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #171715;
-          --fg: #f2f2ee;
-          --muted: #b8b8b0;
-          --accent: #f08a5d;
-        }
-      }
-      * {
-        box-sizing: border-box;
-      }
-      html,
-      body {
-        height: 100%;
-        margin: 0;
-      }
-      body {
-        display: grid;
-        place-items: center;
-        padding: 1rem;
-        background: var(--bg);
-        color: var(--fg);
-        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        line-height: 1.5;
-      }
-      main {
-        max-width: 36rem;
-        text-align: center;
-      }
-      .mark {
-        display: inline-block;
-        margin-bottom: 1rem;
-        padding: 0.25rem 0.75rem;
-        border: 2px solid var(--accent);
-        border-radius: 999px;
-        color: var(--accent);
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        font-size: 0.85rem;
-      }
-      h1 {
-        margin: 0 0 0.5rem;
-        font-size: clamp(2rem, 6vw, 3.25rem);
-        line-height: 1.1;
-      }
-      p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 1.125rem;
-      }
-    </style>
+    <title>SSD Workshop</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="style.css" />
+    <!-- No inline scripts: the Content-Security-Policy allows scripts from this site only. -->
+    <script src="app.js" defer></script>
   </head>
   <body>
     <main>
-      <span class="mark">Coming soon</span>
-      <h1>SSD Workshop, coming soon</h1>
-      <p>Take a small app idea from one sentence to a live web app, guided by AI, with every step explained.</p>
+      <header>
+        <!-- The deploy smoke check looks for this heading on the live page. -->
+        <h1>SSD Workshop</h1>
+      </header>
+
+      <!-- Every screen starts hidden; app.js shows one. Without JavaScript only the notice shows. -->
+      <noscript><p class="card">This page needs JavaScript. Please turn it on and reload.</p></noscript>
+
+      <section id="screen-loading" class="card" data-screen hidden>
+        <p>Loading…</p>
+      </section>
+
+      <section id="screen-email" class="card" data-screen aria-labelledby="email-heading" hidden>
+        <h2 id="email-heading" tabindex="-1">Sign in</h2>
+        <p>Enter the email address your facilitator has on the workshop list. We'll send you a sign-in code.</p>
+        <form id="email-form" method="post" novalidate>
+          <label for="email-input">Email address</label>
+          <input id="email-input" name="email" type="email" autocomplete="email" spellcheck="false" required />
+          <button type="submit" data-busy-label="Sending…">Send me a code</button>
+        </form>
+        <p id="message-email" class="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="screen-code" class="card" data-screen aria-labelledby="code-heading" hidden>
+        <h2 id="code-heading" tabindex="-1">Enter your code</h2>
+        <p id="message-code" class="message" role="status" aria-live="polite"></p>
+        <form id="code-form" method="post" novalidate>
+          <label for="code-input">6-digit code</label>
+          <input id="code-input" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required />
+          <button type="submit" data-busy-label="Checking…">Sign in</button>
+        </form>
+        <p class="hint">Not in your inbox? Check your Junk folder.</p>
+        <p class="links">
+          <button id="resend-button" type="button" class="link" data-busy-label="Sending a new code…">Send me a new code</button>
+          <button id="other-email-button" type="button" class="link">Use a different email</button>
+        </p>
+      </section>
+
+      <section id="screen-nickname" class="card" data-screen aria-labelledby="nickname-heading" hidden>
+        <h2 id="nickname-heading" tabindex="-1">Pick a nickname</h2>
+        <p>Others in the workshop see your nickname, never your email address. You can't change it later.</p>
+        <p class="rule"><strong>No confidential or customer data</strong> in your nickname or anywhere in the workshop.</p>
+        <form id="nickname-form" method="post" novalidate>
+          <label for="nickname-input">Nickname</label>
+          <input id="nickname-input" name="nickname" type="text" autocomplete="nickname" spellcheck="false" maxlength="20" aria-describedby="nickname-help" required />
+          <p id="nickname-help" class="help">3 to 20 letters, digits or dashes.</p>
+          <button type="submit" data-busy-label="Saving…">Save my nickname</button>
+        </form>
+        <p id="message-nickname" class="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <!-- The step screen: ticket 1.8 fills in step 1 (Clarify) here. -->
+      <section id="screen-step" class="card" data-screen aria-labelledby="step-heading" hidden>
+        <h2 id="step-heading" tabindex="-1">Step 1: Clarify</h2>
+        <p>Hi <strong id="step-nickname"></strong>, you're signed in.</p>
+        <p id="step-intro">Step 1 (Clarify) comes here: you'll describe your app idea in a sentence, and the AI helps you make it clear.</p>
+        <p id="message-step" class="message" role="status" aria-live="polite"></p>
+      </section>
     </main>
   </body>
 </html>
