@@ -215,6 +215,22 @@ function tagOnCreateGuarded(c: Cond | undefined): boolean {
 }
 const TAG_ON_CREATE_ACTIONS = ["cloudfront:TagResource", "acm:AddTagsToCertificate"];
 
+// CloudFormation's API Gateway v2 handler tags a new API or stage through the tags endpoint,
+// whose resource has no resource-tag key (Service Authorization Reference), so the Null guard
+// above cannot apply. Safe with the project tag in the request, the call made through
+// CloudFormation (resource import denied) and nothing but the tags endpoint as resource.
+const APIGW_TAGS_ARN = "arn:aws:apigateway:${AWS::Region}::/tags/*";
+const APIGW_TAG_ACTIONS = ["apigateway:POST", "apigateway:PUT"];
+function apigwTagOnCreate(s: Statement): boolean {
+  const c = s.Condition;
+  const resources = list(s.Resource).map(text);
+  return (
+    projectTag(c, "aws:RequestTag/project") &&
+    condValues(c, "ForAnyValue:StringEquals", "aws:CalledVia").join() === "cloudformation.amazonaws.com" &&
+    resources.length === 1 && resources[0] === APIGW_TAGS_ARN
+  );
+}
+
 function scopeOf(s: Statement, t: Template): Scope {
   const c = s.Condition;
   const resources = list(s.Resource).map(text);
@@ -248,6 +264,7 @@ function unscopedWrites(t: Template, stmts: Statement[], allowList: Record<strin
     for (const a of list(s.Action).filter((x) => !isRead(x))) {
       const key = `${s.Sid}/${a}`;
       if (sc.tagOnCreate && TAG_ON_CREATE_ACTIONS.includes(a)) continue;
+      if (APIGW_TAG_ACTIONS.includes(a) && apigwTagOnCreate(s)) continue;
       if (requestTagOnly) {
         // A tag in the request says nothing about the resources the call names: with only
         // aws:RequestTag, the role could tag ANY existing resource and then change it through
@@ -579,12 +596,32 @@ describe("access stack: deploy policies (criterion 2)", () => {
     const sid = "TagOnCreateThroughCloudFormation";
     // Each guard is needed: without it, an existing untagged resource of another project could
     // be tagged and then changed through the ResourceTag statements.
-    const noCalledVia = withText("              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}\n", "");
+    const noCalledVia = withText(
+      '              "Null": {aws:ResourceTag/project: "true"}\n              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}\n',
+      '              "Null": {aws:ResourceTag/project: "true"}\n',
+    );
     expect(deployGaps(noCalledVia)).toContain(`${sid}/cloudfront:TagResource`);
     const noNull = withText('              "Null": {aws:ResourceTag/project: "true"}\n              ForAnyValue', "              ForAnyValue");
     expect(deployGaps(noNull)).toContain(`${sid}/acm:AddTagsToCertificate`);
     const otherAction = withText("Action: [cloudfront:TagResource, acm:AddTagsToCertificate]", "Action: [cloudfront:TagResource, acm:AddTagsToCertificate, ec2:CreateTags]");
     expect(deployGaps(otherAction)).toContain(`${sid}/ec2:CreateTags`);
+  });
+
+  it("tags new APIs and stages through the API Gateway tags endpoint only via CloudFormation (live: first API deploy)", () => {
+    expect(deployGaps(template)).toEqual([]);
+    const sid = "ApiGatewayTagOnCreateThroughCloudFormation";
+    const statement = deployStatements(template).find((st) => st.Sid === sid);
+    expect(list(statement?.Action)).toEqual(APIGW_TAG_ACTIONS);
+    // Without the call path, the role could tag another project's API and then change it
+    // through ApiGatewayTaggedChange.
+    const noCalledVia = withText(
+      "              StringEquals: {aws:RequestTag/project: ssd-workshop}\n              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}\n          - Sid: DnsOnlyWorkshopSubdomain",
+      "              StringEquals: {aws:RequestTag/project: ssd-workshop}\n          - Sid: DnsOnlyWorkshopSubdomain",
+    );
+    expect(deployGaps(noCalledVia)).toContain(`${sid}/apigateway:POST`);
+    // Any resource other than the tags endpoint (here every API) is refused.
+    const wider = withText("Resource: !Sub arn:aws:apigateway:${AWS::Region}::/tags/*", "Resource: !Sub arn:aws:apigateway:${AWS::Region}::/*");
+    expect(deployGaps(wider)).toContain(`${sid}/apigateway:PUT`);
   });
 
   it("denies CloudFormation resource import, so CloudFormation cannot adopt and tag another project's resource", () => {
