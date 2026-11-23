@@ -32,3 +32,6 @@ paths:
   in a `cookie` header, and sets cookies from the response's `cookies` list; header names arrive lower-cased.
   Every protected route calls `requireSession` (`platform/api/session/session.ts`) and acts only on the
   caller's own participant id.
+- A limit on tries (sign-in codes: 5 wrong tries) is counted with one atomic DynamoDB `ADD` (`ReturnValues: UPDATED_NEW`,
+  condition `attribute_exists(pk)`), never a read-then-conditional-write that gives up after lost races: parallel
+  requests would otherwise escape the limit. Test it with a burst of parallel requests against the fake.

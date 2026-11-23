@@ -82,19 +82,21 @@ describe("DynamoVerifyStore", () => {
     expect(sent[0]?.input).toMatchObject({ Key: { pk: { S: `EMAIL#${EMAIL}` }, sk: { S: "CODE" } }, ConsistentRead: true });
   });
 
-  it("records a wrong try only at the version it read, bumping it", async () => {
-    const { client, sent } = stubClient([{}, conflict()]);
+  it("counts a wrong try with one atomic add (attempts and version), only on an existing item, and returns both", async () => {
+    const { client, sent } = stubClient([{ Attributes: { attempts: { N: "3" }, version: { N: "8" } } }, conflict(), { Attributes: {} }]);
     const store = new DynamoVerifyStore(client, TABLE);
-    await expect(store.setAttempts(EMAIL, 3, 7)).resolves.toBe(true);
-    await expect(store.setAttempts(EMAIL, 3, 7)).resolves.toBe(false);
+    await expect(store.addWrongTry(EMAIL)).resolves.toEqual({ attempts: 3, version: 8 });
+    await expect(store.addWrongTry(EMAIL)).resolves.toBeUndefined();
+    await expect(store.addWrongTry(EMAIL)).rejects.toThrow();
     expect(sent[0]).toBeInstanceOf(UpdateItemCommand);
     expect(sent[0]?.input).toEqual({
       TableName: TABLE,
       Key: { pk: { S: `EMAIL#${EMAIL}` }, sk: { S: "CODE" } },
-      UpdateExpression: "SET #attempts = :attempts, #version = :next",
-      ConditionExpression: "#version = :expected",
-      ExpressionAttributeNames: { "#attempts": "attempts", "#version": "version" },
-      ExpressionAttributeValues: { ":attempts": { N: "3" }, ":next": { N: "8" }, ":expected": { N: "7" } },
+      UpdateExpression: "ADD #attempts :one, #version :one",
+      ConditionExpression: "attribute_exists(#pk)",
+      ExpressionAttributeNames: { "#attempts": "attempts", "#version": "version", "#pk": "pk" },
+      ExpressionAttributeValues: { ":one": { N: "1" } },
+      ReturnValues: "UPDATED_NEW",
     });
   });
 
@@ -129,10 +131,13 @@ describe("DynamoVerifyStore", () => {
   });
 
   it("creates or refreshes the profile (role and group; step and createdAt only if new) and returns the step", async () => {
-    const { client, sent } = stubClient([{ Attributes: { step: { S: "nickname" } } }, { Attributes: {} }]);
+    const { client, sent } = stubClient([
+      { Attributes: { step: { S: "nickname" } } },
+      { Attributes: { step: { S: "clarify" }, role: { S: "admin" } } },
+    ]);
     const store = new DynamoVerifyStore(client, TABLE);
     await expect(store.upsertProfile("p-1", "admin", "blue", "2026-11-23T10:00:00.000Z")).resolves.toBe("nickname");
-    await expect(store.upsertProfile("p-1", "admin", "blue", "x")).rejects.toThrow();
+    await expect(store.upsertProfile("p-1", "admin", "blue", "x")).resolves.toBe("clarify");
     expect(sent[0]?.input).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
       UpdateExpression:
@@ -147,6 +152,14 @@ describe("DynamoVerifyStore", () => {
       },
       ReturnValues: "UPDATED_NEW",
     });
+  });
+
+  it("does not fail a sign-in when the update returns no valid step: it answers the first step", async () => {
+    const { client } = stubClient([{ Attributes: {} }, {}, { Attributes: { step: { S: "bogus" } } }]);
+    const store = new DynamoVerifyStore(client, TABLE);
+    await expect(store.upsertProfile("p-1", "participant", "g", "x")).resolves.toBe("nickname");
+    await expect(store.upsertProfile("p-1", "participant", "g", "x")).resolves.toBe("nickname");
+    await expect(store.upsertProfile("p-1", "participant", "g", "x")).resolves.toBe("nickname");
   });
 
   it("puts a new session (hash, participant, times; never the token) only if absent", async () => {
@@ -174,9 +187,15 @@ describe("DynamoVerifyStore", () => {
   });
 
   it("names only the attributes the role's conditions allow, per partition and action", async () => {
-    const { client, sent } = stubClient([{}, {}, {}, { Attributes: { step: { S: "clarify" } } }, {}]);
+    const { client, sent } = stubClient([
+      { Attributes: { attempts: { N: "1" }, version: { N: "2" } } },
+      {},
+      {},
+      { Attributes: { step: { S: "clarify" } } },
+      {},
+    ]);
     const store = new DynamoVerifyStore(client, TABLE);
-    await store.setAttempts(EMAIL, 1, 1);
+    await store.addWrongTry(EMAIL);
     await store.deleteCode(EMAIL, 1);
     await store.linkParticipant(EMAIL, "p-1");
     await store.upsertProfile("p-1", "participant", "g", "x");

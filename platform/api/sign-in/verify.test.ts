@@ -308,20 +308,77 @@ describe("POST /api/sign-in/verify: participant record and conflicts", () => {
     expect([...s.table.profiles.keys()]).toEqual(["first-one"]);
   });
 
-  it("re-reads the codes when another request wrote them in between (versioned writes)", async () => {
+  it("criterion 2: WHEN N wrong codes arrive at once (N < 5) THEN every one is counted and attempts is N", async () => {
+    const s = setup();
+    await seedCode(s.table, LISTED, CODE);
+    const n = MAX_ATTEMPTS - 1;
+    const pending = Array.from({ length: n }, () => verifySignIn(verify(LISTED, OTHER_CODE), s.deps));
+    await settle(() => s.logs.length === n);
+    await vi.advanceTimersByTimeAsync(ANSWER_AFTER_MS);
+    for (const res of await Promise.all(pending)) expect(res.statusCode).toBe(401);
+    expect(s.table.codes.get(LISTED)?.attempts).toBe(n);
+    expect(s.logs.map((l) => l.outcome)).toEqual(Array(n).fill("wrong-code"));
+  });
+
+  it("criterion 2: WHEN 10 wrong codes arrive at once THEN at most 4 are refused before the burn, none goes uncounted, and the right code is refused after", async () => {
+    const s = setup();
+    await seedCode(s.table, LISTED, CODE);
+    const burst = 10;
+    let added = 0;
+    const add = s.table.addWrongTry.bind(s.table);
+    s.table.addWrongTry = async (email) => (added++, add(email));
+    const pending = Array.from({ length: burst }, () => verifySignIn(verify(LISTED, OTHER_CODE), s.deps));
+    await settle(() => s.logs.length === burst);
+    await vi.advanceTimersByTimeAsync(ANSWER_AFTER_MS);
+    for (const res of await Promise.all(pending)) expect(res.statusCode).toBe(401);
+    const outcomes = s.logs.map((l) => l.outcome);
+    // Every guess was counted (one atomic add each); none was dropped as a lost race.
+    expect(added).toBe(burst);
+    expect(outcomes).not.toContain("conflict");
+    expect(outcomes.filter((o) => o === "wrong-code")).toHaveLength(MAX_ATTEMPTS - 1);
+    // The rest burned the item or found it already burned (gone): refused either way.
+    expect(outcomes.filter((o) => o === "burned").length).toBeGreaterThanOrEqual(1);
+    expect(outcomes.filter((o) => o !== "wrong-code").every((o) => o === "burned" || o === "no-code")).toBe(true);
+    expect(s.table.codes.has(LISTED)).toBe(false);
+
+    const res = await answer(verify(LISTED, CODE), s);
+    expect(res.statusCode).toBe(401);
+    expect(s.table.sessions.size).toBe(0);
+  });
+
+  it("burns on the next read an item left at 5 wrong tries when the burning delete lost a race", async () => {
+    const s = setup();
+    await seedCode(s.table, LISTED, CODE, START_S, MAX_ATTEMPTS);
+    const res = await answer(verify(LISTED, CODE), s);
+    expect(res.statusCode).toBe(401);
+    expect(s.table.codes.has(LISTED)).toBe(false);
+    expect(s.logs.map((l) => l.outcome)).toEqual(["burned"]);
+  });
+
+  it("refuses a wrong code whose codes item vanished before it was counted, creating nothing", async () => {
+    const s = setup();
+    await seedCode(s.table, LISTED, CODE);
+    const add = s.table.addWrongTry.bind(s.table);
+    s.table.addWrongTry = async (email) => (s.table.codes.delete(email), add(email));
+    const res = await answer(verify(LISTED, OTHER_CODE), s);
+    expect(res.statusCode).toBe(401);
+    expect(s.table.codes.has(LISTED)).toBe(false);
+    expect(s.logs.map((l) => l.outcome)).toEqual(["no-code"]);
+  });
+
+  it("re-reads before using a right code when another request wrote the codes in between (versioned delete)", async () => {
     const s = setup();
     await seedCode(s.table, LISTED, CODE);
     s.table.beforeCodeRead = () => {
       const item = s.table.codes.get(LISTED);
       if (item) s.table.codes.set(LISTED, { ...item, version: item.version + 1 });
     };
-    const res = await answer(verify(LISTED, OTHER_CODE), s);
-    expect(res.statusCode).toBe(401);
-    expect(s.table.codes.get(LISTED)?.attempts).toBe(1);
-    expect(s.table.codes.get(LISTED)?.version).toBe(3);
+    const res = await answer(verify(LISTED, CODE), s);
+    expect(res.statusCode).toBe(200);
+    expect(s.table.codes.has(LISTED)).toBe(false);
   });
 
-  it("refuses with a conflict when the codes keep changing", async () => {
+  it("refuses a right code with a conflict when the codes keep changing", async () => {
     const s = setup();
     await seedCode(s.table, LISTED, CODE);
     s.table.deleteCode = async () => false;

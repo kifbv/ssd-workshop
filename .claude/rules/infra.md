@@ -140,8 +140,10 @@ paths:
   item of the partition with only the allowed attributes (sign-in: an `ALLOW` entry, taking that person off the
   list, a denial of service, never added rights); when that matters, give the role its own partition (`CODE#`).
 - `HttpLambdaIntegration` writes a route's path into the Lambda permission's source ARN as is, so a path
-  parameter route (`/api/participants/{id}`) gets a literal `{id}`: for a function behind such a route use
-  `scopePermissionToRoute: false` (one permission, `<api id>/*/*/*`, still this API only).
+  parameter route (`/api/participants/{id}`) gets a literal `{id}`. Unverified until a deployed request
+  proves it: whether API Gateway's invoke ARN for such a route matches that literal `{id}` (and works) or
+  not. Until then, for a function behind such a route use `scopePermissionToRoute: false` (one permission,
+  `<api id>/*/*/*`, still this API only), which works either way.
 - DynamoDB `TransactWriteItems` has no IAM action of its own: each item is authorized as `PutItem`,
   `UpdateItem`, `DeleteItem` or `ConditionCheckItem`, with its own `LeadingKeys`/`Attributes` conditions.
   Under a `dynamodb:Attributes` list, return only `UPDATED_NEW`/`UPDATED_OLD`/`NONE` (`ALL_NEW` could

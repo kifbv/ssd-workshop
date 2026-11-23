@@ -1,6 +1,6 @@
 // An in-memory stand-in for the table behind the code check, the session check and the participant
 // routes (ticket 1.5), shared by their tests (not bundled: no handler imports it). It follows the
-// same conditions as the DynamoDB adapters: versioned code writes, a link only when none exists,
+// same conditions as the DynamoDB adapters: an atomic wrong-try count, versioned code deletes, a link only when none exists,
 // and the nickname claim and profile update as one all-or-nothing step.
 import type { ClaimResult, ParticipantStore } from "./participant/participant.js";
 import type { ParticipantRecord, StoredSession } from "./session/session.js";
@@ -42,12 +42,14 @@ export class FakeTable implements VerifyStore, ParticipantStore {
     return copy;
   }
 
-  async setAttempts(email: string, attempts: number, expectedVersion: number): Promise<boolean> {
-    this.maybeFail("setAttempts");
+  /** Like DynamoDB's `ADD attempts :one, version :one` on an existing item: atomic, never refused for a race. */
+  async addWrongTry(email: string): Promise<{ attempts: number; version: number } | undefined> {
+    this.maybeFail("addWrongTry");
     const item = this.codes.get(email);
-    if (item?.version !== expectedVersion) return false;
-    this.codes.set(email, { ...item, attempts, version: expectedVersion + 1 });
-    return true;
+    if (item === undefined) return undefined;
+    const updated = { ...item, attempts: item.attempts + 1, version: item.version + 1 };
+    this.codes.set(email, updated);
+    return { attempts: updated.attempts, version: updated.version };
   }
 
   async deleteCode(email: string, expectedVersion: number): Promise<boolean> {

@@ -22,7 +22,7 @@ import { ANSWER_AFTER_MS, errorName, liveCodes, parseEmailField, verifyAnyCode, 
 
 /** Wrong tries shared by all of an address's live codes; at the fifth the codes are burned. */
 export const MAX_ATTEMPTS = 5;
-/** Tries at a conditional write to the codes item when another request wrote in between. */
+/** Tries at deleting a matched codes item when another request wrote it in between. */
 const CODE_WRITE_TRIES = 3;
 const CODE_PATTERN = /^[0-9]{6}$/;
 
@@ -60,8 +60,11 @@ export interface VerifyStore {
   /** The entry, if the address is listed (an entry without `email` or with an unknown role is not). */
   getAllowEntry(email: string): Promise<AllowEntry | undefined>;
   getCode(email: string): Promise<StoredCodes | undefined>;
-  /** Stores the wrong tries if the codes item is still at `expectedVersion` (and bumps it); false otherwise. */
-  setAttempts(email: string, attempts: number, expectedVersion: number): Promise<boolean>;
+  /**
+   * Counts one wrong try atomically (whatever other requests did in between) and bumps the version;
+   * returns the new `attempts` and `version`, or undefined when the codes item no longer exists.
+   */
+  addWrongTry(email: string): Promise<{ attempts: number; version: number } | undefined>;
   /** Deletes the codes item if it is still at `expectedVersion`; false otherwise. */
   deleteCode(email: string, expectedVersion: number): Promise<boolean>;
   /** Links the entry to a participant if it still exists and has none yet; false otherwise. */
@@ -109,8 +112,10 @@ type CodeCheck = "match" | "no-code" | "wrong-code" | "burned" | "conflict";
 
 /**
  * Checks `code` against the address's live codes. A match deletes the codes item (no code can be
- * used again); a wrong try counts against the shared `attempts`, and the fifth burns the whole
- * item. Every write is conditional on the version read; on a conflict it reads again (3 times).
+ * used again), conditional on the version read; on a conflict it reads again (3 times). A wrong
+ * try is always counted, with one atomic add to the shared `attempts` (never lost to a race, so a
+ * burst of parallel guesses gets at most 4 refusals before the burn); the add that reaches 5 burns
+ * the whole item. A wrong try on an item that vanished meanwhile is simply refused.
  */
 async function checkCode(store: VerifyStore, email: string, code: string, nowSeconds: number): Promise<CodeCheck> {
   for (let i = 0; i < CODE_WRITE_TRIES; i++) {
@@ -118,7 +123,7 @@ async function checkCode(store: VerifyStore, email: string, code: string, nowSec
     const live = liveCodes(stored?.codes ?? [], nowSeconds);
     if (stored === undefined || live.length === 0) return "no-code";
     if (stored.attempts >= MAX_ATTEMPTS) {
-      // Not reachable through this code (the fifth wrong try deletes the item); refuse and burn.
+      // Burned by an earlier wrong try whose delete lost a race; refuse and burn.
       await store.deleteCode(email, stored.version);
       return "burned";
     }
@@ -126,12 +131,14 @@ async function checkCode(store: VerifyStore, email: string, code: string, nowSec
       if (await store.deleteCode(email, stored.version)) return "match";
       continue;
     }
-    const attempts = stored.attempts + 1;
-    if (attempts >= MAX_ATTEMPTS) {
-      if (await store.deleteCode(email, stored.version)) return "burned";
-      continue;
+    const counted = await store.addWrongTry(email);
+    if (counted === undefined) return "no-code";
+    if (counted.attempts >= MAX_ATTEMPTS) {
+      // If a later write wins the delete race, the item keeps attempts >= 5 and every read burns it.
+      await store.deleteCode(email, counted.version);
+      return "burned";
     }
-    if (await store.setAttempts(email, attempts, stored.version)) return "wrong-code";
+    return "wrong-code";
   }
   return "conflict";
 }

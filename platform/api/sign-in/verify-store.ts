@@ -31,6 +31,9 @@ export interface VerifySender {
   send(command: PutItemCommand): Promise<PutItemCommandOutput>;
 }
 
+/** A new participant's step. */
+const FIRST_STEP: Step = "nickname";
+
 const str = (value: string): AttributeValue => ({ S: value });
 const num = (value: number): AttributeValue => ({ N: String(value) });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
@@ -73,17 +76,30 @@ export class DynamoVerifyStore implements VerifyStore {
     return output.Item === undefined ? undefined : codesFromItem(output.Item);
   }
 
-  async setAttempts(email: string, attempts: number, expectedVersion: number): Promise<boolean> {
-    return this.conditional(
-      new UpdateItemCommand({
-        TableName: this.tableName,
-        Key: keyOf(codeKey(email)),
-        UpdateExpression: "SET #attempts = :attempts, #version = :next",
-        ConditionExpression: "#version = :expected",
-        ExpressionAttributeNames: { "#attempts": "attempts", "#version": "version" },
-        ExpressionAttributeValues: { ":attempts": num(attempts), ":next": num(expectedVersion + 1), ":expected": num(expectedVersion) },
-      }),
-    );
+  async addWrongTry(email: string): Promise<{ attempts: number; version: number } | undefined> {
+    // One atomic add, so parallel wrong tries are all counted; the version is bumped too, because
+    // the code request writes the item conditionally on it. Never creates an item.
+    let output: UpdateItemCommandOutput;
+    try {
+      output = await this.client.send(
+        new UpdateItemCommand({
+          TableName: this.tableName,
+          Key: keyOf(codeKey(email)),
+          UpdateExpression: "ADD #attempts :one, #version :one",
+          ConditionExpression: "attribute_exists(#pk)",
+          ExpressionAttributeNames: { "#attempts": "attempts", "#version": "version", "#pk": "pk" },
+          ExpressionAttributeValues: { ":one": num(1) },
+          ReturnValues: "UPDATED_NEW",
+        }),
+      );
+    } catch (error) {
+      if (isConditionFailure(error)) return undefined;
+      throw error;
+    }
+    const attempts = Number(output.Attributes?.["attempts"]?.N);
+    const version = Number(output.Attributes?.["version"]?.N);
+    if (!Number.isInteger(attempts) || !Number.isInteger(version)) throw new Error("wrong try not returned");
+    return { attempts, version };
   }
 
   async deleteCode(email: string, expectedVersion: number): Promise<boolean> {
@@ -133,15 +149,19 @@ export class DynamoVerifyStore implements VerifyStore {
           ":role": str(role),
           ":group": str(group),
           ":now": str(nowIso),
-          ":first": str("nickname"),
+          ":first": str(FIRST_STEP),
         },
-        // Only the attributes this update names come back (no ALL_NEW, which would return any attribute).
+        // Only the attributes this update names come back. Not ALL_NEW: it would return `nickname` and
+        // any other attribute outside the role's `dynamodb:Attributes` list (AWS pairs such a list with
+        // ReturnValues NONE, UPDATED_OLD or UPDATED_NEW).
         ReturnValues: "UPDATED_NEW",
       }),
     );
+    // `SET step = if_not_exists(...)` is an update of `step`, so UPDATED_NEW returns it even when
+    // unchanged. Should it ever be missing or unknown, the sign-in still succeeds and answers the
+    // first step; the sign-in page takes the real step from `GET /api/me` (decisions, 1.5 notes for 1.6).
     const step = output.Attributes?.["step"]?.S;
-    if (!isStep(step)) throw new Error("profile has no valid step");
-    return step;
+    return isStep(step) ? step : FIRST_STEP;
   }
 
   async putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number): Promise<void> {
