@@ -5,13 +5,16 @@
   "scripts": {
     "smoke": "tsx src/smoke/main.ts",
     "allowlist": "tsx src/allowlist/main.ts",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "flags": "tsx src/flags/main.ts",
+    "eval": "tsx src/eval/main.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1175.0",
     "@aws-sdk/client-dynamodb": "^3.1175.0",
     "@aws-sdk/client-service-quotas": "^3.1175.0",
     "@aws-sdk/client-sesv2": "^3.1175.0",
+    "@aws-sdk/client-sqs": "^3.1175.0",
     "@smithy/node-http-handler": "^4.14.2"
   },
   "devDependencies": {

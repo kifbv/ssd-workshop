@@ -39,3 +39,6 @@ paths:
   and `style-src 'self'`); set text with `textContent`. Browser code gets DOM types from `platform/web/tsconfig.json`
   only. In Playwright, a `hidden` element is not in the accessibility tree: `getByRole` waits forever for it, so read
   hidden fields by id.
+- SQS delivers a job at least once: the worker skips a message that is no longer `pending` and stores the outcome in
+  one transaction conditional on it still being pending (ticket 1.7). DynamoDB refuses an expression with an undefined
+  `:value`/`#name` (or an unused one): `store.test.ts` checks every transaction item's placeholders both ways.

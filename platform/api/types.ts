@@ -3,16 +3,18 @@
  *
  * Key scheme (string keys `pk` and `sk`; build them with keys.ts):
  *
- * | Item                 | pk                     | sk                 | Expires (TTL `expiresAt`) |
- * | -------------------- | ---------------------- | ------------------ | ------------------------- |
- * | Allow-list entry     | `EMAIL#<email>`        | `ALLOW`            | never                     |
- * | Sign-in codes        | `EMAIL#<email>`        | `CODE`             | yes (latest code expiry)  |
- * | Code requests        | `EMAIL#<email>`        | `CODE_REQUESTS`    | yes (1 hour after last)   |
- * | Session              | `SESSION#<token hash>` | `SESSION`          | yes (8 hours)             |
- * | Participant          | `PARTICIPANT#<id>`     | `PROFILE`          | never                     |
- * | Conversation message | `PARTICIPANT#<id>`     | `MSG#<message id>` | never                     |
- * | Usage                | `PARTICIPANT#<id>`     | `USAGE`            | never                     |
- * | Nickname claim       | `NICK#<nickname>`      | `NICK`             | never                     |
+ * | Item                 | pk                     | sk                   | Expires (TTL `expiresAt`) |
+ * | -------------------- | ---------------------- | -------------------- | ------------------------- |
+ * | Allow-list entry     | `EMAIL#<email>`        | `ALLOW`              | never                     |
+ * | Sign-in codes        | `EMAIL#<email>`        | `CODE`               | yes (latest code expiry)  |
+ * | Code requests        | `EMAIL#<email>`        | `CODE_REQUESTS`      | yes (1 hour after last)   |
+ * | Session              | `SESSION#<token hash>` | `SESSION`            | yes (8 hours)             |
+ * | Participant          | `PARTICIPANT#<id>`     | `PROFILE`            | never                     |
+ * | Conversation message | `PARTICIPANT#<id>`     | `MSG#<message id>`   | never                     |
+ * | Assistant reply      | `PARTICIPANT#<id>`     | `MSG#<message id>-r` | never                     |
+ * | Conversation state   | `PARTICIPANT#<id>`     | `CONVERSATION`       | never                     |
+ * | Usage                | `PARTICIPANT#<id>`     | `USAGE`              | never                     |
+ * | Nickname claim       | `NICK#<nickname>`      | `NICK`               | never                     |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
  *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email`,
@@ -133,27 +135,103 @@ export interface NicknameClaim extends Keyed {
 
 export type MessageAuthor = "participant" | "assistant";
 
-/** One message of a participant's conversation with the AI (ticket 1.7). */
-export interface ConversationMessage extends Keyed {
-  type: "message";
-  /** Time-ordered: ISO creation time first, then a random suffix. */
-  id: string;
-  participantId: string;
-  author: MessageAuthor;
-  /** The step the message belongs to. */
-  step: Step;
-  text: string;
-  /** ISO 8601. */
-  createdAt: string;
-  /** Tokens and cost of the AI call that produced an assistant message. */
-  usage?: TokenUsage;
-}
+/**
+ * Where a participant message is (ticket 1.7): `pending` until the AI worker is done, then `done`
+ * (answered), `declined` (off the workshop's path, or rejected by a facilitator), `flagged`
+ * (waiting for a facilitator) or `failed` (the AI call failed; the participant can send again).
+ */
+export type MessageStatus = "pending" | "done" | "declined" | "flagged" | "failed";
 
+/** The guardrail check's verdict on a participant message (ticket 1.7). */
+export type GuardrailVerdict = "on-path" | "decline" | "flag";
+
+/** Tokens and US dollars of one or more AI calls. */
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   /** US dollars. */
   costUsd: number;
+}
+
+/**
+ * A message the participant sent (ticket 1.7), at `MSG#<message id>`. The id and the participant
+ * id are read from the keys (not stored twice). The guardrail call's tokens and cost are kept here;
+ * the answer call's are on the reply.
+ */
+export interface ParticipantMessageItem extends Keyed {
+  type: "message";
+  author: "participant";
+  /** The step the message belongs to. */
+  step: Step;
+  text: string;
+  status: MessageStatus;
+  /** ISO 8601. */
+  createdAt: string;
+  /** Epoch seconds when it (last) became pending: a pending message older than 10 minutes counts as failed. */
+  pendingSince: number;
+  /** Set by a facilitator's approval of a flagged message: the worker answers it without a new check. */
+  approved?: boolean;
+  verdict?: GuardrailVerdict;
+  /** The guardrail's short reason (for facilitators; never logged). */
+  verdictReason?: string;
+  /** The guardrail's in-scope suggestion, used in a decline. */
+  suggestion?: string;
+  guardrailInputTokens?: number;
+  guardrailOutputTokens?: number;
+  guardrailCostUsd?: number;
+}
+
+/** How a reply came about: an AI answer, a decline, or the neutral failure text. */
+export type ReplyKind = "answer" | "decline" | "failure";
+
+/**
+ * The assistant's reply to one participant message (ticket 1.7), at `MSG#<message id>-r`, so it
+ * sorts right after the message. An `answer` also stores what was sent to the model and the answer
+ * call's tokens and cost.
+ */
+export interface AssistantMessageItem extends Keyed {
+  type: "message";
+  author: "assistant";
+  /** The step is the message's (the reply sorts right after it), so it is not stored twice. */
+  text: string;
+  kind: ReplyKind;
+  /** The participant message this answers. */
+  replyTo: string;
+  /** ISO 8601. */
+  createdAt: string;
+  /** The participant's text as sent to the model (answers only). */
+  prompt?: string;
+  modelId?: string;
+  /** Version of the system prompt (answers only), e.g. `clarify-v1`. */
+  promptVersion?: string;
+  /** Earlier messages sent along as context (answers only). */
+  historyCount?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+}
+
+export type ConversationMessage = ParticipantMessageItem | AssistantMessageItem;
+
+/**
+ * `open`, or `waiting` for a facilitator's decision on a flagged message (ticket 1.7). The page
+ * shows `waiting` as "waiting for your facilitator".
+ */
+export type ConversationState = "open" | "waiting";
+
+/**
+ * A participant's conversation (ticket 1.7), at `CONVERSATION`: its state and the one message in
+ * flight (pending or flagged). Written only with conditions, so two sends at once cannot both pass.
+ */
+export interface ConversationItem extends Keyed {
+  type: "conversation";
+  state: ConversationState;
+  /** The message in flight; absent when none. */
+  pendingId?: string;
+  /** Epoch seconds: when `pendingId` (last) became pending. */
+  pendingSince?: number;
+  /** ISO 8601. */
+  updatedAt: string;
 }
 
 /** Running totals of a participant's AI use (ticket 1.7; the $5 cap is phase 3). */
@@ -172,4 +250,5 @@ export type TableItem =
   | Participant
   | NicknameClaim
   | ConversationMessage
+  | ConversationItem
   | UsageItem;

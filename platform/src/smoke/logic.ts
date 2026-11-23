@@ -1,5 +1,6 @@
 // Pure logic of the smoke checks: no AWS calls here, so every rule is unit tested.
 import { isValidEmail } from "../../api/email.js";
+import { MODEL_ID } from "../../api/settings.js";
 
 export const REGION = "eu-central-1";
 export const SENDER = "ssd-workshop@rankly.games";
@@ -9,7 +10,8 @@ export const CONFIGURATION_SET = "ssd-workshop-email";
 /** The live code request route (ticket 1.4), through CloudFront. */
 export const SIGN_IN_CODE_URL = "https://workshop.rankly.games/api/sign-in/code";
 
-export const DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-4-6";
+/** The platform's one model setting (platform/api/settings.ts). */
+export const DEFAULT_MODEL_ID = MODEL_ID;
 
 export const USAGE = `Usage: npm run -s smoke -- <command>
 

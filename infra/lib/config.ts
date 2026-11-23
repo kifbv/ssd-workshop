@@ -127,6 +127,75 @@ export const PARTICIPANT_NICK_PUT_ATTRIBUTES = ["pk", "sk", "type", "nickname", 
 /** The profile attribute names the participant function may update in `PARTICIPANT#*`. */
 export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "step"] as const;
 
+/** Lambda function, role and log group of the conversation routes (ticket 1.7). */
+export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
+/**
+ * The attribute names the conversation function may update in `PARTICIPANT#*` (UpdateItem only, so
+ * it can never replace or empty an item): a new message, the conversation's state and message in
+ * flight, and the failure reply when the queue refuses a message. Never `role`, `group`, `nickname`,
+ * `id` or `approved`.
+ */
+export const CONVERSATION_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "author",
+  "step",
+  "text",
+  "status",
+  "createdAt",
+  "pendingSince",
+  "state",
+  "pendingId",
+  "updatedAt",
+  "kind",
+  "replyTo",
+] as const;
+/** Lambda function, role and log group of the AI worker (ticket 1.7). */
+export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
+/**
+ * The attribute names the AI worker may update in `PARTICIPANT#*` (UpdateItem only): a message's
+ * status and guardrail result, the reply with its prompt, tokens and cost, the conversation's state
+ * and the usage totals. Never `step`, `role`, `group`, `nickname`, `id` or `approved` (only a
+ * facilitator's approval sets it, and it skips the guardrail check).
+ */
+export const AI_WORKER_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "author",
+  "text",
+  "status",
+  "kind",
+  "replyTo",
+  "createdAt",
+  "prompt",
+  "modelId",
+  "promptVersion",
+  "historyCount",
+  "inputTokens",
+  "outputTokens",
+  "costUsd",
+  "verdict",
+  "verdictReason",
+  "suggestion",
+  "guardrailInputTokens",
+  "guardrailOutputTokens",
+  "guardrailCostUsd",
+  "state",
+  "pendingId",
+  "pendingSince",
+  "updatedAt",
+  "participantId",
+] as const;
+/** The queue from the conversation function to the AI worker, and its dead-letter queue (ticket 1.7). */
+export const AI_QUEUE_NAME = `${PREFIX}-ai-messages`;
+export const AI_DLQ_NAME = `${PREFIX}-ai-messages-dlq`;
+/** The model of the AI worker (Franck, 2026-11-23); must equal platform/api/settings.ts MODEL_ID. */
+export const MODEL_ID = "eu.anthropic.claude-sonnet-4-6";
+/** The foundation model behind MODEL_ID (an EU profile routes to it in several EU regions). */
+export const FOUNDATION_MODEL_ID = "anthropic.claude-sonnet-4-6";
+
 /** The only address the workshop sends from (SES identity; it receives no mail). */
 export const SENDER_ADDRESS = "ssd-workshop@rankly.games";
 /** SES configuration set created by the access stack; every send names it. */

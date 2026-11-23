@@ -41,13 +41,17 @@ export const MAX_RAW_BODY_BYTES = 4096;
 
 /**
  * The body as a JSON object (possibly base64), or undefined when it is missing, too large, not
- * JSON or not an object. Never throws and never echoes the input.
+ * JSON or not an object. Never throws and never echoes the input. Routes with larger bodies (a
+ * conversation message, ticket 1.7) pass their own limits.
  */
-export function readJsonObject(request: HttpRequest): Record<string, unknown> | undefined {
+export function readJsonObject(
+  request: HttpRequest,
+  limits: { maxBodyBytes: number; maxRawBodyBytes: number } = { maxBodyBytes: MAX_BODY_BYTES, maxRawBodyBytes: MAX_RAW_BODY_BYTES },
+): Record<string, unknown> | undefined {
   if (typeof request.body !== "string") return undefined;
-  if (Buffer.byteLength(request.body, "utf8") > MAX_RAW_BODY_BYTES) return undefined;
+  if (Buffer.byteLength(request.body, "utf8") > limits.maxRawBodyBytes) return undefined;
   const raw = request.isBase64Encoded === true ? Buffer.from(request.body, "base64").toString("utf8") : request.body;
-  if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) return undefined;
+  if (Buffer.byteLength(raw, "utf8") > limits.maxBodyBytes) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

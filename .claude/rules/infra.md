@@ -153,3 +153,6 @@ paths:
   and the logical id (a new name alone is an in-place update), or the deploy fails on `UpdateResponseHeadersPolicy`.
 - The site stack builds the pages (`buildWeb`, esbuild) at synth time into `cdk.out/ssd-workshop-web` and uploads that
   folder, not `platform/web`: a new static file must be added to `STATIC_FILES` in `platform/web/build.ts`.
+- A Lambda function cannot invoke another (the boundary has no `lambda:InvokeFunction`, and invoke permissions
+  are only for API Gateway, EventBridge, SNS and S3): hand work off through an `ssd-workshop-*` SQS queue and an
+  event source mapping (ticket 1.7), with identity-based rights only (no queue policy: `sqs:AddPermission` is denied).

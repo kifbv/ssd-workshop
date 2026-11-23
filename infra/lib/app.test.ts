@@ -11,7 +11,11 @@ import {
   SIGN_IN_VERIFY_ROUTE_KEY,
   SIGN_IN_VERIFY_THROTTLE,
   TTL_ATTRIBUTE,
+  AI_QUEUE_MAX_RECEIVES,
+  AI_QUEUE_VISIBILITY_SECONDS,
+  AI_WORKER_TIMEOUT_SECONDS,
 } from "./api-stack.js";
+import { CONVERSATION_ROUTES as CONVERSATION_ROUTE_KEYS } from "../../platform/api/conversation/conversation.js";
 import { buildApp } from "./app.js";
 import {
   ACCOUNT,
@@ -31,6 +35,10 @@ import {
   SIGN_IN_CODE_FUNCTION_NAME,
   SIGN_IN_VERIFY_FUNCTION_NAME,
   PARTICIPANT_FUNCTION_NAME,
+  CONVERSATION_FUNCTION_NAME,
+  AI_WORKER_FUNCTION_NAME,
+  AI_QUEUE_NAME,
+  AI_DLQ_NAME,
   REGION,
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
@@ -62,6 +70,8 @@ const MUST_BE_TAGGED = [
   "AWS::DynamoDB::Table",
   "AWS::ApiGatewayV2::Api",
   "AWS::ApiGatewayV2::Stage",
+  "AWS::SQS::Queue",
+  "AWS::Lambda::EventSourceMapping",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -102,6 +112,7 @@ const NOT_RESOURCE_NAMES = [
 const DNS_NAME_PROPERTIES: Record<string, string[]> = {
   "AWS::Route53::RecordSet": ["Name"],
   "AWS::Lambda::Permission": ["FunctionName"],
+  "AWS::Lambda::EventSourceMapping": ["FunctionName"],
 };
 
 /** Every [path, value] under `value` whose key is a physical name ("Name" or "*Name"). */
@@ -124,6 +135,7 @@ const EXPECTED_NAME_PATHS = [
   "LogGroupName",
   "OriginAccessControlConfig.Name",
   "TableName",
+  "QueueName",
   "Name",
 ];
 
@@ -614,13 +626,15 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/me",
       "POST /api/me/nickname",
       "GET /api/participants/{id}",
+      "POST /api/conversation/messages",
+      "GET /api/conversation/messages/{id}",
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(4);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(5);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -672,6 +686,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       SIGN_IN_CODE_FUNCTION_NAME,
       SIGN_IN_VERIFY_FUNCTION_NAME,
       PARTICIPANT_FUNCTION_NAME,
+      CONVERSATION_FUNCTION_NAME,
+      AI_WORKER_FUNCTION_NAME,
     ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
       Runtime: "nodejs22.x",
@@ -1098,5 +1114,158 @@ describe("api stack: participant function (ticket 1.5)", () => {
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
     const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
     await expect(quietly(() => bundle.handler({ routeKey: "GET /api/me" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describe("api stack: conversation queue (ticket 1.7)", () => {
+  const queues = () => ofType("AWS::SQS::Queue").map(([, id, r]) => [id, r] as const);
+  const queue = (name: string) => queues().find(([, r]) => r.Properties?.QueueName === name);
+
+  it("creates the queue ssd-workshop-ai-messages and its dead-letter queue, SQS-encrypted and tagged, without a queue policy", () => {
+    expect(queues().map(([, r]) => r.Properties?.QueueName).sort()).toEqual([AI_QUEUE_NAME, AI_DLQ_NAME].sort());
+    expect(AI_QUEUE_NAME).toBe("ssd-workshop-ai-messages");
+    expect(AI_DLQ_NAME).toBe("ssd-workshop-ai-messages-dlq");
+    for (const [id, r] of queues()) {
+      expect(r.Properties?.SqsManagedSseEnabled, id).toBe(true);
+      expect(tagsOf(r).project, id).toBe("ssd-workshop");
+    }
+    // The access stack denies sqs:AddPermission; no resource policy is needed (identity-based rights).
+    expect(ofType("AWS::SQS::QueuePolicy")).toEqual([]);
+  });
+
+  it("hides a job for six times the worker's timeout and moves it to the dead-letter queue after 3 receives", () => {
+    expect(AI_WORKER_TIMEOUT_SECONDS).toBe(300);
+    expect(queue(AI_QUEUE_NAME)?.[1].Properties).toMatchObject({
+      VisibilityTimeout: AI_QUEUE_VISIBILITY_SECONDS,
+      RedrivePolicy: { deadLetterTargetArn: { "Fn::GetAtt": [queue(AI_DLQ_NAME)?.[0], "Arn"] }, maxReceiveCount: AI_QUEUE_MAX_RECEIVES },
+    });
+    expect(AI_QUEUE_VISIBILITY_SECONDS).toBe(1800);
+    expect(AI_QUEUE_MAX_RECEIVES).toBe(3);
+  });
+
+  it("feeds the worker one job at a time through a tagged event source mapping", () => {
+    const mappings = ofType("AWS::Lambda::EventSourceMapping");
+    expect(mappings).toHaveLength(1);
+    const worker = apiFunction(AI_WORKER_FUNCTION_NAME);
+    expect(mappings[0]?.[2].Properties).toMatchObject({
+      BatchSize: 1,
+      EventSourceArn: { "Fn::GetAtt": [queue(AI_QUEUE_NAME)?.[0], "Arn"] },
+      FunctionName: { Ref: worker.fnEntry()?.[0] },
+      Tags: [{ Key: "project", Value: "ssd-workshop" }],
+    });
+  });
+});
+
+describe("api stack: conversation function (ticket 1.7)", () => {
+  const f = apiFunction(CONVERSATION_FUNCTION_NAME);
+  const queueArn = () => ({ "Fn::GetAtt": [ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1], "Arn"] });
+
+  it("names the function, role and log group ssd-workshop-api-conversation; Node.js 22 arm64, 256 MB, 10 s", () => {
+    expect(CONVERSATION_FUNCTION_NAME).toBe("ssd-workshop-api-conversation");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({ Runtime: "nodejs22.x", Architectures: ["arm64"], MemorySize: 256, Timeout: 10 });
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({
+      LogGroupName: CONVERSATION_FUNCTION_NAME,
+      RetentionInDays: 14,
+    });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+  });
+
+  it("routes POST /api/conversation/messages and GET /api/conversation/messages/{id} to it, invoked only by this API", () => {
+    expect([...CONVERSATION_ROUTE_KEYS]).toEqual(["POST /api/conversation/messages", "GET /api/conversation/messages/{id}"]);
+    for (const routeKey of CONVERSATION_ROUTE_KEYS) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({
+        IntegrationType: "AWS_PROXY",
+        PayloadFormatVersion: "2.0",
+        IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+      });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    expect(JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn)).toContain('"/*/*/*"');
+  });
+
+  it("allows only its logs, GetItem on sessions and participants, updates of listed attributes in participants, and sends to the queue", () => {
+    expect(f.statements()).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": {
+            "dynamodb:Attributes": [
+              "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
+            ],
+          },
+        },
+      },
+      { Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn() },
+    ]);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string; body: string }) => Promise<{ statusCode: number }> }>();
+    await expect(quietly(() => bundle.handler({ routeKey: "POST /api/conversation/messages", body: "{}" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describe("api stack: AI worker (ticket 1.7)", () => {
+  const f = apiFunction(AI_WORKER_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-ai-worker; Node.js 22 arm64, 256 MB, 300 s; no route", () => {
+    expect(AI_WORKER_FUNCTION_NAME).toBe("ssd-workshop-api-ai-worker");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({ Runtime: "nodejs22.x", Architectures: ["arm64"], MemorySize: 256, Timeout: 300 });
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({
+      LogGroupName: AI_WORKER_FUNCTION_NAME,
+      RetentionInDays: 14,
+    });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(f.permissions()).toEqual([]);
+  });
+
+  it("allows only its logs, reads and updates of listed attributes in participants, the one model and consuming its queue", () => {
+    const queueArn = { "Fn::GetAtt": [ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1], "Arn"] };
+    expect(f.statements()).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:GetItem", "dynamodb:Query"],
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": expect.not.arrayContaining(["approved", "step", "role", "group", "nickname", "id"]) },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "bedrock:InvokeModel",
+        Resource: [
+          `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/eu.anthropic.claude-sonnet-4-6`,
+          "arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-4-6",
+        ],
+      },
+      {
+        Effect: "Allow",
+        Action: ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+        Resource: queueArn,
+      },
+    ]);
+  });
+
+  it("bundles the handler into a self-contained index.js that skips a malformed job without any AWS call", async () => {
+    const bundle = f.bundle<{ handler: (event: { Records: { body: string }[] }) => Promise<void> }>();
+    await expect(quietly(() => bundle.handler({ Records: [{ body: "not json" }] }))).resolves.toBeUndefined();
   });
 });

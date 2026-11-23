@@ -5,11 +5,23 @@ import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations
 import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
 import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
+  ACCOUNT,
+  AI_DLQ_NAME,
+  AI_QUEUE_NAME,
+  AI_WORKER_FUNCTION_NAME,
+  AI_WORKER_UPDATE_ATTRIBUTES,
   API_NAME,
+  CONVERSATION_FUNCTION_NAME,
+  CONVERSATION_UPDATE_ATTRIBUTES,
+  FOUNDATION_MODEL_ID,
+  MODEL_ID,
+  REGION,
   HEALTH_FUNCTION_NAME,
   PARTICIPANT_FUNCTION_NAME,
   PARTICIPANT_NICK_PUT_ATTRIBUTES,
@@ -52,6 +64,28 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
   { path: "/api/me/nickname", method: HttpMethod.POST },
   { path: "/api/participants/{id}", method: HttpMethod.GET },
+] as const;
+
+/** The protected conversation routes (ticket 1.7), served by one function. */
+export const CONVERSATION_ROUTES = [
+  { path: "/api/conversation/messages", method: HttpMethod.POST },
+  { path: "/api/conversation/messages/{id}", method: HttpMethod.GET },
+] as const;
+
+/**
+ * The AI worker's timeout (ticket 1.7): a guardrail call and an answer of up to 2000 tokens fit with
+ * room; the AI calls are cut off 30 s before it, so the outcome is always stored.
+ */
+export const AI_WORKER_TIMEOUT_SECONDS = 300;
+/** Six times the worker's timeout, as AWS recommends for a queue that feeds a Lambda function. */
+export const AI_QUEUE_VISIBILITY_SECONDS = 6 * AI_WORKER_TIMEOUT_SECONDS;
+/** A job whose worker crashed this many times goes to the dead-letter queue. */
+export const AI_QUEUE_MAX_RECEIVES = 3;
+
+/** The model the AI worker may call: the EU inference profile and the foundation model it routes to in each EU region. */
+export const BEDROCK_INVOKE_RESOURCES = [
+  `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/${MODEL_ID}`,
+  `arn:aws:bedrock:eu-*::foundation-model/${FOUNDATION_MODEL_ID}`,
 ] as const;
 
 /** The TTL attribute (epoch seconds) of sign-in codes and sessions. */
@@ -247,6 +281,80 @@ export class ApiStack extends Stack {
       this.api.addRoutes({ path: route.path, methods: [route.method], integration: participantIntegration });
     }
 
+    // Ticket 1.7: the conversation. The routes' function stores a message and hands its ids to the
+    // AI worker through a queue (a function may not invoke another: the boundary has no
+    // lambda:InvokeFunction). Both update only listed attribute names in `PARTICIPANT#*`, never put.
+    const aiDeadLetters = new Queue(this, "AiMessagesDlq", {
+      queueName: AI_DLQ_NAME,
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(14),
+    });
+    const aiQueue = new Queue(this, "AiMessages", {
+      queueName: AI_QUEUE_NAME,
+      encryption: QueueEncryption.SQS_MANAGED,
+      visibilityTimeout: Duration.seconds(AI_QUEUE_VISIBILITY_SECONDS),
+      retentionPeriod: Duration.days(1),
+      deadLetterQueue: { queue: aiDeadLetters, maxReceiveCount: AI_QUEUE_MAX_RECEIVES },
+    });
+
+    const participantPartitions = { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] };
+    const conversation = workshopFunction(this, "Conversation", CONVERSATION_FUNCTION_NAME, "conversation.ts");
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": participantPartitions,
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...CONVERSATION_UPDATE_ATTRIBUTES] },
+        },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [aiQueue.queueArn] }),
+    );
+    // One invoke permission scoped to this API, as for the participant routes (path parameter route).
+    const conversationIntegration = new HttpLambdaIntegration("ConversationIntegration", conversation, {
+      scopePermissionToRoute: false,
+    });
+    for (const route of CONVERSATION_ROUTES) {
+      this.api.addRoutes({ path: route.path, methods: [route.method], integration: conversationIntegration });
+    }
+
+    const worker = workshopFunction(this, "AiWorker", AI_WORKER_FUNCTION_NAME, "ai-worker.ts", 256, AI_WORKER_TIMEOUT_SECONDS);
+    worker.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": participantPartitions },
+      }),
+    );
+    worker.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": participantPartitions,
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...AI_WORKER_UPDATE_ATTRIBUTES] },
+        },
+      }),
+    );
+    worker.addToRolePolicy(
+      new PolicyStatement({ effect: Effect.ALLOW, actions: ["bedrock:InvokeModel"], resources: [...BEDROCK_INVOKE_RESOURCES] }),
+    );
+    // One job per invocation; the source grants the role the consume rights on this queue only.
+    worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1 }));
+
     // Route-level throttles (L1 RouteSettings; the L2 stage has no per-route option). A route must
     // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
     const cfnStage = stage.node.defaultChild as CfnStage;
@@ -272,7 +380,14 @@ export class ApiStack extends Stack {
  * its own named role (only the right to write its logs; the caller adds what the
  * function needs; the app's aspect adds the path and boundary) and its own named log group with two weeks of retention.
  */
-function workshopFunction(scope: Construct, id: string, name: string, entry: string, memorySize = 256): NodejsFunction {
+function workshopFunction(
+  scope: Construct,
+  id: string,
+  name: string,
+  entry: string,
+  memorySize = 256,
+  timeoutSeconds = 10,
+): NodejsFunction {
   const logGroup = new LogGroup(scope, `${id}Logs`, {
     logGroupName: name,
     retention: RetentionDays.TWO_WEEKS,
@@ -293,7 +408,7 @@ function workshopFunction(scope: Construct, id: string, name: string, entry: str
     runtime: Runtime.NODEJS_22_X,
     architecture: Architecture.ARM_64,
     memorySize,
-    timeout: Duration.seconds(10),
+    timeout: Duration.seconds(timeoutSeconds),
     role,
     logGroup,
     // NodejsFunction leaves @aws-sdk/* out of the bundle by default on Node 18+ runtimes (the

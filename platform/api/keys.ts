@@ -65,3 +65,24 @@ export function newParticipantId(randomUUID: () => string): string {
 }
 
 export const usageKey = (participantId: string): ItemKey => ({ pk: participantPk(participantId), sk: "USAGE" });
+
+/** The state of a participant's conversation (ticket 1.7): open or waiting, and the message in flight. */
+export const conversationKey = (participantId: string): ItemKey => ({ pk: participantPk(participantId), sk: "CONVERSATION" });
+
+/** The id of the assistant's reply to a participant message: sorts right after it, before the next one. */
+export const replyId = (messageId: string): string => `${checkId("message id", messageId)}${REPLY_SUFFIX}`;
+export const REPLY_SUFFIX = "-r";
+
+/** A participant message id: an ISO time (UTC, milliseconds), a dash and 16 lower-case hex digits. */
+export const MESSAGE_ID_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z-[0-9a-f]{16}$/;
+
+/**
+ * A new message id that sorts by time: the ISO creation time, a dash and 16 random hex digits
+ * (from a cryptographic source such as `crypto.randomBytes`), so ids made in the same millisecond
+ * still differ.
+ */
+export function newMessageId(now: Date, randomBytes: (size: number) => Buffer): string {
+  const random = randomBytes(8);
+  if (random.length !== 8) throw new Error("random source gave the wrong length");
+  return `${now.toISOString()}-${random.toString("hex")}`;
+}
