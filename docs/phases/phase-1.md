@@ -1,6 +1,6 @@
 # Phase 1: Sign in and talk
 
-Spec sections: 2 (Users and roles), 3 (Participant journey: sign-in, step 1 Clarify, step 2 Spec), 4 (Guardrails 3, 4 and 6), 5 (Architecture, Data and privacy, Security), 7 (Build phases, row 1). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus). Status: draft, waiting for Franck's answers.
+Spec sections: 2 (Users and roles), 3 (Participant journey: sign-in, step 1 Clarify, step 2 Spec), 4 (Guardrails 3, 4 and 6), 5 (Architecture, Data and privacy, Security), 7 (Build phases, row 1). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus). Status: draft, questions answered 2026-11-23.
 
 Goal: an allow-listed person opens `workshop.rankly.games`, gets a 6-digit code by email, picks a nickname, describes an app idea, answers the AI's clarifying questions, reads and changes a spec with a diagram, and presses **Approve spec**. Off-path ideas are declined; unusual ones wait for a facilitator. The build itself (step 3) is phase 2, so after approval the page says the build comes next.
 
@@ -61,7 +61,7 @@ Acceptance criteria (each starts as FAIL):
 
 ### 1.4 Code request and code email
 
-`POST /api/sign-in/code` takes an email. If it is on the allow-list and under 5 codes in the last hour, a 6-digit code is stored hashed, valid 10 minutes, and emailed; either way the answer is the same neutral message. The email is built to stay out of Junk: sender name "SSD Workshop" `<ssd-workshop@rankly.games>`, subject "Your SSD Workshop sign-in code: 123456", HTML and plain-text parts, one line saying why the person gets it, and a working Reply-To.
+`POST /api/sign-in/code` takes an email. If it is on the allow-list and under 5 codes in the last hour, a 6-digit code is stored hashed, valid 10 minutes, and emailed; either way the answer is the same neutral message. The email is built to stay out of Junk: sender name "SSD Workshop" `<ssd-workshop@rankly.games>`, subject "Your SSD Workshop sign-in code: 123456", HTML and plain-text parts, one line saying why the person gets it, and a closing line "Questions? Ask your facilitator." No Reply-To: nobody needs to reply, `ssd-workshop@rankly.games` receives no mail, and a Reply-To on another domain than the sender is itself a spam signal.
 
 Depends on: 1.3, 0.6 merged. Areas: api.
 
@@ -70,7 +70,7 @@ Acceptance criteria (each starts as FAIL):
 - WHEN an allow-listed email asks for a code THEN one code email is sent and the stored code is a hash with a 10-minute expiry (unit test with SES and DynamoDB mocked)
 - WHEN an email that is not on the allow-list asks THEN the answer is byte-for-byte the same as for an allow-listed one, and nothing is sent
 - WHEN the same email asks a sixth time within an hour THEN no email is sent and the answer is still the neutral one
-- WHEN the email is built THEN it has the "SSD Workshop" display name, the subject with the code, a text and an HTML part with the same code and the explanatory line, and the Reply-To address from configuration
+- WHEN the email is built THEN it has the "SSD Workshop" display name, the subject with the code, a text and an HTML part with the same code and the explanatory line and the "ask your facilitator" line, and no Reply-To header
 - WHEN the function's logs are read after these tests THEN no email address and no code appear in them (log capture test)
 - WHEN `npm run smoke -- signin <address>` runs against the live site with Franck's address THEN the code email arrives
 
@@ -150,11 +150,13 @@ Acceptance criteria (each starts as FAIL):
 
 ## Questions for Franck
 
-1. **New paid services.** Phase 1 switches on API Gateway (HTTP API), Lambda and DynamoDB on demand, all named in the signed-off spec. At workshop scale they stay under $2 a month at rest; Bedrock is the real cost, about $10 to $20 for phase 1's own tests and evals at Sonnet prices. Suggested: yes, go ahead.
-2. **Model.** Sonnet 5.5 has a quota of 0 in this account and Sonnet 4.6 works (6M tokens and 50 requests per minute). Suggested: build phase 1 on Sonnet 4.6, with the model id in one config value, and you request the Sonnet 5.5 quota if you want it for the pitch.
-3. **Facilitators: own group or everyone?** Spec section 5 says facilitators only see their own group, but your 22 November edit made the dashboard one global view. Phase 1 builds the roles, so the rule needs to be one or the other. Suggested: facilitators see every participant (spec delta, CHANGED: "facilitators only see their own group" becomes "facilitators see all participants; participants see only their own data").
-4. **Loading the allow-list.** Suggested: you run `npm run allowlist -- import` from your machine with a CSV kept outside the repository (so the addresses never pass through a Claude session or GitHub); the admin page for the allow-list comes in phase 3.
-5. **Reply-To for the code email.** It must reach a person, and the repository is public, so the address goes in a configuration value, not in code. Suggested: `ssd-workshop@rankly.games` if that mailbox receives mail (or forwards to you); otherwise tell me the address and I'll keep it out of the repository.
+Answered on 2026-11-23 (see `docs/decisions.md`):
+
+1. **New paid services** (API Gateway HTTP API, Lambda, DynamoDB on demand; under $2 a month at rest, about $10 to $20 of Bedrock for phase 1's tests). Answer: yes.
+2. **Model:** Sonnet 4.6 for phase 1, model id in one config value; Franck requests the Sonnet 5.5 quota if he wants it for the pitch. Answer: yes.
+3. **Facilitators see all participants** (spec delta, CHANGED). Answer: yes.
+4. **Allow-list** imported by Franck from his machine with a CSV kept outside the repository; admin page in phase 3. Answer: yes.
+5. **Reply-To.** `ssd-workshop@rankly.games` receives no mail, and the system expects no replies. Answer: no Reply-To header; the email says "Questions? Ask your facilitator." (A Reply-To on another domain than the sender would look like phishing to spam filters.)
 
 ## Blocked
 
