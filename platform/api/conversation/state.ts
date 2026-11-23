@@ -64,7 +64,7 @@ export interface AnswerRecord {
 
 /** How a message ends (or, for `flagged`, pauses). */
 export type Finish =
-  | { kind: "done"; reply: string; answer: AnswerRecord; guardrail?: GuardrailRecord }
+  | { kind: "done"; reply: string; answer: AnswerRecord; guardrail?: GuardrailRecord; offersSpec?: boolean }
   | { kind: "declined"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "failed"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "flagged"; guardrail: GuardrailRecord };
@@ -80,6 +80,19 @@ export interface NewMessage {
 }
 
 export type CreateResult = "created" | "busy" | "waiting";
+
+/**
+ * One item of the conversation as the history route reads it (ticket 1.8), oldest first: a
+ * participant message (with its status and when it became pending) or a reply (`replyTo` set).
+ */
+export type ListedItem =
+  | { author: "participant"; id: string; text: string; status: MessageStatus; pendingSince: number }
+  | { author: "assistant"; replyTo: string; text: string; offersSpec: boolean };
+
+/** Items read for the page's history (ticket 1.8): the last 50 messages and replies. */
+export const HISTORY_PAGE_LIMIT = 50;
+
+export type MoveResult = "moved" | "busy" | "waiting" | "wrong-step";
 
 /**
  * The table, as the conversation needs it. Every write that changes a message's status names the
@@ -105,6 +118,14 @@ export interface ConversationStore {
    * conversation's message in flight (nothing written).
    */
   finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean>;
+  /** The last `limit` messages and replies, oldest first (ticket 1.8). */
+  listItems(participantId: string, limit: number): Promise<ListedItem[]>;
+  /**
+   * Moves the participant from step 1 (clarify) to step 2 (spec), only while the profile is at
+   * clarify and the conversation exists with no message in flight (a stale pending one does not
+   * count), in one transaction (ticket 1.8). Otherwise `busy`, `waiting`, or `wrong-step`.
+   */
+  moveToSpec(participantId: string, nowSeconds: number, nowIso: string): Promise<MoveResult>;
   /**
    * Adds tokens and cost to the participant's usage totals on their own: only when the final write
    * failed for good, so tokens already spent are still counted.

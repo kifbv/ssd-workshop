@@ -201,6 +201,8 @@ export interface AssistantMessageItem extends Keyed {
   kind: ReplyKind;
   /** The participant message this answers. */
   replyTo: string;
+  /** Set (true) on an answer in which the AI offered to write the spec (ticket 1.8). */
+  offersSpec?: boolean;
   /** ISO 8601. */
   createdAt: string;
   /** The participant's text as sent to the model (answers only). */

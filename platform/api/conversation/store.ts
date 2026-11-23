@@ -15,7 +15,7 @@ import {
   type TransactWriteItem,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { conversationKey, MESSAGE_PREFIX, messageKey, replyId, REPLY_SUFFIX, usageKey, type ItemKey } from "../keys.js";
+import { conversationKey, MESSAGE_PREFIX, messageKey, participantKey, replyId, REPLY_SUFFIX, usageKey, type ItemKey } from "../keys.js";
 import { isStep } from "../session/session.js";
 import type { ConversationState, MessageStatus, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
@@ -25,6 +25,8 @@ import {
   type ConversationStore,
   type CreateResult,
   type Finish,
+  type ListedItem,
+  type MoveResult,
   type NewMessage,
   type StoredConversation,
   type StoredMessage,
@@ -230,6 +232,74 @@ export class DynamoConversationStore implements ConversationStore {
     return exchanges.reverse();
   }
 
+  async listItems(participantId: string, limit: number): Promise<ListedItem[]> {
+    const pk = conversationKey(participantId).pk;
+    const output = await this.client.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        // Newest first, then turned around: the last `limit` messages and replies, oldest first.
+        KeyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
+        ExpressionAttributeNames: {
+          "#pk": "pk",
+          "#sk": "sk",
+          "#author": "author",
+          "#text": "text",
+          "#status": "status",
+          "#pendingSince": "pendingSince",
+          "#offersSpec": "offersSpec",
+        },
+        ExpressionAttributeValues: { ":pk": str(pk), ":prefix": str(MESSAGE_PREFIX) },
+        ProjectionExpression: "#sk, #author, #text, #status, #pendingSince, #offersSpec",
+        ScanIndexForward: false,
+        Limit: limit,
+      }),
+    );
+    const items: ListedItem[] = [];
+    for (const i of output.Items ?? []) {
+      const sk = i["sk"]?.S ?? "";
+      const text = i["text"]?.S;
+      if (!sk.startsWith(MESSAGE_PREFIX) || text === undefined) continue;
+      const id = sk.slice(MESSAGE_PREFIX.length);
+      const author = i["author"]?.S;
+      if (author === "assistant" && id.endsWith(REPLY_SUFFIX)) {
+        items.push({ author, replyTo: id.slice(0, -REPLY_SUFFIX.length), text, offersSpec: i["offersSpec"]?.BOOL === true });
+      } else if (author === "participant") {
+        const status = i["status"]?.S;
+        const pendingSince = Number(i["pendingSince"]?.N);
+        if (isStatus(status) && Number.isFinite(pendingSince)) items.push({ author, id, text, status, pendingSince });
+      }
+    }
+    return items.reverse();
+  }
+
+  async moveToSpec(participantId: string, nowSeconds: number, nowIso: string): Promise<MoveResult> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(this.tableName, participantKey(participantId), { step: str("spec") }, {
+              expression: "#step = :clarify",
+              values: { ":clarify": str("clarify") },
+            }),
+            setItem(this.tableName, conversationKey(participantId), { updatedAt: str(nowIso) }, {
+              // The conversation exists and has no message in flight (or only a stale pending one).
+              expression: "attribute_exists(#pk) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+              names: { "#pk": "pk", "#pendingId": "pendingId", "#state": "state", "#pendingSince": "pendingSince" },
+              values: { ":open": str("open"), ":staleBefore": num(nowSeconds - STALE_PENDING_SECONDS) },
+            }),
+          ],
+        }),
+      );
+      return "moved";
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? [];
+      if (reasons[0]?.Code === "ConditionalCheckFailed") return "wrong-step";
+      const conversation = await this.getConversation(participantId);
+      return conversation?.state === "waiting" ? "waiting" : "busy";
+    }
+  }
+
   async finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean> {
     const guardrail = outcome.guardrail;
     const items: TransactWriteItem[] = [
@@ -265,6 +335,7 @@ export class DynamoConversationStore implements ConversationStore {
             type: str("message"),
             author: str("assistant"),
             text: str(outcome.reply),
+            ...(outcome.kind === "done" && outcome.offersSpec === true ? { offersSpec: { BOOL: true } } : {}),
             kind: str(REPLY_KINDS[outcome.kind]),
             replyTo: str(messageId),
             createdAt: str(nowIso),

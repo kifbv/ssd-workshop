@@ -238,6 +238,78 @@ describe("DynamoConversationStore", () => {
     for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
   });
 
+  it("stores offersSpec on an answer that offered the spec, inside the worker's attribute list (ticket 1.8)", async () => {
+    const { client, sent } = stubClient([{}, {}]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await store.finish("p-1", ID, { ...DONE, offersSpec: true }, "pending", NOW_ISO);
+    await store.finish("p-1", ID, DONE, "pending", NOW_ISO);
+    const reply = (n: number) => (sent[n]?.input as { TransactItems: TransactWriteItem[] }).TransactItems[1]?.Update;
+    expect(reply(0)?.ExpressionAttributeValues?.[":offersSpec"]).toEqual({ BOOL: true });
+    expect(reply(1)?.ExpressionAttributeNames).not.toHaveProperty("#offersSpec");
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    expect(CONVERSATION_UPDATE_ATTRIBUTES).not.toContain("offersSpec");
+  });
+
+  it("lists the last messages and replies of the caller's partition, oldest first, without prompts or costs (ticket 1.8)", async () => {
+    const { client, sent } = stubClient([
+      {
+        Items: [
+          { sk: { S: `MSG#${ID}-r` }, author: { S: "assistant" }, text: { S: "Ready." }, offersSpec: { BOOL: true } },
+          { sk: { S: `MSG#${ID}` }, author: { S: "participant" }, text: { S: "weekly" }, status: { S: "done" }, pendingSince: { N: "2000" } },
+          { sk: { S: "MSG#x" }, author: { S: "participant" }, text: { S: "bad" }, status: { S: "odd" }, pendingSince: { N: "1" } },
+          { sk: { S: "MSG#y-r" }, author: { S: "assistant" }, text: { S: "Who?" } },
+        ],
+      },
+    ]);
+    const items = await new DynamoConversationStore(client, TABLE).listItems("p-1", 50);
+    expect(items).toEqual([
+      { author: "assistant", replyTo: "y", text: "Who?", offersSpec: false },
+      { author: "participant", id: ID, text: "weekly", status: "done", pendingSince: 2000 },
+      { author: "assistant", replyTo: ID, text: "Ready.", offersSpec: true },
+    ]);
+    const input = (sent[0] as QueryCommand).input;
+    expect(input).toMatchObject({
+      TableName: TABLE,
+      KeyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": { S: "PARTICIPANT#p-1" }, ":prefix": { S: "MSG#" } },
+      ScanIndexForward: false,
+      Limit: 50,
+    });
+    expect(Object.values(input.ExpressionAttributeNames ?? {})).not.toContain("prompt");
+    expect(Object.values(input.ExpressionAttributeNames ?? {})).not.toContain("costUsd");
+  });
+
+  it("moves the profile from clarify to spec only while nothing is in flight, inside the conversation function's attribute list (ticket 1.8)", async () => {
+    const { client, sent } = stubClient([
+      {},
+      cancelled(["ConditionalCheckFailed", "None"]),
+      cancelled(["None", "ConditionalCheckFailed"]),
+      { Item: { state: { S: "waiting" }, pendingId: { S: ID } } },
+      cancelled(["None", "ConditionalCheckFailed"]),
+      { Item: { state: { S: "open" }, pendingId: { S: ID } } },
+      new Error("down"),
+    ]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).resolves.toBe("moved");
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems.map((i) => i.Update);
+    expect(items[0]).toMatchObject({
+      Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
+      UpdateExpression: "SET #step = :step",
+      ConditionExpression: "#step = :clarify",
+      ExpressionAttributeValues: { ":step": { S: "spec" }, ":clarify": { S: "clarify" } },
+    });
+    expect(items[1]).toMatchObject({
+      Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "CONVERSATION" } },
+      ConditionExpression: "attribute_exists(#pk) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+      ExpressionAttributeValues: { ":updatedAt": { S: NOW_ISO }, ":open": { S: "open" }, ":staleBefore": { N: "800" } },
+    });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).resolves.toBe("wrong-step");
+    await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).resolves.toBe("waiting");
+    await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).resolves.toBe("busy");
+    await expect(store.moveToSpec("p-1", 2000, NOW_ISO)).rejects.toThrow("down");
+  });
+
   it("answers false on a lost race and throws anything else", async () => {
     const { client } = stubClient([cancelled(["ConditionalCheckFailed", "None", "None", "None"]), new Error("down")]);
     const store = new DynamoConversationStore(client, TABLE);

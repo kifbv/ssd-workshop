@@ -64,12 +64,44 @@
         <p id="message-nickname" class="message" role="status" aria-live="polite"></p>
       </section>
 
-      <!-- The step screen: ticket 1.8 fills in step 1 (Clarify) here. -->
+      <!-- Step 1, Clarify (ticket 1.8): the conversation with the AI about the idea. -->
       <section id="screen-step" class="card" data-screen aria-labelledby="step-heading" hidden>
         <h2 id="step-heading" tabindex="-1">Step 1: Clarify</h2>
-        <p>Hi <strong id="step-nickname"></strong>, you're signed in.</p>
-        <p id="step-intro">Step 1 (Clarify) comes here: you'll describe your app idea in a sentence, and the AI helps you make it clear.</p>
+        <p>Hi <strong id="step-nickname"></strong>! Describe your app idea in a sentence or two. The AI asks a few questions to make it clear; answer, change your mind or steer as you like.</p>
+
+        <aside id="behind-scenes" class="behind" aria-labelledby="behind-heading">
+          <h3 id="behind-heading">Behind the scenes</h3>
+          <ol id="behind-flow" class="flow" data-stage="idle">
+            <li data-part="you">Your message</li>
+            <li data-part="check">Safety check</li>
+            <li data-part="model">Claude on Bedrock</li>
+            <li data-part="reply">Reply</li>
+          </ol>
+          <p id="behind-text" class="help">A quick check first makes sure your message fits the workshop. Then Claude, an AI model running on Amazon Bedrock, reads your idea and the conversation so far, and asks about what is still unclear.</p>
+        </aside>
+
+        <ol id="chat" class="chat" aria-label="Conversation" aria-live="polite"></ol>
+        <p id="typing" class="typing" role="status" hidden><span class="dots" aria-hidden="true"><span></span><span></span><span></span></span> The AI is writing…</p>
+        <p id="waiting-notice" class="notice" role="status" hidden>Your message is waiting for your facilitator. You can write again once they have looked at it.</p>
+
+        <form id="chat-form" method="post" novalidate>
+          <label for="chat-input">Your message</label>
+          <textarea id="chat-input" name="text" rows="3" maxlength="2000" required></textarea>
+          <button id="chat-send" type="submit" data-busy-label="Sending…">Send</button>
+        </form>
         <p id="message-step" class="message" role="status" aria-live="polite"></p>
+
+        <div id="spec-offer" class="spec-offer" data-offered="false" hidden>
+          <p id="spec-offer-text"></p>
+          <button id="write-spec-button" type="button" data-busy-label="Moving on…">Write my spec</button>
+        </div>
+      </section>
+
+      <!-- Step 2, Spec: ticket 1.9 fills it in. -->
+      <section id="screen-spec" class="card" data-screen aria-labelledby="spec-heading" hidden>
+        <h2 id="spec-heading" tabindex="-1">Step 2: Spec</h2>
+        <p>Hi <strong id="spec-nickname"></strong>. Next, the AI writes a short spec of your app: what it does, its screens, the data it keeps and a diagram.</p>
+        <p id="message-spec" class="message" role="status" aria-live="polite"></p>
       </section>
     </main>
   </body>

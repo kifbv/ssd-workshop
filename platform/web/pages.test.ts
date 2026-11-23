@@ -1,4 +1,4 @@
-// Ticket 1.6: the sign-in screens in a real browser (Playwright's Chromium), against a mocked API.
+// Tickets 1.6 and 1.8: the sign-in screens and step 1 in a real browser (Playwright's Chromium), against a mocked API.
 // The built site (buildWeb, as the site stack publishes it) is served by a tiny local server that
 // sends the pages' real Content-Security-Policy, so any inline script or style the policy would
 // block in production fails these tests too. Every test runs at phone width (375 px).
@@ -109,6 +109,7 @@ function fakeApi(): Record<string, Handler> {
   const record = () => ({ id: "p-1", nickname, role: "participant", group: "g1", step: nickname ? "clarify" : "nickname" });
   return {
     "GET /api/me": () => (signedIn ? { status: 200, body: record() } : { status: 401, body: { message: "Please sign in." } }),
+    "GET /api/conversation": () => (signedIn ? { status: 200, body: { step: "clarify", state: "open", messages: [] } } : { status: 401, body: {} }),
     "POST /api/sign-in/code": () => ({ status: 202, body: NEUTRAL_BODY }),
     "POST /api/sign-in/verify": (call) => {
       const body = call.body as { code?: string };
@@ -185,7 +186,8 @@ describe("sign-in screens (ticket 1.6)", () => {
     await expect.poll(() => screen("step").isVisible()).toBe(true);
     expect(await page.locator("#step-heading").textContent()).toBe("Step 1: Clarify");
     expect(await page.locator("#step-nickname").textContent()).toBe("ada-l");
-    expect(await page.locator("#step-intro").isVisible()).toBe(true);
+    expect(await page.locator("#behind-scenes").isVisible()).toBe(true);
+    expect(await page.locator("#chat-input").isVisible()).toBe(true);
     await expectNoSideScroll();
 
     // The real API contract: JSON bodies with the JSON content type; the step comes from GET /api/me.
@@ -293,13 +295,285 @@ describe("sign-in screens (ticket 1.6)", () => {
   it("takes a returning person with a valid session straight to their step", async () => {
     const calls = await mockApi({
       "GET /api/me": () => ({ status: 200, body: { id: "p-1", nickname: "grace", role: "participant", group: "g1", step: "clarify" } }),
+      "GET /api/conversation": () => ({ status: 200, body: { step: "clarify", state: "open", messages: [] } }),
     });
     await page.goto(origin);
     await expect.poll(() => screen("step").isVisible()).toBe(true);
     expect(await page.locator("#step-nickname").textContent()).toBe("grace");
     expect(await screen("email").isVisible()).toBe(false);
-    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /api/me"]);
+    await expect.poll(() => calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /api/me", "GET /api/conversation"]);
     await expectNoSideScroll();
+  }, 30_000);
+});
+
+// Ticket 1.8: step 1 (Clarify) against a mocked conversation API.
+interface MockMessage {
+  id: string;
+  author: "participant" | "assistant";
+  text: string;
+  status?: string;
+  offersSpec?: boolean;
+}
+
+const QUESTIONS = "A run log for you.\n1. Who is it for?\n2. What do you record?\n3. What can wait?";
+const ME = { id: "p-1", nickname: "ada-l", role: "participant", group: "g1" };
+
+/**
+ * A stand-in for the conversation routes: one participant at `step`, the conversation in `messages`;
+ * a sent message stays pending until `answer()` (or `flag()`) is called. Polls are counted per id.
+ */
+function fakeConversation(start: MockMessage[] = [], step = "clarify") {
+  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1 };
+  const answer = (reply: string, offersSpec = false) => {
+    const id = state.pendingId ?? "";
+    const message = state.messages.find((m) => m.id === id);
+    if (message) message.status = "done";
+    state.messages.push({ id: `${id}-r`, author: "assistant", text: reply, ...(offersSpec ? { offersSpec } : {}) });
+    state.pendingId = undefined;
+    state.waiting = false;
+  };
+  const flag = () => {
+    const message = state.messages.find((m) => m.id === state.pendingId);
+    if (message) message.status = "flagged";
+    state.waiting = true;
+  };
+  const handlers: Record<string, Handler> = {
+    "GET /api/me": () => ({ status: 200, body: { ...ME, step: state.step } }),
+    "GET /api/conversation": () => ({
+      status: 200,
+      body: { step: state.step, state: state.waiting ? "waiting" : "open", messages: state.messages, ...(state.pendingId ? { pendingId: state.pendingId } : {}) },
+    }),
+    "POST /api/conversation/messages": (call) => {
+      if (state.pendingId) return { status: 409, body: { reason: "busy", message: "Please wait for the answer to your last message." } };
+      const id = `m${state.nextId++}`;
+      state.messages.push({ id, author: "participant", text: (call.body as { text: string }).text, status: "pending" });
+      state.pendingId = id;
+      return { status: 202, body: { id } };
+    },
+    "POST /api/conversation/step": () => {
+      if (!state.messages.some((m) => m.status === "done")) return { status: 409, body: { reason: "too-early", message: "Tell the AI about your idea first." } };
+      state.step = "spec";
+      return { status: 200, body: { step: "spec" } };
+    },
+  };
+  // Polls of any message id: GET /api/conversation/messages/<id>.
+  const pollPath = (id: string) => `GET /api/conversation/messages/${id}`;
+  const pollHandler = (id: string): Handler => () => {
+    state.polls++;
+    const message = state.messages.find((m) => m.id === id);
+    const reply = state.messages.find((m) => m.id === `${id}-r`);
+    return { status: 200, body: { id, status: message?.status ?? "pending", ...(reply ? { reply: reply.text } : {}) } };
+  };
+  for (let n = 1; n <= 5; n++) handlers[pollPath(`m${n}`)] = pollHandler(`m${n}`);
+  return { state, handlers, answer, flag };
+}
+
+function must<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("missing value");
+  return value;
+}
+const bubbles = () => page.locator("#chat .bubble").allTextContents();
+/** Stops the installed page clock from following real time: from here only runFor moves it. */
+async function pauseClock(): Promise<void> {
+  const now = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(now + 1);
+}
+/** Lets the page's pending fetches and their handlers run (real time, a little). */
+const settle = () => page.waitForTimeout(250);
+/**
+ * Moves page time by `ms`, which must fire one poll, waits for its answer and lets the page handle it,
+ * so the next poll's timer is set before time moves again.
+ */
+async function pollAfter(ms: number): Promise<void> {
+  const answered = page.waitForResponse((r) => r.url().includes("/api/conversation/messages/"));
+  await page.clock.runFor(ms);
+  await answered;
+  await settle();
+}
+
+describe("step 1: Clarify (ticket 1.8)", () => {
+  it("WHEN the screen waits for a reply THEN it shows a typing indicator, polls every 2 seconds and stops once the reply has arrived (criterion 3)", async () => {
+    const api = fakeConversation();
+    await mockApi(api.handlers);
+    await page.clock.install();
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await pauseClock();
+    expect(await page.locator("#behind-scenes").isVisible()).toBe(true);
+    expect(await page.locator("#behind-flow li").allTextContents()).toEqual(["Your message", "Safety check", "Claude on Bedrock", "Reply"]);
+    expect(await page.locator("#typing").isVisible()).toBe(false);
+    expect(await page.locator("#spec-offer").isVisible()).toBe(false);
+    await expectNoSideScroll();
+
+    await page.getByRole("textbox", { name: "Your message" }).fill("I'd like a fitness tracker for my runs.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    expect(await bubbles()).toEqual(["I'd like a fitness tracker for my runs."]);
+    expect(await page.locator("#behind-flow").getAttribute("data-stage")).toBe("working");
+    expect(await page.locator("#chat-send").isDisabled()).toBe(true);
+    expect(await page.getByRole("textbox", { name: "Your message" }).inputValue()).toBe("");
+    await expectNoSideScroll();
+
+    // No poll before 2 seconds, then one every 2 seconds.
+    await page.clock.runFor(1900);
+    await settle();
+    expect(api.state.polls).toBe(0);
+    await pollAfter(100);
+    expect(api.state.polls).toBe(1);
+    await pollAfter(2000);
+    expect(api.state.polls).toBe(2);
+    await page.clock.runFor(1000);
+    await settle();
+    expect(api.state.polls).toBe(2);
+    expect(await page.locator("#typing").isVisible()).toBe(true);
+
+    // The reply arrives: shown at the next poll, typing indicator gone, no more polls.
+    api.answer(QUESTIONS);
+    await pollAfter(1000);
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(false);
+    expect(api.state.polls).toBe(3);
+    await expect.poll(bubbles).toEqual(["I'd like a fitness tracker for my runs.", QUESTIONS]);
+    expect(await page.locator("#behind-flow").getAttribute("data-stage")).toBe("reply");
+    await page.clock.runFor(20_000);
+    await settle();
+    expect(api.state.polls).toBe(3);
+
+    // The numbered questions keep their lines; Write my spec appears, not yet highlighted.
+    expect(await page.locator("#chat .bubble").nth(1).evaluate((e) => getComputedStyle(e).whiteSpace)).toBe("pre-wrap");
+    expect(await page.locator("#spec-offer").isVisible()).toBe(true);
+    expect(await page.locator("#spec-offer").getAttribute("data-offered")).toBe("false");
+    expect(await page.locator("#chat-send").isDisabled()).toBe(false);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN the page is reloaded THEN the conversation so far is shown again, and a pending message is polled again (criterion 4)", async () => {
+    const api = fakeConversation([
+      { id: "m1", author: "participant", text: "A movie watchlist", status: "done" },
+      { id: "m1-r", author: "assistant", text: QUESTIONS },
+    ]);
+    api.state.nextId = 2;
+    const calls = await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(bubbles).toEqual(["A movie watchlist", QUESTIONS]);
+    expect(await page.locator("#typing").isVisible()).toBe(false);
+
+    await page.getByRole("textbox", { name: "Your message" }).fill("Just me, with star ratings.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+
+    await page.reload();
+    await expect.poll(bubbles).toEqual(["A movie watchlist", QUESTIONS, "Just me, with star ratings."]);
+    expect(await page.locator("#typing").isVisible()).toBe(true);
+    api.answer("Thanks!");
+    await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A movie watchlist", QUESTIONS, "Just me, with star ratings.", "Thanks!"]);
+    expect(await page.locator("#typing").isVisible()).toBe(false);
+    expect(calls.filter((c) => c.path === "/api/conversation").length).toBeGreaterThanOrEqual(2);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("shows 'waiting for your facilitator' for a flagged message, also after a reload, and blocks sending meanwhile", async () => {
+    const api = fakeConversation();
+    await mockApi(api.handlers);
+    await page.clock.install();
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await pauseClock();
+    await page.getByRole("textbox", { name: "Your message" }).fill("An app that tells me which medicine to take.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    api.flag();
+    await page.clock.runFor(2000);
+    await expect.poll(() => page.locator("#waiting-notice").isVisible()).toBe(true);
+    expect(await page.locator("#typing").isVisible()).toBe(false);
+    expect(await page.locator("#waiting-notice").textContent()).toBe(
+      "Your message is waiting for your facilitator. You can write again once they have looked at it.",
+    );
+    expect(await page.locator("#behind-flow").getAttribute("data-stage")).toBe("facilitator");
+    expect(await page.locator("#chat-send").isDisabled()).toBe(true);
+    // While the facilitator decides, the page checks every 10 seconds instead of every 2.
+    const polls = api.state.polls;
+    await page.clock.runFor(9000);
+    await settle();
+    expect(api.state.polls).toBe(polls);
+    await page.clock.runFor(1000);
+    await expect.poll(() => api.state.polls).toBe(polls + 1);
+
+    await page.reload();
+    await expect.poll(() => page.locator("#waiting-notice").isVisible()).toBe(true);
+    expect(await page.locator("#chat-send").isDisabled()).toBe(true);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN the participant presses Write my spec THEN they move to step 2, also after a reload (criterion 5)", async () => {
+    const api = fakeConversation([
+      { id: "m1", author: "participant", text: "A run log", status: "done" },
+      { id: "m1-r", author: "assistant", text: QUESTIONS },
+      { id: "m2", author: "participant", text: "Just me, distance and time, no maps.", status: "done" },
+      { id: "m2-r", author: "assistant", text: 'I have enough to write your spec. Press "Write my spec" when you are ready.', offersSpec: true },
+    ]);
+    const calls = await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-offer").isVisible()).toBe(true);
+    // The AI offered: the button is the highlighted one.
+    expect(await page.locator("#spec-offer").getAttribute("data-offered")).toBe("true");
+    expect(await page.locator("#spec-offer-text").textContent()).toBe("The AI has enough to write your spec.");
+    await expectNoSideScroll();
+
+    await page.getByRole("button", { name: "Write my spec" }).click();
+    await expect.poll(() => screen("spec").isVisible()).toBe(true);
+    expect(await screen("step").isVisible()).toBe(false);
+    expect(await page.locator("#spec-heading").textContent()).toBe("Step 2: Spec");
+    expect(await page.locator("#spec-nickname").textContent()).toBe("ada-l");
+    const step = calls.find((c) => c.path === "/api/conversation/step");
+    expect(step).toMatchObject({ method: "POST", contentType: "application/json", body: { step: "spec" } });
+    await expectNoSideScroll();
+
+    await page.reload();
+    await expect.poll(() => screen("spec").isVisible()).toBe(true);
+    expect(await screen("step").isVisible()).toBe(false);
+  }, 30_000);
+
+  it("keeps a message sent before the page's first conversation read has answered, and keeps waiting for its reply", async () => {
+    const api = fakeConversation();
+    let first = true;
+    const read = must(api.handlers["GET /api/conversation"]);
+    await mockApi({
+      ...api.handlers,
+      // The first read leaves with the empty conversation and answers late.
+      "GET /api/conversation": (call) => {
+        const reply = read(call);
+        if (!first) return reply;
+        first = false;
+        return { ...reply, body: JSON.parse(JSON.stringify(reply.body)) as unknown, delayMs: 1500 };
+      },
+    });
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await page.getByRole("textbox", { name: "Your message" }).fill("A plant watering reminder.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    await page.waitForTimeout(1800);
+    expect(await bubbles()).toEqual(["A plant watering reminder."]);
+    expect(await page.locator("#typing").isVisible()).toBe(true);
+    api.answer(QUESTIONS);
+    await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A plant watering reminder.", QUESTIONS]);
+  }, 30_000);
+
+  it("shows the API's reason when Write my spec is refused, and stays on step 1", async () => {
+    const api = fakeConversation([
+      { id: "m1", author: "participant", text: "A run log", status: "done" },
+      { id: "m1-r", author: "assistant", text: QUESTIONS },
+    ]);
+    await mockApi({
+      ...api.handlers,
+      "POST /api/conversation/step": () => ({ status: 409, body: { reason: "busy", message: "Please wait for the answer to your last message." } }),
+    });
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-offer").isVisible()).toBe(true);
+    expect(await page.locator("#spec-offer").getAttribute("data-offered")).toBe("false");
+    await page.getByRole("button", { name: "Write my spec" }).click();
+    await expect.poll(() => page.locator("#message-step").textContent()).toBe("Please wait for the answer to your last message.");
+    expect(await screen("step").isVisible()).toBe(true);
   }, 30_000);
 });
 

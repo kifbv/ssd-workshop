@@ -18,7 +18,7 @@ export interface Me {
   step: string;
 }
 
-export type Screen = "email" | "code" | "nickname" | "step";
+export type Screen = "email" | "code" | "nickname" | "step" | "spec";
 export type Tone = "info" | "error";
 
 /** A message for the current screen. */
@@ -117,14 +117,13 @@ export function nicknameResult(
   return common(answer);
 }
 
-/** A person without a nickname picks one first; everyone else goes to their step. */
-export function screenFor(me: Me): "nickname" | "step" {
-  return me.nickname === null || me.step === "nickname" ? "nickname" : "step";
-}
-
-/** Heading of the step screen. Later steps get their own screens in later tickets. */
-export function stepHeading(step: string): string {
-  return step === "clarify" ? "Step 1: Clarify" : "Welcome back";
+/**
+ * A person without a nickname picks one first; at step 1 they go to the Clarify screen (`step`),
+ * after Write my spec to the step 2 screen (`spec`, ticket 1.8; ticket 1.9 fills it in).
+ */
+export function screenFor(me: Me): "nickname" | "step" | "spec" {
+  if (me.nickname === null || me.step === "nickname") return "nickname";
+  return me.step === "clarify" ? "step" : "spec";
 }
 
 /** A quick check before asking for a code; the API applies the full rule. */

@@ -13,7 +13,9 @@ import {
   type ConversationStore,
   type CreateResult,
   type Finish,
+  type ListedItem,
   type MessageQueue,
+  type MoveResult,
   type NewMessage,
   type StoredConversation,
   type StoredMessage,
@@ -28,6 +30,7 @@ export interface FakeMessage extends StoredMessage {
 
 export interface FakeReply {
   text: string;
+  offersSpec?: boolean;
   kind: ReplyKind;
   createdAt: string;
   prompt?: string;
@@ -155,6 +158,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       const answer = outcome.kind === "done" ? outcome.answer : undefined;
       this.repliesOf(participantId).set(messageId, {
         text: outcome.reply,
+        ...(outcome.kind === "done" && outcome.offersSpec === true ? { offersSpec: true } : {}),
         kind: outcome.kind === "done" ? "answer" : outcome.kind === "declined" ? "decline" : "failure",
         createdAt: nowIso,
         ...(answer === undefined
@@ -173,6 +177,33 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       if (u !== undefined) this.add(participantId, u);
     }
     return true;
+  }
+
+  async listItems(participantId: string, limit: number): Promise<ListedItem[]> {
+    this.fail("listItems");
+    const replies = this.replies.get(participantId) ?? new Map<string, FakeReply>();
+    const items: { sk: string; item: ListedItem }[] = [];
+    for (const m of this.messages.get(participantId)?.values() ?? []) {
+      items.push({ sk: m.id, item: { author: "participant", id: m.id, text: m.text, status: m.status, pendingSince: m.pendingSince } });
+      const r = replies.get(m.id);
+      if (r !== undefined) items.push({ sk: `${m.id}-r`, item: { author: "assistant", replyTo: m.id, text: r.text, offersSpec: r.offersSpec === true } });
+    }
+    return items
+      .sort((a, b) => (a.sk < b.sk ? -1 : 1))
+      .slice(-limit)
+      .map((i) => i.item);
+  }
+
+  async moveToSpec(participantId: string, nowSeconds: number): Promise<MoveResult> {
+    this.fail("moveToSpec");
+    const profile = this.profiles.get(participantId);
+    if (profile?.step !== "clarify") return "wrong-step";
+    const c = this.conversations.get(participantId);
+    if (c === undefined) return "busy";
+    const free = c.pendingId === undefined || (c.state === "open" && (c.pendingSince ?? 0) < nowSeconds - STALE_PENDING_SECONDS);
+    if (!free) return c.state === "waiting" ? "waiting" : "busy";
+    this.profiles.set(participantId, { ...profile, step: "spec" });
+    return "moved";
   }
 
   async addUsage(participantId: string, usage: TokenUsage): Promise<void> {

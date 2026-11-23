@@ -66,10 +66,12 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/participants/{id}", method: HttpMethod.GET },
 ] as const;
 
-/** The protected conversation routes (ticket 1.7), served by one function. */
+/** The protected conversation routes (ticket 1.7; history and step from ticket 1.8), served by one function. */
 export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/messages", method: HttpMethod.POST },
   { path: "/api/conversation/messages/{id}", method: HttpMethod.GET },
+  { path: "/api/conversation", method: HttpMethod.GET },
+  { path: "/api/conversation/step", method: HttpMethod.POST },
 ] as const;
 
 /**
@@ -312,6 +314,15 @@ export class ApiStack extends Stack {
         actions: ["dynamodb:GetItem"],
         resources: [this.table.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+      }),
+    );
+    // The page's history (ticket 1.8): a Query of the caller's own partition (requireSession picks it).
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": participantPartitions },
       }),
     );
     conversation.addToRolePolicy(
