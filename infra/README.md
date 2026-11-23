@@ -412,3 +412,21 @@ npm run eval -- spec
 On a failure, `ssd-workshop-api-ai-worker`'s log has `"outcome":"failed"` lines with the error name
 (`MalformedSpec` or `MissingSpec` for a spec of the wrong shape, `AccessDeniedException` for a missing right),
 and `ssd-workshop-api-conversation`'s `"route":"spec"` or `"route":"approve"` lines.
+
+## Start a participant's conversation over
+
+For tests and dry runs, with Franck's own AWS credentials (it reads and deletes items of one participant
+in `ssd-workshop-data`):
+
+```sh
+npm run conversation -- reset <nickname>
+# expect: "<nickname> is at step ..., with N messages and replies and M spec versions." and "Nothing changed. ..."
+npm run conversation -- reset <nickname> --yes
+# expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify). AI usage totals kept."
+```
+
+The participant's messages, the AI's replies, every spec version (an approved one included) and the
+conversation state are deleted, and their step goes back to Clarify; their profile, nickname, sign-in and
+AI usage totals stay. A reload of their page shows an empty step 1. The command refuses while the AI is
+answering their last message (try again a minute later); a message waiting for a facilitator is cleared
+too. If it stops part way (an AWS error), run it again: the second run finishes.
