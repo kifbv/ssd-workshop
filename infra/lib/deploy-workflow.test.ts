@@ -108,6 +108,8 @@ describe("deploy workflow (ticket 0.5)", () => {
     const env = deploySteps[smoke]?.env ?? {};
     expect(env["SITE_URL"]).toMatch(/outputs\.site_url/);
     expect(env["HEADING"]).toMatch(/outputs\.heading/);
+    // Ticket 1.6: the heading also matched the placeholder, so the page's script must answer 200 too.
+    expect(deploySteps[smoke]?.run).toContain('"${SITE_URL}app.js"');
   });
 
   it("calls GET /api/health on the API's own endpoint after the deploy (ticket 1.1 criterion 3)", () => {
@@ -170,13 +172,13 @@ describe("deploy workflow (ticket 0.5)", () => {
 });
 
 describe("deploy settings", () => {
-  it("come from config.ts and the placeholder page", () => {
+  it("come from config.ts and the sign-in page", () => {
     const settings = deploySettings();
     expect(settings.roleArn).toBe(DEPLOY_ROLE_ARN);
     expect(DEPLOY_ROLE_ARN).toBe(`arn:aws:iam::${ACCOUNT}:role/ssd-workshop-deploy`);
     expect(settings.region).toBe(REGION);
     expect(settings.siteUrl).toBe(`https://${DOMAIN}/`);
-    expect(settings.heading).toBe("SSD Workshop, coming soon");
+    expect(settings.heading).toBe("SSD Workshop");
     expect(settings.apiStack).toBe("ssd-workshop-api");
     expect(settings.hostedZoneId).toBe(HOSTED_ZONE_ID);
   });
@@ -187,7 +189,7 @@ describe("deploy settings", () => {
       `role_arn=${DEPLOY_ROLE_ARN}`,
       `region=${REGION}`,
       `site_url=https://${DOMAIN}/`,
-      "heading=SSD Workshop, coming soon",
+      "heading=SSD Workshop",
       `api_stack=${STACK_NAMES.api}`,
       `hosted_zone_id=${HOSTED_ZONE_ID}`,
     ]);

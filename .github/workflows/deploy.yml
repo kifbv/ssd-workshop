@@ -36,6 +36,11 @@ jobs:
       - name: Install
         run: npm ci
 
+      # The browser tests of the sign-in pages (ticket 1.6) need Chromium; the version follows the
+      # exact playwright version in platform/package.json.
+      - name: Install the test browser
+        run: npx playwright install --with-deps chromium
+
       - name: Unit tests
         run: npm test
 
@@ -100,14 +105,16 @@ jobs:
             # On a connection failure curl prints 000 and exits non-zero; `|| true` keeps the
             # loop going, and 000 is not 200, so the attempt counts as a failure and retries.
             code=$(curl -sS -o page.html -w '%{http_code}' --max-time 20 "$SITE_URL" || true)
-            if [ "$code" = "200" ] && grep -qF -- "$HEADING" page.html; then
-              echo "OK: $SITE_URL answers 200 with \"$HEADING\""
+            # The page's script must be live too (ticket 1.6): the heading alone also matches the old placeholder.
+            script=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "${SITE_URL}app.js" || true)
+            if [ "$code" = "200" ] && grep -qF -- "$HEADING" page.html && [ "$script" = "200" ]; then
+              echo "OK: $SITE_URL answers 200 with \"$HEADING\" and app.js answers 200"
               exit 0
             fi
-            echo "Attempt $attempt: HTTP ${code:-000}, heading not found yet"
+            echo "Attempt $attempt: page HTTP ${code:-000}, app.js HTTP ${script:-000}, not live yet"
             sleep 30
           done
-          echo "::error::$SITE_URL did not answer 200 with \"$HEADING\""
+          echo "::error::$SITE_URL did not answer 200 with \"$HEADING\" and app.js 200"
           exit 1
 
       # Ticket 1.1 criterion 3: the API's own endpoint answers

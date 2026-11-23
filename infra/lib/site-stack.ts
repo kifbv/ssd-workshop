@@ -1,15 +1,20 @@
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { Duration, RemovalPolicy, Stack, Stage, type StackProps } from "aws-cdk-lib";
 import { CfnRole, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { CfnFunction, CfnLayerVersion, Function as LambdaFunction } from "aws-cdk-lib/aws-lambda";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership, type IBucket } from "aws-cdk-lib/aws-s3";
 import { BucketDeployment, CacheControl, Source } from "aws-cdk-lib/aws-s3-deployment";
 import type { Construct } from "constructs";
+import { buildWeb } from "../../platform/web/build.js";
 import { ACCOUNT, PREFIX, SITE_BUCKET_NAME } from "./config.js";
 
-/** The placeholder page and anything else under platform/web. */
+/** The pages' sources (HTML, CSS and TypeScript); the site gets their build, not this folder. */
 export const WEB_DIR = fileURLToPath(new URL("../../platform/web", import.meta.url));
+
+/** Folder inside the cloud assembly (cdk.out) where the pages are built at synth time. */
+export const WEB_BUILD_FOLDER = "ssd-workshop-web";
 
 /**
  * The private bucket behind CloudFront and the upload of the web pages into it.
@@ -53,8 +58,14 @@ export class SiteStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // Built at synth time (ticket 1.6): index.html, style.css and the bundled app.js only, so
+    // synth, CI and the deploy workflow all publish a fresh build and no TypeScript or tests.
+    const outdir = Stage.of(this)?.outdir;
+    if (!outdir) throw new Error("the site stack must be inside an App or Stage");
+    const webBuild = buildWeb(join(outdir, WEB_BUILD_FOLDER));
+
     const deployment = new BucketDeployment(this, "WebPages", {
-      sources: [Source.asset(WEB_DIR)],
+      sources: [Source.asset(webBuild)],
       // Asserted to its interface: aws-cdk-lib breaks exactOptionalPropertyTypes.
       destinationBucket: this.bucket as IBucket,
       // Short browser and CloudFront lifetime: a merged change is live within

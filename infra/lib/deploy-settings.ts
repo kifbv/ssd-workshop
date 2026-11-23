@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
 
-/** The placeholder page, in the folder the site stack uploads. */
+/** The sign-in page source; the site stack publishes its build (same HTML). */
 const INDEX_HTML = fileURLToPath(new URL("../../platform/web/index.html", import.meta.url));
 
 export interface DeploySettings {

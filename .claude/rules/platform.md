@@ -35,3 +35,7 @@ paths:
 - A limit on tries (sign-in codes: 5 wrong tries) is counted with one atomic DynamoDB `ADD` (`ReturnValues: UPDATED_NEW`,
   condition `attribute_exists(pk)`), never a read-then-conditional-write that gives up after lost races: parallel
   requests would otherwise escape the limit. Test it with a burst of parallel requests against the fake.
+- Pages (`platform/web`): no inline `<script>`, `<style>`, `style=` or `on*=` attributes (the CSP has `script-src 'self'`
+  and `style-src 'self'`); set text with `textContent`. Browser code gets DOM types from `platform/web/tsconfig.json`
+  only. In Playwright, a `hidden` element is not in the accessibility tree: `getByRole` waits forever for it, so read
+  hidden fields by id.

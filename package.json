@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "lint": "eslint .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p platform/web/tsconfig.json",
     "test": "vitest run --passWithNoTests",
     "synth": "npm run synth -w infra",
     "smoke": "npm run -s smoke -w platform --",

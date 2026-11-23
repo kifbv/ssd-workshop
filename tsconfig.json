@@ -5,5 +5,5 @@
     "checkJs": true
   },
   "include": ["eslint.config.mjs", "vitest.config.ts", "infra/**/*.ts", "platform/**/*.ts"],
-  "exclude": ["**/node_modules", "**/cdk.out", "**/dist"]
+  "exclude": ["**/node_modules", "**/cdk.out", "**/dist", "platform/web/**"]
 }

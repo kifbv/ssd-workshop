@@ -148,3 +148,8 @@ paths:
   `UpdateItem`, `DeleteItem` or `ConditionCheckItem`, with its own `LeadingKeys`/`Attributes` conditions.
   Under a `dynamodb:Attributes` list, return only `UPDATED_NEW`/`UPDATED_OLD`/`NONE` (`ALL_NEW` could
   return attributes outside it), and list `pk`/`sk` plus every name an expression uses, conditions included.
+- A custom CloudFront policy (the pages' `ssd-workshop-pages-v1` response headers policy, ticket 1.6) can be created but
+  never updated: a change to any of its settings must bump `PAGES_HEADERS_POLICY_VERSION`, which changes the name
+  and the logical id (a new name alone is an in-place update), or the deploy fails on `UpdateResponseHeadersPolicy`.
+- The site stack builds the pages (`buildWeb`, esbuild) at synth time into `cdk.out/ssd-workshop-web` and uploads that
+  folder, not `platform/web`: a new static file must be added to `STATIC_FILES` in `platform/web/build.ts`.

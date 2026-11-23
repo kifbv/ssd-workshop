@@ -119,13 +119,13 @@ aws route53 list-resource-record-sets --region us-east-1 \
   --hosted-zone-id "$ZONE_ID" --output json > /tmp/zone-before.json
 ```
 
-1. HTTPS answers 200 with the placeholder page:
+1. HTTPS answers 200 with the site's page (the placeholder until ticket 1.6, the sign-in page since):
 
    ```sh
    curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://workshop.rankly.games/
    # expect: 200 0
-   curl -sS https://workshop.rankly.games/ | grep -c 'SSD Workshop, coming soon'
-   # expect: 2 or more (title and heading)
+   curl -sS https://workshop.rankly.games/ | grep -c '<h1>SSD Workshop</h1>'
+   # expect: 1
    ```
 
 2. The bucket refuses direct requests (only CloudFront can read it):
@@ -267,3 +267,33 @@ rm -f "$JAR"; unset ADDRESS CODE
 On a refusal, the log groups `ssd-workshop-api-sign-in-verify` and `ssd-workshop-api-participant` have
 one JSON line per request with its outcome (and the AWS error name, e.g. `AccessDeniedException`, on a
 failure); they never hold the address, the code, the token or the nickname.
+
+## Check after the sign-in pages deploy (ticket 1.6)
+
+The pages carry the Content-Security-Policy of the `ssd-workshop-pages-v1` headers policy, and
+`/api/*` keeps the managed security headers:
+
+```sh
+curl -sSI https://workshop.rankly.games/ | grep -i -E '^(content-security-policy|strict-transport-security|x-frame-options|x-content-type-options|referrer-policy):'
+# expect: content-security-policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+#           connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'
+#         strict-transport-security: max-age=31536000, x-frame-options: DENY, x-content-type-options: nosniff,
+#         referrer-policy: strict-origin-when-cross-origin
+curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' https://workshop.rankly.games/app.js
+# expect: 200 text/javascript (or application/javascript)
+curl -sSI https://workshop.rankly.games/api/health | grep -i -c '^content-security-policy:'
+# expect: 0 (the API keeps the managed SecurityHeadersPolicy)
+```
+
+Then open https://workshop.rankly.games/ on a phone: the email screen shows, a code arrives, the code
+screen leads to the nickname screen (first sign-in) or straight to step 1, and the browser console shows
+no "Refused to ..." message.
+
+The headers policy cannot be changed in place (the deploy rights create custom policies but cannot
+update or delete them): to change a header, bump `PAGES_HEADERS_POLICY_VERSION` in `infra/lib/config.ts`
+(new name and new logical id, so CloudFormation creates a replacement); the old one stays behind, unused,
+until Franck deletes it.
+
+If the first deploy of this policy fails and rolls back, the retained `ssd-workshop-pages-v1` stays behind
+and the retry fails on its name: delete it in the CloudFront console (Policies, Response headers) or bump
+`PAGES_HEADERS_POLICY_VERSION`, then re-run the deploy.

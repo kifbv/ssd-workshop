@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,8 @@ import {
   HEALTH_FUNCTION_NAME,
   HOSTED_ZONE_ID,
   IAM_PATH,
+  PAGES_CONTENT_SECURITY_POLICY,
+  PAGES_HEADERS_POLICY_NAME,
   SENDER_ADDRESS,
   SES_CONFIGURATION_SET,
   SIGN_IN_CODE_FUNCTION_NAME,
@@ -37,7 +39,7 @@ import {
 } from "./config.js";
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
-import { WEB_DIR } from "./site-stack.js";
+import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 
 interface Resource {
   Type: string;
@@ -69,6 +71,7 @@ const NOT_TAGGABLE = [
   "AWS::IAM::Policy",
   "AWS::Lambda::LayerVersion",
   "AWS::CloudFront::OriginAccessControl",
+  "AWS::CloudFront::ResponseHeadersPolicy",
   "AWS::Route53::RecordSet",
   "Custom::CDKBucketDeployment",
   "AWS::ApiGatewayV2::Route",
@@ -331,14 +334,23 @@ describe("buckets (criterion 2)", () => {
     expect(deployment?.[1].Properties?.SystemMetadata).toEqual({ "cache-control": "public, max-age=60" });
     expect(deployment?.[1].Properties?.DestinationBucketName).toBeDefined();
   });
+
+  it("uploads the pages built at synth time: the page, its stylesheet and app.js, no TypeScript or tests (ticket 1.6)", () => {
+    // The built folder in the assembly, and the asset CDK staged from it (same content).
+    expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(["app.js", "index.html", "style.css"]);
+    const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")));
+    expect(staged).toHaveLength(1);
+    expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(["app.js", "index.html", "style.css"]);
+  });
 });
 
-describe("placeholder page", () => {
-  it("says SSD Workshop, coming soon", () => {
+describe("sign-in page (ticket 1.6)", () => {
+  it("has the stable SSD Workshop heading the deploy smoke check looks for, and loads its script from a file", () => {
     const html = readFileSync(join(WEB_DIR, "index.html"), "utf8");
     expect(html).toContain('<html lang="en">');
-    expect(html).toContain("<title>SSD Workshop, coming soon</title>");
-    expect(html).toMatch(/<h1>SSD Workshop, coming soon<\/h1>/);
+    expect(html).toContain("<title>SSD Workshop</title>");
+    expect(html).toMatch(/<h1>SSD Workshop<\/h1>/);
+    expect(html).toContain('<script src="app.js" defer></script>');
   });
 });
 
@@ -370,9 +382,6 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
         ViewerProtocolPolicy: "redirect-to-https",
         // Managed CachingOptimized policy.
         CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6",
-        // Managed SecurityHeadersPolicy (HSTS, X-Content-Type-Options,
-        // X-Frame-Options, Referrer-Policy, X-XSS-Protection).
-        ResponseHeadersPolicyId: "67f7725c-6f97-4210-82d7-5512b31e9d03",
       },
       ViewerCertificate: {
         AcmCertificateArn: { Ref: certId },
@@ -389,8 +398,6 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
     expect(siteOrigin?.OriginAccessControlId).toBeDefined();
     expect((config.DefaultCacheBehavior as Record<string, unknown>).TargetOriginId).toBe(siteOrigin?.Id);
     expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(1);
-    // The managed headers policy creates no resource of its own.
-    expect(ofType("AWS::CloudFront::ResponseHeadersPolicy")).toEqual([]);
   });
 
   it("changes only the workshop.rankly.games records (A and AAAA aliases to CloudFront)", () => {
@@ -451,14 +458,14 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
   });
 
   it("uses managed policies only (no new untaggable CloudFront resource)", () => {
-    for (const type of [
-      "AWS::CloudFront::CachePolicy",
-      "AWS::CloudFront::OriginRequestPolicy",
-      "AWS::CloudFront::ResponseHeadersPolicy",
-      "AWS::CloudFront::Function",
-    ]) {
+    for (const type of ["AWS::CloudFront::CachePolicy", "AWS::CloudFront::OriginRequestPolicy", "AWS::CloudFront::Function"]) {
       expect(ofType(type), type).toEqual([]);
     }
+    // The pages' headers policy (ticket 1.6) is the only custom CloudFront policy, and /api/*
+    // keeps the managed SecurityHeadersPolicy (asserted above), not the pages' policy.
+    const custom = ofType("AWS::CloudFront::ResponseHeadersPolicy");
+    expect(custom).toHaveLength(1);
+    expect(JSON.stringify(apiBehaviour())).not.toContain(custom[0]?.[1] ?? "-");
   });
 
   it("still creates exactly the A and AAAA records for workshop.rankly.games, and no other Route53 record", () => {
@@ -471,6 +478,59 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
     ]);
     expect(ofType("AWS::Route53::RecordSetGroup")).toEqual([]);
     expect(ofType("AWS::Route53::HostedZone")).toEqual([]);
+  });
+});
+
+describe("pages' response headers (ticket 1.6 criterion 5)", () => {
+  const policies = (): [string, string, Resource][] => ofType("AWS::CloudFront::ResponseHeadersPolicy");
+  const policyConfig = (): Record<string, unknown> =>
+    policies()[0]?.[2].Properties?.ResponseHeadersPolicyConfig as Record<string, unknown>;
+  const distributionConfig = (): Record<string, unknown> =>
+    ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as Record<string, unknown>;
+
+  it("serves the pages (default behaviour) with one custom headers policy ssd-workshop-pages-v1 in the edge stack, retained", () => {
+    expect(policies()).toHaveLength(1);
+    const [stackName, id, policy] = policies()[0] ?? [];
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(PAGES_HEADERS_POLICY_NAME).toBe("ssd-workshop-pages-v1");
+    expect(policyConfig().Name).toBe(PAGES_HEADERS_POLICY_NAME);
+    // The version is in the logical id too: a changed policy is a replacement, never an update.
+    expect(id).toMatch(/^PagesHeadersV1[0-9A-F]{8}$/);
+    // Untaggable, so the deploy rights can create but never update or delete it.
+    expect(policy?.DeletionPolicy).toBe("Retain");
+    expect(policy?.UpdateReplacePolicy).toBe("Retain");
+    expect((distributionConfig().DefaultCacheBehavior as Record<string, unknown>).ResponseHeadersPolicyId).toEqual({ Ref: id });
+  });
+
+  it("sends a Content-Security-Policy that allows scripts only from the site itself (no inline scripts)", () => {
+    const security = policyConfig().SecurityHeadersConfig as Record<string, Record<string, unknown>>;
+    expect(security.ContentSecurityPolicy).toEqual({ ContentSecurityPolicy: PAGES_CONTENT_SECURITY_POLICY, Override: true });
+    const directives = new Map(
+      PAGES_CONTENT_SECURITY_POLICY.split(";").map((d) => {
+        const [name, ...values] = d.trim().split(/\s+/);
+        return [name, values] as const;
+      }),
+    );
+    expect(directives.get("script-src")).toEqual(["'self'"]);
+    expect(directives.get("default-src")).toEqual(["'self'"]);
+    expect(directives.get("style-src")).toEqual(["'self'"]);
+    expect(directives.get("connect-src")).toEqual(["'self'"]);
+    expect(directives.get("frame-ancestors")).toEqual(["'none'"]);
+    expect(directives.get("object-src")).toEqual(["'none'"]);
+    expect(directives.get("base-uri")).toEqual(["'self'"]);
+    expect(PAGES_CONTENT_SECURITY_POLICY).not.toMatch(/unsafe-|\*|https?:|nonce-|sha\d+-/);
+  });
+
+  it("keeps the managed policy's security headers: HSTS one year, nosniff, frame and referrer", () => {
+    const security = policyConfig().SecurityHeadersConfig as Record<string, unknown>;
+    expect(security).toMatchObject({
+      StrictTransportSecurity: { AccessControlMaxAgeSec: 31536000, IncludeSubdomains: false, Preload: false, Override: true },
+      ContentTypeOptions: { Override: true },
+      FrameOptions: { FrameOption: "DENY", Override: true },
+      ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
+    });
+    expect(policyConfig().CustomHeadersConfig).toBeUndefined();
+    expect(policyConfig().CorsConfig).toBeUndefined();
   });
 });
 
