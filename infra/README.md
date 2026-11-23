@@ -11,9 +11,11 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check, own record, nickname) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push); see "Build network (ticket 2.1)" | inline template (`LegacyStackSynthesizer`) |
 
 Deploy order: cdk-assets, then site, then edge; api after cdk-assets (it needs the assets
-bucket for its Lambda code, and nothing from site or edge). Nothing is passed between regions: the edge
+bucket for its Lambda code, and nothing from site or edge); builds on its own (no file assets, nothing
+from the other stacks). Nothing is passed between regions: the edge
 stack finds the site bucket by its fixed name, and the site bucket policy lets this account's
 CloudFront distributions read it.
 
@@ -30,7 +32,7 @@ flowchart LR
   wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main"]
   oidc --> role["sts:AssumeRoleWithWebIdentity<br/>ssd-workshop-deploy (1 hour)"]
   role --> before["DNS zone snapshot"]
-  before --> cdk["cdk deploy --all<br/>assets, site, edge, api"]
+  before --> cdk["cdk deploy --all<br/>assets, site, edge, api, builds"]
   cdk --> after["DNS zone snapshot<br/>diff: no change"]
   after --> smoke["Smoke checks<br/>page heading, /api/health direct and through CloudFront"]
   other["Any other branch,<br/>pull request or tag"] -.->|"refused: sub does not match"| role
@@ -412,6 +414,41 @@ npm run eval -- spec
 On a failure, `ssd-workshop-api-ai-worker`'s log has `"outcome":"failed"` lines with the error name
 (`MalformedSpec` or `MissingSpec` for a spec of the wrong shape, `AccessDeniedException` for a missing right),
 and `ssd-workshop-api-conversation`'s `"route":"spec"` or `"route":"approve"` lines.
+
+## Build network (ticket 2.1)
+
+```mermaid
+flowchart LR
+  subgraph vpc["VPC ssd-workshop-builds 10.42.0.0/16"]
+    a["Subnet ssd-workshop-builds-public-1<br/>eu-central-1a, 10.42.0.0/24"]
+    b["Subnet ssd-workshop-builds-public-2<br/>eu-central-1b, 10.42.1.0/24"]
+  end
+  task["Build task (Fargate, from 2.8)<br/>public IP, security group ssd-workshop-builds"] --- a
+  a --> igw["Internet gateway"]
+  b --> igw
+  igw -->|"TCP 443 only"| out["GitHub, Bedrock, ECR, DynamoDB, SQS"]
+  ecr["ECR ssd-workshop-builder<br/>newest 5 images"] -.->|image| task
+  cluster["ECS cluster ssd-workshop-builds"] -.->|runs| task
+```
+
+Build tasks get a public IP in `RunTask` (`assignPublicIp`), which replaces a NAT gateway (about $40 a
+month). The security group lets only TCP 443 out and nothing in, so a task can be reached from nowhere.
+No VPC endpoint, no flow logs, no Container Insights; the VPC's default security group is left as AWS
+creates it (untagged, so the deploy rights cannot change it) and nothing uses it.
+
+After the deploy (criterion 4), read-only:
+
+```sh
+aws ec2 describe-subnets --region eu-central-1 --filters Name=tag:project,Values=ssd-workshop \
+  --query 'Subnets[].[SubnetId,AvailabilityZone,CidrBlock,Tags[?Key==`Name`]|[0].Value]' --output table
+# expect: exactly two rows, e.g.
+#   subnet-0abc...  eu-central-1a  10.42.0.0/24  ssd-workshop-builds-public-1
+#   subnet-0def...  eu-central-1b  10.42.1.0/24  ssd-workshop-builds-public-2
+```
+
+Then the two subnet ids go into `infra/lib/config.ts` as constants (where the comment after
+`BUILDER_IMAGES_KEPT` says) for ticket 2.2, which pins `ecs:RunTask` to them. If the stack is ever
+recreated, the subnets get new ids: update the constants and the access stack.
 
 ## Start a participant's conversation over
 

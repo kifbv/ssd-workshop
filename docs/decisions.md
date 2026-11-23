@@ -22,6 +22,14 @@ Choices made while building that the specification left open. Newest phase first
 - **GitHub organization (Franck, 2026-11-23):** `ssd-workshop-apps`, with the GitHub App `ssd-workshop-gh-app` installed on all its repositories (Administration and Contents read and write). Franck keeps the private key on his machine until ticket 2.6 creates the secret `ssd-workshop-github`.
 - **Model quotas (Franck, 2026-11-23):** Franck requested Sonnet 5.5 and Haiku 5.5 tokens-per-minute quotas; the platform uses the EU geographic profiles (`eu.anthropic.*`, spec: EU routing), whose quotas are separate from the global ones. Until granted, every role stays on Sonnet 4.6.
 - **Models per role (2026-11-23, PR #24):** each AI role (guardrail, clarify, spec, readiness, build) has its own model and price setting, and every eval takes `--model <id>`; a role moves to a cheaper or newer Claude model only after its eval passes on it.
+- **(2.1) Builds stack:** `ssd-workshop-builds` (eu-central-1, `infra/lib/builds-stack.ts`), inline template synthesizer (no file assets), no dependency on the other stacks. Names in `infra/lib/config.ts`.
+- **(2.1) Network:** VPC `10.42.0.0/16` (an uncommon range, so a later peering or VPN is less likely to clash), two public `/24` subnets in `eu-central-1a` and `eu-central-1b`, one internet gateway, no NAT gateway, no VPC endpoint, no flow logs (a paid log for traffic that is HTTPS only). The subnets are named `ssd-workshop-builds-public-1` and `-2`.
+- **(2.1) Fixed zones:** the zones are constants and the stack overrides `availabilityZones`; otherwise CDK asks AWS for the account's zones at synth time, which CI cannot do. A test checks the assembly needs no context lookup.
+- **(2.1) No public IP by default:** `MapPublicIpOnLaunch` is off on both subnets; build tasks ask for one in `RunTask` (`assignPublicIp: ENABLED`), so nothing else started there gets a public address by accident.
+- **(2.1) Default security group left alone:** `restrictDefaultSecurityGroup: false`. The VPC's default group is created untagged, so the deploy rights (`Ec2ChangeTaggedOnly`) cannot revoke its rules, and CDK's restriction needs a custom-resource Lambda; build tasks always name `ssd-workshop-builds`.
+- **(2.1) Security group:** `ssd-workshop-builds`, one egress rule TCP 443 to `0.0.0.0/0` (GitHub, Bedrock, ECR, DynamoDB, SQS all speak HTTPS), no ingress, IPv4 only (the VPC has no IPv6).
+- **(2.1) Cluster:** `ssd-workshop-builds`, Fargate only (no EC2 capacity), Container Insights off (paid metrics; the tasks' own logs suffice).
+- **(2.1) Image repository:** `ssd-workshop-builder`, scan on push (the free basic scan), one lifecycle rule expiring all but the newest 5 images (tagged or not), mutable tags, retained on stack delete, no `emptyOnDelete` (a custom-resource Lambda) and no repository policy (denied by the access stack).
 
 ## Phase 1: sign in and talk
 

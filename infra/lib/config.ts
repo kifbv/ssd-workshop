@@ -33,7 +33,28 @@ export const STACK_NAMES = {
   site: `${PREFIX}-site`,
   edge: `${PREFIX}-edge`,
   api: `${PREFIX}-api`,
+  builds: `${PREFIX}-builds`,
 } as const;
+
+/**
+ * Build network, cluster and image repository (ticket 2.1, stack `ssd-workshop-builds`).
+ * Two public subnets and no NAT gateway: build tasks get a public IP to reach GitHub and Bedrock.
+ */
+export const BUILDS_VPC_NAME = `${PREFIX}-builds`;
+export const BUILDS_VPC_CIDR = "10.42.0.0/16";
+/**
+ * The two zones of the build subnets. Constants, not a lookup: with an account in `env`, CDK would
+ * ask AWS for the zones at synth time, and CI synthesizes without credentials.
+ */
+export const BUILDS_AVAILABILITY_ZONES = [`${REGION}a`, `${REGION}b`] as const;
+/** Security group of the build tasks: outgoing HTTPS only, nothing incoming. */
+export const BUILDS_SECURITY_GROUP_NAME = `${PREFIX}-builds`;
+export const BUILDS_CLUSTER_NAME = `${PREFIX}-builds`;
+/** Image repository of the builder container; keeps the newest BUILDER_IMAGES_KEPT images. */
+export const BUILDER_REPOSITORY_NAME = `${PREFIX}-builder`;
+export const BUILDER_IMAGES_KEPT = 5;
+// After the first deploy of `ssd-workshop-builds`, the two subnet ids go here as constants
+// (BUILDS_SUBNET_IDS) for ticket 2.2, which pins ecs:RunTask to them (see infra/README.md).
 
 /** The single DynamoDB table (key scheme in platform/api/types.ts). */
 export const TABLE_NAME = `${PREFIX}-data`;
