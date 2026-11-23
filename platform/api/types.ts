@@ -6,7 +6,8 @@
  * | Item                 | pk                     | sk                 | Expires (TTL `expiresAt`) |
  * | -------------------- | ---------------------- | ------------------ | ------------------------- |
  * | Allow-list entry     | `EMAIL#<email>`        | `ALLOW`            | never                     |
- * | Sign-in code         | `EMAIL#<email>`        | `CODE`             | yes (10 minutes)          |
+ * | Sign-in codes        | `EMAIL#<email>`        | `CODE`             | yes (latest code expiry)  |
+ * | Code requests        | `EMAIL#<email>`        | `CODE_REQUESTS`    | yes (1 hour after last)   |
  * | Session              | `SESSION#<token hash>` | `SESSION`          | yes (8 hours)             |
  * | Participant          | `PARTICIPANT#<id>`     | `PROFILE`          | never                     |
  * | Conversation message | `PARTICIPANT#<id>`     | `MSG#<message id>` | never                     |
@@ -51,17 +52,43 @@ export interface AllowListEntry extends Keyed {
   createdAt: string;
 }
 
-/** The current sign-in code of one email (ticket 1.4). */
-export interface CodeItem extends Keyed {
-  type: "code";
+/** One code sent by email (ticket 1.4). */
+export interface CodeEntry {
   /** Hash of the 6-digit code; the code itself is never stored. */
   codeHash: string;
-  /** Epoch seconds (TTL attribute). */
+  /** Epoch seconds: the code is valid until then (10 minutes). */
   expiresAt: number;
-  /** Wrong tries so far; the code is burned at 5. */
+}
+
+/**
+ * The live sign-in codes of one email (ticket 1.4). A new code does not cancel the earlier ones:
+ * every unexpired code stays valid (at most 5; expired ones are pruned on write), so a stranger
+ * asking for a code cannot cancel the one a participant is typing.
+ */
+export interface CodeItem extends Keyed {
+  type: "code";
+  /** Unexpired codes, oldest first, at most 5. */
+  codes: CodeEntry[];
+  /** Wrong tries so far, shared by all the codes; the whole item is burned at 5 (ticket 1.5). */
   attempts: number;
-  /** ISO 8601. */
-  createdAt: string;
+  /** Bumped on every write; a write names the version it read (two writers cannot lose a code). */
+  version: number;
+  /** Epoch seconds (TTL attribute): the latest code's expiry. */
+  expiresAt: number;
+}
+
+/**
+ * When codes were sent to one allow-listed email in the last hour (ticket 1.4): at most 5.
+ * Only written for allow-listed emails, so no stranger's address is ever stored.
+ */
+export interface CodeRequestsItem extends Keyed {
+  type: "code-requests";
+  /** Epoch seconds of each code sent within the last hour, oldest first. */
+  sentAt: number[];
+  /** Bumped on every write; a write names the version it read (two requests at once cannot both pass). */
+  version: number;
+  /** Epoch seconds (TTL attribute): one hour after the newest send. */
+  expiresAt: number;
 }
 
 /** A signed-in browser (ticket 1.5). */
@@ -122,4 +149,11 @@ export interface UsageItem extends Keyed, TokenUsage {
   updatedAt: string;
 }
 
-export type TableItem = AllowListEntry | CodeItem | SessionItem | Participant | ConversationMessage | UsageItem;
+export type TableItem =
+  | AllowListEntry
+  | CodeItem
+  | CodeRequestsItem
+  | SessionItem
+  | Participant
+  | ConversationMessage
+  | UsageItem;

@@ -131,3 +131,11 @@ paths:
   `REDIRECT_TO_HTTPS` (a redirect turns POST into GET). A value from another region's stack
   (the API id for the us-east-1 edge stack) is a constant in `config.ts`; recreating that
   resource means updating the constant.
+- `NodejsFunction` on Node 18+ runtimes leaves `@aws-sdk/*` out of the bundle by default (the runtime's
+  copy is used): set `bundling.externalModules: []` so the function runs the tested SDK version and the
+  synth test can `require` the bundle on its own.
+- IAM cannot condition on a DynamoDB sort key: a role limited to a partition (`dynamodb:LeadingKeys`) can still
+  write any item in it. Limit PutItem's attribute names (`dynamodb:Attributes`) and make readers require an
+  attribute that role cannot write. A PutItem still replaces a whole item, so such a role can overwrite another
+  item of the partition with only the allowed attributes (sign-in: an `ALLOW` entry, taking that person off the
+  list, a denial of service, never added rights); when that matters, give the role its own partition (`CODE#`).

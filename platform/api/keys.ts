@@ -35,6 +35,9 @@ export const allowListKey = (email: string): ItemKey => ({ pk: emailPk(email), s
 
 export const codeKey = (email: string): ItemKey => ({ pk: emailPk(email), sk: "CODE" });
 
+/** When codes were sent to this email in the last hour (rate limit, ticket 1.4). */
+export const codeRequestsKey = (email: string): ItemKey => ({ pk: emailPk(email), sk: "CODE_REQUESTS" });
+
 export const sessionKey = (tokenHash: string): ItemKey => ({
   pk: `SESSION#${checkId("token hash", tokenHash)}`,
   sk: "SESSION",

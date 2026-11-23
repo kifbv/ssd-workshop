@@ -1,9 +1,13 @@
 // Pure logic of the smoke checks: no AWS calls here, so every rule is unit tested.
+import { isValidEmail } from "../../api/email.js";
 
 export const REGION = "eu-central-1";
 export const SENDER = "ssd-workshop@rankly.games";
 /** SES configuration set every workshop email names (created by the access stack). */
 export const CONFIGURATION_SET = "ssd-workshop-email";
+
+/** The live code request route (ticket 1.4), through CloudFront. */
+export const SIGN_IN_CODE_URL = "https://workshop.rankly.games/api/sign-in/code";
 
 export const DEFAULT_MODEL_ID = "eu.anthropic.claude-sonnet-4-6";
 
@@ -13,16 +17,19 @@ Commands:
   bedrock          ask Claude on Bedrock (EU inference profile) for a short answer and print the latency
   quota            print the model's tokens-per-minute and requests-per-minute quotas in ${REGION}
   ses <address>    send a test email from ${SENDER} to <address>
+  signin <address> ask the live site for a sign-in code for <address> (POST ${SIGN_IN_CODE_URL})
 
 Environment:
   SMOKE_MODEL_ID   inference profile to use (default ${DEFAULT_MODEL_ID}); must start with eu.anthropic.
 
-Keep the -s: without it npm echoes the command line, recipient address included.`;
+Keep the -s: without it npm echoes the command line, recipient address included.
+signin needs no AWS credentials; the code email arrives only if <address> is on the allow-list.`;
 
 export type SmokeCommand =
   | { command: "bedrock" }
   | { command: "quota" }
-  | { command: "ses"; address: string };
+  | { command: "ses"; address: string }
+  | { command: "signin"; address: string };
 
 export function parseArgs(args: readonly string[]): SmokeCommand | { error: string } {
   const [command, ...rest] = args;
@@ -38,6 +45,14 @@ export function parseArgs(args: readonly string[]): SmokeCommand | { error: stri
         return { error: "the ses argument is not an email address" };
       }
       return { command: "ses", address };
+    }
+    case "signin": {
+      const [address, ...extra] = rest;
+      if (address === undefined) return { error: "signin needs an email address" };
+      if (extra.length > 0) return { error: "signin takes exactly one address" };
+      // The API's own rule, so an address the site would refuse is caught here.
+      if (!isValidEmail(address.trim().toLowerCase())) return { error: "the signin argument is not an email address" };
+      return { command: "signin", address: address.trim().toLowerCase() };
     }
     case undefined:
       return { error: "no command given" };
@@ -180,4 +195,35 @@ export function buildTestEmail(code: string): { subject: string; text: string } 
       "It is a sample, not a real code. You can ignore this email.",
     ].join("\n"),
   };
+}
+
+export interface SignInRequest {
+  url: string;
+  init: { method: "POST"; headers: Record<string, string>; body: string };
+}
+
+/** The request the sign-in page will make: POST {"email"} as JSON. */
+export function buildSignInRequest(address: string): SignInRequest {
+  return {
+    url: SIGN_IN_CODE_URL,
+    init: { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: address }) },
+  };
+}
+
+/** Status and the API's answer; the address only masked, and the answer redacted in case it echoes one. */
+export function formatSignInResult(address: string, status: number, body: string): string {
+  let answer = body;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object" && typeof (parsed as { message?: unknown }).message === "string") {
+      answer = (parsed as { message: string }).message;
+    }
+  } catch {
+    // Not JSON (a CloudFront error page, say): print it as text, shortened.
+  }
+  return [
+    `Asked ${SIGN_IN_CODE_URL} for a code for ${maskEmail(address)}`,
+    `Status: ${status}`,
+    `Answer: ${redactError(answer.slice(0, 500)) || "(empty)"}`,
+  ].join("\n");
 }

@@ -8,3 +8,12 @@ export interface HttpResponse {
   headers?: Record<string, string>;
   body?: string;
 }
+
+/**
+ * The parts of an API Gateway HTTP API (payload format 2.0) request event the
+ * handlers read. The body is base64 when `isBase64Encoded` is true.
+ */
+export interface HttpRequest {
+  body?: string;
+  isBase64Encoded?: boolean;
+}

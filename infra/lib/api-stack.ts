@@ -1,20 +1,36 @@
 import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
-import { HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
+import { type CfnStage, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
-import { Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
-import { Architecture, type IFunction, Runtime } from "aws-cdk-lib/aws-lambda";
+import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import type { Construct } from "constructs";
-import { API_NAME, HEALTH_FUNCTION_NAME, TABLE_NAME } from "./config.js";
+import {
+  API_NAME,
+  HEALTH_FUNCTION_NAME,
+  SENDER_ADDRESS,
+  SES_SEND_RESOURCES,
+  SIGN_IN_CODE_PUT_ATTRIBUTES,
+  SIGN_IN_CODE_FUNCTION_NAME,
+  TABLE_NAME,
+} from "./config.js";
 
 /** Lambda handlers live with the rest of the API code. */
 export const API_HANDLERS_DIR = fileURLToPath(new URL("../../platform/api/handlers", import.meta.url));
 
 /** Default-stage throttle: a cheap guard against runaway clients (the workshop needs ~15 requests/s). */
 export const API_THROTTLE = { rateLimit: 50, burstLimit: 100 } as const;
+
+/**
+ * Route throttle for `POST /api/sign-in/code` (ticket 1.4): reachable without sign-in and every
+ * well-formed request holds a Lambda for 3 s, so a flood at the stage limit would keep ~150
+ * executions busy in an account whose Lambda concurrency is shared. ~15 people need far less.
+ */
+export const SIGN_IN_CODE_ROUTE_KEY = "POST /api/sign-in/code";
+export const SIGN_IN_CODE_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 
 /** The TTL attribute (epoch seconds) of sign-in codes and sessions. */
 export const TTL_ATTRIBUTE = "expiresAt";
@@ -52,7 +68,7 @@ export class ApiStack extends Stack {
       // The stage is added below, with throttling.
       createDefaultStage: false,
     });
-    this.api.addStage("DefaultStage", {
+    const stage = this.api.addStage("DefaultStage", {
       stageName: "$default",
       autoDeploy: true,
       throttle: API_THROTTLE,
@@ -66,6 +82,54 @@ export class ApiStack extends Stack {
       integration: new HttpLambdaIntegration("HealthIntegration", health),
     });
 
+    // Ticket 1.4: emails a sign-in code. Reachable without sign-in, so its table rights stay in
+    // the `EMAIL#*` partitions: GetItem (allow-list, codes, counter) and PutItem of the CODE and
+    // CODE_REQUESTS attribute names only. It sends from the workshop address only, through the
+    // workshop's identities and configuration set. 512 MB keeps scrypt fast and predictable; the
+    // answer goes out at 3 s, well inside the 10 s timeout.
+    const signInCode = workshopFunction(this, "SignInCode", SIGN_IN_CODE_FUNCTION_NAME, "sign-in-code.ts", 512);
+    const emailPartitions = { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] } };
+    signInCode.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: emailPartitions,
+      }),
+    );
+    signInCode.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          ...emailPartitions,
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SIGN_IN_CODE_PUT_ATTRIBUTES] },
+        },
+      }),
+    );
+    signInCode.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["ses:SendEmail"],
+        resources: [...SES_SEND_RESOURCES],
+        conditions: { StringEquals: { "ses:FromAddress": SENDER_ADDRESS } },
+      }),
+    );
+    const signInCodeRoutes = this.api.addRoutes({
+      path: "/api/sign-in/code",
+      methods: [HttpMethod.POST],
+      integration: new HttpLambdaIntegration("SignInCodeIntegration", signInCode),
+    });
+    // Route-level throttle (L1 RouteSettings; the L2 stage has no per-route option). The route must
+    // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
+    const cfnStage = stage.node.defaultChild as CfnStage;
+    cfnStage.addPropertyOverride(`RouteSettings.${SIGN_IN_CODE_ROUTE_KEY}`, {
+      ThrottlingRateLimit: SIGN_IN_CODE_THROTTLE.rateLimit,
+      ThrottlingBurstLimit: SIGN_IN_CODE_THROTTLE.burstLimit,
+    });
+    for (const route of signInCodeRoutes) cfnStage.node.addDependency(route);
+
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",
       value: this.api.apiEndpoint,
@@ -75,10 +139,10 @@ export class ApiStack extends Stack {
 
 /**
  * A Node.js 22 arm64 function bundled by esbuild from platform/api/handlers, with
- * its own named role (no rights beyond writing its logs; the app's aspect adds the
- * path and boundary) and its own named log group with two weeks of retention.
+ * its own named role (only the right to write its logs; the caller adds what the
+ * function needs; the app's aspect adds the path and boundary) and its own named log group with two weeks of retention.
  */
-function workshopFunction(scope: Construct, id: string, name: string, entry: string): IFunction {
+function workshopFunction(scope: Construct, id: string, name: string, entry: string, memorySize = 256): NodejsFunction {
   const logGroup = new LogGroup(scope, `${id}Logs`, {
     logGroupName: name,
     retention: RetentionDays.TWO_WEEKS,
@@ -98,10 +162,13 @@ function workshopFunction(scope: Construct, id: string, name: string, entry: str
     handler: "handler",
     runtime: Runtime.NODEJS_22_X,
     architecture: Architecture.ARM_64,
-    memorySize: 256,
+    memorySize,
     timeout: Duration.seconds(10),
     role,
     logGroup,
-    bundling: { minify: true, sourceMap: false },
-  }) as IFunction;
+    // NodejsFunction leaves @aws-sdk/* out of the bundle by default on Node 18+ runtimes (the
+    // runtime has its own copy). Bundling it pins the version the tests ran with and keeps the
+    // bundle self-contained (the synth test loads it).
+    bundling: { minify: true, sourceMap: false, externalModules: [] },
+  });
 }

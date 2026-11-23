@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   allowListKey,
   codeKey,
+  codeRequestsKey,
   MESSAGE_PREFIX,
   messageKey,
   normalizeEmail,
@@ -24,6 +25,7 @@ describe("item keys", () => {
   it("keys the allow-list entry and the code by the normalized email, so both share one partition", () => {
     expect(allowListKey("Jane@Example.com")).toEqual({ pk: "EMAIL#jane@example.com", sk: "ALLOW" });
     expect(codeKey(" jane@example.com")).toEqual({ pk: "EMAIL#jane@example.com", sk: "CODE" });
+    expect(codeRequestsKey("JANE@example.com")).toEqual({ pk: "EMAIL#jane@example.com", sk: "CODE_REQUESTS" });
   });
 
   it("keys a session by its token hash", () => {

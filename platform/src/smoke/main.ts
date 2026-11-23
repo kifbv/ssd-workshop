@@ -1,6 +1,7 @@
-// `npm run -s smoke -- <command>`: proves the account can reach Bedrock, read its quotas and send email.
+// `npm run -s smoke -- <command>`: proves the account can reach Bedrock, read its quotas and send email,
+// and that the live site sends sign-in codes.
 // The AWS calls stay thin; the rules live in ./logic.ts.
-// Always run it with `-s`: without it npm echoes the command line, so `ses <address>` would print the
+// Always run it with `-s`: without it npm echoes the command line, so `ses <address>` or `signin <address>` would print the
 // recipient address. The root script calls this workspace with `-s` already; the outer `-s` is on you.
 import { randomInt } from "node:crypto";
 import { Agent, type AgentOptions } from "node:https";
@@ -18,8 +19,10 @@ import {
   REGION,
   SENDER,
   USAGE,
+  buildSignInRequest,
   buildTestEmail,
   findModelQuotas,
+  formatSignInResult,
   formatLatency,
   formatQuotaLine,
   maskEmail,
@@ -107,6 +110,15 @@ async function smokeSes(address: string): Promise<void> {
   console.log(`MessageId: ${response.MessageId ?? "(none)"}`);
 }
 
+// Plain fetch: no AWS call, so no credentials. Node's fetch does not use HTTPS_PROXY (Claude sessions
+// cannot reach workshop.rankly.games anyway); run it from your own machine.
+async function smokeSignIn(address: string): Promise<boolean> {
+  const request = buildSignInRequest(address);
+  const response = await fetch(request.url, request.init);
+  console.log(formatSignInResult(address, response.status, await response.text()));
+  return response.status === 202;
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -123,6 +135,8 @@ async function main(): Promise<number> {
     case "ses":
       await smokeSes(parsed.address);
       break;
+    case "signin":
+      return (await smokeSignIn(parsed.address)) ? 0 : 1;
   }
   return 0;
 }
