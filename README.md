@@ -41,7 +41,8 @@ npm run -s allowlist -- list
 - Give the file as an absolute path (a relative path is refused). It must stay outside this
   repository and outside any other git work tree (no folder above it holds a `.git`): such a path is
   refused, symlinks included, and so is a file with more than one hard link or a path that is not a
-  file. `*.csv` is also in `.gitignore`.
+  file. `*.csv` is also in `.gitignore`. A "bare" dotfiles repository (`git --git-dir=~/.cfg
+  --work-tree=~`) leaves no `.git` to find, so keep the file out of any such work tree yourself.
 - `import` prints how many people were added, updated and rejected, and the line number and reason
   of each rejected line; importing again updates group and role. `list` prints counts per group and
   role. Neither ever prints an address.
