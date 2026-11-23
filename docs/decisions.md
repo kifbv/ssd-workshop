@@ -12,6 +12,13 @@ Choices made while building that the specification left open. Newest phase first
 - **Spec deltas:** a change to signed-off behaviour is recorded here as ADDED, CHANGED or REMOVED,
   with the date and the pull request.
 
+## Phase 2: build and go live
+
+- **Paid services (Franck, 2026-11-23):** ECS Fargate, ECR, Secrets Manager and a public IPv4 address per running build task are approved for phase 2 (under $1 a month at rest; Bedrock about $0.50 to $2 a build, $20 to $50 for phase 2's tests). No NAT gateway.
+- **Spec delta, CHANGED (Franck, 2026-11-23, PR #24):** section 5 "Code" and item 8: participants' repositories live in a free GitHub organization Franck owns for the apps (not a company organization, not his personal account), written through a GitHub App installed only there; each build gets a one-hour token for its one repository.
+- **Access stack for build tasks (Franck, 2026-11-23):** `ecs:DescribeTaskDefinition` on `Resource *` is accepted as a new risk (the workshop's principals can read other projects' task definitions, environment included; check: CloudTrail); in return ticket 2.2 pins `RunTask`/`StartTask` to the workshop subnets (`ecs:subnet`), closing accepted risk 1.
+- **Models per role (2026-11-23, PR #24):** each AI role (guardrail, clarify, spec, readiness, build) has its own model and price setting, and every eval takes `--model <id>`; a role moves to a cheaper or newer Claude model only after its eval passes on it.
+
 ## Phase 1: sign in and talk
 
 - **Paid services (Franck, 2026-11-23):** API Gateway HTTP API, Lambda and DynamoDB on demand are approved for phase 1 (estimate under $2 a month at rest, about $10 to $20 of Bedrock for tests and evals).
