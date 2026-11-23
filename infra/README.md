@@ -252,6 +252,7 @@ verify
 # expect: {"next":"nickname"} (or the step he is at) and 200, after about 3 seconds
 curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
 # expect: {"id":"...","nickname":null,"role":"<role from the allow-list>",...} and 200
+# A nickname is set once and cannot be changed later: replace Franck with the one you want to keep.
 curl -sS -b "$JAR" -H 'content-type: application/json' --data '{"nickname":"Franck"}' \
   -w '\n%{http_code}\n' https://workshop.rankly.games/api/me/nickname
 # expect: {...,"nickname":"Franck","step":"clarify"} and 200 (409 "already-set" if he has one)
