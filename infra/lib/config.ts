@@ -32,7 +32,15 @@ export const STACK_NAMES = {
   assets: `${PREFIX}-cdk-assets`,
   site: `${PREFIX}-site`,
   edge: `${PREFIX}-edge`,
+  api: `${PREFIX}-api`,
 } as const;
+
+/** The single DynamoDB table (key scheme in platform/api/types.ts). */
+export const TABLE_NAME = `${PREFIX}-data`;
+/** The HTTP API; its routes all start with /api/ (CloudFront sends /api/* to it from ticket 1.2). */
+export const API_NAME = `${PREFIX}-api`;
+/** Lambda function, role and log group of `GET /api/health`. */
+export const HEALTH_FUNCTION_NAME = `${PREFIX}-api-health`;
 
 /**
  * Created by the access stack; GitHub Actions assumes it through OIDC, from `main` only.

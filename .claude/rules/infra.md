@@ -116,3 +116,7 @@ paths:
   `infra/bin/print-deploy-settings.ts`); never hard-code the account id in a workflow.
 - Only `deploy.yml` may ask for `id-token: write`; `ci.yml` runs on pull requests and gets no
   AWS access (tested).
+- Lambda code: `NodejsFunction` bundles locally with esbuild (an `infra` dev dependency; no
+  Docker) from `platform/api/handlers/`. Give each function its own named role and named log
+  group (`logGroup` prop), and put the stack on `assetsBucketSynthesizer()`. API Gateway v2
+  (`AWS::ApiGatewayV2::Api`, `::Stage`) takes `Tags` as a JSON map, not a list.

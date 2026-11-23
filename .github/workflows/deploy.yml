@@ -75,3 +75,24 @@ jobs:
           done
           echo "::error::$SITE_URL did not answer 200 with \"$HEADING\""
           exit 1
+
+      # Ticket 1.1 criterion 3: the API's own endpoint (not yet behind CloudFront) answers
+      # GET /api/health with 200 {"ok":true}. Reads only the workshop API stack's output.
+      - name: Smoke check the API health
+        env:
+          API_STACK: ${{ steps.settings.outputs.api_stack }}
+          AWS_REGION: ${{ steps.settings.outputs.region }}
+        run: |
+          endpoint=$(aws cloudformation describe-stacks --region "$AWS_REGION" --stack-name "$API_STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" --output text)
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o health.json -w '%{http_code}' --max-time 20 "$endpoint/api/health" || true)
+            if [ "$code" = "200" ] && [ "$(cat health.json)" = '{"ok":true}' ]; then
+              echo "OK: $endpoint/api/health answers 200 {\"ok\":true}"
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP ${code:-000}"
+            sleep 10
+          done
+          echo "::error::$endpoint/api/health did not answer 200 {\"ok\":true}"
+          exit 1
