@@ -124,3 +124,6 @@ paths:
   `/tags/<url-encoded ARN>`) when it creates a tagged API or stage; the access stack allows it only
   via CloudFormation (`ApiGatewayTagOnCreateThroughCloudFormation`). A new service whose
   CloudFormation handler tags in a separate call needs the same check before its first deploy.
+  A tagged stage is also checked as `apigateway:TagResource` (an action missing from the Service
+  Authorization Reference) on `/apis/<id>/stages` (`ApiGatewayTagStagesOnCreate`): AWS error
+  messages, not the reference, are the source of truth for tag-on-create actions.

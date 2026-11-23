@@ -287,6 +287,12 @@ Resources:
   # denies that keep workshop data inside the account (sharing, exports, egress).
   DeployPolicyEdge:
     Type: AWS::IAM::ManagedPolicy
+    # W3037: cfn-lint's action list lacks apigateway:TagResource, which AWS checks when
+    # CloudFormation creates a tagged API Gateway stage (ApiGatewayTagStagesOnCreate).
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3037]
     Properties:
       ManagedPolicyName: ssd-workshop-deploy-edge
       PolicyDocument:
@@ -381,6 +387,17 @@ Resources:
             Resource: !Sub arn:aws:apigateway:${AWS::Region}::/tags/*
             Condition:
               StringEquals: {aws:RequestTag/project: ssd-workshop}
+              ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}
+          # Creating a tagged stage is also authorized as apigateway:TagResource on the API's
+          # stages (live, second ssd-workshop-api deploy; the action is not in the Service
+          # Authorization Reference yet). The stages inherit the API's tag, so the API must
+          # already be the project's.
+          - Sid: ApiGatewayTagStagesOnCreate
+            Effect: Allow
+            Action: apigateway:TagResource
+            Resource: !Sub arn:aws:apigateway:${AWS::Region}::/apis/*
+            Condition:
+              StringEquals: {aws:RequestTag/project: ssd-workshop, aws:ResourceTag/project: ssd-workshop}
               ForAnyValue:StringEquals: {aws:CalledVia: cloudformation.amazonaws.com}
           - Sid: DnsOnlyWorkshopSubdomain
             Effect: Allow
