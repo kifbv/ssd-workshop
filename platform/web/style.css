@@ -236,6 +236,12 @@ textarea:focus-visible {
   justify-self: start;
   background: var(--bg);
 }
+.bubble .see-spec {
+  display: block;
+  margin-top: 0.5rem;
+  font-weight: 400;
+  text-align: start;
+}
 .bubble[data-status="declined"],
 .bubble[data-status="failed"] {
   opacity: 0.75;

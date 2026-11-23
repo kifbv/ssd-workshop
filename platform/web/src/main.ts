@@ -192,6 +192,16 @@ function render(): void {
       item.dataset["author"] = m.author;
       if (m.status !== undefined) item.dataset["status"] = m.status;
       item.textContent = m.text;
+      // The reply that saved the shown spec version links back to it: the spec sits above a long conversation.
+      // Older versions are not shown on the page, so older replies carry no link.
+      if (m.author === "assistant" && m.specVersion !== undefined && m.specVersion === shownSpec?.version && view.screen === "spec") {
+        const see = document.createElement("button");
+        see.type = "button";
+        see.className = "link see-spec";
+        see.textContent = SPEC_TEXTS.seeVersion(m.specVersion);
+        see.addEventListener("click", revealSpec);
+        item.append(see);
+      }
       return item;
     }),
   );
@@ -249,6 +259,8 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
     setStatus(id, result.status);
     messages.push({ id: `${id}-r`, author: "assistant", text: result.reply });
     stopPolling();
+    // A new spec version saved by this reply is brought into view once it is read (live check, ticket 1.9).
+    revealNextSpec = true;
     // The reload brings offersSpec, a new spec version and anything else the poll does not carry.
     await loadConversation();
     return;
@@ -311,7 +323,11 @@ async function loadConversation(): Promise<void> {
 async function loadSpec(): Promise<void> {
   const latest = specInfo.latest;
   const approved = specInfo.approved !== undefined;
-  if (latest === undefined || (shownSpec?.version === latest && shownSpec.approved === approved)) return;
+  if (latest === undefined || (shownSpec?.version === latest && shownSpec.approved === approved)) {
+    revealNextSpec = false;
+    return;
+  }
+  const previous = shownSpec?.version;
   const result = specResult(await call("GET", "/api/conversation/spec"));
   if (result.kind === "signed-out") {
     stopPolling();
@@ -325,9 +341,23 @@ async function loadSpec(): Promise<void> {
   if (result.kind === "none") return;
   const redraw = shownSpec?.text !== result.spec.text;
   shownSpec = result.spec;
+  const reveal = revealNextSpec && previous !== undefined && previous !== result.spec.version;
+  revealNextSpec = false;
   if (redraw) showSpecDocument(result.spec);
   else byId("spec-version").textContent = versionLabel(result.spec);
   render();
+  if (reveal) revealSpec();
+}
+
+/** Set when a reply arrives: if it saved a new spec version, `loadSpec` scrolls the spec into view. */
+let revealNextSpec = false;
+
+/** Scrolls the spec to the top of the screen and moves the focus to it (screen readers announce it). */
+function revealSpec(): void {
+  const doc = byId("spec-doc");
+  if (doc.hidden) return;
+  doc.scrollIntoView({ block: "start" });
+  doc.focus({ preventScroll: true });
 }
 
 const versionLabel = (spec: SpecVersion): string => `Version ${spec.version}${spec.approved ? " (approved)" : ""}`;
