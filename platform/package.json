@@ -7,7 +7,8 @@
     "allowlist": "tsx src/allowlist/main.ts",
     "test": "vitest run --passWithNoTests",
     "flags": "tsx src/flags/main.ts",
-    "eval": "tsx src/eval/main.ts"
+    "eval": "tsx src/eval/main.ts",
+    "conversation": "tsx src/conversation/main.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1175.0",

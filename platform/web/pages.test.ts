@@ -376,10 +376,15 @@ function must<T>(value: T | undefined): T {
   return value;
 }
 const bubbles = () => page.locator("#chat .bubble").allTextContents();
-/** Stops the installed page clock from following real time: from here only runFor moves it. */
+/**
+ * Stops the installed page clock from following real time: from here only runFor moves it. The target is
+ * 1 s ahead because real time keeps passing between reading the page's clock and pausing it (under a
+ * loaded full run, more than 1 ms: "Cannot fast-forward to the past"). Call it only while the page has
+ * no timer set (before the first send), since pausing fires the timers due in that second.
+ */
 async function pauseClock(): Promise<void> {
   const now = await page.evaluate(() => Date.now());
-  await page.clock.pauseAt(now + 1);
+  await page.clock.pauseAt(now + 1000);
 }
 /** Lets the page's pending fetches and their handlers run (real time, a little). */
 const settle = () => page.waitForTimeout(250);

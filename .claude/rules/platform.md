@@ -48,10 +48,12 @@ paths:
 - The Lambda runtime writes an uncaught error's message and stack to CloudWatch: a handler whose errors may carry
   personal data logs only `errorName(error)` and throws a bare `new Error(...)` (no `cause`), as `ai-worker.ts` does.
 - Playwright's `page.clock.install()` keeps the page clock following real time: to test timers (polling every 2 s),
-  pause it after the page loads (`page.clock.pauseAt(Date.now() in the page + 1)`), then move time only with
+  pause it after the page loads (`page.clock.pauseAt(Date.now() in the page + 1000)`), then move time only with
   `runFor`. `runFor` fires only timers already set: after each poll, wait for its response (`waitForResponse`) and
   let the page handle it before moving time again, or the next timer is missed (ticket 1.8, `pauseClock` and
   `pollAfter` in `pages.test.ts`).
+  Pause at the page's time plus 1 s, not plus 1 ms: real time passes between reading the page's clock and
+  pausing, and a loaded full run fails with "Cannot fast-forward to the past".
 - A model's machine-readable signal (clarify's `[READY_FOR_SPEC]`) is a marker line the worker strips before storing
   the text, so it never shows on the page or goes back to the model as history (ticket 1.8).
 - Mermaid under the pages' CSP (`style-src 'self'`): draw off-screen with `setAttribute("style")` turned into CSSOM
