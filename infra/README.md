@@ -10,7 +10,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
-| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`), Lambdas `ssd-workshop-api-health` and `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check, own record, nickname) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 
 Deploy order: cdk-assets, then site, then edge; api after cdk-assets (it needs the assets
 bucket for its Lambda code, and nothing from site or edge). Nothing is passed between regions: the edge
@@ -230,3 +230,40 @@ npm run -s smoke -- signin <address>
 If no email arrives, the function's log group `ssd-workshop-api-sign-in-code` has one JSON line per
 request with its outcome (`sent`, `not-listed`, `rate-limited`, `conflict`, `failed` with the step and
 the AWS error name, or `Timeout` when the work was still running at the 3-second answer time); it never holds the address or the code.
+
+## Check after the sign-in deploy (ticket 1.5)
+
+The first live sign-in proves the new roles' DynamoDB rights (IAM attribute conditions are only
+checked by AWS), and a second one proves that a returning person is sent back to their step. From
+Franck's machine, with his own address, after `smoke signin` sent a code. The address and the code
+go to `curl` on stdin (`--data @-`), never as an argument (which other processes can see), and the
+cookie jar is a private temporary file removed at the end:
+
+```sh
+JAR=$(mktemp); trap 'rm -f "$JAR"' EXIT
+read -r -p 'Address: ' ADDRESS
+verify() { # reads a code, sends {"email","code"} on stdin
+  read -r -p 'Code: ' CODE
+  printf '{"email":"%s","code":"%s"}' "$ADDRESS" "$CODE" |
+    curl -sS -c "$JAR" -H 'content-type: application/json' --data @- -w '\n%{http_code}\n' \
+      https://workshop.rankly.games/api/sign-in/verify
+}
+verify
+# expect: {"next":"nickname"} (or the step he is at) and 200, after about 3 seconds
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"id":"...","nickname":null,"role":"<role from the allow-list>",...} and 200
+# A nickname is set once and cannot be changed later: replace Franck with the one you want to keep.
+curl -sS -b "$JAR" -H 'content-type: application/json' --data '{"nickname":"Franck"}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/me/nickname
+# expect: {...,"nickname":"Franck","step":"clarify"} and 200 (409 "already-set" if he has one)
+curl -sS -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"message":"Please sign in."} and 401
+# now ask for a second code (`npm run -s smoke -- signin <address>` in another terminal), then:
+verify
+# expect: {"next":"clarify"} and 200 (the returning sign-in keeps his step)
+rm -f "$JAR"; unset ADDRESS CODE
+```
+
+On a refusal, the log groups `ssd-workshop-api-sign-in-verify` and `ssd-workshop-api-participant` have
+one JSON line per request with its outcome (and the AWS error name, e.g. `AccessDeniedException`, on a
+failure); they never hold the address, the code, the token or the nickname.

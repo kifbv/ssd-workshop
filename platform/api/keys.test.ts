@@ -5,6 +5,8 @@ import {
   codeRequestsKey,
   MESSAGE_PREFIX,
   messageKey,
+  newParticipantId,
+  nicknameKey,
   normalizeEmail,
   participantKey,
   sessionKey,
@@ -40,6 +42,19 @@ describe("item keys", () => {
       sk: "MSG#2026-11-23T10:00:00.000Z-x7",
     });
     expect(messageKey("p1", "m").sk.startsWith(MESSAGE_PREFIX)).toBe(true);
+  });
+
+  it("keys a nickname claim by the lower-cased nickname, so names that differ only in case collide", () => {
+    expect(nicknameKey("Ada-42")).toEqual({ pk: "NICK#ada-42", sk: "NICK" });
+    expect(nicknameKey("ADA-42")).toEqual(nicknameKey("ada-42"));
+    expect(() => nicknameKey("")).toThrow();
+    expect(() => nicknameKey("a#b")).toThrow();
+  });
+
+  it("makes participant ids from a random UUID, refusing one that holds #", () => {
+    expect(newParticipantId(() => "3f1c2a9e-0000-4000-8000-000000000001")).toBe("3f1c2a9e-0000-4000-8000-000000000001");
+    expect(() => newParticipantId(() => "a#b")).toThrow();
+    expect(() => newParticipantId(() => "")).toThrow();
   });
 
   it("refuses an empty id or an id holding the # separator (keys must not collide)", () => {

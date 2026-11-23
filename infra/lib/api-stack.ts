@@ -11,10 +11,17 @@ import type { Construct } from "constructs";
 import {
   API_NAME,
   HEALTH_FUNCTION_NAME,
+  PARTICIPANT_FUNCTION_NAME,
+  PARTICIPANT_NICK_PUT_ATTRIBUTES,
+  PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES,
   SENDER_ADDRESS,
   SES_SEND_RESOURCES,
   SIGN_IN_CODE_PUT_ATTRIBUTES,
   SIGN_IN_CODE_FUNCTION_NAME,
+  SIGN_IN_VERIFY_EMAIL_UPDATE_ATTRIBUTES,
+  SIGN_IN_VERIFY_FUNCTION_NAME,
+  SIGN_IN_VERIFY_PROFILE_UPDATE_ATTRIBUTES,
+  SIGN_IN_VERIFY_SESSION_PUT_ATTRIBUTES,
   TABLE_NAME,
 } from "./config.js";
 
@@ -31,6 +38,21 @@ export const API_THROTTLE = { rateLimit: 50, burstLimit: 100 } as const;
  */
 export const SIGN_IN_CODE_ROUTE_KEY = "POST /api/sign-in/code";
 export const SIGN_IN_CODE_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
+
+/**
+ * Route throttle for `POST /api/sign-in/verify` (ticket 1.5): like the code route, reachable
+ * without sign-in and every well-formed request holds a Lambda for 3 s. Guessing is already
+ * capped by the 5 wrong tries per address.
+ */
+export const SIGN_IN_VERIFY_ROUTE_KEY = "POST /api/sign-in/verify";
+export const SIGN_IN_VERIFY_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
+
+/** The protected participant routes (ticket 1.5), all served by one function behind one session check. */
+export const PARTICIPANT_ROUTES = [
+  { path: "/api/me", method: HttpMethod.GET },
+  { path: "/api/me/nickname", method: HttpMethod.POST },
+  { path: "/api/participants/{id}", method: HttpMethod.GET },
+] as const;
 
 /** The TTL attribute (epoch seconds) of sign-in codes and sessions. */
 export const TTL_ATTRIBUTE = "expiresAt";
@@ -121,14 +143,122 @@ export class ApiStack extends Stack {
       methods: [HttpMethod.POST],
       integration: new HttpLambdaIntegration("SignInCodeIntegration", signInCode),
     });
-    // Route-level throttle (L1 RouteSettings; the L2 stage has no per-route option). The route must
+
+    // Ticket 1.5: checks a code and starts a session. Reachable without sign-in. In `EMAIL#*` it
+    // reads (allow-list, codes), updates only `attempts`, `version` and `participantId`, and deletes
+    // (the used or burned codes item); in `PARTICIPANT#*` it updates only the profile's attributes
+    // (never `nickname`); in `SESSION#*` it puts only the session's. 512 MB for scrypt, as 1.4.
+    const signInVerify = workshopFunction(this, "SignInVerify", SIGN_IN_VERIFY_FUNCTION_NAME, "sign-in-verify.ts", 512);
+    signInVerify.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: emailPartitions,
+      }),
+    );
+    signInVerify.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          ...emailPartitions,
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SIGN_IN_VERIFY_EMAIL_UPDATE_ATTRIBUTES] },
+        },
+      }),
+    );
+    signInVerify.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:DeleteItem"],
+        resources: [this.table.tableArn],
+        conditions: emailPartitions,
+      }),
+    );
+    signInVerify.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SIGN_IN_VERIFY_PROFILE_UPDATE_ATTRIBUTES] },
+        },
+      }),
+    );
+    signInVerify.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SIGN_IN_VERIFY_SESSION_PUT_ATTRIBUTES] },
+        },
+      }),
+    );
+    const signInVerifyRoutes = this.api.addRoutes({
+      path: "/api/sign-in/verify",
+      methods: [HttpMethod.POST],
+      integration: new HttpLambdaIntegration("SignInVerifyIntegration", signInVerify),
+    });
+
+    // Ticket 1.5: the protected participant routes. It reads sessions and profiles, puts nickname
+    // claims (only their attributes) and updates only a profile's `nickname` and `step`; the claim
+    // and the profile update go in one transaction, authorized item by item.
+    const participant = workshopFunction(this, "Participant", PARTICIPANT_FUNCTION_NAME, "participant.ts");
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+      }),
+    );
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["NICK#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...PARTICIPANT_NICK_PUT_ATTRIBUTES] },
+        },
+      }),
+    );
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES] },
+        },
+      }),
+    );
+    // One invoke permission for the function, scoped to this API (`<api id>/*/*/*`) instead of one
+    // per route: CDK's per-route source ARN would hold `{id}` literally for the path parameter route.
+    const participantIntegration = new HttpLambdaIntegration("ParticipantIntegration", participant, {
+      scopePermissionToRoute: false,
+    });
+    for (const route of PARTICIPANT_ROUTES) {
+      this.api.addRoutes({ path: route.path, methods: [route.method], integration: participantIntegration });
+    }
+
+    // Route-level throttles (L1 RouteSettings; the L2 stage has no per-route option). A route must
     // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
     const cfnStage = stage.node.defaultChild as CfnStage;
     cfnStage.addPropertyOverride(`RouteSettings.${SIGN_IN_CODE_ROUTE_KEY}`, {
       ThrottlingRateLimit: SIGN_IN_CODE_THROTTLE.rateLimit,
       ThrottlingBurstLimit: SIGN_IN_CODE_THROTTLE.burstLimit,
     });
-    for (const route of signInCodeRoutes) cfnStage.node.addDependency(route);
+    cfnStage.addPropertyOverride(`RouteSettings.${SIGN_IN_VERIFY_ROUTE_KEY}`, {
+      ThrottlingRateLimit: SIGN_IN_VERIFY_THROTTLE.rateLimit,
+      ThrottlingBurstLimit: SIGN_IN_VERIFY_THROTTLE.burstLimit,
+    });
+    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes]) cfnStage.node.addDependency(route);
 
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",

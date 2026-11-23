@@ -50,4 +50,18 @@ export const messageKey = (participantId: string, messageId: string): ItemKey =>
   sk: `${MESSAGE_PREFIX}${checkId("message id", messageId)}`,
 });
 
+/**
+ * The claim on a nickname (ticket 1.5): keyed by the lower-cased nickname, so `Ada` and `ada`
+ * collide. Written together with the profile's nickname, only if absent.
+ */
+export const nicknameKey = (nickname: string): ItemKey => ({
+  pk: `NICK#${checkId("nickname", nickname).toLowerCase()}`,
+  sk: "NICK",
+});
+
+/** A new participant id: a random UUID (never holds the key separator). */
+export function newParticipantId(randomUUID: () => string): string {
+  return checkId("participant id", randomUUID());
+}
+
 export const usageKey = (participantId: string): ItemKey => ({ pk: participantPk(participantId), sk: "USAGE" });

@@ -68,6 +68,42 @@ export const SIGN_IN_CODE_PUT_ATTRIBUTES = [
   "expiresAt",
 ] as const;
 
+/** Lambda function, role and log group of `POST /api/sign-in/verify` (ticket 1.5). */
+export const SIGN_IN_VERIFY_FUNCTION_NAME = `${PREFIX}-api-sign-in-verify`;
+/**
+ * The attribute names the code check may update in `EMAIL#*` partitions (UpdateItem,
+ * `dynamodb:Attributes`): the codes item's wrong tries and version, and the allow-list entry's
+ * link to its participant. Never `email`, `role` or `group`: it cannot list anyone or change rights.
+ */
+export const SIGN_IN_VERIFY_EMAIL_UPDATE_ATTRIBUTES = ["pk", "sk", "attempts", "version", "participantId"] as const;
+/** The profile attribute names the code check may update in `PARTICIPANT#*` (never `nickname`). */
+export const SIGN_IN_VERIFY_PROFILE_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "id",
+  "role",
+  "group",
+  "step",
+  "createdAt",
+] as const;
+/** The session attribute names the code check may put in `SESSION#*`. */
+export const SIGN_IN_VERIFY_SESSION_PUT_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "tokenHash",
+  "participantId",
+  "createdAt",
+  "expiresAt",
+] as const;
+/** Lambda function, role and log group of the protected participant routes (ticket 1.5). */
+export const PARTICIPANT_FUNCTION_NAME = `${PREFIX}-api-participant`;
+/** The nickname claim's attribute names the participant function may put in `NICK#*`. */
+export const PARTICIPANT_NICK_PUT_ATTRIBUTES = ["pk", "sk", "type", "nickname", "participantId", "createdAt"] as const;
+/** The profile attribute names the participant function may update in `PARTICIPANT#*`. */
+export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "step"] as const;
+
 /** The only address the workshop sends from (SES identity; it receives no mail). */
 export const SENDER_ADDRESS = "ssd-workshop@rankly.games";
 /** SES configuration set created by the access stack; every send names it. */
