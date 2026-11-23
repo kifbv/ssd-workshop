@@ -21,6 +21,10 @@ export interface ResetState {
   pendingSince?: number;
   /** "waiting" while a flagged message waits for a facilitator. */
   state?: string;
+  /** ISO 8601: the conversation item's last change; every message sent or answered changes it. */
+  updatedAt?: string;
+  /** Whether the conversation item exists (a participant who never wrote has none). */
+  exists: boolean;
 }
 
 /** The items a reset deletes: sort keys of the participant's messages, replies and spec versions. */
@@ -38,9 +42,10 @@ export interface ResetStore {
   listResetItems(participantId: string): Promise<ResetItems>;
   /**
    * Deletes the conversation item and puts the step back to clarify, in one transaction, on condition
-   * that the message in flight is still the one seen (none: still none). False when it changed.
+   * that the conversation item is unchanged since it was read (same message in flight, same `updatedAt`;
+   * none read: still none). False when it changed.
    */
-  restart(participantId: string, seenPendingId: string | undefined): Promise<boolean>;
+  restart(participantId: string, seen: ResetState): Promise<boolean>;
   /** Deletes the given sort keys of the participant's partition. */
   deleteItems(participantId: string, sortKeys: readonly string[]): Promise<void>;
 }
@@ -59,6 +64,34 @@ const str = (value: string): AttributeValue => ({ S: value });
 export const BATCH_SIZE = 25;
 /** Tries for the items DynamoDB leaves unprocessed (throttling) before giving up. */
 export const BATCH_ATTEMPTS = 5;
+
+/** The condition that the conversation item is as it was read: same message in flight, same last change. */
+export function unchangedSince(seen: ResetState): {
+  ConditionExpression: string;
+  ExpressionAttributeNames: Record<string, string>;
+  ExpressionAttributeValues?: Record<string, AttributeValue>;
+} {
+  if (!seen.exists) return { ConditionExpression: "attribute_not_exists(#pk)", ExpressionAttributeNames: { "#pk": "pk" } };
+  const parts: string[] = [];
+  const names: Record<string, string> = { "#pendingId": "pendingId" };
+  const values: Record<string, AttributeValue> = {};
+  if (seen.pendingId === undefined) parts.push("attribute_not_exists(#pendingId)");
+  else {
+    parts.push("#pendingId = :seen");
+    values[":seen"] = str(seen.pendingId);
+  }
+  names["#updatedAt"] = "updatedAt";
+  if (seen.updatedAt === undefined) parts.push("attribute_not_exists(#updatedAt)");
+  else {
+    parts.push("#updatedAt = :updatedAt");
+    values[":updatedAt"] = str(seen.updatedAt);
+  }
+  return {
+    ConditionExpression: parts.join(" AND "),
+    ExpressionAttributeNames: names,
+    ...(Object.keys(values).length > 0 ? { ExpressionAttributeValues: values } : {}),
+  };
+}
 
 export class DynamoResetStore implements ResetStore {
   constructor(
@@ -89,14 +122,17 @@ export class DynamoResetStore implements ResetStore {
   }
 
   async getResetState(participantId: string): Promise<ResetState> {
-    const item = await this.getAttributes(conversationKey(participantId), ["pendingId", "pendingSince", "state"]);
+    const item = await this.getAttributes(conversationKey(participantId), ["pk", "pendingId", "pendingSince", "state", "updatedAt"]);
     const pendingId = item?.["pendingId"]?.S;
     const pendingSince = item?.["pendingSince"]?.N;
     const state = item?.["state"]?.S;
+    const updatedAt = item?.["updatedAt"]?.S;
     return {
+      exists: item?.["pk"] !== undefined,
       ...(pendingId === undefined ? {} : { pendingId }),
       ...(pendingSince === undefined ? {} : { pendingSince: Number(pendingSince) }),
       ...(state === undefined ? {} : { state }),
+      ...(updatedAt === undefined ? {} : { updatedAt }),
     };
   }
 
@@ -126,26 +162,14 @@ export class DynamoResetStore implements ResetStore {
     return items;
   }
 
-  async restart(participantId: string, seenPendingId: string | undefined): Promise<boolean> {
+  async restart(participantId: string, seen: ResetState): Promise<boolean> {
     const conversation = conversationKey(participantId);
     const profile = participantKey(participantId);
     try {
       await this.sender.send(
         new TransactWriteItemsCommand({
           TransactItems: [
-            {
-              Delete: {
-                TableName: this.table,
-                Key: { pk: str(conversation.pk), sk: str(conversation.sk) },
-                ...(seenPendingId === undefined
-                  ? { ConditionExpression: "attribute_not_exists(#pendingId)", ExpressionAttributeNames: { "#pendingId": "pendingId" } }
-                  : {
-                      ConditionExpression: "#pendingId = :seen",
-                      ExpressionAttributeNames: { "#pendingId": "pendingId" },
-                      ExpressionAttributeValues: { ":seen": str(seenPendingId) },
-                    }),
-              },
-            },
+            { Delete: { TableName: this.table, Key: { pk: str(conversation.pk), sk: str(conversation.sk) }, ...unchangedSince(seen) } },
             {
               Update: {
                 TableName: this.table,

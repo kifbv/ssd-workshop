@@ -2,9 +2,8 @@
 // tests and dry runs. Without --yes it only says what it would delete. Run from your own machine with
 // your own AWS credentials (AWS_PROFILE). The flow lives here with its outside world passed in, so it
 // is tested against in-memory fakes; ./main.ts wires in the real ones. Nothing it prints holds a
-// message text, an id or an email address.
+// message text, an id or an email address (an error shows only its name).
 import { STALE_PENDING_SECONDS } from "../../api/conversation/state.js";
-import { redactError } from "../smoke/logic.js";
 import type { ResetStore } from "./store.js";
 
 export const USAGE = `Usage: npm run conversation -- reset <nickname> [--yes]
@@ -66,7 +65,7 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
   const answering =
     state.pendingId !== undefined && state.state !== "waiting" && nowSeconds - (state.pendingSince ?? 0) <= STALE_PENDING_SECONDS;
   if (answering) {
-    deps.err(`The AI is still answering ${nickname}'s last message; try again in a minute. Nothing changed.`);
+    deps.err(`The AI is still answering ${nickname}'s last message; try again in a minute (after a crash, up to 20 minutes). Nothing changed.`);
     return 1;
   }
   const items = await store.listResetItems(participantId);
@@ -76,7 +75,7 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
     deps.out(`Nothing changed. Run again with --yes to delete them and send ${nickname} back to step 1 (Clarify); their AI usage totals are kept.`);
     return 0;
   }
-  if (!(await store.restart(participantId, state.pendingId))) {
+  if (!(await store.restart(participantId, state))) {
     deps.err(`${nickname} sent a message meanwhile; nothing changed. Try again in a minute.`);
     return 1;
   }
@@ -86,8 +85,9 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
   return 0;
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+/** Only the error's name: an AWS error message can quote a key (a participant id) or an item. */
+function errorName(error: unknown): string {
+  return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name) ? error.name : "Error";
 }
 
 export async function runConversation(args: readonly string[], deps: ConversationDeps): Promise<number> {
@@ -99,7 +99,7 @@ export async function runConversation(args: readonly string[], deps: Conversatio
   try {
     return await reset(parsed, deps, deps.createStore());
   } catch (error) {
-    deps.err(`Conversation command failed: ${redactError(errorText(error))}`);
+    deps.err(`Conversation command failed: ${errorName(error)}. Check your AWS credentials (AWS_PROFILE) and the region.`);
     deps.err("Run the same command again: a reset that stopped part way finishes on the next run.");
     return 1;
   }

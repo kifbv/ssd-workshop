@@ -427,6 +427,6 @@ npm run conversation -- reset <nickname> --yes
 
 The participant's messages, the AI's replies, every spec version (an approved one included) and the
 conversation state are deleted, and their step goes back to Clarify; their profile, nickname, sign-in and
-AI usage totals stay. A reload of their page shows an empty step 1. The command refuses while the AI is
-answering their last message (try again a minute later); a message waiting for a facilitator is cleared
+AI usage totals stay. A reload of their page shows an empty step 1. Errors print only the AWS error's name, never a key or a text. The command refuses while the AI is
+answering their last message (try again a minute later; after a worker crash, up to 20 minutes); a message waiting for a facilitator is cleared
 too. If it stops part way (an AWS error), run it again: the second run finishes.
