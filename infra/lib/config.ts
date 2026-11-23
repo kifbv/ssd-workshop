@@ -39,6 +39,15 @@ export const STACK_NAMES = {
 export const TABLE_NAME = `${PREFIX}-data`;
 /** The HTTP API; its routes all start with /api/ (CloudFront sends /api/* to it from ticket 1.2). */
 export const API_NAME = `${PREFIX}-api`;
+/**
+ * Id of the live HTTP API (api stack, ticket 1.1). A constant because the edge
+ * stack (us-east-1) cannot read it across regions: `crossRegionReferences` is
+ * not allowed (see .claude/rules/infra.md). If the API stack is ever recreated,
+ * the API gets a new id and this constant must be updated, or /api/* breaks.
+ */
+export const API_ID = "ut2mzqmbb4";
+/** Origin of CloudFront's `/api/*` behaviour: the API's own execute-api address. */
+export const API_ORIGIN_DOMAIN = `${API_ID}.execute-api.${REGION}.amazonaws.com`;
 /** Lambda function, role and log group of `GET /api/health`. */
 export const HEALTH_FUNCTION_NAME = `${PREFIX}-api-health`;
 

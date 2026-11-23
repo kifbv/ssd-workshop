@@ -9,7 +9,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`), Lambda `ssd-workshop-api-health` bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 
 Deploy order: cdk-assets, then site, then edge; api after cdk-assets (it needs the assets
@@ -29,8 +29,10 @@ flowchart LR
   merge["Pull request merged<br/>(push to main)"] --> wf["deploy.yml<br/>npm ci, npm test"]
   wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main"]
   oidc --> role["sts:AssumeRoleWithWebIdentity<br/>ssd-workshop-deploy (1 hour)"]
-  role --> cdk["cdk deploy --all<br/>assets, site, edge, api"]
-  cdk --> smoke["Smoke checks<br/>page heading, /api/health"]
+  role --> before["DNS zone snapshot"]
+  before --> cdk["cdk deploy --all<br/>assets, site, edge, api"]
+  cdk --> after["DNS zone snapshot<br/>diff: no change"]
+  after --> smoke["Smoke checks<br/>page heading, /api/health direct and through CloudFront"]
   other["Any other branch,<br/>pull request or tag"] -.->|"refused: sub does not match"| role
 ```
 
@@ -51,6 +53,11 @@ flowchart LR
   change is live within minutes of the merge, well inside 10 minutes.
 - Then it reads the `ApiEndpoint` output of `ssd-workshop-api` and fails unless
   `GET /api/health` on that endpoint answers 200 with `{"ok":true}` (ticket 1.1 criterion 3).
+- Then it requires `https://workshop.rankly.games/api/health` (through CloudFront) to answer
+  200 with `{"ok":true}`, retrying for about five minutes (ticket 1.2 criterion 1).
+- Around `cdk deploy`, it saves the rankly.games zone's records (sorted with `jq`, in
+  `$RUNNER_TEMP`) before and after, and fails if `diff` finds any change (ticket 1.2
+  criterion 3). This check also runs when the deploy itself failed.
 - To redeploy the same commit: Actions, Deploy, the run, "Re-run all jobs".
 
 ### No AWS keys in GitHub (criterion 3)
@@ -161,7 +168,17 @@ Criterion 3 (tags and boundary) is proven by `npm test` on the synthesized templ
 
 Read-only. The deploy workflow runs the same check after every deploy ("Smoke check the API
 health"). The endpoint is the API's own (`https://<api id>.execute-api.eu-central-1.amazonaws.com`);
-from ticket 1.2 the API is also reachable at `https://workshop.rankly.games/api/`.
+from ticket 1.2 the API is also reachable at `https://workshop.rankly.games/api/` ("Smoke check
+the API through CloudFront"):
+
+```sh
+curl -sS -w '\n%{http_code}\n' https://workshop.rankly.games/api/health
+# expect: {"ok":true}
+#         200
+```
+
+The edge stack reaches the API by its id, a constant in `infra/lib/config.ts` (`API_ID`): if
+`ssd-workshop-api` is ever recreated, update it.
 
 ```sh
 ENDPOINT=$(aws cloudformation describe-stacks --region eu-central-1 --stack-name ssd-workshop-api \

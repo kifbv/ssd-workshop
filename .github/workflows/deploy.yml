@@ -51,9 +51,37 @@ jobs:
           aws-region: ${{ steps.settings.outputs.region }}
           role-session-name: ssd-workshop-deploy-${{ github.run_id }}
 
+      # Ticket 1.2 criterion 3: no record in the rankly.games zone may change, apart from what
+      # the edge stack owns (and that stays the same from one deploy to the next). The snapshot,
+      # sorted with jq, stays in the runner's temp folder and is never committed.
+      - name: Snapshot the DNS zone before the deploy
+        id: zone_before
+        env:
+          HOSTED_ZONE_ID: ${{ steps.settings.outputs.hosted_zone_id }}
+        run: |
+          aws route53 list-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --output json \
+            | jq -S '.ResourceRecordSets | sort_by(.Name, .Type, (.SetIdentifier // ""))' \
+            > "$RUNNER_TEMP/zone-before.json"
+          echo "Zone has $(jq length "$RUNNER_TEMP/zone-before.json") record sets"
+
       - name: CDK deploy
         working-directory: infra
         run: npx cdk deploy --all --require-approval never
+
+      # Runs even when the deploy failed, so a partial change is caught as well.
+      - name: Check the DNS zone did not change
+        if: ${{ !cancelled() && steps.zone_before.outcome == 'success' }}
+        env:
+          HOSTED_ZONE_ID: ${{ steps.settings.outputs.hosted_zone_id }}
+        run: |
+          aws route53 list-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --output json \
+            | jq -S '.ResourceRecordSets | sort_by(.Name, .Type, (.SetIdentifier // ""))' \
+            > "$RUNNER_TEMP/zone-after.json"
+          if ! diff -u "$RUNNER_TEMP/zone-before.json" "$RUNNER_TEMP/zone-after.json"; then
+            echo "::error::The deploy changed records in the rankly.games zone (diff above)"
+            exit 1
+          fi
+          echo "OK: no record in the zone changed"
 
       # CloudFormation waits for CloudFront; the pages are cached up to 60 seconds,
       # so retry for about five minutes before failing.
@@ -76,7 +104,7 @@ jobs:
           echo "::error::$SITE_URL did not answer 200 with \"$HEADING\""
           exit 1
 
-      # Ticket 1.1 criterion 3: the API's own endpoint (not yet behind CloudFront) answers
+      # Ticket 1.1 criterion 3: the API's own endpoint answers
       # GET /api/health with 200 {"ok":true}. Reads only the workshop API stack's output.
       - name: Smoke check the API health
         env:
@@ -95,4 +123,23 @@ jobs:
             sleep 10
           done
           echo "::error::$endpoint/api/health did not answer 200 {\"ok\":true}"
+          exit 1
+
+      # Ticket 1.2 criterion 1: the same route through CloudFront, at the workshop address.
+      # SITE_URL ends with a slash. CloudFront may take a few minutes to roll out the
+      # /api/* behaviour, so retry for about five minutes before failing.
+      - name: Smoke check the API through CloudFront
+        env:
+          SITE_URL: ${{ steps.settings.outputs.site_url }}
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -sS -o site-health.json -w '%{http_code}' --max-time 20 "${SITE_URL}api/health" || true)
+            if [ "$code" = "200" ] && [ "$(cat site-health.json)" = '{"ok":true}' ]; then
+              echo "OK: ${SITE_URL}api/health answers 200 {\"ok\":true}"
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP ${code:-000}"
+            sleep 30
+          done
+          echo "::error::${SITE_URL}api/health did not answer 200 {\"ok\":true}"
           exit 1

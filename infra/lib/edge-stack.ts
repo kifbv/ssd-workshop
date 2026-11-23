@@ -1,20 +1,24 @@
 import { Annotations, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import { Certificate, CertificateValidation } from "aws-cdk-lib/aws-certificatemanager";
 import {
+  AllowedMethods,
   CachePolicy,
   Distribution,
   HttpVersion,
+  OriginProtocolPolicy,
+  OriginRequestPolicy,
   PriceClass,
   ResponseHeadersPolicy,
   S3OriginAccessControl,
   ViewerProtocolPolicy,
 } from "aws-cdk-lib/aws-cloudfront";
-import { S3BucketOrigin } from "aws-cdk-lib/aws-cloudfront-origins";
+import { HttpOrigin, S3BucketOrigin } from "aws-cdk-lib/aws-cloudfront-origins";
 import { AaaaRecord, ARecord, HostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
 import { CloudFrontTarget } from "aws-cdk-lib/aws-route53-targets";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 import {
+  API_ORIGIN_DOMAIN,
   DOMAIN,
   HOSTED_ZONE_ID,
   HOSTED_ZONE_NAME,
@@ -79,6 +83,23 @@ export class EdgeStack extends Stack {
         // Managed SecurityHeadersPolicy: HSTS, nosniff, frame and referrer
         // headers. Managed, so no new resource.
         responseHeadersPolicy: ResponseHeadersPolicy.SECURITY_HEADERS,
+      },
+      // Ticket 1.2: pages and API share one origin (no CORS, no new DNS record).
+      // Managed policies only, so no new untaggable resource.
+      additionalBehaviors: {
+        "/api/*": {
+          origin: new HttpOrigin(API_ORIGIN_DOMAIN, {
+            protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
+          }),
+          allowedMethods: AllowedMethods.ALLOW_ALL,
+          // Never cache API answers; pass cookies, query strings and every
+          // header except Host (API Gateway needs its own Host) to the API.
+          cachePolicy: CachePolicy.CACHING_DISABLED,
+          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          // HTTPS only, not a redirect: a redirect would turn a POST into a GET.
+          viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
+          responseHeadersPolicy: ResponseHeadersPolicy.SECURITY_HEADERS,
+        },
       },
     });
     // CDK cannot add to an imported bucket's policy; the site stack does it.

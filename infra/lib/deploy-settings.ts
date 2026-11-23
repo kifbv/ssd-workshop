@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DEPLOY_ROLE_ARN, DOMAIN, REGION, STACK_NAMES } from "./config.js";
+import { DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
 
 /** The placeholder page, in the folder the site stack uploads. */
 const INDEX_HTML = fileURLToPath(new URL("../../platform/web/index.html", import.meta.url));
@@ -16,6 +16,8 @@ export interface DeploySettings {
   heading: string;
   /** Stack whose `ApiEndpoint` output the API health check reads. */
   apiStack: string;
+  /** rankly.games zone, snapshotted before and after the deploy (no record may change). */
+  hostedZoneId: string;
 }
 
 /** Returns the text of the first <h1> of an HTML document, whitespace collapsed. */
@@ -34,6 +36,7 @@ export function deploySettings(): DeploySettings {
     siteUrl: `https://${DOMAIN}/`,
     heading: firstHeading(readFileSync(INDEX_HTML, "utf8")),
     apiStack: STACK_NAMES.api,
+    hostedZoneId: HOSTED_ZONE_ID,
   };
 }
 
@@ -45,6 +48,7 @@ export function toGitHubOutput(settings: DeploySettings): string {
     `site_url=${settings.siteUrl}`,
     `heading=${settings.heading}`,
     `api_stack=${settings.apiStack}`,
+    `hosted_zone_id=${settings.hostedZoneId}`,
     "",
   ].join("\n");
 }

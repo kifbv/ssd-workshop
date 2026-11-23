@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { ACCOUNT, DEPLOY_ROLE_ARN, DOMAIN, REGION, STACK_NAMES } from "./config.js";
+import { ACCOUNT, DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
 import { deploySettings, firstHeading, toGitHubOutput } from "./deploy-settings.js";
 
 const repoFile = (path: string): string =>
@@ -15,6 +15,7 @@ interface Step {
   with?: Record<string, unknown>;
   env?: Record<string, unknown>;
   "working-directory"?: string;
+  if?: string;
 }
 
 interface Job {
@@ -121,6 +122,43 @@ describe("deploy workflow (ticket 0.5)", () => {
     expect(step?.run).toContain(`'{"ok":true}'`);
   });
 
+  it("snapshots the rankly.games zone before and after cdk deploy and fails on any difference (ticket 1.2 criterion 3)", () => {
+    const index = (match: (step: Step) => boolean): number => deploySteps.findIndex(match);
+    const creds = index((step) => !!step.uses?.startsWith("aws-actions/configure-aws-credentials@"));
+    const cdk = index((step) => !!step.run?.includes("cdk deploy"));
+    const snapshots = deploySteps
+      .map((step, i) => [step, i] as const)
+      .filter(([step]) => step.run?.includes("aws route53 list-resource-record-sets"));
+    expect(snapshots).toHaveLength(2);
+    const [before, after] = snapshots;
+    expect(before?.[1]).toBeGreaterThan(creds);
+    expect(before?.[1]).toBeLessThan(cdk);
+    expect(after?.[1]).toBeGreaterThan(cdk);
+    for (const [step] of snapshots) {
+      expect(step.env?.["HOSTED_ZONE_ID"]).toMatch(/outputs\.hosted_zone_id/);
+      expect(step.run).toContain('--hosted-zone-id "$HOSTED_ZONE_ID"');
+      // Normalised with jq and kept in the runner's temp folder, never in the checkout.
+      expect(step.run).toContain("jq");
+      expect(step.run).toContain("$RUNNER_TEMP/");
+    }
+    expect(after?.[0].run).toMatch(/diff -u "\$RUNNER_TEMP\/zone-before\.json" "\$RUNNER_TEMP\/zone-after\.json"/);
+    expect(after?.[0].run).toContain("::error::");
+    // The after-snapshot runs even when the deploy fails, so a partial change is still caught.
+    expect(after?.[0].if).toBe("${{ !cancelled() && steps.zone_before.outcome == 'success' }}");
+  });
+
+  it("calls GET /api/health through CloudFront at the site URL, with retries (ticket 1.2 criterion 1)", () => {
+    const cdk = deploySteps.findIndex((step) => !!step.run?.includes("cdk deploy"));
+    const health = deploySteps.findIndex((step) => !!step.run?.includes('"${SITE_URL}api/health"'));
+    expect(health).toBeGreaterThan(cdk);
+    const step = deploySteps[health];
+    expect(step?.env?.["SITE_URL"]).toMatch(/outputs\.site_url/);
+    expect(step?.run).toContain(`'{"ok":true}'`);
+    expect(step?.run).toMatch(/for attempt in 1 2 3 4 5 6 7 8 9 10;/);
+    expect(step?.run).toContain("sleep 30");
+    expect(step?.run).toContain("::error::");
+  });
+
   it("pins every action to a major version", () => {
     for (const step of deploySteps.filter((s) => s.uses)) {
       expect(step.uses).toMatch(/^[\w.-]+\/[\w.-]+@v\d+$/);
@@ -137,6 +175,7 @@ describe("deploy settings", () => {
     expect(settings.siteUrl).toBe(`https://${DOMAIN}/`);
     expect(settings.heading).toBe("SSD Workshop, coming soon");
     expect(settings.apiStack).toBe("ssd-workshop-api");
+    expect(settings.hostedZoneId).toBe(HOSTED_ZONE_ID);
   });
 
   it("print as GITHUB_OUTPUT lines", () => {
@@ -147,6 +186,7 @@ describe("deploy settings", () => {
       `site_url=https://${DOMAIN}/`,
       "heading=SSD Workshop, coming soon",
       `api_stack=${STACK_NAMES.api}`,
+      `hosted_zone_id=${HOSTED_ZONE_ID}`,
     ]);
   });
 
