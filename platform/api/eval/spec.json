@@ -1,0 +1,128 @@
+{
+  "description": "Step 2 (Spec) examples (ticket 1.9): `npm run eval -- spec` sends each one to the real answer call with the spec system prompt. A new-spec example must give a spec with a title, the sections \"What it does\", \"Screens\" and \"Data it keeps\", and one Mermaid flowchart that Mermaid parses and draws (in Chromium, with the page's own diagram.js), naming the keywords; a keeps-spec example (a question) must be answered without a new spec.",
+  "examples": [
+    {
+      "name": "fitness tracker: first spec",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "I'd like a fitness tracker where I log my runs and see my weekly distance.",
+          "answer": "A simple log of your runs with a weekly distance total.\n1. Is it just for you, or for a group?\n2. What do you want to record for each run: distance only, or also time and date?\n3. Should it show anything besides the weekly total?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just for me. For each run: the date, the distance in km and how long it took. Show this week's total distance and my longest run. Leave out maps, GPS, sharing and reminders.",
+          "answer": "A personal run log with the date, distance and time of each run, this week's total and your longest run, without maps or sharing. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        }
+      ],
+      "text": "Please write my spec.",
+      "keywords": [
+        "run",
+        "distance"
+      ]
+    },
+    {
+      "name": "movies tracker: first spec",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "A movie tracker: a list of films I want to watch, and I tick them off with a rating.",
+          "answer": "A watchlist where you tick off films and rate them.\n1. Is it just for you, or shared with others?\n2. What do you want to note for each film?\n3. How do you want to rate: stars from 1 to 5, or thumbs up or down?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just me. The title and the year. Stars from 1 to 5 once I have watched it. Leave out posters, search and streaming links.",
+          "answer": "A personal watchlist: you add films with title and year, tick them off when watched and give 1 to 5 stars, without posters or search. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        }
+      ],
+      "text": "Please write my spec.",
+      "keywords": [
+        "film",
+        "star"
+      ]
+    },
+    {
+      "name": "nutrition calculator: first spec",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "Can we build a nutrition calculator that adds up the calories of what I eat in a day?",
+          "answer": "A daily calorie counter for what you eat.\n1. Is it just for you?\n2. Do you type in the calories of each food yourself, or pick from a list?\n3. Do you want a daily goal to compare against?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just me. I type the food name and its calories myself. A daily goal of 2000 that I can change. It only needs today; leave out history, nutrients and barcode scanning.",
+          "answer": "A one-day calorie counter: you add foods with their calories, see today's total against a goal you can change, without history or scanning. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        }
+      ],
+      "text": "Please write my spec.",
+      "keywords": [
+        "calorie",
+        "goal"
+      ]
+    },
+    {
+      "name": "question about the diagram",
+      "check": "keeps-spec",
+      "history": [
+        {
+          "question": "I'd like a fitness tracker where I log my runs and see my weekly distance.",
+          "answer": "A simple log of your runs with a weekly distance total.\n1. Is it just for you, or for a group?\n2. What do you want to record for each run: distance only, or also time and date?\n3. Should it show anything besides the weekly total?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just for me. For each run: the date, the distance in km and how long it took. Show this week's total distance and my longest run. Leave out maps, GPS, sharing and reminders.",
+          "answer": "A personal run log with the date, distance and time of each run, this week's total and your longest run, without maps or sharing. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        },
+        {
+          "question": "Please write my spec.",
+          "answer": "Here is your spec. Ask me anything about it, or ask for a change."
+        }
+      ],
+      "currentSpec": "# Run log\n\n```mermaid\nflowchart TD\n  home[Home] -->|add a run| add[Add a run]\n  add -->|saves| runs[(Runs)]\n  runs -->|weekly total| home\n```\n\n## What it does\nA personal log of your runs. It shows this week's total distance so you can see how much you ran.\n\n## Screens\n- Home: this week's total distance and the list of your runs, newest first.\n- Add a run: the date, the distance in km and how long it took.\n\n## Data it keeps\n- Runs: the date, the distance in km and the time for each run.",
+      "text": "What does the cylinder shape in the diagram mean?",
+      "keywords": []
+    },
+    {
+      "name": "question about a word",
+      "check": "keeps-spec",
+      "history": [
+        {
+          "question": "I'd like a fitness tracker where I log my runs and see my weekly distance.",
+          "answer": "A simple log of your runs with a weekly distance total.\n1. Is it just for you, or for a group?\n2. What do you want to record for each run: distance only, or also time and date?\n3. Should it show anything besides the weekly total?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just for me. For each run: the date, the distance in km and how long it took. Show this week's total distance and my longest run. Leave out maps, GPS, sharing and reminders.",
+          "answer": "A personal run log with the date, distance and time of each run, this week's total and your longest run, without maps or sharing. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        },
+        {
+          "question": "Please write my spec.",
+          "answer": "Here is your spec. Ask me anything about it, or ask for a change."
+        }
+      ],
+      "currentSpec": "# Run log\n\n```mermaid\nflowchart TD\n  home[Home] -->|add a run| add[Add a run]\n  add -->|saves| runs[(Runs)]\n  runs -->|weekly total| home\n```\n\n## What it does\nA personal log of your runs. It shows this week's total distance so you can see how much you ran.\n\n## Screens\n- Home: this week's total distance and the list of your runs, newest first.\n- Add a run: the date, the distance in km and how long it took.\n\n## Data it keeps\n- Runs: the date, the distance in km and the time for each run.",
+      "text": "Why is Add a run a separate screen?",
+      "keywords": []
+    },
+    {
+      "name": "change: add a screen",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "I'd like a fitness tracker where I log my runs and see my weekly distance.",
+          "answer": "A simple log of your runs with a weekly distance total.\n1. Is it just for you, or for a group?\n2. What do you want to record for each run: distance only, or also time and date?\n3. Should it show anything besides the weekly total?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just for me. For each run: the date, the distance in km and how long it took. Show this week's total distance and my longest run. Leave out maps, GPS, sharing and reminders.",
+          "answer": "A personal run log with the date, distance and time of each run, this week's total and your longest run, without maps or sharing. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        },
+        {
+          "question": "Please write my spec.",
+          "answer": "Here is your spec. Ask me anything about it, or ask for a change."
+        }
+      ],
+      "currentSpec": "# Run log\n\n```mermaid\nflowchart TD\n  home[Home] -->|add a run| add[Add a run]\n  add -->|saves| runs[(Runs)]\n  runs -->|weekly total| home\n```\n\n## What it does\nA personal log of your runs. It shows this week's total distance so you can see how much you ran.\n\n## Screens\n- Home: this week's total distance and the list of your runs, newest first.\n- Add a run: the date, the distance in km and how long it took.\n\n## Data it keeps\n- Runs: the date, the distance in km and the time for each run.",
+      "text": "Please add a screen that shows my longest run.",
+      "keywords": [
+        "longest",
+        "weekly"
+      ]
+    }
+  ]
+}

@@ -133,7 +133,10 @@ export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
  * The attribute names the conversation function may update in `PARTICIPANT#*` (UpdateItem only, so
  * it can never replace or empty an item): a new message, the conversation's state and message in
  * flight, the failure reply when the queue refuses a message, and the profile's `step` from clarify to
- * spec (Write my spec, ticket 1.8). Never `role`, `group`, `nickname`, `id` or `approvedTextHash`.
+ * spec (Write my spec, ticket 1.8). Ticket 1.9: the approval, `approvedSpecVersion` on the conversation,
+ * `approvedAt` on the spec version and the step to approved (the condition names `latestSpecVersion`).
+ * Never `role`, `group`, `nickname`, `id`, `approvedTextHash` or `specVersion` (readers of a spec version
+ * require it, so this role cannot make one).
  */
 export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "pk",
@@ -150,6 +153,9 @@ export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "updatedAt",
   "kind",
   "replyTo",
+  "approvedSpecVersion",
+  "latestSpecVersion",
+  "approvedAt",
 ] as const;
 /** Lambda function, role and log group of the AI worker (ticket 1.7). */
 export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
@@ -157,7 +163,9 @@ export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
  * The attribute names the AI worker may update in `PARTICIPANT#*` (UpdateItem only): a message's
  * status and guardrail result, the reply with its prompt, tokens, cost and `offersSpec` (ticket 1.8), the conversation's state
  * and the usage totals. Never `step`, `role`, `group`, `nickname`, `id` or `approvedTextHash` (only a
- * facilitator's approval sets it, and it skips the guardrail check for that exact text).
+ * facilitator's approval sets it, and it skips the guardrail check for that exact text). Ticket 1.9: a
+ * new spec version (`specVersion`, `messageId`) and the conversation's `latestSpecVersion`; never
+ * `approvedSpecVersion` or `approvedAt` (only the participant's Approve spec sets them).
  */
 export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",
@@ -188,6 +196,9 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pendingSince",
   "updatedAt",
   "participantId",
+  "specVersion",
+  "messageId",
+  "latestSpecVersion",
 ] as const;
 /** The queue from the conversation function to the AI worker, and its dead-letter queue (ticket 1.7). */
 export const AI_QUEUE_NAME = `${PREFIX}-ai-messages`;

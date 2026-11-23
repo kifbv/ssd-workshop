@@ -24,6 +24,8 @@ export interface HttpRequest {
   /** For example `GET /api/me`. */
   routeKey?: string;
   pathParameters?: Record<string, string | undefined>;
+  /** The query string's parameters (a repeated name arrives comma-joined). */
+  queryStringParameters?: Record<string, string | undefined>;
 }
 
 /** Every API answer: JSON, never cached. */

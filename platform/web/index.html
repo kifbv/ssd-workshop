@@ -97,11 +97,58 @@
         </div>
       </section>
 
-      <!-- Step 2, Spec: ticket 1.9 fills it in. -->
+      <!-- Step 2, Spec (ticket 1.9): the spec, diagram first, then the conversation about it and Approve spec. -->
       <section id="screen-spec" class="card" data-screen aria-labelledby="spec-heading" hidden>
         <h2 id="spec-heading" tabindex="-1">Step 2: Spec</h2>
-        <p>Hi <strong id="spec-nickname"></strong>. Next, the AI writes a short spec of your app: what it does, its screens, the data it keeps and a diagram.</p>
+        <p>Hi <strong id="spec-nickname"></strong>. The AI writes a short spec of your app: a diagram, what it does, its screens and the data it keeps. Ask about anything in it, or ask for changes, as often as you like.</p>
+
+        <p id="spec-approved" class="notice" role="status" tabindex="-1" hidden>Spec approved. Next comes the build: the AI turns this spec into your app. Your facilitator will tell you when the build starts.</p>
+
+        <article id="spec-doc" class="spec" aria-labelledby="spec-title" hidden>
+          <p id="spec-version" class="spec-version"></p>
+          <h3 id="spec-title"></h3>
+          <figure class="diagram">
+            <p id="spec-diagram-status" class="help" role="status"></p>
+            <img id="spec-diagram-img" alt="" hidden />
+            <details id="spec-diagram-source">
+              <summary>Diagram as text</summary>
+              <pre id="spec-diagram-text"></pre>
+            </details>
+          </figure>
+          <div id="spec-sections"></div>
+        </article>
+
+        <div id="spec-missing" class="spec-missing" hidden>
+          <p>Your spec is not written yet. Press the button to ask the AI for it.</p>
+          <button id="spec-write-button" type="button" data-busy-label="Asking…">Write my spec</button>
+        </div>
+
+        <aside id="spec-behind" class="behind" aria-labelledby="spec-behind-heading">
+          <h3 id="spec-behind-heading">Behind the scenes</h3>
+          <ol id="spec-behind-flow" class="flow" data-stage="idle">
+            <li data-part="you">Your message</li>
+            <li data-part="check">Safety check</li>
+            <li data-part="model">Claude on Bedrock</li>
+            <li data-part="reply">Answer or new version</li>
+          </ol>
+          <p class="help">Claude, an AI model running on Amazon Bedrock, writes the spec from your conversation in step 1. A question gets an answer and leaves the spec as it is; a change saves a new version, and every version is kept.</p>
+        </aside>
+
+        <ol id="spec-chat" class="chat" aria-label="Conversation about your spec" aria-live="polite"></ol>
+        <p id="spec-typing" class="typing" role="status" hidden><span class="dots" aria-hidden="true"><span></span><span></span><span></span></span> <span id="spec-typing-text">The AI is writing…</span></p>
+        <p id="spec-waiting-notice" class="notice" role="status" hidden>Your message is waiting for your facilitator. You can write again once they have looked at it.</p>
+
+        <form id="spec-chat-form" method="post" novalidate>
+          <label for="spec-chat-input">Ask a question or ask for a change</label>
+          <textarea id="spec-chat-input" name="text" rows="3" maxlength="2000" required></textarea>
+          <button id="spec-chat-send" type="submit" data-busy-label="Sending…">Send</button>
+        </form>
         <p id="message-spec" class="message" role="status" aria-live="polite"></p>
+
+        <div id="spec-approve" class="spec-approve" hidden>
+          <p>Happy with it? Approve your spec. You can still ask questions or ask for changes until you do.</p>
+          <button id="approve-spec-button" type="button" data-busy-label="Approving…">Approve spec</button>
+        </div>
       </section>
     </main>
   </body>

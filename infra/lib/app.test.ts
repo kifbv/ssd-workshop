@@ -350,12 +350,12 @@ describe("buckets (criterion 2)", () => {
     expect(deployment?.[1].Properties?.DestinationBucketName).toBeDefined();
   });
 
-  it("uploads the pages built at synth time: the page, its stylesheet and app.js, no TypeScript or tests (ticket 1.6)", () => {
+  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), no TypeScript or tests (ticket 1.6)", () => {
     // The built folder in the assembly, and the asset CDK staged from it (same content).
-    expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(["app.js", "index.html", "style.css"]);
+    expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(["app.js", "diagram.js", "index.html", "style.css"]);
     const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")));
     expect(staged).toHaveLength(1);
-    expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(["app.js", "index.html", "style.css"]);
+    expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(["app.js", "diagram.js", "index.html", "style.css"]);
   });
 });
 
@@ -633,6 +633,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/conversation/messages/{id}",
       "GET /api/conversation",
       "POST /api/conversation/step",
+      "GET /api/conversation/spec",
+      "POST /api/conversation/spec/approve",
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
@@ -1188,12 +1190,14 @@ describe("api stack: conversation function (ticket 1.7)", () => {
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("routes the message, poll, history and step routes to it, invoked only by this API", () => {
+  it("routes the message, poll, history, step, spec and approve routes to it, invoked only by this API", () => {
     expect([...CONVERSATION_ROUTE_KEYS]).toEqual([
       "POST /api/conversation/messages",
       "GET /api/conversation/messages/{id}",
       "GET /api/conversation",
       "POST /api/conversation/step",
+      "GET /api/conversation/spec",
+      "POST /api/conversation/spec/approve",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -1230,6 +1234,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
           "ForAllValues:StringEquals": {
             "dynamodb:Attributes": [
               "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
+              "approvedSpecVersion", "latestSpecVersion", "approvedAt",
             ],
           },
         },
@@ -1303,6 +1308,16 @@ describe("api stack: AI worker (ticket 1.7)", () => {
       for (const forbidden of ["approved", "approvedTextHash", "role", "group", "nickname", "id"]) expect(names, forbidden).not.toContain(forbidden);
     }
     expect(workerUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"]).not.toContain("step");
+    // Ticket 1.9: only the AI worker makes spec versions (readers require specVersion), and only the
+    // participant's Approve spec (the conversation function) approves one.
+    const workerNames = workerUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
+    const conversationNames = conversationUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
+    expect(workerNames).toContain("specVersion");
+    expect(conversationNames).not.toContain("specVersion");
+    for (const approval of ["approvedSpecVersion", "approvedAt"]) {
+      expect(workerNames, approval).not.toContain(approval);
+      expect(conversationNames, approval).toContain(approval);
+    }
   });
 
   it("bundles the handler into a self-contained index.js that skips a malformed job without any AWS call", async () => {

@@ -66,12 +66,14 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/participants/{id}", method: HttpMethod.GET },
 ] as const;
 
-/** The protected conversation routes (ticket 1.7; history and step from ticket 1.8), served by one function. */
+/** The protected conversation routes (ticket 1.7; history and step from 1.8; spec and approve from 1.9), served by one function. */
 export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/messages", method: HttpMethod.POST },
   { path: "/api/conversation/messages/{id}", method: HttpMethod.GET },
   { path: "/api/conversation", method: HttpMethod.GET },
   { path: "/api/conversation/step", method: HttpMethod.POST },
+  { path: "/api/conversation/spec", method: HttpMethod.GET },
+  { path: "/api/conversation/spec/approve", method: HttpMethod.POST },
 ] as const;
 
 /**

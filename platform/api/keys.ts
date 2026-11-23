@@ -73,6 +73,17 @@ export const conversationKey = (participantId: string): ItemKey => ({ pk: partic
 export const replyId = (messageId: string): string => `${checkId("message id", messageId)}${REPLY_SUFFIX}`;
 export const REPLY_SUFFIX = "-r";
 
+/** Prefix of every spec version's sort key (ticket 1.9): `SPEC#0001`, `SPEC#0002`, ... */
+export const SPEC_PREFIX = "SPEC#";
+/** Spec versions are numbered 1 to MAX_SPEC_VERSION (4 digits, so the keys sort by version). */
+export const MAX_SPEC_VERSION = 9999;
+
+/** One version of a participant's spec (ticket 1.9): every version is kept, the newest sorts last. */
+export function specKey(participantId: string, version: number): ItemKey {
+  if (!Number.isInteger(version) || version < 1 || version > MAX_SPEC_VERSION) throw new Error("spec version out of range");
+  return { pk: participantPk(participantId), sk: `${SPEC_PREFIX}${String(version).padStart(4, "0")}` };
+}
+
 /** A participant message id: an ISO time (UTC, milliseconds), a dash and 16 lower-case hex digits. */
 export const MESSAGE_ID_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z-[0-9a-f]{16}$/;
 

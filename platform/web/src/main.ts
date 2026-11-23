@@ -1,6 +1,7 @@
-// Sign-in screens (ticket 1.6): email, code, nickname, then the step screen; step 1, Clarify, and the
-// step 2 screen (ticket 1.8). The rules for each API answer are in ./flow.ts and ./chat.ts; this
-// file only wires them to the page.
+// Sign-in screens (ticket 1.6): email, code, nickname, then the step screen; step 1, Clarify (ticket
+// 1.8), and step 2, Spec and approval (ticket 1.9). The rules for each API answer are in ./flow.ts,
+// ./chat.ts and ./spec-view.ts; this file only wires them to the page. Both steps share one
+// conversation, polling and Send form logic, each on its own elements (`VIEWS`).
 //
 // Personal data: the email address lives only in `pendingEmail` (memory) between asking for a
 // code and checking it. It never goes into the URL, storage, a cookie or the console.
@@ -31,6 +32,9 @@ import {
   writeSpecResult,
   type ChatMessage,
 } from "./chat.js";
+import type { DiagramApi } from "./diagram.js";
+import { pictureUrl } from "./diagram-svg.js";
+import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
 
 type ScreenName = Screen | "loading";
 
@@ -43,7 +47,7 @@ function byId<T extends HTMLElement>(id: string): T {
 }
 
 /** Same-origin JSON call; status 0 when there is no answer at all. */
-async function call(method: "GET" | "POST", path: string, body?: Record<string, string>): Promise<ApiAnswer> {
+async function call(method: "GET" | "POST", path: string, body?: Record<string, unknown>): Promise<ApiAnswer> {
   const init: RequestInit = { method, credentials: "same-origin", cache: "no-store" };
   if (body) {
     init.headers = { "content-type": "application/json" };
@@ -104,30 +108,59 @@ function showEmail(message?: string, tone: Tone = "info"): void {
 
 function showMe(me: Me): void {
   const screen = screenFor(me);
+  nickname = me.nickname ?? "";
   if (screen === "nickname") {
     stopPolling();
     clearMessage("nickname");
     show("nickname", "nickname-input");
     return;
   }
-  if (screen === "spec") {
-    showSpec(me.nickname ?? "");
-    return;
-  }
-  byId("step-nickname").textContent = me.nickname ?? "";
-  clearMessage("step");
-  show("step", "step-heading");
+  openView(screen === "spec" ? "spec" : "step");
   void loadConversation();
 }
 
-function showSpec(nickname: string): void {
-  stopPolling();
-  byId("spec-nickname").textContent = nickname;
-  clearMessage("spec");
-  show("spec", "spec-heading");
+// ---- Steps 1 and 2: the conversation (tickets 1.8 and 1.9) ----
+
+/** The elements of one step's conversation. */
+interface View {
+  screen: "step" | "spec";
+  chat: string;
+  typing: string;
+  waitingNotice: string;
+  send: string;
+  flow: string;
+  form: string;
+  input: string;
 }
 
-// ---- Step 1, Clarify (ticket 1.8) ----
+const VIEWS: Record<"step" | "spec", View> = {
+  step: { screen: "step", chat: "chat", typing: "typing", waitingNotice: "waiting-notice", send: "chat-send", flow: "behind-flow", form: "chat-form", input: "chat-input" },
+  spec: {
+    screen: "spec",
+    chat: "spec-chat",
+    typing: "spec-typing",
+    waitingNotice: "spec-waiting-notice",
+    send: "spec-chat-send",
+    flow: "spec-behind-flow",
+    form: "spec-chat-form",
+    input: "spec-chat-input",
+  },
+};
+
+let nickname = "";
+let view: View = VIEWS.step;
+
+/** Shows a step's screen (once) with the person's nickname. */
+function openView(screen: "step" | "spec"): void {
+  const changed = view.screen !== screen || byId(`screen-${screen}`).hidden;
+  view = VIEWS[screen];
+  if (!changed) return;
+  stopPolling();
+  messages = [];
+  byId(screen === "step" ? "step-nickname" : "spec-nickname").textContent = nickname;
+  clearMessage(screen);
+  show(screen, screen === "step" ? "step-heading" : "spec-heading");
+}
 
 /** The conversation as shown, oldest first. */
 let messages: ChatMessage[] = [];
@@ -139,6 +172,10 @@ let pollRound = 0;
 /** Bumped on every local change (a message sent), so a conversation read that started earlier is ignored. */
 let localVersion = 0;
 
+/** Step 2 (ticket 1.9): the newest and approved versions, and the version on the page. */
+let specInfo: { latest?: number; approved?: number; atApproved: boolean } = { atApproved: false };
+let shownSpec: SpecVersion | null = null;
+
 function stopPolling(): void {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer);
   pollTimer = undefined;
@@ -146,10 +183,9 @@ function stopPolling(): void {
   waiting = null;
 }
 
-/** Shows the conversation, the waiting state, the behind-the-scenes stage and Write my spec. */
+/** Shows the conversation, the waiting state and the behind-the-scenes stage, then the step's own controls. */
 function render(): void {
-  const list = byId("chat");
-  list.replaceChildren(
+  byId(view.chat).replaceChildren(
     ...messages.map((m) => {
       const item = document.createElement("li");
       item.className = "bubble";
@@ -159,16 +195,34 @@ function render(): void {
       return item;
     }),
   );
-  byId("typing").hidden = waiting?.mode !== "pending";
-  byId("waiting-notice").hidden = waiting?.mode !== "flagged";
-  byId("behind-flow").dataset["stage"] = stageOf(waiting?.mode ?? "none", messages);
-  byId<HTMLButtonElement>("chat-send").disabled = waiting !== null;
+  byId(view.typing).hidden = waiting?.mode !== "pending";
+  byId(view.waitingNotice).hidden = waiting?.mode !== "flagged";
+  byId(view.flow).dataset["stage"] = stageOf(waiting?.mode ?? "none", messages);
+  byId<HTMLButtonElement>(view.send).disabled = waiting !== null;
+  if (view.screen === "step") renderStepOne();
+  else renderStepTwo();
+}
+
+/** Step 1: Write my spec (ticket 1.8). */
+function renderStepOne(): void {
   const offer = byId("spec-offer");
   offer.hidden = !canWriteSpec(messages);
   const offered = specOffered(messages);
   offer.dataset["offered"] = String(offered);
   byId("spec-offer-text").textContent = offered ? CHAT_TEXTS.specOffered : CHAT_TEXTS.specAnytime;
   byId<HTMLButtonElement>("write-spec-button").disabled = waiting !== null;
+}
+
+/** Step 2 (ticket 1.9): the approved notice, the missing-spec button, the form and Approve spec. */
+function renderStepTwo(): void {
+  const approved = specInfo.approved !== undefined || specInfo.atApproved;
+  byId("spec-approved").hidden = !approved;
+  byId("spec-doc").hidden = shownSpec === null;
+  byId("spec-missing").hidden = approved || specInfo.latest !== undefined || waiting !== null;
+  byId("spec-typing-text").textContent = specInfo.latest === undefined ? SPEC_TEXTS.writing : SPEC_TEXTS.answering;
+  byId("spec-chat-form").hidden = approved;
+  byId("spec-approve").hidden = approved || shownSpec === null;
+  byId<HTMLButtonElement>("approve-spec-button").disabled = waiting !== null || shownSpec?.version !== specInfo.latest;
 }
 
 /** Waits for the reply to message `id`: a poll every 2 seconds (10 while a facilitator decides). */
@@ -195,7 +249,7 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
     setStatus(id, result.status);
     messages.push({ id: `${id}-r`, author: "assistant", text: result.reply });
     stopPolling();
-    // The reload brings offersSpec and anything else the poll does not carry.
+    // The reload brings offersSpec, a new spec version and anything else the poll does not carry.
     await loadConversation();
     return;
   } else if (result.kind === "signed-out") {
@@ -216,7 +270,10 @@ function setStatus(id: string, status: string): void {
   if (message) message.status = status;
 }
 
-/** Reads the conversation so far (a page load, a reload, or after a reply) and resumes waiting if needed. */
+/**
+ * Reads the conversation so far (a page load, a reload, or after a reply), shows the screen of the
+ * person's step, resumes waiting if needed, and at step 2 reads the newest spec when it changed.
+ */
 async function loadConversation(): Promise<void> {
   const version = localVersion;
   const result = conversationResult(await call("GET", "/api/conversation"));
@@ -228,20 +285,166 @@ async function loadConversation(): Promise<void> {
     return;
   }
   if (result.kind === "show") {
-    say("step", result.message, result.tone);
+    say(view.screen, result.message, result.tone);
     return;
   }
   const { conversation } = result;
-  if (conversation.step !== "clarify") {
-    await goToOwnStep("step");
+  if (conversation.step !== "clarify" && conversation.step !== "spec" && conversation.step !== "approved") {
+    await goToOwnStep(view.screen);
     return;
   }
-  messages = conversation.messages;
+  openView(conversation.step === "clarify" ? "step" : "spec");
+  messages = view.screen === "spec" ? stepTwoMessages(conversation.messages) : conversation.messages;
+  specInfo = {
+    ...(conversation.latestSpecVersion === undefined ? {} : { latest: conversation.latestSpecVersion }),
+    ...(conversation.approvedSpecVersion === undefined ? {} : { approved: conversation.approvedSpecVersion }),
+    atApproved: conversation.step === "approved",
+  };
   stopPolling();
   const pending = conversation.pendingId;
   if (pending !== undefined) startPolling(pending, conversation.state === "waiting" ? "flagged" : "pending");
   else render();
+  if (view.screen === "spec") await loadSpec();
 }
+
+/** Reads the newest spec version when the page shows another one (or none), and shows it. */
+async function loadSpec(): Promise<void> {
+  const latest = specInfo.latest;
+  const approved = specInfo.approved !== undefined;
+  if (latest === undefined || (shownSpec?.version === latest && shownSpec.approved === approved)) return;
+  const result = specResult(await call("GET", "/api/conversation/spec"));
+  if (result.kind === "signed-out") {
+    stopPolling();
+    showEmail(MESSAGES.signedOut);
+    return;
+  }
+  if (result.kind === "show") {
+    say("spec", result.message, result.tone);
+    return;
+  }
+  if (result.kind === "none") return;
+  const redraw = shownSpec?.text !== result.spec.text;
+  shownSpec = result.spec;
+  if (redraw) showSpecDocument(result.spec);
+  else byId("spec-version").textContent = versionLabel(result.spec);
+  render();
+}
+
+const versionLabel = (spec: SpecVersion): string => `Version ${spec.version}${spec.approved ? " (approved)" : ""}`;
+
+/** Bumped for every spec shown, so a slow drawing of an older version is dropped. */
+let drawing = 0;
+
+/** Shows a spec: the title, the diagram (drawn as a picture), and the sections. */
+function showSpecDocument(spec: SpecVersion): void {
+  const doc = specView(spec.text);
+  byId("spec-version").textContent = versionLabel(spec);
+  byId("spec-title").textContent = doc.title;
+  byId("spec-diagram-text").textContent = doc.diagram;
+  byId("spec-sections").replaceChildren(
+    ...doc.sections.flatMap((section) => {
+      const heading = document.createElement("h4");
+      heading.textContent = section.heading;
+      const blocks = section.blocks.map((block) => {
+        if (block.kind === "paragraph") {
+          const p = document.createElement("p");
+          p.textContent = block.text;
+          return p;
+        }
+        const list = document.createElement("ul");
+        list.append(
+          ...block.items.map((text) => {
+            const li = document.createElement("li");
+            li.textContent = text;
+            return li;
+          }),
+        );
+        return list;
+      });
+      return [heading, ...blocks];
+    }),
+  );
+  void drawDiagram(doc.diagram, doc.title, ++drawing);
+}
+
+let diagramScript: Promise<DiagramApi> | undefined;
+
+/** Loads diagram.js (Mermaid) once, the first time a diagram is drawn. */
+function diagramApi(): Promise<DiagramApi> {
+  diagramScript ??= new Promise<DiagramApi>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "diagram.js";
+    script.addEventListener("load", () => {
+      const api = (window as unknown as { ssdDiagram?: DiagramApi }).ssdDiagram;
+      if (api) resolve(api);
+      else reject(new Error("diagram.js did not load"));
+    });
+    script.addEventListener("error", () => {
+      diagramScript = undefined;
+      reject(new Error("diagram.js did not load"));
+    });
+    document.head.append(script);
+  });
+  return diagramScript;
+}
+
+async function drawDiagram(source: string, title: string, round: number): Promise<void> {
+  const status = byId("spec-diagram-status");
+  const img = byId<HTMLImageElement>("spec-diagram-img");
+  img.hidden = true;
+  status.textContent = SPEC_TEXTS.drawing;
+  try {
+    const picture = await (await diagramApi()).render(source);
+    if (round !== drawing) return;
+    img.width = picture.width;
+    img.height = picture.height;
+    img.alt = `Diagram of ${title || "your app"}: its screens, the data it keeps and how they connect.`;
+    img.src = pictureUrl(picture);
+    await img.decode();
+    if (round !== drawing) return;
+    img.hidden = false;
+    status.textContent = "";
+  } catch {
+    if (round !== drawing) return;
+    img.hidden = true;
+    status.textContent = SPEC_TEXTS.noDiagram;
+  }
+}
+
+/** Sends the message in the current step's form. */
+function sendMessage(): void {
+  const input = byId<HTMLTextAreaElement>(view.input);
+  const sendButton = byId<HTMLButtonElement>(view.send);
+  const screen = view.screen;
+  const text = input.value.trim();
+  if (text === "") {
+    say(screen, CHAT_TEXTS.empty, "error");
+    input.focus();
+    return;
+  }
+  if (waiting !== null) return;
+  clearMessage(screen);
+  void whileBusy(sendButton, async () => {
+    const result = sendResult(await call("POST", "/api/conversation/messages", { text }));
+    if (result.kind === "sent") {
+      input.value = "";
+      localVersion++;
+      messages.push({ id: result.id, author: "participant", text, status: "pending", step: screen === "spec" ? "spec" : "clarify" });
+      startPolling(result.id, "pending");
+    } else if (result.kind === "busy" || result.kind === "waiting" || result.kind === "approved") {
+      await loadConversation();
+    } else if (result.kind === "no-nickname") {
+      await goToOwnStep(screen);
+    } else if (result.kind === "signed-out") {
+      showEmail(MESSAGES.signedOut);
+    } else {
+      say(screen, result.message, result.tone);
+    }
+  }).finally(() => {
+    if (!byId(`screen-${screen}`).hidden) render();
+  });
+}
+
 /** Reads the person's own record and goes where it says; signed out goes to the email screen. */
 async function goToOwnStep(onFailure: Screen): Promise<void> {
   const result = meResult(await call("GET", "/api/me"));
@@ -335,48 +538,49 @@ function wire(): void {
     showEmail();
   });
 
-  const chatForm = byId<HTMLFormElement>("chat-form");
-  const chatInput = byId<HTMLTextAreaElement>("chat-input");
-  const sendButton = byId<HTMLButtonElement>("chat-send");
-  chatForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const text = chatInput.value.trim();
-    if (text === "") {
-      say("step", CHAT_TEXTS.empty, "error");
-      chatInput.focus();
-      return;
-    }
-    if (waiting !== null) return;
-    clearMessage("step");
-    void whileBusy(sendButton, async () => {
-      const result = sendResult(await call("POST", "/api/conversation/messages", { text }));
-      if (result.kind === "sent") {
-        chatInput.value = "";
-        localVersion++;
-        messages.push({ id: result.id, author: "participant", text, status: "pending" });
-        startPolling(result.id, "pending");
-      } else if (result.kind === "busy" || result.kind === "waiting") {
-        await loadConversation();
-      } else if (result.kind === "no-nickname") {
-        await goToOwnStep("step");
-      } else if (result.kind === "signed-out") {
-        showEmail(MESSAGES.signedOut);
-      } else {
-        say("step", result.message, result.tone);
-      }
-    }).finally(render);
-  });
+  for (const v of Object.values(VIEWS)) {
+    byId<HTMLFormElement>(v.form).addEventListener("submit", (event) => {
+      event.preventDefault();
+      sendMessage();
+    });
+  }
 
-  const writeSpec = byId<HTMLButtonElement>("write-spec-button");
-  writeSpec.addEventListener("click", () => {
-    clearMessage("step");
-    void whileBusy(writeSpec, async () => {
-      const result = writeSpecResult(await call("POST", "/api/conversation/step", { step: "spec" }));
-      if (result.kind === "moved") showSpec(byId("step-nickname").textContent ?? "");
-      else if (result.kind === "signed-out") showEmail(MESSAGES.signedOut);
-      else say("step", result.message, result.tone);
+  // Write my spec, on step 1 and (when the first try failed) on step 2: then step 2 shows the spec coming.
+  for (const [id, screen] of [["write-spec-button", "step"], ["spec-write-button", "spec"]] as const) {
+    const button = byId<HTMLButtonElement>(id);
+    button.addEventListener("click", () => {
+      clearMessage(screen);
+      void whileBusy(button, async () => {
+        const result = writeSpecResult(await call("POST", "/api/conversation/step", { step: "spec" }));
+        if (result.kind === "moved") {
+          openView("spec");
+          await loadConversation();
+        } else if (result.kind === "signed-out") showEmail(MESSAGES.signedOut);
+        else say(screen, result.message, result.tone);
+      }).finally(() => {
+        if (!byId(`screen-${view.screen}`).hidden) render();
+      });
+    });
+  }
+
+  // Approve spec (ticket 1.9): the version on the page; a refusal says why and re-reads what changed.
+  const approveButton = byId<HTMLButtonElement>("approve-spec-button");
+  approveButton.addEventListener("click", () => {
+    const spec = shownSpec;
+    if (spec === null || waiting !== null) return;
+    clearMessage("spec");
+    void whileBusy(approveButton, async () => {
+      const result = approveResult(await call("POST", "/api/conversation/spec/approve", { version: spec.version }));
+      if (result.kind === "approved") {
+        await loadConversation();
+        byId("spec-approved").focus();
+      } else if (result.kind === "refused") {
+        say("spec", result.message, "error");
+        await loadConversation();
+      } else if (result.kind === "signed-out") showEmail(MESSAGES.signedOut);
+      else say("spec", result.message, result.tone);
     }).finally(() => {
-      if (!byId("screen-step").hidden) render();
+      if (!byId("screen-spec").hidden) render();
     });
   });
 

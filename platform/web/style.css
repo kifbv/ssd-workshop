@@ -300,3 +300,87 @@ textarea:focus-visible {
   background: var(--accent);
   color: var(--accent-fg);
 }
+
+/* Step 2, Spec (ticket 1.9): a wider page for the spec on a laptop, the diagram first and large. */
+main:has(#screen-spec:not([hidden])) {
+  max-width: 48rem;
+}
+.spec {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg);
+}
+.spec h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1.3rem;
+}
+.spec h4 {
+  margin: 1rem 0 0.25rem;
+  font-size: 1rem;
+}
+.spec ul {
+  margin: 0 0 0.5rem;
+  padding-left: 1.25rem;
+}
+.spec-version {
+  margin: 0 0 0.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+/* The diagram is a picture on white (its colours are Mermaid's light theme), never wider than the card. */
+.diagram {
+  margin: 0 0 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  color: #1d1d1b;
+  text-align: center;
+}
+.diagram img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.diagram .help {
+  color: #55554f;
+}
+.diagram .help:empty {
+  display: none;
+}
+.diagram details {
+  margin-top: 0.5rem;
+  text-align: left;
+  font-size: 0.85rem;
+}
+.diagram pre {
+  overflow-x: auto;
+  white-space: pre;
+}
+/* Where Mermaid draws before the picture is made: off-screen, with the font it measures with. */
+.diagram-work {
+  position: absolute;
+  top: 0;
+  left: -10000px;
+  width: 1200px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 16px;
+}
+.spec-missing button,
+#approve-spec-button {
+  padding: 0.7rem 1rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.spec-approve {
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+#spec-approved:focus {
+  outline: none;
+}

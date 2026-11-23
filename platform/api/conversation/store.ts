@@ -15,7 +15,18 @@ import {
   type TransactWriteItem,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { conversationKey, MESSAGE_PREFIX, messageKey, participantKey, replyId, REPLY_SUFFIX, usageKey, type ItemKey } from "../keys.js";
+import {
+  conversationKey,
+  MESSAGE_PREFIX,
+  messageKey,
+  participantKey,
+  replyId,
+  REPLY_SUFFIX,
+  SPEC_PREFIX,
+  specKey,
+  usageKey,
+  type ItemKey,
+} from "../keys.js";
 import { isStep } from "../session/session.js";
 import type { ConversationState, MessageStatus, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
@@ -25,8 +36,10 @@ import {
   type ConversationStore,
   type CreateResult,
   type Finish,
+  type ApproveResult,
   type ListedItem,
   type MoveResult,
+  type StoredSpec,
   type NewMessage,
   type StoredConversation,
   type StoredMessage,
@@ -94,6 +107,23 @@ export function setItem(
   };
 }
 
+/** A spec version number read from an item (a whole number from 1), or undefined. */
+function versionOf(value: AttributeValue | undefined): number | undefined {
+  const n = Number(value?.N);
+  return Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
+const SPEC_NAMES = { "#pk": "pk", "#sk": "sk", "#specVersion": "specVersion", "#text": "text", "#createdAt": "createdAt", "#approvedAt": "approvedAt" };
+const SPEC_PROJECTION = "#sk, #specVersion, #text, #createdAt, #approvedAt";
+
+/** A spec version from its item: only with `specVersion`, which no role but the AI worker's may write. */
+function specOf(item: Record<string, AttributeValue> | undefined): StoredSpec | undefined {
+  const version = versionOf(item?.["specVersion"]);
+  const text = item?.["text"]?.S;
+  if (item === undefined || version === undefined || text === undefined || !(item["sk"]?.S ?? "").startsWith(SPEC_PREFIX)) return undefined;
+  return { version, text, createdAt: item["createdAt"]?.S ?? "", approved: item["approvedAt"]?.S !== undefined };
+}
+
 const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure" } as const;
 
 export class DynamoConversationStore implements ConversationStore {
@@ -118,8 +148,11 @@ export class DynamoConversationStore implements ConversationStore {
                 updatedAt: str(message.createdAt),
               },
               {
-                // No message in flight, or only a stale pending one (a flagged one never goes stale).
-                expression: "attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore)",
+                // No message in flight, or only a stale pending one (a flagged one never goes stale), and
+                // no approved spec (ticket 1.9: changes are closed once it is approved).
+                expression:
+                  "attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+                names: { "#approvedSpecVersion": "approvedSpecVersion" },
                 values: { ":open": str("open"), ":staleBefore": num(message.nowSeconds - STALE_PENDING_SECONDS) },
               },
             ),
@@ -144,6 +177,7 @@ export class DynamoConversationStore implements ConversationStore {
     } catch (error) {
       if (!conditionFailed(error)) throw error;
       const conversation = await this.getConversation(participantId);
+      if (conversation?.approvedSpecVersion !== undefined) return "approved";
       return conversation?.state === "waiting" ? "waiting" : "busy";
     }
   }
@@ -195,7 +229,14 @@ export class DynamoConversationStore implements ConversationStore {
     const state = output.Item?.["state"]?.S;
     if (state !== "open" && state !== "waiting") return undefined;
     const pendingId = output.Item?.["pendingId"]?.S;
-    return { state: state as ConversationState, ...(pendingId === undefined ? {} : { pendingId }) };
+    const latestSpecVersion = versionOf(output.Item?.["latestSpecVersion"]);
+    const approvedSpecVersion = versionOf(output.Item?.["approvedSpecVersion"]);
+    return {
+      state: state as ConversationState,
+      ...(pendingId === undefined ? {} : { pendingId }),
+      ...(latestSpecVersion === undefined ? {} : { latestSpecVersion }),
+      ...(approvedSpecVersion === undefined ? {} : { approvedSpecVersion }),
+    };
   }
 
   async getHistory(participantId: string, beforeMessageId: string): Promise<Exchange[]> {
@@ -247,9 +288,11 @@ export class DynamoConversationStore implements ConversationStore {
           "#status": "status",
           "#pendingSince": "pendingSince",
           "#offersSpec": "offersSpec",
+          "#step": "step",
+          "#specVersion": "specVersion",
         },
         ExpressionAttributeValues: { ":pk": str(pk), ":prefix": str(MESSAGE_PREFIX) },
-        ProjectionExpression: "#sk, #author, #text, #status, #pendingSince, #offersSpec",
+        ProjectionExpression: "#sk, #author, #text, #status, #pendingSince, #offersSpec, #step, #specVersion",
         ScanIndexForward: false,
         Limit: limit,
       }),
@@ -262,11 +305,19 @@ export class DynamoConversationStore implements ConversationStore {
       const id = sk.slice(MESSAGE_PREFIX.length);
       const author = i["author"]?.S;
       if (author === "assistant" && id.endsWith(REPLY_SUFFIX)) {
-        items.push({ author, replyTo: id.slice(0, -REPLY_SUFFIX.length), text, offersSpec: i["offersSpec"]?.BOOL === true });
+        const specVersion = versionOf(i["specVersion"]);
+        items.push({
+          author,
+          replyTo: id.slice(0, -REPLY_SUFFIX.length),
+          text,
+          offersSpec: i["offersSpec"]?.BOOL === true,
+          ...(specVersion === undefined ? {} : { specVersion }),
+        });
       } else if (author === "participant") {
         const status = i["status"]?.S;
+        const step = i["step"]?.S;
         const pendingSince = Number(i["pendingSince"]?.N);
-        if (isStatus(status) && Number.isFinite(pendingSince)) items.push({ author, id, text, status, pendingSince });
+        if (isStatus(status) && isStep(step) && Number.isFinite(pendingSince)) items.push({ author, id, step, text, status, pendingSince });
       }
     }
     return items.reverse();
@@ -300,8 +351,84 @@ export class DynamoConversationStore implements ConversationStore {
     }
   }
 
+  async getLatestSpec(participantId: string): Promise<StoredSpec | undefined> {
+    const pk = conversationKey(participantId).pk;
+    const output = await this.client.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        // The newest version sorts last (4-digit version numbers).
+        KeyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
+        ExpressionAttributeNames: SPEC_NAMES,
+        ExpressionAttributeValues: { ":pk": str(pk), ":prefix": str(SPEC_PREFIX) },
+        ProjectionExpression: SPEC_PROJECTION,
+        ScanIndexForward: false,
+        Limit: 1,
+        ConsistentRead: true,
+      }),
+    );
+    return specOf(output.Items?.[0]);
+  }
+
+  async getSpec(participantId: string, version: number): Promise<StoredSpec | undefined> {
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: keyOf(specKey(participantId, version)),
+        ConsistentRead: true,
+        ProjectionExpression: SPEC_PROJECTION,
+        ExpressionAttributeNames: { "#sk": "sk", "#specVersion": "specVersion", "#text": "text", "#createdAt": "createdAt", "#approvedAt": "approvedAt" },
+      }),
+    );
+    const spec = specOf(output.Item);
+    return spec?.version === version ? spec : undefined;
+  }
+
+  async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<ApproveResult> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(this.tableName, participantKey(participantId), { step: str("approved") }, {
+              expression: "#step = :spec",
+              values: { ":spec": str("spec") },
+            }),
+            setItem(
+              this.tableName,
+              conversationKey(participantId),
+              { approvedSpecVersion: num(version), updatedAt: str(nowIso) },
+              {
+                // This version is the newest, none was approved, and nothing is in flight (a stale pending
+                // message is let go: its late answer can no longer land, since pendingId is removed).
+                expression:
+                  "#latestSpecVersion = :version AND attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+                names: { "#latestSpecVersion": "latestSpecVersion", "#state": "state" },
+                values: { ":version": num(version), ":open": str("open"), ":staleBefore": num(nowSeconds - STALE_PENDING_SECONDS) },
+              },
+              { remove: ["pendingId", "pendingSince"] },
+            ),
+            setItem(this.tableName, specKey(participantId, version), { approvedAt: str(nowIso) }, {
+              expression: "attribute_exists(#pk)",
+              names: { "#pk": "pk" },
+            }),
+          ],
+        }),
+      );
+      return "approved";
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? [];
+      if (reasons[0]?.Code === "ConditionalCheckFailed") return "wrong-step";
+      const conversation = await this.getConversation(participantId);
+      if (conversation?.latestSpecVersion === undefined) return "no-spec";
+      if (conversation.latestSpecVersion !== version) return "stale";
+      if (conversation.state === "waiting") return "waiting";
+      return "busy";
+    }
+  }
+
   async finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean> {
     const guardrail = outcome.guardrail;
+    const spec = outcome.kind === "done" ? outcome.spec : undefined;
     const items: TransactWriteItem[] = [
       setItem(
         this.tableName,
@@ -327,6 +454,17 @@ export class DynamoConversationStore implements ConversationStore {
       items.push(setItem(this.tableName, conversationKey(participantId), { state: str("waiting"), updatedAt: str(nowIso) }, inFlight));
     } else {
       const answer = outcome.kind === "done" ? outcome.answer : undefined;
+      if (spec !== undefined) {
+        // Ticket 1.9: the new version, written once, with the answer that made it.
+        items.push(
+          setItem(
+            this.tableName,
+            specKey(participantId, spec.version),
+            { type: str("spec"), specVersion: num(spec.version), text: str(spec.text), messageId: str(messageId), createdAt: str(nowIso) },
+            { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+          ),
+        );
+      }
       items.push(
         setItem(
           this.tableName,
@@ -336,6 +474,7 @@ export class DynamoConversationStore implements ConversationStore {
             author: str("assistant"),
             text: str(outcome.reply),
             ...(outcome.kind === "done" && outcome.offersSpec === true ? { offersSpec: { BOOL: true } } : {}),
+            ...(spec === undefined ? {} : { specVersion: num(spec.version) }),
             kind: str(REPLY_KINDS[outcome.kind]),
             replyTo: str(messageId),
             createdAt: str(nowIso),
@@ -353,9 +492,13 @@ export class DynamoConversationStore implements ConversationStore {
           },
           { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
         ),
-        setItem(this.tableName, conversationKey(participantId), { state: str("open"), updatedAt: str(nowIso) }, inFlight, {
-          remove: ["pendingId", "pendingSince"],
-        }),
+        setItem(
+          this.tableName,
+          conversationKey(participantId),
+          { state: str("open"), updatedAt: str(nowIso), ...(spec === undefined ? {} : { latestSpecVersion: num(spec.version) }) },
+          inFlight,
+          { remove: ["pendingId", "pendingSince"] },
+        ),
       );
     }
     const total = addUsage(guardrail?.usage, outcome.kind === "done" ? outcome.answer.usage : undefined);

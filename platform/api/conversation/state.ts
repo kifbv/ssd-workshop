@@ -39,6 +39,19 @@ export interface StoredMessage {
 export interface StoredConversation {
   state: ConversationState;
   pendingId?: string;
+  /** The newest spec version (ticket 1.9). */
+  latestSpecVersion?: number;
+  /** The approved spec version (ticket 1.9): no more messages once set. */
+  approvedSpecVersion?: number;
+}
+
+/** One version of a participant's spec (ticket 1.9). */
+export interface StoredSpec {
+  version: number;
+  text: string;
+  /** ISO 8601. */
+  createdAt: string;
+  approved: boolean;
 }
 
 /** True when a pending message was left behind by a crashed worker (see STALE_PENDING_SECONDS). */
@@ -64,10 +77,16 @@ export interface AnswerRecord {
 
 /** How a message ends (or, for `flagged`, pauses). */
 export type Finish =
-  | { kind: "done"; reply: string; answer: AnswerRecord; guardrail?: GuardrailRecord; offersSpec?: boolean }
+  | { kind: "done"; reply: string; answer: AnswerRecord; guardrail?: GuardrailRecord; offersSpec?: boolean; spec?: NewSpec }
   | { kind: "declined"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "failed"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "flagged"; guardrail: GuardrailRecord };
+
+/** A new spec version an answer made (ticket 1.9), stored with the answer in one transaction. */
+export interface NewSpec {
+  version: number;
+  text: string;
+}
 
 export interface NewMessage {
   id: string;
@@ -79,20 +98,24 @@ export interface NewMessage {
   nowSeconds: number;
 }
 
-export type CreateResult = "created" | "busy" | "waiting";
+/** `approved`: the participant approved their spec, so no message is taken any more (ticket 1.9). */
+export type CreateResult = "created" | "busy" | "waiting" | "approved";
 
 /**
  * One item of the conversation as the history route reads it (ticket 1.8), oldest first: a
  * participant message (with its status and when it became pending) or a reply (`replyTo` set).
  */
 export type ListedItem =
-  | { author: "participant"; id: string; text: string; status: MessageStatus; pendingSince: number }
-  | { author: "assistant"; replyTo: string; text: string; offersSpec: boolean };
+  | { author: "participant"; id: string; step: Step; text: string; status: MessageStatus; pendingSince: number }
+  | { author: "assistant"; replyTo: string; text: string; offersSpec: boolean; specVersion?: number };
 
 /** Items read for the page's history (ticket 1.8): the last 50 messages and replies. */
 export const HISTORY_PAGE_LIMIT = 50;
 
 export type MoveResult = "moved" | "busy" | "waiting" | "wrong-step";
+
+/** How an approval ends (ticket 1.9). */
+export type ApproveResult = "approved" | "busy" | "waiting" | "wrong-step" | "stale" | "no-spec";
 
 /**
  * The table, as the conversation needs it. Every write that changes a message's status names the
@@ -126,6 +149,17 @@ export interface ConversationStore {
    * count), in one transaction (ticket 1.8). Otherwise `busy`, `waiting`, or `wrong-step`.
    */
   moveToSpec(participantId: string, nowSeconds: number, nowIso: string): Promise<MoveResult>;
+  /** The newest version of the participant's spec (ticket 1.9). */
+  getLatestSpec(participantId: string): Promise<StoredSpec | undefined>;
+  /** One version of the participant's spec (ticket 1.9). */
+  getSpec(participantId: string, version: number): Promise<StoredSpec | undefined>;
+  /**
+   * Approves version `version` (ticket 1.9), in one transaction: the profile's step from spec to
+   * approved, the conversation's `approvedSpecVersion` (only while that version is the newest, none
+   * was approved and no message is in flight; a stale pending one is let go), and `approvedAt` on the
+   * version. Otherwise `wrong-step`, `stale` (a newer version exists), `no-spec`, `busy` or `waiting`.
+   */
+  approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<ApproveResult>;
   /**
    * Adds tokens and cost to the participant's usage totals on their own: only when the final write
    * failed for good, so tokens already spent are still counted.

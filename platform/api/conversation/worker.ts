@@ -9,6 +9,7 @@ import { errorName } from "../sign-in/code-request.js";
 import { answerMessage } from "./answer.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, usageOf, type ModelClient } from "./model.js";
+import { WRITE_SPEC_REQUEST } from "./spec.js";
 import { FAILURE_REPLY, isStale, textHash, type AiJob, type ConversationStore, type Finish, type GuardrailRecord } from "./state.js";
 
 export type WorkerOutcome = "done" | "declined" | "flagged" | "failed" | "skipped" | "invalid";
@@ -91,8 +92,11 @@ async function run(
   let finishing = false;
   try {
     // A facilitator approved this very text after a flag: no new check. A text changed since (by
-    // anyone) has another hash and is checked again.
-    if (message.approvedTextHash === undefined || message.approvedTextHash !== textHash(message.text)) {
+    // anyone) has another hash and is checked again. Write my spec's own request (ticket 1.9) is the
+    // platform's fixed text, so it needs no check either.
+    const approved = message.approvedTextHash !== undefined && message.approvedTextHash === textHash(message.text);
+    const writeSpec = message.step === "spec" && message.text === WRITE_SPEC_REQUEST;
+    if (!approved && !writeSpec) {
       const check = await checkGuardrail(deps.model, message.text, signal);
       guardrail = { verdict: check.verdict, reason: check.reason, suggestion: check.suggestion, usage: check.usage };
       if (check.verdict === "decline") {
@@ -107,7 +111,9 @@ async function run(
       }
     }
     const history = await deps.store.getHistory(participantId, messageId);
-    const answer = await answerMessage(deps.model, message.step, history, message.text, signal);
+    // Step 2 (ticket 1.9): the model sees the current spec, and an answer may carry a new version.
+    const current = message.step === "spec" ? await deps.store.getLatestSpec(participantId) : undefined;
+    const answer = await answerMessage(deps.model, message.step, history, message.text, signal, current?.text);
     finishing = true;
     const applied = await finish({
       kind: "done",
@@ -120,6 +126,7 @@ async function run(
         usage: usageOf(answer),
       },
       ...(answer.offersSpec ? { offersSpec: true } : {}),
+      ...(answer.spec === undefined ? {} : { spec: { version: (current?.version ?? 0) + 1, text: answer.spec } }),
       ...(guardrail === undefined ? {} : { guardrail }),
     });
     return { outcome: applied ? "done" : "skipped", ...(guardrail === undefined ? {} : { verdict: guardrail.verdict }) };

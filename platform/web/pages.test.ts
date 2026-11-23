@@ -1,7 +1,8 @@
-// Tickets 1.6 and 1.8: the sign-in screens and step 1 in a real browser (Playwright's Chromium), against a mocked API.
+// Tickets 1.6, 1.8 and 1.9: the sign-in screens, step 1 and step 2 in a real browser (Playwright's Chromium), against a mocked API.
 // The built site (buildWeb, as the site stack publishes it) is served by a tiny local server that
 // sends the pages' real Content-Security-Policy, so any inline script or style the policy would
-// block in production fails these tests too. Every test runs at phone width (375 px).
+// block in production fails these tests too. Every test runs at phone width (375 px); step 2's diagram
+// is also checked at laptop width (1280 px).
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -127,13 +128,13 @@ function fakeApi(): Record<string, Handler> {
 }
 
 /** Nothing on the page is wider than the viewport (criterion 4). */
-async function expectNoSideScroll(): Promise<void> {
+async function expectNoSideScroll(width: number = PHONE.width): Promise<void> {
   const widths = await page.evaluate(() => ({
     scroll: document.documentElement.scrollWidth,
     client: document.documentElement.clientWidth,
     body: document.body.scrollWidth,
   }));
-  expect(widths.client).toBe(PHONE.width);
+  expect(widths.client).toBe(width);
   expect(widths.scroll).toBeLessThanOrEqual(widths.client);
   expect(widths.body).toBeLessThanOrEqual(widths.client);
 }
@@ -313,6 +314,7 @@ interface MockMessage {
   text: string;
   status?: string;
   offersSpec?: boolean;
+  step?: string;
 }
 
 const QUESTIONS = "A run log for you.\n1. Who is it for?\n2. What do you record?\n3. What can wait?";
@@ -577,9 +579,277 @@ describe("step 1: Clarify (ticket 1.8)", () => {
   }, 30_000);
 });
 
+// Ticket 1.9: step 2 (Spec and approval) against a mocked API.
+const LAPTOP = { width: 1280, height: 800 };
+const SPEC_1 = `# Run log
+
+\`\`\`mermaid
+flowchart TD
+  home[Home] -->|add a run| add[Add a run]
+  add -->|saves| runs[(Runs)]
+  runs -->|weekly total| home
+\`\`\`
+
+## What it does
+A log of your runs that shows this week's **total** distance.
+
+## Screens
+- Home: this week's total and the list of runs.
+- Add a run: date, distance and time.
+
+## Data it keeps
+- Runs: date, distance in km and time.`;
+const SPEC_2 = SPEC_1.replace("- Add a run: date, distance and time.", "- Add a run: date, distance and time.\n- Longest run: your longest run so far.").replace(
+  "runs -->|weekly total| home",
+  "runs -->|weekly total| home\n  runs -->|longest| longest[Longest run]",
+);
+const CLARIFY_DONE: MockMessage[] = [
+  { id: "m1", author: "participant", text: "A run log", status: "done", step: "clarify" },
+  { id: "m1-r", author: "assistant", text: QUESTIONS, step: "clarify" },
+];
+
+/**
+ * A stand-in for step 2: the conversation (with steps), the spec versions, Write my spec and Approve
+ * spec. A message stays pending until `answer()`; an answer may carry a new spec version.
+ */
+function fakeSpecApi(step = "spec", specs: string[] = [SPEC_1]) {
+  const base = fakeConversation(
+    specs.length > 0
+      ? [...CLARIFY_DONE, { id: "m2", author: "participant", text: "Please write my spec.", status: "done", step: "spec" }, { id: "m2-r", author: "assistant", text: "Here is your spec.", step: "spec" }]
+      : CLARIFY_DONE,
+    step,
+  );
+  base.state.nextId = 3;
+  const spec = { versions: [...specs], approved: undefined as number | undefined, approves: [] as unknown[] };
+  const answer = (reply: string, newSpec?: string) => {
+    base.answer(reply);
+    must(base.state.messages.at(-1)).step = "spec";
+    if (newSpec !== undefined) spec.versions.push(newSpec);
+  };
+  const conversationBody = () => {
+    const body = must(base.handlers["GET /api/conversation"])({ method: "GET", path: "", contentType: undefined, body: null }).body as Record<string, unknown>;
+    return {
+      ...body,
+      step: base.state.step,
+      ...(spec.versions.length > 0 ? { latestSpecVersion: spec.versions.length } : {}),
+      ...(spec.approved === undefined ? {} : { approvedSpecVersion: spec.approved }),
+    };
+  };
+  const handlers: Record<string, Handler> = {
+    ...base.handlers,
+    "GET /api/conversation": () => ({ status: 200, body: conversationBody() }),
+    "GET /api/conversation/spec": () => {
+      const text = spec.versions.at(-1);
+      if (text === undefined) return { status: 404, body: { message: "Not found." } };
+      return { status: 200, body: { version: spec.versions.length, text, createdAt: "x", approved: spec.approved === spec.versions.length } };
+    },
+    "POST /api/conversation/messages": (call) => {
+      const reply = must(base.handlers["POST /api/conversation/messages"])(call);
+      if (reply.status === 202) must(base.state.messages.at(-1)).step = "spec";
+      return reply;
+    },
+    "POST /api/conversation/step": () => {
+      base.state.step = "spec";
+      if (spec.versions.length > 0 || base.state.pendingId) return { status: 200, body: { step: "spec" } };
+      const id = `m${base.state.nextId++}`;
+      base.state.messages.push({ id, author: "participant", text: "Please write my spec.", status: "pending", step: "spec" });
+      base.state.pendingId = id;
+      return { status: 200, body: { step: "spec", id } };
+    },
+    "POST /api/conversation/spec/approve": (call) => {
+      spec.approves.push(call.body);
+      const version = (call.body as { version: number }).version;
+      if (version !== spec.versions.length) return { status: 409, body: { reason: "stale", message: "There is a newer version of your spec. Please have a look at it, then approve it." } };
+      spec.approved = version;
+      base.state.step = "approved";
+      return { status: 200, body: { step: "approved", version } };
+    },
+  };
+  return { ...base, spec, handlers, answer };
+}
+
+const specBubbles = () => page.locator("#spec-chat .bubble").allTextContents();
+
+/** The diagram is a decoded picture with pixels drawn, within the card, above the spec's sections. */
+async function expectDiagramPicture(viewportWidth: number): Promise<void> {
+  const img = page.locator("#spec-diagram-img");
+  await expect.poll(() => img.isVisible(), { timeout: 15_000 }).toBe(true);
+  const facts = await img.evaluate((element) => {
+    const image = element as HTMLImageElement;
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    context?.drawImage(image, 0, 0);
+    const data = context?.getImageData(0, 0, canvas.width, canvas.height).data ?? new Uint8ClampedArray();
+    let inked = 0;
+    for (let i = 0; i < data.length; i += 4) if ((data[i + 3] ?? 0) > 0 && (data[i] ?? 255) < 160) inked++;
+    const box = image.getBoundingClientRect();
+    const card = document.getElementById("spec-doc")?.getBoundingClientRect();
+    const firstSection = document.querySelector("#spec-sections h4")?.getBoundingClientRect();
+    return {
+      complete: image.complete,
+      natural: [image.naturalWidth, image.naturalHeight],
+      shown: [box.width, box.height],
+      inked,
+      src: image.src.slice(0, 27),
+      alt: image.alt,
+      insideCard: card !== undefined && box.left >= card.left && box.right <= card.right,
+      aboveSections: firstSection !== undefined && box.bottom <= firstSection.top,
+    };
+  });
+  expect(facts.complete).toBe(true);
+  expect(facts.src).toBe("data:image/svg+xml;charset=");
+  expect(facts.natural[0]).toBeGreaterThan(50);
+  expect(facts.natural[1]).toBeGreaterThan(50);
+  expect(facts.shown[0]).toBeGreaterThan(50);
+  expect(facts.shown[0]).toBeLessThanOrEqual(viewportWidth);
+  // Boxes, arrows and labels drawn in dark ink, not an empty or broken image.
+  expect(facts.inked).toBeGreaterThan(200);
+  expect(facts.alt).toContain("Diagram of Run log");
+  expect(facts.insideCard).toBe(true);
+  expect(facts.aboveSections).toBe(true);
+  expect(await page.locator("#spec-diagram-status").textContent()).toBe("");
+}
+
+describe("step 2: Spec and approval (ticket 1.9)", () => {
+  it("WHEN the spec is shown THEN the diagram is drawn as a picture at laptop and phone widths, above the sections (criterion 3)", async () => {
+    const api = fakeSpecApi();
+    const calls = await mockApi(api.handlers);
+    for (const viewport of [LAPTOP, PHONE]) {
+      await page.setViewportSize(viewport);
+      await page.goto(origin);
+      await expect.poll(() => screen("spec").isVisible()).toBe(true);
+      await expect.poll(() => page.locator("#spec-title").textContent()).toBe("Run log");
+      expect(await page.locator("#spec-version").textContent()).toBe("Version 1");
+      expect(await page.locator("#spec-sections h4").allTextContents()).toEqual(["What it does", "Screens", "Data it keeps"]);
+      expect(await page.locator("#spec-sections p").first().textContent()).toBe("A log of your runs that shows this week's total distance.");
+      expect(await page.locator("#spec-sections li").allTextContents()).toEqual([
+        "Home: this week's total and the list of runs.",
+        "Add a run: date, distance and time.",
+        "Runs: date, distance in km and time.",
+      ]);
+      await expectDiagramPicture(viewport.width);
+      // Step 2 shows its own conversation only, and the behind-the-scenes box.
+      expect(await specBubbles()).toEqual(["Please write my spec.", "Here is your spec."]);
+      expect(await page.locator("#spec-behind-flow li").allTextContents()).toEqual(["Your message", "Safety check", "Claude on Bedrock", "Answer or new version"]);
+      expect(await page.getByRole("button", { name: "Approve spec" }).isEnabled()).toBe(true);
+      await expectNoSideScroll(viewport.width);
+    }
+    // diagram.js is fetched from the site itself, under its Content-Security-Policy (afterEach: no violation).
+    expect(calls.filter((c) => c.path === "/api/conversation/spec").length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it("WHEN Write my spec is pressed THEN step 2 shows the AI writing, then the spec with its diagram", async () => {
+    const api = fakeSpecApi("clarify", []);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-offer").isVisible()).toBe(true);
+    await page.getByRole("button", { name: "Write my spec" }).click();
+    await expect.poll(() => screen("spec").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    expect(await page.locator("#spec-typing-text").textContent()).toBe("The AI is writing your spec…");
+    expect(await page.locator("#spec-doc").isVisible()).toBe(false);
+    expect(await page.locator("#spec-missing").isVisible()).toBe(false);
+    expect(await page.locator("#spec-approve").isVisible()).toBe(false);
+    expect(await page.locator("#spec-behind-flow").getAttribute("data-stage")).toBe("working");
+    api.answer("Here is your spec.", SPEC_1);
+    await expect.poll(() => page.locator("#spec-doc").isVisible(), { timeout: 6000 }).toBe(true);
+    expect(await page.locator("#spec-typing").isVisible()).toBe(false);
+    await expectDiagramPicture(PHONE.width);
+    expect(await specBubbles()).toEqual(["Please write my spec.", "Here is your spec."]);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN the first spec could not be written THEN step 2 offers Write my spec again", async () => {
+    const api = fakeSpecApi("spec", []);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-missing").isVisible()).toBe(true);
+    await page.getByRole("button", { name: "Write my spec" }).click();
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    expect(await page.locator("#spec-missing").isVisible()).toBe(false);
+  }, 30_000);
+
+  it("WHEN the participant asks a question THEN the answer shows and the spec stays; WHEN they ask for a change THEN the new version is shown (criterion 2)", async () => {
+    const api = fakeSpecApi();
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 1");
+
+    await page.getByRole("textbox", { name: "Ask a question or ask for a change" }).fill("What does the cylinder mean?");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    expect(await page.locator("#spec-typing-text").textContent()).toBe("The AI is writing…");
+    expect(await page.getByRole("button", { name: "Approve spec" }).isDisabled()).toBe(true);
+    api.answer("It is where the app keeps your runs.");
+    await expect.poll(specBubbles, { timeout: 6000 }).toContain("It is where the app keeps your runs.");
+    expect(await page.locator("#spec-version").textContent()).toBe("Version 1");
+
+    await page.getByRole("textbox", { name: "Ask a question or ask for a change" }).fill("Please add a screen with my longest run.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    api.answer("I added a Longest run screen.", SPEC_2);
+    await expect.poll(() => page.locator("#spec-version").textContent(), { timeout: 6000 }).toBe("Version 2");
+    expect(await page.locator("#spec-sections li").allTextContents()).toContain("Longest run: your longest run so far.");
+    await expectDiagramPicture(PHONE.width);
+    expect(await page.getByRole("button", { name: "Approve spec" }).isEnabled()).toBe(true);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN the participant presses Approve spec THEN the version is approved, the page says the build comes next, and changes are closed (criterion 4)", async () => {
+    const api = fakeSpecApi("spec", [SPEC_1, SPEC_2]);
+    const calls = await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2");
+    await page.getByRole("button", { name: "Approve spec" }).click();
+    await expect.poll(() => page.locator("#spec-approved").isVisible()).toBe(true);
+    expect(calls.find((c) => c.path === "/api/conversation/spec/approve")).toMatchObject({ method: "POST", contentType: "application/json", body: { version: 2 } });
+    expect(await page.locator("#spec-approved").textContent()).toContain("Next comes the build");
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2 (approved)");
+    expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
+    expect(await page.locator("#spec-approve").isVisible()).toBe(false);
+    expect(await page.locator("#spec-doc").isVisible()).toBe(true);
+    await expectNoSideScroll();
+
+    // A reload (step approved) shows the same.
+    await page.reload();
+    await expect.poll(() => page.locator("#spec-approved").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2 (approved)");
+    expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
+  }, 30_000);
+
+  it("WHEN a diagram cannot be drawn THEN the page says so and keeps it readable as text", async () => {
+    const broken = SPEC_1.replace("home[Home] -->|add a run| add[Add a run]", "home[Home (main)] -->|add a run| add[Add a run");
+    const api = fakeSpecApi("spec", [broken]);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-diagram-status").textContent(), { timeout: 15_000 }).toBe(
+      "The diagram could not be drawn. Ask the AI to fix it, or read it as text below.",
+    );
+    expect(await page.locator("#spec-diagram-img").isVisible()).toBe(false);
+    expect(await page.locator("#spec-diagram-text").textContent()).toContain("home[Home (main)]");
+    expect(await page.locator("#spec-sections h4").allTextContents()).toEqual(["What it does", "Screens", "Data it keeps"]);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("shows the API's reason when an approval is refused, and shows the newer version", async () => {
+    const api = fakeSpecApi();
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 1");
+    // A change landed from another tab meanwhile.
+    api.spec.versions.push(SPEC_2);
+    await page.getByRole("button", { name: "Approve spec" }).click();
+    await expect.poll(() => page.locator("#message-spec").textContent()).toBe("There is a newer version of your spec. Please have a look at it, then approve it.");
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2");
+    expect(await page.locator("#spec-approved").isVisible()).toBe(false);
+  }, 30_000);
+});
+
 describe("built site", () => {
-  it("holds only the page, its stylesheet and one script, and the page has no inline script, style or handler", () => {
-    expect(readdirSync(dir).sort()).toEqual(["app.js", "index.html", "style.css"]);
+  it("holds only the page, its stylesheet and its two scripts, and the page has no inline script, style or handler", () => {
+    expect(readdirSync(dir).sort()).toEqual(["app.js", "diagram.js", "index.html", "style.css"]);
     const html = readFileSync(join(dir, "index.html"), "utf8");
     expect(html).toContain('<script src="app.js" defer></script>');
     expect(html).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/);

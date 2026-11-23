@@ -15,6 +15,10 @@ export interface ChatMessage {
   status?: string;
   /** Replies: the AI offered to write the spec. */
   offersSpec?: boolean;
+  /** The step the message belongs to: step 1 and step 2 each show their own (ticket 1.9). */
+  step?: string;
+  /** Replies: the spec version this answer saved (ticket 1.9). */
+  specVersion?: number;
 }
 
 /** `GET /api/conversation`. */
@@ -23,6 +27,9 @@ export interface Conversation {
   state: "open" | "waiting";
   messages: ChatMessage[];
   pendingId?: string;
+  /** The newest and the approved spec versions (ticket 1.9). */
+  latestSpecVersion?: number;
+  approvedSpecVersion?: number;
 }
 
 export const CHAT_TEXTS = {
@@ -42,26 +49,44 @@ function common(answer: ApiAnswer): Show {
   return show(MESSAGES.failed);
 }
 
+/** A spec version number: a whole number from 1. */
+export const isVersion = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1;
+
 const record = (v: unknown): Record<string, unknown> | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 
 function parseMessage(value: unknown): ChatMessage | undefined {
   const m = record(value);
   if (m === undefined) return undefined;
-  const { id, author, text, status, offersSpec } = m;
+  const { id, author, text, status, offersSpec, step, specVersion } = m;
   if (typeof id !== "string" || typeof text !== "string" || (author !== "participant" && author !== "assistant")) return undefined;
-  return { id, author, text, ...(typeof status === "string" ? { status } : {}), ...(offersSpec === true ? { offersSpec: true } : {}) };
+  return {
+    id,
+    author,
+    text,
+    ...(typeof status === "string" ? { status } : {}),
+    ...(offersSpec === true ? { offersSpec: true } : {}),
+    ...(typeof step === "string" ? { step } : {}),
+    ...(isVersion(specVersion) ? { specVersion } : {}),
+  };
 }
 
 /** A conversation from `GET /api/conversation`, or undefined when it is not one. */
 export function parseConversation(body: unknown): Conversation | undefined {
   const b = record(body);
   if (b === undefined) return undefined;
-  const { step, state, messages, pendingId } = b;
+  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion } = b;
   if (typeof step !== "string" || (state !== "open" && state !== "waiting") || !Array.isArray(messages)) return undefined;
   const parsed = messages.map(parseMessage);
   if (parsed.some((m) => m === undefined)) return undefined;
-  return { step, state, messages: parsed as ChatMessage[], ...(typeof pendingId === "string" ? { pendingId } : {}) };
+  return {
+    step,
+    state,
+    messages: parsed as ChatMessage[],
+    ...(typeof pendingId === "string" ? { pendingId } : {}),
+    ...(isVersion(latestSpecVersion) ? { latestSpecVersion } : {}),
+    ...(isVersion(approvedSpecVersion) ? { approvedSpecVersion } : {}),
+  };
 }
 
 export function conversationResult(answer: ApiAnswer): { kind: "conversation"; conversation: Conversation } | { kind: "signed-out" } | Show {
@@ -78,7 +103,7 @@ const reasonOf = (body: unknown): unknown => record(body)?.["reason"];
 /** `POST /api/conversation/messages`. */
 export function sendResult(
   answer: ApiAnswer,
-): { kind: "sent"; id: string } | { kind: "busy" } | { kind: "waiting" } | { kind: "no-nickname" } | { kind: "signed-out" } | Show {
+): { kind: "sent"; id: string } | { kind: "busy" } | { kind: "waiting" } | { kind: "no-nickname" } | { kind: "approved" } | { kind: "signed-out" } | Show {
   if (answer.status === 202) {
     const id = record(answer.body)?.["id"];
     return typeof id === "string" ? { kind: "sent", id } : show(MESSAGES.failed);
@@ -89,6 +114,8 @@ export function sendResult(
     if (reason === "busy") return { kind: "busy" };
     if (reason === "waiting") return { kind: "waiting" };
     if (reason === "no-nickname") return { kind: "no-nickname" };
+    // Ticket 1.9: the spec was approved (in another tab): the page shows the approved state.
+    if (reason === "approved") return { kind: "approved" };
   }
   if (answer.status === 400) return show(messageOf(answer.body) ?? MESSAGES.failed);
   if (answer.status === 401) return { kind: "signed-out" };

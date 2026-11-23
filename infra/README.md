@@ -369,3 +369,46 @@ npm run eval -- clarify
 
 On a failure, `ssd-workshop-api-conversation`'s log has `"route":"history"` or `"route":"step"` lines with the
 outcome and the AWS error name (e.g. `AccessDeniedException`).
+
+## Check after the step 2 deploy (ticket 1.9)
+
+The first live spec proves the AI worker's new attribute rights (`specVersion`, `messageId`,
+`latestSpecVersion`) and the first approval the conversation function's (`approvedSpecVersion`,
+`approvedAt`); both are only checked by AWS. On `https://workshop.rankly.games`, signed in at step 1 with an
+answered idea, once on a laptop and once on a phone:
+
+1. Press **Write my spec**. "Step 2: Spec" shows "The AI is writing your spec…"; within about a minute the
+   spec appears: "Version 1", the title, the diagram drawn as a picture (not text), then "What it does",
+   "Screens" and "Data it keeps". The browser console shows no Content-Security-Policy error.
+2. Ask a question ("What does the cylinder mean?"): an answer appears and the spec stays "Version 1".
+3. Ask for a change ("Add a screen with my longest run"): the spec becomes "Version 2" with the change.
+4. Press **Approve spec**: "Spec approved. Next comes the build…" shows, the message box and the button go
+   away, and the spec reads "Version 2 (approved)"; a reload shows the same.
+
+Or with `curl`, signed in as in the 1.5 check (same `JAR`), after step 1 above:
+
+```sh
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation/spec
+# expect: {"version":1,"text":"# ...","createdAt":"...","approved":false} and 200 (404 before the first version)
+curl -sS -b "$JAR" -w '\n%{http_code}\n' 'https://workshop.rankly.games/api/conversation/spec?version=99'
+# expect: {"message":"Not found."} and 404
+curl -sS -b "$JAR" -H 'content-type: application/json' --data '{"version":1}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation/spec/approve
+# expect: {"step":"approved","version":1} and 200 (409 "stale" when a newer version exists)
+curl -sS -b "$JAR" -H 'content-type: application/json' --data '{"text":"Add a monthly total"}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation/messages
+# expect after the approval: {"message":"Your spec is approved, ...","reason":"approved"} and 409
+```
+
+With Franck's own AWS credentials, the step 2 eval against the live model (about $0.05; it builds the pages
+and draws each diagram with Mermaid in Playwright's Chromium, so `npx playwright install chromium` once on a
+new machine):
+
+```sh
+npm run eval -- spec
+# expect: one PASS line per example with the answer below it, "Spec: 6/6 passed", exit code 0
+```
+
+On a failure, `ssd-workshop-api-ai-worker`'s log has `"outcome":"failed"` lines with the error name
+(`MalformedSpec` or `MissingSpec` for a spec of the wrong shape, `AccessDeniedException` for a missing right),
+and `ssd-workshop-api-conversation`'s `"route":"spec"` or `"route":"approve"` lines.

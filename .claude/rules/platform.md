@@ -54,3 +54,10 @@ paths:
   `pollAfter` in `pages.test.ts`).
 - A model's machine-readable signal (clarify's `[READY_FOR_SPEC]`) is a marker line the worker strips before storing
   the text, so it never shows on the page or goes back to the model as history (ticket 1.8).
+- Mermaid under the pages' CSP (`style-src 'self'`): draw off-screen with `setAttribute("style")` turned into CSSOM
+  writes and `<style>` elements into SVG `<desc>` placeholders, `securityLevel: "loose"` (DOMPurify's final parse
+  reports every style attribute), then show the finished SVG only as an `<img>` from a `data:` URL (ticket 1.9,
+  `platform/web/src/diagram.ts`). Mermaid cannot parse flowcharts in Node.js (no DOM, "DOMPurify.addHook is not a
+  function"): check diagrams with the page's own `diagram.js` in Playwright's Chromium (`platform/src/eval/diagram.ts`).
+- A large browser-only library goes into its own esbuild entry (`platform/web/build.ts` `SCRIPTS`), loaded only when
+  needed, so the other pages stay small (ticket 1.9, `diagram.js`).
