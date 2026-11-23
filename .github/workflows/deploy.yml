@@ -77,8 +77,14 @@ jobs:
           aws route53 list-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --output json \
             | jq -S '.ResourceRecordSets | sort_by(.Name, .Type, (.SetIdentifier // ""))' \
             > "$RUNNER_TEMP/zone-after.json"
-          if ! diff -u "$RUNNER_TEMP/zone-before.json" "$RUNNER_TEMP/zone-after.json"; then
-            echo "::error::The deploy changed records in the rankly.games zone (diff above)"
+          # The zone also holds other projects' records: on a change, print only the names and
+          # types that changed, never their values, so nothing of theirs lands in the public log.
+          if ! diff -q "$RUNNER_TEMP/zone-before.json" "$RUNNER_TEMP/zone-after.json" > /dev/null; then
+            jq -c '.[]' "$RUNNER_TEMP/zone-before.json" | sort > "$RUNNER_TEMP/zone-before.lines"
+            jq -c '.[]' "$RUNNER_TEMP/zone-after.json" | sort > "$RUNNER_TEMP/zone-after.lines"
+            comm -3 "$RUNNER_TEMP/zone-before.lines" "$RUNNER_TEMP/zone-after.lines" \
+              | sed 's/^\t//' | jq -r '"\(.Name) \(.Type)"' | sort -u
+            echo "::error::The deploy changed records in the rankly.games zone (names and types above)"
             exit 1
           fi
           echo "OK: no record in the zone changed"

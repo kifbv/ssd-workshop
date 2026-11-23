@@ -141,7 +141,10 @@ describe("deploy workflow (ticket 0.5)", () => {
       expect(step.run).toContain("jq");
       expect(step.run).toContain("$RUNNER_TEMP/");
     }
-    expect(after?.[0].run).toMatch(/diff -u "\$RUNNER_TEMP\/zone-before\.json" "\$RUNNER_TEMP\/zone-after\.json"/);
+    expect(after?.[0].run).toMatch(/diff -q "\$RUNNER_TEMP\/zone-before\.json" "\$RUNNER_TEMP\/zone-after\.json"/);
+    // Only names and types of changed records reach the log, never their values.
+    expect(after?.[0].run).not.toMatch(/diff -u/);
+    expect(after?.[0].run).toMatch(/jq -r '"\\\(\.Name\) \\\(\.Type\)"'/);
     expect(after?.[0].run).toContain("::error::");
     // The after-snapshot runs even when the deploy fails, so a partial change is still caught.
     expect(after?.[0].if).toBe("${{ !cancelled() && steps.zone_before.outcome == 'success' }}");
