@@ -25,6 +25,11 @@ import {
   runSpecEval,
   scoreSpec,
   type SpecExample,
+  formatReadinessResult,
+  formatReadinessSummary,
+  parseReadinessExamples,
+  runReadinessEval,
+  scoreReadiness,
 } from "./logic.js";
 
 function must<T>(value: T | undefined): T {
@@ -271,6 +276,53 @@ describe("spec suite (ticket 1.9)", () => {
     expect(lines[0]).toContain("     | <spec>");
     expect(lines[1]).toBe("FAIL  2 [keeps-spec] q: error ThrottlingException");
     expect(formatSpecSummary(results)).toEqual(["Spec: 1/2 passed", `Tokens: 1000 in, 400 out, cost $${usage.costUsd.toFixed(4)}`, "  new-spec: 1/1", "  keeps-spec: 0/1"]);
+    expect(exitCode(results)).toBe(1);
+  });
+});
+
+describe("readiness (ticket 2.7)", () => {
+  const READINESS_FILE = readFileSync(new URL("../../api/eval/readiness.json", import.meta.url), "utf8");
+
+  it("takes the readiness suite", () => {
+    expect(parseEvalArgs(["readiness"])).toEqual({ suite: "readiness" });
+  });
+
+  it("readiness.json (criterion 1's examples): the three example specs expected ready; login, payment, outside service and open question expected not ready", () => {
+    const examples = parseReadinessExamples(READINESS_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const ready = examples.filter((e) => e.expected === "ready");
+    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example"]);
+    for (const idea of ["fitness tracker", "movie tracker", "nutrition calculator"]) expect(ready.some((e) => e.name.includes(idea)), idea).toBe(true);
+    const failing = new Set(examples.filter((e) => e.expected === "not-ready").map((e) => e.category));
+    for (const category of ["login", "payment", "outside service", "open question"]) expect(failing, category).toContain(category);
+    // Every failing example's keywords include its category's own word, so a passing reason names it.
+    for (const e of examples.filter((x) => x.expected === "not-ready")) expect(e.keywords.join(" ").toLowerCase(), e.name).toContain(e.category.split(" ")[0]);
+  });
+
+  it("refuses a malformed file or a spec of the wrong shape", () => {
+    expect(parseReadinessExamples("nope")).toEqual({ error: "the examples file is not JSON" });
+    expect(parseReadinessExamples('{"examples":[{"name":"x","category":"example","expected":"ready","spec":"# Only a title"}]}')).toMatchObject({ error: expect.stringContaining("example 1") });
+  });
+
+  it("scores the verdict, and for a failing spec a reason naming the problem; a failed call fails", async () => {
+    const examples = parseReadinessExamples(READINESS_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const login = must(examples.find((e) => e.category === "login"));
+    const example = must(examples.find((e) => e.category === "example"));
+    expect(scoreReadiness(example, { verdict: "ready", reasons: [] })).toEqual({ pass: true, detail: "ready" });
+    expect(scoreReadiness(example, { verdict: "not-ready", reasons: ["x"] }).pass).toBe(false);
+    expect(scoreReadiness(login, { verdict: "not-ready", reasons: ["Your spec needs a Login for each colleague."] })).toMatchObject({ pass: true });
+    expect(scoreReadiness(login, { verdict: "not-ready", reasons: ["Your spec is too big."] })).toMatchObject({ pass: false });
+    expect(scoreReadiness(login, { verdict: "unreadable", reasons: [] })).toMatchObject({ pass: false });
+    const usage = usageOf({ inputTokens: 1000, outputTokens: 50 });
+    const results = await runReadinessEval([example, login], async (e) => {
+      if (e === login) throw Object.assign(new Error("x"), { name: "ThrottlingException" });
+      return { verdict: "ready", reasons: [], usage };
+    });
+    expect(results.map((r) => r.pass)).toEqual([true, false]);
+    expect(results[1]?.detail).toBe("error ThrottlingException");
+    expect(formatReadinessSummary(results)).toEqual(["Readiness: 1/2 passed", "Tokens: 1000 in, 50 out, cost $0.0041", "  expected ready: 1/1", "  expected not-ready: 0/1"]);
+    expect(formatReadinessResult({ example: login, pass: true, detail: "d", outcome: { verdict: "not-ready", reasons: ["r1"], usage } }, 3)).toBe(`PASS  4 [login] ${login.name}: d\n     | r1`);
     expect(exitCode(results)).toBe(1);
   });
 });

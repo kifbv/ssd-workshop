@@ -112,7 +112,7 @@ describe("parseReadinessAnswer", () => {
       reasons: ["a login thing", "b"],
     });
     expect(parseReadinessAnswer(JSON.stringify({ verdict: "not-ready", reasons: Array.from({ length: 9 }, (_, i) => `r${i} ${"x".repeat(400)}`) })).reasons).toHaveLength(5);
-    expect(parseReadinessAnswer(JSON.stringify({ verdict: "not-ready", reasons: ["y".repeat(900)] })).reasons[0]).toHaveLength(300);
+    expect(parseReadinessAnswer(JSON.stringify({ verdict: "not-ready", reasons: ["y".repeat(900)] })).reasons[0]).toHaveLength(400);
     for (const text of ["", "ready", "{", '{"verdict":"maybe"}', '{"verdict":"not-ready"}', '{"verdict":"not-ready","reasons":[]}', '{"verdict":"not-ready","reasons":["  "]}', "[1]"]) {
       expect(parseReadinessAnswer(text), text).toEqual({ verdict: "unreadable", reasons: [] });
     }
