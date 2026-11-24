@@ -190,6 +190,7 @@ flowchart LR
 | --- | --- |
 | `ReadsWithoutSecrets` | Account-wide reads that CDK or Claude need and whose answers hold no secrets: stack list, template validation, EC2 and ECS listings, certificates, hosted zone list, Bedrock models and inference profiles, service quotas, the SES send quota and identities, bucket names, a random password (`secretsmanager:GetRandomPassword`, which CloudFormation calls to fill a new secret such as `ssd-workshop-github`; no resource scope, and it reads nothing), log group names, costs. |
 | `NoLauncherForSessions` | For the Claude user only (`aws:PrincipalArn`): deny everything but reads on the build launcher's role (`ssd-workshop-builds-launcher`, both ARN forms) and function (with versions and aliases; invoking included), and on the CDK assets bucket and its objects, so a session can never reach the GitHub App's key through the one role allowed to read it (ticket 2.6, Franck's choice: block sessions, trust deploys from `main`). |
+| `NoBuildQueueForSessions` | For the Claude user only (`aws:PrincipalArn`): deny `sqs:SendMessage`, `sqs:SetQueueAttributes` and `sqs:PurgeQueue` on `ssd-workshop-builds*` (the launch queue, its dead-letter queue and the check queue), so a session cannot start, redirect or empty builds: a launch message makes the launcher mint a repository token and start a task (ticket 2.9, Franck's choice, 2026-11-24). Retries run from Franck's machine (`AWS_PROFILE=franck npm run builds -- retry <nickname>`, infra/README.md). Deploys from `main` still manage the queues. |
 | `NoGitHubKey` | Deny every Secrets Manager action on the GitHub App's private key (`secret:ssd-workshop-github-*`, ticket 2.6) except creating, describing, tagging and reading its policy or version ids (a `NotAction` list, so new actions are denied too): only Franck loads it and only the build launcher (2.9) reads it. CloudFormation still creates the secret; any later change of it (settings or tags: CloudFormation's update handler reads the value) and drift detection on it go through Franck. In this policy because `ssd-workshop-deploy` is too close to its size limit. |
 | `WorkshopZoneReads` | The rankly.games zone and its records. |
 | `WorkshopIamReads` | Read roles and instance profiles on `/ssd-workshop/` and `ssd-workshop-*` policies (not `GetAccountAuthorizationDetails` or other projects' roles). |
@@ -357,6 +358,28 @@ follow-up.
         | [.eventTime, .userIdentity.arn, .requestParameters.taskDefinition] | @tsv'
     done
     # expect: no output
+    ```
+
+16. **The builder's GitHub token is visible to account readers for its hour** (Franck, 2026-11-24,
+    ticket 2.9). The launcher passes the build's one-repository token (`contents: write` on that
+    participant's repository only, valid one hour) to the builder task as a RunTask container
+    override (`BUILDER_GITHUB_TOKEN`). The task definition holds no secret, and the App's key and
+    the organization-wide token never leave the launcher. Impact: anyone in the shared account who
+    can read ECS task details (`ecs:DescribeTasks`) or CloudTrail RunTask `requestParameters` can
+    copy the token while it lives and push to that one participant repository. It cannot change
+    the live app: the deployer publishes only the commit the builder stored as `pushedCommit`
+    (decision "(2.8) pushedCommit"). Check (run by Franck as admin): every `DescribeTasks` on the
+    builds cluster by anyone other than the launcher role, and every read of RunTask events by a
+    non-admin, should be explained:
+
+    ```sh
+    aws cloudtrail lookup-events --region eu-central-1 \
+      --lookup-attributes AttributeKey=EventName,AttributeValue=DescribeTasks --output json \
+    | jq -r '.Events[].CloudTrailEvent | fromjson
+        | select((.requestParameters.cluster // "") | test("ssd-workshop-builds"))
+        | select(.userIdentity.arn | test("ssd-workshop-builds-launcher") | not)
+        | [.eventTime, .userIdentity.arn] | @tsv'
+    # expect: only Franck's own reads
     ```
 
 Not granted, so a later ticket brings it to Franck before it is needed:

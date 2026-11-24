@@ -6,7 +6,7 @@ import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/
 import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
-import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
+import { type ICommandHooks, NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
@@ -498,6 +498,7 @@ export function workshopFunction(
   entry: string,
   memorySize = 256,
   timeoutSeconds = 10,
+  commandHooks?: ICommandHooks,
 ): NodejsFunction {
   const logGroup = new LogGroup(scope, `${id}Logs`, {
     logGroupName: name,
@@ -525,6 +526,6 @@ export function workshopFunction(
     // NodejsFunction leaves @aws-sdk/* out of the bundle by default on Node 18+ runtimes (the
     // runtime has its own copy). Bundling it pins the version the tests ran with and keeps the
     // bundle self-contained (the synth test loads it).
-    bundling: { minify: true, sourceMap: false, externalModules: [] },
+    bundling: { minify: true, sourceMap: false, externalModules: [], ...(commandHooks === undefined ? {} : { commandHooks }) },
   });
 }

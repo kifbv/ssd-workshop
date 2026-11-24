@@ -122,3 +122,28 @@ export const BUILD_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/$
  * "The build took too long.".
  */
 export const BUILD_AGENT_TIMEOUT_MS = 12 * 60 * 1000;
+
+/**
+ * The build launcher (ticket 2.9): where it starts the builder's Fargate tasks. The cluster and the two public build
+ * subnets (infra/lib/config.ts BUILDS_CLUSTER_NAME and BUILDS_SUBNET_IDS, kept equal by a test): IAM cannot pin RunTask
+ * to subnets (no `ecs:subnet` key on RunTask), so the launcher names them itself, always with a public IP (the subnets
+ * have no NAT gateway). The task definition's ARN and the security group's id change with deploys and come from the
+ * function's environment (not secrets).
+ */
+export const BUILDS_CLUSTER_NAME = "ssd-workshop-builds";
+export const BUILDS_SUBNET_IDS = ["subnet-05229d71b1e0b41ff", "subnet-0965bcee41d455dba"] as const;
+/** The builder's container in the task definition `ssd-workshop-builder`: RunTask's overrides name it. */
+export const BUILDER_CONTAINER_NAME = "builder";
+/** The launch queue's dead-letter queue: the launcher's check marks the builds of its messages failed. */
+export const BUILD_DLQ_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/ssd-workshop-builds-dlq.fifo`;
+/** The deploy queue's dead-letter queue: the launcher's check marks the builds of its messages failed. */
+export const DEPLOY_DLQ_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/ssd-workshop-deploys-dlq.fifo`;
+/** The queue EventBridge Scheduler fills every minute to run the launcher's stuck-build check (ticket 2.9). */
+export const BUILD_CHECK_QUEUE_NAME = "ssd-workshop-builds-check";
+/**
+ * A claimed build with no task yet (the launcher stopped between its claim and RunTask) is marked failed by the check
+ * after this long: well past the launcher's own timeout, so a launch still under way is never cut off.
+ */
+export const LAUNCH_UNSTARTED_MS = 20 * 60 * 1000;
+/** A build task running longer than this is stopped by the check (the agent alone stops at 12 minutes). */
+export const BUILD_TASK_MAX_MS = 30 * 60 * 1000;

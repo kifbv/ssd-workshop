@@ -1,0 +1,324 @@
+// Ticket 2.9: the build launcher and its stuck-build check, against the in-memory table, tasks, queues and GitHub.
+import { describe, expect, it } from "vitest";
+import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "../github/app.js";
+import { FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../github/fakes.js";
+import { SPEC_FILE } from "../github/repository.js";
+import { loadTemplateFiles } from "../github/template.js";
+import { BUILD_TASK_MAX_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { FakeBuildTable, FakeDeadLetters, FakeTasks } from "./fakes.js";
+import {
+  DEPLOY_DEAD_REASON,
+  QUEUED_DEAD_REASON,
+  SPEC_MISSING_REASON,
+  START_FAILED_REASON,
+  STOPPED_REASON,
+  UNSTARTED_REASON,
+  LAUNCH_SERVICE_REASON,
+  parseLaunchMessage,
+  processLaunch,
+  runCheck,
+  type CheckDeps,
+  type LauncherDeps,
+  type LauncherLogEntry,
+} from "./launcher.js";
+
+const BUILD = "2026-11-24T10-00-00-000Z-0101010101010101";
+const PARTICIPANT = "6f1c2a9e-0000-4000-8000-000000000001";
+const NICKNAME = "Ada-L";
+const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const message = (buildId = BUILD): string => JSON.stringify({ buildId });
+
+function setup() {
+  let now = Date.parse("2026-11-24T10:00:00.000Z");
+  const clock = () => new Date(now);
+  const table = new FakeBuildTable();
+  table.addQueuedBuild({ buildId: BUILD, participantId: PARTICIPANT, nickname: NICKNAME, spec: "# Run log\n\nLog runs." });
+  const tasks = new FakeTasks(clock);
+  const github = new FakeGitHub(clock);
+  const githubLogs: GitHubLogEntry[] = [];
+  const githubDeps: GitHubDeps = { fetch: github.fetch, now: clock, log: (entry) => githubLogs.push(entry), sleep: async () => undefined };
+  const logs: LauncherLogEntry[] = [];
+  let secretReads = 0;
+  const deps: LauncherDeps = {
+    records: table,
+    tasks,
+    credentials: async () => {
+      secretReads += 1;
+      return parseGitHubSecret(TEST_SECRET_TEXT);
+    },
+    github: githubDeps,
+    templateFiles: () => loadTemplateFiles(),
+    now: clock,
+    log: (entry) => logs.push(entry),
+  };
+  const launchDeadLetters = new FakeDeadLetters();
+  const deployDeadLetters = new FakeDeadLetters();
+  const check: CheckDeps = { records: table, tasks, launchDeadLetters, deployDeadLetters, now: clock, log: (entry) => logs.push(entry) };
+  return {
+    table,
+    tasks,
+    github,
+    githubLogs,
+    deps,
+    check,
+    logs,
+    launchDeadLetters,
+    deployDeadLetters,
+    secretReads: () => secretReads,
+    advance: (ms: number) => {
+      now += ms;
+    },
+  };
+}
+
+/** Everything a test can see printed: no token, key, nickname, repository, build or participant id may appear. */
+function assertQuietLogs(s: ReturnType<typeof setup>): void {
+  const printed = JSON.stringify([s.logs, s.githubLogs]);
+  for (const token of s.github.bearers) expect(printed).not.toContain(token);
+  for (const secret of [TEST_PRIVATE_KEY_PEM.slice(40, 80), NICKNAME, NICKNAME.toLowerCase(), BUILD, PARTICIPANT]) expect(printed).not.toContain(secret);
+}
+
+describe("the launch message", () => {
+  it("is exactly {\"buildId\": <id>}", () => {
+    expect(parseLaunchMessage(message())).toBe(BUILD);
+    for (const body of [undefined, "", "not json", "null", "[]", '{"buildId":"../x"}', '{"buildId":1}', JSON.stringify({ buildId: BUILD, nickname: "Bob" }), "{}"]) {
+      expect(parseLaunchMessage(body), String(body)).toBeUndefined();
+    }
+  });
+});
+
+describe("launching a build (ticket 2.9)", () => {
+  it("prepares the repository, mints a one-repository token and starts exactly one task with it; the build is building with its task", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    expect(s.tasks.started).toHaveLength(1);
+    const [task] = s.tasks.started;
+    expect(task?.buildId).toBe(BUILD);
+    // The repository holds the template and the approved spec.
+    const repo = s.github.repo("ssd-ada-l");
+    expect(s.github.filesAt("ssd-ada-l", repo.main ?? "")[SPEC_FILE]).toBe("# Run log\n\nLog runs.");
+    // Criterion 1 (overrides): the token in the override reaches only that repository, contents write: never the
+    // organization-wide administration token, never the app's key.
+    const grant = s.github.grants.get(task?.token ?? "");
+    expect(grant?.repositories).toEqual(["ssd-ada-l"]);
+    expect(grant?.permissions).toEqual({ contents: "write", metadata: "read" });
+    expect(task?.token).not.toContain("PRIVATE KEY");
+    const build = s.table.builds.get(BUILD);
+    expect(build).toMatchObject({ status: "building", taskArn: task?.taskArn, launchedAt: "2026-11-24T10:00:00.000Z" });
+    expect(s.table.launches.get(BUILD)).toEqual({ buildId: BUILD, claimedAt: "2026-11-24T10:00:00.000Z", taskArn: task?.taskArn });
+    expect(s.logs.at(-1)).toMatchObject({ event: "launcher", outcome: "started" });
+    assertQuietLogs(s);
+  });
+
+  it("treats a second delivery of the same message (and a build no longer queued) as a duplicate: never a second task", async () => {
+    const s = setup();
+    await processLaunch(message(), s.deps);
+    expect(await processLaunch(message(), s.deps)).toBe("duplicate");
+    expect(s.tasks.started).toHaveLength(1);
+    for (const status of ["building", "deploying", "live", "failed"] as const) {
+      const t = setup();
+      const build = t.table.builds.get(BUILD);
+      if (build) build.status = status;
+      expect(await processLaunch(message(), t.deps), status).toBe("duplicate");
+      expect(t.tasks.started).toEqual([]);
+      expect(t.github.calls).toEqual([]);
+      expect(t.table.builds.get(BUILD)?.status).toBe(status);
+    }
+  });
+
+  it("drops a message that is not exactly {buildId} or names no build, without a write or a GitHub call", async () => {
+    const s = setup();
+    for (const body of ["not json", JSON.stringify({ buildId: BUILD, nickname: "Bob" }), '{"buildId":"x/y"}', undefined]) {
+      expect(await processLaunch(body, s.deps)).toBe("invalid");
+    }
+    expect(await processLaunch(message("no-such-build"), s.deps)).toBe("duplicate");
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    expect(s.github.calls).toEqual([]);
+    expect(s.tasks.started).toEqual([]);
+    expect(s.secretReads()).toBe(0);
+  });
+
+  it("ignores a build whose nickname is not its participant's profile nickname (a changed build record): no repository, no token", async () => {
+    const s = setup();
+    const build = s.table.builds.get(BUILD);
+    if (build) build.nickname = "Bob";
+    expect(await processLaunch(message(), s.deps)).toBe("ignored");
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    expect(s.github.calls).toEqual([]);
+    expect(s.secretReads()).toBe(0);
+    expect(s.tasks.started).toEqual([]);
+    // Letter case counts too: the deployer compares the nickname exactly.
+    const t = setup();
+    t.table.profiles.set(PARTICIPANT, NICKNAME.toLowerCase());
+    expect(await processLaunch(message(), t.deps)).toBe("ignored");
+    expect(t.tasks.started).toEqual([]);
+  });
+
+  it("ignores a build that is not its participant's conversation build (left queued by a conversation reset)", async () => {
+    const s = setup();
+    s.table.conversations.set(PARTICIPANT, { buildId: "another-build", approvedSpecVersion: 2 });
+    expect(await processLaunch(message(), s.deps)).toBe("ignored");
+    s.table.conversations.set(PARTICIPANT, { approvedSpecVersion: 2 });
+    expect(await processLaunch(message(), s.deps)).toBe("ignored");
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    expect(s.tasks.started).toEqual([]);
+  });
+
+  it("throws a bare error on a failed read before the claim, so SQS delivers the message again; the redelivery starts the task", async () => {
+    const s = setup();
+    s.table.failOnce.add("readBuild");
+    await expect(processLaunch(message(), s.deps)).rejects.toThrow(/^launch failed$/);
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    s.table.failOnce.add("claim");
+    await expect(processLaunch(message(), s.deps)).rejects.toThrow(/^launch failed$/);
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    expect(s.tasks.started).toHaveLength(1);
+  });
+
+  it("marks the build failed, without a task, when the approved spec is missing", async () => {
+    const s = setup();
+    s.table.specs.clear();
+    expect(await processLaunch(message(), s.deps)).toBe("failed");
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [SPEC_MISSING_REASON] });
+    expect(s.tasks.started).toEqual([]);
+    expect(s.table.launches.size).toBe(0);
+  });
+
+  it("marks the build failed with GitHub's plain reason when the repository cannot be prepared", async () => {
+    const s = setup();
+    s.github.installationAccount = "someone-else";
+    expect(await processLaunch(message(), s.deps)).toBe("failed");
+    const build = s.table.builds.get(BUILD);
+    expect(build?.status).toBe("failed");
+    expect(build?.failureReasons?.[0]).toMatch(/^GitHub: /);
+    expect(s.tasks.started).toEqual([]);
+    assertQuietLogs(s);
+  });
+
+  it("marks the build failed when ECS starts no task, or RunTask fails", async () => {
+    const s = setup();
+    s.tasks.failure = "RESOURCE:ENI";
+    expect(await processLaunch(message(), s.deps)).toBe("failed");
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [START_FAILED_REASON] });
+    const t = setup();
+    t.tasks.startError = Object.assign(new Error("throttled"), { name: "ThrottlingException" });
+    expect(await processLaunch(message(), t.deps)).toBe("failed");
+    expect(t.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [LAUNCH_SERVICE_REASON] });
+    expect(t.logs.at(-1)).toMatchObject({ outcome: "failed", error: "ThrottlingException" });
+  });
+
+  it("stops a started task it could not record, and marks the build failed (no task runs unwatched)", async () => {
+    const s = setup();
+    s.table.failOnce.add("recordTask");
+    expect(await processLaunch(message(), s.deps)).toBe("failed");
+    expect(s.tasks.stopCalls).toEqual([s.tasks.started[0]?.taskArn]);
+    expect(s.table.builds.get(BUILD)?.status).toBe("failed");
+  });
+});
+
+describe("the stuck-build check (ticket 2.9)", () => {
+  async function launched() {
+    const s = setup();
+    await processLaunch(message(), s.deps);
+    const taskArn = s.tasks.started[0]?.taskArn ?? "";
+    return { ...s, taskArn };
+  }
+
+  it("criterion 3: WHEN a task stops without the build being finished THEN the next check (run every minute) marks the build failed", async () => {
+    const s = await launched();
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    s.tasks.exit(s.taskArn);
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON], finishedAt: "2026-11-24T10:01:00.000Z" });
+    expect(s.table.launches.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", failed: 1 });
+  });
+
+  it("also when ECS no longer knows the task", async () => {
+    const s = await launched();
+    s.tasks.states.clear();
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("failed");
+  });
+
+  it("leaves a build the builder finished: handed over (pushed commit) or marked failed with its own reason", async () => {
+    const s = await launched();
+    const build = s.table.builds.get(BUILD);
+    if (build) build.pushedCommit = COMMIT;
+    s.tasks.exit(s.taskArn);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "building", pushedCommit: COMMIT });
+    expect(s.table.launches.size).toBe(0);
+
+    const t = await launched();
+    const other = t.table.builds.get(BUILD);
+    if (other) Object.assign(other, { status: "failed", failureReasons: ["The build took too long."] });
+    t.tasks.exit(t.taskArn);
+    await runCheck(t.check);
+    expect(t.table.builds.get(BUILD)?.failureReasons).toEqual(["The build took too long."]);
+    expect(t.table.launches.size).toBe(0);
+  });
+
+  it("stops a task running longer than BUILD_TASK_MAX_MS; the next check marks the build failed", async () => {
+    const s = await launched();
+    s.advance(BUILD_TASK_MAX_MS - 1000);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    s.advance(2000);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([s.taskArn]);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+  });
+
+  it("marks failed a claim that got no task within LAUNCH_UNSTARTED_MS (the launcher stopped half-way), not before", async () => {
+    const s = setup();
+    await s.table.claim(BUILD, NICKNAME, PARTICIPANT, "2026-11-24T10:00:00.000Z");
+    s.advance(LAUNCH_UNSTARTED_MS - 1000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    s.advance(2000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [UNSTARTED_REASON] });
+    expect(s.table.launches.size).toBe(0);
+  });
+
+  it("fails a queued build whose launch message reached the dead-letter queue, and only a queued one; every dead letter is removed", async () => {
+    const s = setup();
+    s.table.addQueuedBuild({ buildId: "b-2", participantId: "p-2", nickname: "Bob" });
+    const live = s.table.builds.get("b-2");
+    if (live) live.status = "live";
+    s.launchDeadLetters.add(message());
+    s.launchDeadLetters.add(message("b-2"));
+    s.launchDeadLetters.add("not json");
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [QUEUED_DEAD_REASON] });
+    expect(s.table.builds.get("b-2")?.status).toBe("live");
+    expect(s.launchDeadLetters.messages).toEqual([]);
+    expect(s.logs.at(-1)).toMatchObject({ outcome: "checked", failed: 1, deadLetters: 3 });
+  });
+
+  it("fails a build left deploying (or handed over) whose deploy message reached the dead-letter queue, only for its pushed commit and app", async () => {
+    const s = await launched();
+    const build = s.table.builds.get(BUILD);
+    if (build) Object.assign(build, { status: "deploying", pushedCommit: COMMIT });
+    const other = "f".repeat(40);
+    s.deployDeadLetters.add(JSON.stringify({ buildId: BUILD, nickname: NICKNAME, commit: other }));
+    s.deployDeadLetters.add(JSON.stringify({ buildId: BUILD, nickname: "Bob", commit: COMMIT }));
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("deploying");
+    s.deployDeadLetters.add(JSON.stringify({ buildId: BUILD, nickname: NICKNAME, commit: COMMIT }));
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [DEPLOY_DEAD_REASON] });
+    expect(s.deployDeadLetters.messages).toEqual([]);
+  });
+
+  it("throws a bare error when the table fails, after logging only its name", async () => {
+    const s = setup();
+    s.table.failOnce.add("listLaunches");
+    await expect(runCheck(s.check)).rejects.toThrow(/^check failed$/);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "error", error: "InternalServerError" });
+  });
+});

@@ -1,11 +1,44 @@
+import { fileURLToPath } from "node:url";
 import { Duration, RemovalPolicy, Stack, type StackProps, Tags } from "aws-cdk-lib";
 import { IpAddresses, type IVpc, Peer, Port, SecurityGroup, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository, TagStatus } from "aws-cdk-lib/aws-ecr";
-import { Cluster, ContainerInsights } from "aws-cdk-lib/aws-ecs";
+import { Table } from "aws-cdk-lib/aws-dynamodb";
+import {
+  Cluster,
+  ContainerImage,
+  ContainerInsights,
+  CpuArchitecture,
+  FargateTaskDefinition,
+  LogDrivers,
+  OperatingSystemFamily,
+} from "aws-cdk-lib/aws-ecs";
+import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import { CfnSchedule } from "aws-cdk-lib/aws-scheduler";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
+import { BEDROCK_INVOKE_RESOURCES, workshopFunction } from "./api-stack.js";
 import {
+  ACCOUNT,
+  ATTRIBUTE_LIMITED_RETURN_VALUES,
+  BUILD_CHECK_QUEUE_NAME,
+  BUILD_CHECK_SCHEDULE_NAME,
+  BUILD_CHECK_SCHEDULER_ROLE_NAME,
+  BUILD_LAUNCHER_FUNCTION_NAME,
+  BUILDER_BUILD_READ_ATTRIBUTES,
+  BUILDER_BUILD_UPDATE_ATTRIBUTES,
+  BUILDER_CONTAINER_NAME,
+  BUILDER_CPU,
+  BUILDER_EXECUTION_ROLE_NAME,
+  BUILDER_IMAGE_DIGEST_CONTEXT,
+  BUILDER_IMAGE_DIGEST_UNSET,
+  BUILDER_LOG_GROUP_NAME,
+  BUILDER_MEMORY_MB,
+  BUILDER_TASK_FAMILY,
+  BUILDER_TASK_ROLE_NAME,
+  BUILDER_USAGE_UPDATE_ATTRIBUTES,
   BUILDER_IMAGES_KEPT,
   BUILDER_REPOSITORY_NAME,
   BUILD_DLQ_NAME,
@@ -15,14 +48,34 @@ import {
   BUILDS_SECURITY_GROUP_NAME,
   BUILDS_VPC_CIDR,
   BUILDS_VPC_NAME,
+  DEPLOY_DLQ_NAME,
+  DEPLOY_QUEUE_NAME,
   GITHUB_SECRET_NAME,
+  LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
+  LAUNCHER_LAUNCH_ATTRIBUTES,
+  LAUNCHER_READ_ATTRIBUTES,
+  LAUNCHES_PARTITION,
+  REGION,
+  TABLE_NAME,
 } from "./config.js";
 
 /**
- * Visibility timeout of the launch queue (ticket 2.7). Its consumer, the build launcher, comes with ticket 2.9, which
- * sets this just above the launcher's timeout (rule in .claude/rules/infra.md); until then nothing consumes it.
+ * The build launcher's timeout (ticket 2.9): preparing the repository (a dozen GitHub calls, each at most 10 s, with
+ * brief retries) and RunTask fit with room; GitHub calls stop LAUNCH_RESERVE_MS (20 s) before it, so a failure is
+ * always written.
  */
-export const BUILD_QUEUE_VISIBILITY_SECONDS = 330;
+export const LAUNCHER_TIMEOUT_SECONDS = 120;
+export const LAUNCHER_MEMORY_MB = 512;
+/** Visibility timeout of the launch queue (ticket 2.7): just above the launcher's timeout (ticket 2.9). */
+export const BUILD_QUEUE_VISIBILITY_SECONDS = LAUNCHER_TIMEOUT_SECONDS + 30;
+/** At most this many launches at once (one participant's launches run one at a time: a FIFO message group each). */
+export const LAUNCHER_MAX_CONCURRENCY = 5;
+/** EventBridge Scheduler runs the stuck-build check this often (criterion 3: a stopped task's build fails within 2 minutes). */
+export const BUILD_CHECK_SCHEDULE = "rate(1 minute)";
+/** Check messages are only triggers: one left unread for 5 minutes is dropped (a later one runs the check). */
+export const BUILD_CHECK_RETENTION_SECONDS = 300;
+/** The template the launcher commits (ticket 2.6), copied next to its bundled code as `template/`. */
+export const TEMPLATE_DIR = fileURLToPath(new URL("../../templates/basic", import.meta.url));
 /** Deliveries of one launch message before it goes to the dead-letter queue. */
 export const BUILD_QUEUE_MAX_RECEIVES = 3;
 
@@ -39,6 +92,7 @@ export class BuildsStack extends Stack {
   readonly repository: Repository;
   readonly githubSecret: Secret;
   readonly buildQueue: Queue;
+  readonly builderTask: FargateTaskDefinition;
 
   /**
    * The zones are fixed (config.ts). Without this override, `Vpc` checks its zones against
@@ -128,6 +182,198 @@ export class BuildsStack extends Stack {
       visibilityTimeout: Duration.seconds(BUILD_QUEUE_VISIBILITY_SECONDS),
       retentionPeriod: Duration.days(1),
       deadLetterQueue: { queue: buildDeadLetters, maxReceiveCount: BUILD_QUEUE_MAX_RECEIVES },
+    });
+
+    // Ticket 2.9: the builder's task. Its image is the deploy workflow's push, named by digest.
+    const digest = String(this.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT) ?? BUILDER_IMAGE_DIGEST_UNSET);
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${BUILDER_IMAGE_DIGEST_CONTEXT} must be sha256:<64 hex digits>`);
+    const taskPrincipal = () =>
+      new ServicePrincipal("ecs-tasks.amazonaws.com", {
+        conditions: {
+          StringEquals: { "aws:SourceAccount": ACCOUNT },
+          ArnLike: { "aws:SourceArn": `arn:aws:ecs:${REGION}:${ACCOUNT}:*` },
+        },
+      });
+    const builderLogs = new LogGroup(this, "BuilderLogs", {
+      logGroupName: BUILDER_LOG_GROUP_NAME,
+      retention: RetentionDays.TWO_WEEKS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    // The runner's rights (decision "Spec delta ... Builder"): the build model, its build record, the usage counters and
+    // the deploy queue. Nothing else: no secret, no other table partition, no other queue.
+    const taskRole = new Role(this, "BuilderTaskRole", {
+      roleName: BUILDER_TASK_ROLE_NAME,
+      assumedBy: taskPrincipal(),
+      description: "The builder task's runner: the build model, its build record, usage counters, the deploy queue",
+    });
+    const executionRole = new Role(this, "BuilderExecutionRole", {
+      roleName: BUILDER_EXECUTION_ROLE_NAME,
+      assumedBy: taskPrincipal(),
+      description: "Starts the builder task: pulls its image and writes its logs",
+    });
+    const tableArn = Table.fromTableName(this, "Data", TABLE_NAME).tableArn;
+    taskRole.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+        resources: [...BEDROCK_INVOKE_RESOURCES],
+      }),
+    );
+    taskRole.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...BUILDER_BUILD_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    taskRole.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...BUILDER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    taskRole.addToPolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...BUILDER_USAGE_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    taskRole.addToPolicy(
+      new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [`arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}`] }),
+    );
+    this.builderTask = new FargateTaskDefinition(this, "BuilderTask", {
+      family: BUILDER_TASK_FAMILY,
+      cpu: BUILDER_CPU,
+      memoryLimitMiB: BUILDER_MEMORY_MB,
+      taskRole,
+      executionRole,
+      runtimePlatform: { cpuArchitecture: CpuArchitecture.X86_64, operatingSystemFamily: OperatingSystemFamily.LINUX },
+    });
+    // No environment and no secrets: the launcher passes the build id and its one-repository token at start.
+    this.builderTask.addContainer("Builder", {
+      containerName: BUILDER_CONTAINER_NAME,
+      image: ContainerImage.fromEcrRepository(this.repository, digest),
+      essential: true,
+      logging: LogDrivers.awsLogs({ streamPrefix: "builder", logGroup: builderLogs }),
+    });
+
+    // Ticket 2.9: the build launcher, fed by the launch queue and, every minute, by the check queue.
+    const checkQueue = new Queue(this, "BuildsCheck", {
+      queueName: BUILD_CHECK_QUEUE_NAME,
+      encryption: QueueEncryption.SQS_MANAGED,
+      visibilityTimeout: Duration.seconds(BUILD_QUEUE_VISIBILITY_SECONDS),
+      retentionPeriod: Duration.seconds(BUILD_CHECK_RETENTION_SECONDS),
+    });
+    const launcher = workshopFunction(this, "Launcher", BUILD_LAUNCHER_FUNCTION_NAME, "builds-launcher.ts", LAUNCHER_MEMORY_MB, LAUNCHER_TIMEOUT_SECONDS, {
+      beforeBundling: () => [],
+      beforeInstall: () => [],
+      // The template the launcher commits travels with its code (decision "(2.6) Template files are an input").
+      afterBundling: (_inputDir: string, outputDir: string) => [`cp -R "${TEMPLATE_DIR}" "${outputDir}/template"`],
+    });
+    launcher.addEnvironment("BUILDER_TASK_DEFINITION_ARN", this.builderTask.taskDefinitionArn);
+    launcher.addEnvironment("BUILDS_SECURITY_GROUP_ID", this.securityGroup.securityGroupId);
+    // The one reader of the GitHub App's key (the boundary denies every other role, decision "(2.6)").
+    launcher.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["secretsmanager:GetSecretValue"], resources: [this.githubSecret.secretArn] }));
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*", "PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [LAUNCHES_PARTITION], "dynamodb:Attributes": [...LAUNCHER_LAUNCH_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["ecs:RunTask"],
+        resources: [this.builderTask.taskDefinitionArn],
+        conditions: { ArnEquals: { "ecs:cluster": this.cluster.clusterArn } },
+      }),
+    );
+    const buildTasks = `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`;
+    launcher.addToRolePolicy(
+      new PolicyStatement({ effect: Effect.ALLOW, actions: ["ecs:TagResource"], resources: [buildTasks], conditions: { StringEquals: { "ecs:CreateAction": "RunTask" } } }),
+    );
+    launcher.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["ecs:DescribeTasks", "ecs:StopTask"], resources: [buildTasks] }));
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["iam:PassRole"],
+        resources: [taskRole.roleArn, executionRole.roleArn],
+        conditions: { StringEquals: { "iam:PassedToService": "ecs-tasks.amazonaws.com" } },
+      }),
+    );
+    // The stuck-build check reads the two dead-letter queues (and removes what it handled).
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+        resources: [buildDeadLetters.queueArn, `arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_DLQ_NAME}`],
+      }),
+    );
+    // One message per invocation; the sources grant the consume rights on these two queues only.
+    launcher.addEventSource(new SqsEventSource(this.buildQueue, { batchSize: 1, maxConcurrency: LAUNCHER_MAX_CONCURRENCY }));
+    launcher.addEventSource(new SqsEventSource(checkQueue, { batchSize: 1, maxConcurrency: 2 }));
+
+    // Every minute, EventBridge Scheduler drops a trigger on the check queue (a Lambda cannot be invoked by a workload
+    // role: the boundary has no lambda:InvokeFunction). Its role may only send to that queue.
+    const schedulerRole = new Role(this, "BuildsCheckSchedulerRole", {
+      roleName: BUILD_CHECK_SCHEDULER_ROLE_NAME,
+      assumedBy: new ServicePrincipal("scheduler.amazonaws.com", { conditions: { StringEquals: { "aws:SourceAccount": ACCOUNT } } }),
+      description: "Sends the stuck-build check's trigger to its queue every minute",
+    });
+    schedulerRole.addToPolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [checkQueue.queueArn] }));
+    new CfnSchedule(this, "BuildsCheckSchedule", {
+      name: BUILD_CHECK_SCHEDULE_NAME,
+      description: "SSD Workshop: run the build launcher's stuck-build check",
+      scheduleExpression: BUILD_CHECK_SCHEDULE,
+      flexibleTimeWindow: { mode: "OFF" },
+      state: "ENABLED",
+      target: { arn: checkQueue.queueArn, roleArn: schedulerRole.roleArn, input: "{}" },
     });
   }
 }

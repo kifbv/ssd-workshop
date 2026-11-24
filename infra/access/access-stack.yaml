@@ -659,6 +659,16 @@ Resources:
               - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}/*
             Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Sessions cannot start, redirect or empty builds (Franck, 2026-11-24, ticket 2.9): the
+          # launch queue's messages make the launcher mint a repository token and start a task.
+          # Retries run from Franck's machine (npm run builds -- retry). Deploys from main may manage
+          # the queues; only the Claude user is denied.
+          - Sid: NoBuildQueueForSessions
+            Effect: Deny
+            Action: [sqs:SendMessage, sqs:SetQueueAttributes, sqs:PurgeQueue]
+            Resource: !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-builds*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey
             Effect: Deny
             NotAction:

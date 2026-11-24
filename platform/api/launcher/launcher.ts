@@ -1,0 +1,316 @@
+/**
+ * The build launcher (ticket 2.9): turns a queued build into a running builder task, and its stuck-build check.
+ *
+ * Launch, for one message of the launch queue `ssd-workshop-builds.fifo` (body exactly `{"buildId": "<id>"}`; one
+ * message group per participant, so one participant's launches run one at a time, decision "(2.6) For 2.9: one
+ * preparation at a time"). Every input is untrusted: the message names only a build id, and everything else comes from
+ * stored records (decision "(2.6) For 2.7 to 2.9: where the nickname comes from").
+ *
+ * 1. The build must be `queued`, its `nickname` must equal its participant's profile nickname, and its id must be the
+ *    participant's conversation `buildId` (decision "(2.7) For 2.9"); anything else is a duplicate or ignored, dropped
+ *    without a write.
+ * 2. Claim: one transaction moves the build from `queued` to `building` (conditional, so a second message for the same
+ *    build is a duplicate and never starts a second task) and adds it to the watch list (`LAUNCHES`).
+ * 3. Reads the approved spec, prepares the repository (ticket 2.6, the template bundled with the function), mints the
+ *    builder's one-repository token, and starts the task (cluster `ssd-workshop-builds`, the two workshop subnets, a
+ *    public IP). The token goes in RunTask's container override `BUILDER_GITHUB_TOKEN` (Franck accepted the risk,
+ *    decision "(2.9) Token hand-off"); the app's key and the organization-wide token never leave this process.
+ * 4. Records the task on the watch list and the build.
+ *
+ * Any failure after the claim marks the build failed with a plain reason (and stops a task already started), and the
+ * message is consumed: a new try is `npm run builds -- retry <nickname>`.
+ *
+ * Check (every minute, EventBridge Scheduler through the queue `ssd-workshop-builds-check`): a watched build whose task
+ * has stopped (or is gone) while the build is still `building` without a pushed commit is marked failed; a claim that
+ * never got a task within LAUNCH_UNSTARTED_MS is marked failed; a task running past BUILD_TASK_MAX_MS is stopped; the
+ * launch queue's dead-letter messages fail their `queued` builds, and the deploy queue's fail their builds still
+ * waiting for that deploy (decision "(2.5) Deploy message", "(2.7) For 2.9").
+ *
+ * Logs: one JSON line per launch or check, with an outcome, counts and an error name; never a token, nickname, build id,
+ * repository name or error message.
+ */
+import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/app.js";
+import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
+import { parseDeployJob, storedReason } from "../deploy/deploy.js";
+import { BUILD_ID_PATTERN } from "../keys.js";
+import { BUILD_TASK_MAX_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { errorName } from "../sign-in/code-request.js";
+import type { BuildStatus } from "../types.js";
+
+/** What the launcher reads of a build. */
+export interface LaunchBuild {
+  nickname: string;
+  participantId: string;
+  status: BuildStatus;
+}
+
+/** One entry of the watch list. */
+export interface LaunchEntry {
+  buildId: string;
+  /** ISO 8601: when the launcher claimed the build. */
+  claimedAt: string;
+  /** Set once the task started. */
+  taskArn?: string;
+}
+
+export interface LaunchRecords {
+  readBuild(buildId: string): Promise<LaunchBuild | undefined>;
+  /** The participant's profile nickname, as stored. */
+  readProfileNickname(participantId: string): Promise<string | undefined>;
+  /** The participant's conversation: the build it started and the approved spec version. */
+  readConversation(participantId: string): Promise<{ buildId?: string; approvedSpecVersion?: number }>;
+  /** The text of the spec version, only when that version exists and was approved. */
+  readApprovedSpec(participantId: string, version: number): Promise<string | undefined>;
+  /**
+   * One transaction: the build from `queued` to `building` (only while its nickname and participant are the ones read)
+   * and its watch-list entry. False when the build is no longer `queued` (a duplicate message).
+   */
+  claim(buildId: string, nickname: string, participantId: string, nowIso: string): Promise<boolean>;
+  /** Stores the started task on the watch-list entry and on the build. */
+  recordTask(buildId: string, taskArn: string, nowIso: string): Promise<void>;
+  /** Marks a claimed build that has no task failed (only while `building` without a task); removes its entry. */
+  failUnstarted(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  /** Marks failed a build still `building` with this task and no pushed commit. */
+  failStopped(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  /** Marks failed a build still `queued`. */
+  failQueued(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  /** Marks failed a build of this app still waiting for the deploy of this pushed commit (`building` or `deploying`). */
+  failDeploy(buildId: string, nickname: string, commit: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  listLaunches(): Promise<LaunchEntry[]>;
+  /** Removes a watch-list entry, only while it still names this task (or none, for `undefined`). */
+  removeLaunch(buildId: string, taskArn: string | undefined): Promise<void>;
+}
+
+/** A task as the check sees it. */
+export interface TaskState {
+  stopped: boolean;
+  /** When ECS created it. */
+  createdAt?: Date;
+}
+
+export interface BuildTasks {
+  /** Starts the builder for the build; the token goes in the container's override. */
+  start(buildId: string, token: string): Promise<{ taskArn: string } | { failure: string }>;
+  /** The state of each task; a task ECS no longer knows counts as stopped. */
+  describe(taskArns: readonly string[]): Promise<Map<string, TaskState>>;
+  stop(taskArn: string): Promise<void>;
+}
+
+export interface DeadLetter {
+  body: string | undefined;
+  receiptHandle: string;
+}
+
+export interface DeadLetters {
+  /** Up to 10 messages (no wait). */
+  receive(): Promise<DeadLetter[]>;
+  remove(receiptHandle: string): Promise<void>;
+}
+
+export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "failed";
+
+export interface LauncherLogEntry {
+  event: "launcher" | "build-check";
+  outcome: LaunchOutcome | "checked" | "error";
+  error?: string;
+  /** Check: builds marked failed, tasks stopped, dead letters read. */
+  failed?: number;
+  stopped?: number;
+  deadLetters?: number;
+  durationMs: number;
+}
+
+export interface LauncherDeps {
+  records: LaunchRecords;
+  tasks: BuildTasks;
+  /** Reads and parses the GitHub App's secret (only inside this process). */
+  credentials: () => Promise<AppCredentials>;
+  github: GitHubDeps;
+  templateFiles: () => Promise<RepositoryFile[]>;
+  now: () => Date;
+  log: (entry: LauncherLogEntry) => void;
+}
+
+export interface CheckDeps {
+  records: LaunchRecords;
+  tasks: BuildTasks;
+  launchDeadLetters: DeadLetters;
+  deployDeadLetters: DeadLetters;
+  now: () => Date;
+  log: (entry: LauncherLogEntry) => void;
+}
+
+export const SPEC_MISSING_REASON = "The approved spec could not be found, so the build did not start.";
+export const START_FAILED_REASON = "The build could not be started: the build service had no room for it. Your facilitator can restart it.";
+export const LAUNCH_SERVICE_REASON = "The build could not be started because of a problem on the workshop's side.";
+export const STOPPED_REASON = "The build stopped before it was finished.";
+export const UNSTARTED_REASON = "The build did not start in time.";
+export const QUEUED_DEAD_REASON = "The build could not be started after several tries.";
+export const DEPLOY_DEAD_REASON = "The app could not be published because of a problem on the workshop's side.";
+
+/** The build id of a launch message: exactly `{"buildId": "<id>"}`, else undefined. */
+export function parseLaunchMessage(body: string | undefined): string | undefined {
+  if (body === undefined) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value);
+  const buildId = (value as { buildId?: unknown }).buildId;
+  if (keys.length !== 1 || typeof buildId !== "string" || !BUILD_ID_PATTERN.test(buildId)) return undefined;
+  return buildId;
+}
+
+/** A launch failure's reason for the build: GitHub's plain step messages, else a fixed text. */
+function launchReason(error: unknown): string {
+  if (error instanceof GitHubProblem) return storedReason(`GitHub: ${error.message}`);
+  if (error instanceof LaunchFailure) return error.reason;
+  return LAUNCH_SERVICE_REASON;
+}
+
+class LaunchFailure extends Error {
+  constructor(readonly reason: string) {
+    super("launch failed");
+    this.name = "LaunchFailure";
+  }
+}
+
+/**
+ * Handles one launch message. Throws (a bare error, so SQS delivers it again) only before the claim, when a read
+ * failed; after the claim every outcome is recorded on the build and the message is consumed.
+ */
+export async function processLaunch(body: string | undefined, deps: LauncherDeps): Promise<LaunchOutcome> {
+  const started = deps.now().getTime();
+  const log = (outcome: LaunchOutcome, error?: unknown): void => {
+    deps.log({ event: "launcher", outcome, ...(error === undefined ? {} : { error: errorName(error) }), durationMs: Math.max(0, deps.now().getTime() - started) });
+  };
+  const buildId = parseLaunchMessage(body);
+  if (buildId === undefined) {
+    log("invalid");
+    return "invalid";
+  }
+
+  let build: LaunchBuild | undefined;
+  let checked: { ok: boolean; specVersion?: number };
+  // Before and including the claim, a failed read or write is thrown: SQS delivers the message again, and the claim's
+  // condition keeps a redelivery from acting twice.
+  try {
+    build = await deps.records.readBuild(buildId);
+    if (build === undefined || build.status !== "queued") {
+      log("duplicate");
+      return "duplicate";
+    }
+    const [profileNickname, conversation] = await Promise.all([
+      deps.records.readProfileNickname(build.participantId),
+      deps.records.readConversation(build.participantId),
+    ]);
+    checked = {
+      ok: profileNickname === build.nickname && conversation.buildId === buildId,
+      ...(conversation.approvedSpecVersion === undefined ? {} : { specVersion: conversation.approvedSpecVersion }),
+    };
+    if (!checked.ok) {
+      log("ignored");
+      return "ignored";
+    }
+    if (!(await deps.records.claim(buildId, build.nickname, build.participantId, deps.now().toISOString()))) {
+      log("duplicate");
+      return "duplicate";
+    }
+  } catch (error) {
+    log("failed", error);
+    // No cause: only the error's name is ever printed.
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error("launch failed");
+  }
+  const { nickname, participantId } = build;
+
+  let taskArn: string | undefined;
+  try {
+    const version = checked.specVersion;
+    const spec = version === undefined ? undefined : await deps.records.readApprovedSpec(participantId, version);
+    if (spec === undefined) throw new LaunchFailure(SPEC_MISSING_REASON);
+    const credentials = await deps.credentials();
+    await prepareRepository({ credentials, nickname, spec, templateFiles: await deps.templateFiles() }, deps.github);
+    const { token } = await builderToken(credentials, nickname, deps.github);
+    const result = await deps.tasks.start(buildId, token);
+    if ("failure" in result) throw new LaunchFailure(START_FAILED_REASON);
+    taskArn = result.taskArn;
+    await deps.records.recordTask(buildId, taskArn, deps.now().toISOString());
+    log("started");
+    return "started";
+  } catch (error) {
+    // A task already started but not recorded would run unwatched: stop it, then fail the build.
+    if (taskArn !== undefined) await deps.tasks.stop(taskArn).catch(() => undefined);
+    try {
+      await deps.records.failUnstarted(buildId, [launchReason(error)], deps.now().toISOString());
+    } catch (markError) {
+      // The check fails it after LAUNCH_UNSTARTED_MS (its entry has no task).
+      log("failed", markError);
+      return "failed";
+    }
+    log("failed", error);
+    return "failed";
+  }
+}
+
+/** Reads a dead-letter queue until it is empty (at most `rounds` batches), handing each message to `handle`. */
+async function drain(queue: DeadLetters, handle: (body: string | undefined) => Promise<void>, rounds = 5): Promise<number> {
+  let count = 0;
+  for (let round = 0; round < rounds; round += 1) {
+    const messages = await queue.receive();
+    if (messages.length === 0) break;
+    for (const message of messages) {
+      await handle(message.body);
+      await queue.remove(message.receiptHandle);
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** The stuck-build check. Every write is conditional, so two checks at once (or a check racing a launch) are harmless. */
+export async function runCheck(deps: CheckDeps): Promise<void> {
+  const started = deps.now().getTime();
+  const nowIso = (): string => deps.now().toISOString();
+  let failed = 0;
+  let stopped = 0;
+  let deadLetters = 0;
+  try {
+    const launches = await deps.records.listLaunches();
+    const withTask = launches.filter((entry): entry is LaunchEntry & { taskArn: string } => entry.taskArn !== undefined);
+    const states = withTask.length === 0 ? new Map<string, TaskState>() : await deps.tasks.describe(withTask.map((entry) => entry.taskArn));
+    for (const entry of launches) {
+      if (entry.taskArn === undefined) {
+        if (started - Date.parse(entry.claimedAt) < LAUNCH_UNSTARTED_MS) continue;
+        if (await deps.records.failUnstarted(entry.buildId, [UNSTARTED_REASON], nowIso())) failed += 1;
+        else await deps.records.removeLaunch(entry.buildId, undefined);
+        continue;
+      }
+      const state = states.get(entry.taskArn) ?? { stopped: true };
+      if (state.stopped) {
+        if (await deps.records.failStopped(entry.buildId, entry.taskArn, [STOPPED_REASON], nowIso())) failed += 1;
+        await deps.records.removeLaunch(entry.buildId, entry.taskArn);
+      } else if (state.createdAt !== undefined && started - state.createdAt.getTime() > BUILD_TASK_MAX_MS) {
+        // Marked failed by the next check, once ECS reports it stopped.
+        await deps.tasks.stop(entry.taskArn);
+        stopped += 1;
+      }
+    }
+    deadLetters += await drain(deps.launchDeadLetters, async (body) => {
+      const buildId = parseLaunchMessage(body);
+      if (buildId !== undefined && (await deps.records.failQueued(buildId, [QUEUED_DEAD_REASON], nowIso()))) failed += 1;
+    });
+    deadLetters += await drain(deps.deployDeadLetters, async (body) => {
+      const job = parseDeployJob(body);
+      if (job !== undefined && (await deps.records.failDeploy(job.buildId, job.nickname, job.commit, [DEPLOY_DEAD_REASON], nowIso()))) failed += 1;
+    });
+  } catch (error) {
+    deps.log({ event: "build-check", outcome: "error", error: errorName(error), failed, stopped, deadLetters, durationMs: Math.max(0, deps.now().getTime() - started) });
+    // eslint-disable-next-line preserve-caught-error -- no cause, as above
+    throw new Error("check failed");
+  }
+  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, durationMs: Math.max(0, deps.now().getTime() - started) });
+}

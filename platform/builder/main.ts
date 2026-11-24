@@ -1,9 +1,11 @@
 /**
  * The builder's entry point (ticket 2.8; ticket 2.9 packages it as the `ssd-workshop-builder` image and starts it as a
- * Fargate task): `tsx platform/builder/main.ts`, with
+ * Fargate task, image platform/builder/Dockerfile, which runs this file bundled): `tsx platform/builder/main.ts`, with
  *
  * - `BUILD_ID`: the build to run (the nickname and participant come from the stored build record, never from here);
- * - `BUILDER_GITHUB_TOKEN`: the build's one-repository token (`builderToken`, ticket 2.6), minted by the launcher.
+ * - `BUILDER_GITHUB_TOKEN`: the build's one-repository token (`builderToken`, ticket 2.6), minted by the launcher and
+ *   passed in RunTask's container override (ticket 2.9; Franck accepted that ECS and CloudTrail show it for its hour,
+ *   decision "(2.9) Token hand-off"). Never the app's key or the organization-wide token.
  *
  * The token is deleted from `process.env` as soon as it is read. That keeps it out of anything that copies the
  * environment later, but it is not what keeps it from the agent: the agent's process gets an explicit environment

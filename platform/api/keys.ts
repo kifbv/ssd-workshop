@@ -82,6 +82,18 @@ export function buildKey(buildId: string): ItemKey {
   return { pk: `BUILD#${buildId}`, sk: "BUILD" };
 }
 
+/**
+ * The launcher's watch list (ticket 2.9): one item per build it claimed and has not seen finish, at `LAUNCHES` /
+ * `BUILD#<build id>`, holding the build's task once started. The stuck-build check reads this one partition (no scan).
+ * Its partition key is not `BUILD#...` (IAM's `BUILD#*` never matches `LAUNCHES`), so the builder's task role cannot
+ * touch it.
+ */
+export const LAUNCHES_PK = "LAUNCHES";
+
+export function launchKey(buildId: string): ItemKey {
+  return { pk: LAUNCHES_PK, sk: buildKey(buildId).pk };
+}
+
 /** Prefix of every stored value's sort key in an app's data partition (ticket 2.4). */
 export const APP_DATA_PREFIX = "DATA#";
 

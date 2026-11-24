@@ -12,11 +12,11 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v1` and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check, own record, nickname) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push), GitHub App secret `ssd-workshop-github` (ticket 2.6), FIFO launch queue `ssd-workshop-builds.fifo` and its dead-letter queue (ticket 2.7; the AI worker is its only sender, the launcher of ticket 2.9 its consumer); see "Build network (ticket 2.1)" | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push), GitHub App secret `ssd-workshop-github` (ticket 2.6), FIFO launch queue `ssd-workshop-builds.fifo` and its dead-letter queue (ticket 2.7; the AI worker is its only sender, the launcher its consumer), from ticket 2.9 the builder task definition `ssd-workshop-builder` (image by digest, logs `/ecs/ssd-workshop-builder`), the launcher Lambda `ssd-workshop-builds-launcher`, the check queue and schedule `ssd-workshop-builds-check`; see "Build network (ticket 2.1)" and "Builds: builder task and launcher (ticket 2.9)" | `CliCredentialsStackSynthesizer`, assets bucket (from ticket 2.9) |
 
 Deploy order: cdk-assets, then site and apps, then edge; api after cdk-assets (it needs the assets
 bucket for its Lambda code, and nothing from site or edge); apps after cdk-assets and before edge (edge
-serves its bucket at `/apps/*`); builds on its own (no file assets, nothing
+serves its bucket at `/apps/*`); builds after cdk-assets (from ticket 2.9 its launcher's code is a file asset; it takes nothing
 from the other stacks). Nothing is passed between regions: the edge
 stack finds the site bucket by its fixed name, and the site bucket policy lets this account's
 CloudFront distributions read it.
@@ -685,3 +685,71 @@ conversation state are deleted, and their step goes back to Clarify; their profi
 AI usage totals stay. A reload of their page shows an empty step 1. Errors print only the AWS error's name, never a key or a text. The command refuses while the AI is
 answering their last message (try again a minute later; after a worker crash, up to 20 minutes); a message waiting for a facilitator is cleared
 too. If it stops part way (an AWS error), run it again: the second run finishes.
+
+## Builds: builder task and launcher (ticket 2.9)
+
+A merge to `main` builds the builder image (`platform/builder/Dockerfile`), pushes it to
+`ssd-workshop-builder` tagged with the commit, and deploys the task definition `ssd-workshop-builder`
+pinned to the pushed digest. The launcher `ssd-workshop-builds-launcher` reads the launch queue
+`ssd-workshop-builds.fifo`, prepares the participant's repository, mints the build's one-repository
+token and starts the task on `ssd-workshop-builds` in the two workshop subnets with a public IP. Every
+minute EventBridge Scheduler (`ssd-workshop-builds-check`) triggers its stuck-build check: a task that
+stopped before its build was finished, a build that never started, and builds left in the launch or
+deploy dead-letter queues are marked failed. Task logs: `/ecs/ssd-workshop-builder`; the launcher's:
+`ssd-workshop-builds-launcher`.
+
+Before the first deploy, Franck applies the access stack (`NoBuildQueueForSessions`, ticket 2.9) and
+the GitHub App secret must be loaded (section above).
+
+### List and retry builds (Franck's machine)
+
+Claude sessions may not send to the builds queues (Franck, 2026-11-24), so retries run with Franck's
+credentials:
+
+```sh
+AWS_PROFILE=franck npm run builds -- list
+# expect: one line per build, newest first: "<created at>  <status>  <nickname>  <build id>"
+AWS_PROFILE=franck npm run builds -- retry <nickname>
+# expect: "<nickname>'s build <build id> is queued again; the launcher starts a new task on the same repository within a minute."
+```
+
+Only a `failed` build (or one stuck `queued`) is retried; the command refuses while the earlier task
+still runs. The build keeps its id, so the participant's page follows the new run, and the task works
+on the same repository `ssd-<nickname>`.
+
+### Live check (criterion 5, to verify after deploy)
+
+1. In the browser, as a test participant with a nickname, go through Clarify and Spec and approve the
+   spec. Note the time.
+2. Within a minute the build shows "building" on the participant's page; check the task:
+
+   ```sh
+   AWS_PROFILE=franck aws ecs list-tasks --region eu-central-1 --cluster ssd-workshop-builds
+   # expect: one task ARN (while the build runs)
+   AWS_PROFILE=franck aws logs tail ssd-workshop-builds-launcher --region eu-central-1 --since 10m
+   # expect: a {"event":"launcher","outcome":"started",...} line, and {"event":"build-check","outcome":"checked",...}
+   #         lines every minute
+   ```
+
+3. Within 10 minutes of the approval, `https://workshop.rankly.games/apps/<nickname>/` answers 200 with
+   the participant's app, and the page shows the build `live`:
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' https://workshop.rankly.games/apps/<nickname>/
+   # expect: 200
+   AWS_PROFILE=franck aws logs tail /ecs/ssd-workshop-builder --region eu-central-1 --since 15m
+   # expect: one JSON line per phase, ending with {"event":"builder","phase":"finish","outcome":"ok",...}
+   ```
+
+4. Criterion 3 live (optional): during a second build, stop its task
+   (`aws ecs stop-task --cluster ssd-workshop-builds --task <arn>`, Franck's credentials); within
+   2 minutes `npm run builds -- list` shows that build `failed`, and the page shows "The build stopped
+   before it was finished." Then `AWS_PROFILE=franck npm run builds -- retry <nickname>` starts a new
+   task on the same repository (criterion 4) and the app goes live again.
+5. Confirm the task holds no secret in its definition and only the two override variables:
+
+   ```sh
+   AWS_PROFILE=franck aws ecs describe-task-definition --region eu-central-1 --task-definition ssd-workshop-builder \
+     --query 'taskDefinition.containerDefinitions[0].[environment,secrets]'
+   # expect: [null, null] (or [[], []])
+   ```

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { ACCOUNT, DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
+import { ACCOUNT, BUILDER_IMAGE_DIGEST_CONTEXT, BUILDER_REPOSITORY_NAME, DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
 import { deploySettings, firstHeading, toGitHubOutput } from "./deploy-settings.js";
 
 const repoFile = (path: string): string =>
@@ -16,6 +16,7 @@ interface Step {
   env?: Record<string, unknown>;
   "working-directory"?: string;
   if?: string;
+  id?: string;
 }
 
 interface Job {
@@ -164,6 +165,25 @@ describe("deploy workflow (ticket 0.5)", () => {
     expect(step?.run).toContain("::error::");
   });
 
+  it("builds and pushes the builder image after assuming the role, and deploys it by the pushed digest (ticket 2.9)", () => {
+    const index = (match: (step: Step) => boolean) => deploySteps.findIndex(match);
+    const credentials = index((step) => !!step.uses?.startsWith("aws-actions/configure-aws-credentials"));
+    const image = index((step) => step.id === "builder");
+    const cdk = index((step) => !!step.run?.includes("cdk deploy"));
+    expect(credentials).toBeGreaterThanOrEqual(0);
+    expect(image).toBeGreaterThan(credentials);
+    expect(cdk).toBeGreaterThan(image);
+    const build = deploySteps[image];
+    expect(build?.run).toContain("docker build -f platform/builder/Dockerfile");
+    expect(build?.run).toContain("docker push");
+    expect(build?.run).toContain('echo "digest=$digest" >> "$GITHUB_OUTPUT"');
+    // Registry and repository from config.ts, never a hard-coded account.
+    expect(build?.env).toEqual({ REGISTRY: "${{ steps.settings.outputs.builder_registry }}", REPOSITORY: "${{ steps.settings.outputs.builder_repository }}" });
+    expect(deployText).not.toContain(ACCOUNT);
+    expect(deploySteps[cdk]?.env).toEqual({ BUILDER_IMAGE_DIGEST: "${{ steps.builder.outputs.digest }}" });
+    expect(deploySteps[cdk]?.run).toContain(`-c "${BUILDER_IMAGE_DIGEST_CONTEXT}=$BUILDER_IMAGE_DIGEST"`);
+  });
+
   it("pins every action to a major version", () => {
     for (const step of deploySteps.filter((s) => s.uses)) {
       expect(step.uses).toMatch(/^[\w.-]+\/[\w.-]+@v\d+$/);
@@ -181,6 +201,8 @@ describe("deploy settings", () => {
     expect(settings.heading).toBe("SSD Workshop");
     expect(settings.apiStack).toBe("ssd-workshop-api");
     expect(settings.hostedZoneId).toBe(HOSTED_ZONE_ID);
+    expect(settings.builderRegistry).toBe(`${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`);
+    expect(settings.builderRepository).toBe(BUILDER_REPOSITORY_NAME);
   });
 
   it("print as GITHUB_OUTPUT lines", () => {
@@ -192,6 +214,8 @@ describe("deploy settings", () => {
       "heading=SSD Workshop",
       `api_stack=${STACK_NAMES.api}`,
       `hosted_zone_id=${HOSTED_ZONE_ID}`,
+      `builder_registry=${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`,
+      `builder_repository=${BUILDER_REPOSITORY_NAME}`,
     ]);
   });
 

@@ -71,12 +71,14 @@ export function buildApp(props?: AppProps): App {
   apps.addStackDependency(assets);
   edge.addStackDependency(apps);
 
-  // No file assets and nothing from the other stacks: deploys on its own.
-  new BuildsStack(app, STACK_NAMES.builds, {
+  // Ticket 2.9 adds the build launcher (bundled Lambda code), so the assets bucket; it finds the table and the
+  // deploy queue by name.
+  const builds = new BuildsStack(app, STACK_NAMES.builds, {
     env: { account: ACCOUNT, region: REGION },
-    synthesizer: inlineTemplateSynthesizer(),
-    description: "SSD Workshop: build network, ECS cluster and builder image repository",
+    synthesizer: assetsBucketSynthesizer(),
+    description: "SSD Workshop: build network, ECS cluster, builder image, task and launcher",
   });
+  builds.addStackDependency(assets);
 
   return app;
 }

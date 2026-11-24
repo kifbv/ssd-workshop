@@ -1433,6 +1433,22 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(ROLES[0]).toBe(BUILD_LAUNCHER_ROLE_ARN);
     });
 
+    it("denies the Claude user sending to, changing or purging the builds queues (Franck, 2026-11-24, ticket 2.9)", () => {
+      const queues = ["ssd-workshop-builds.fifo", "ssd-workshop-builds-dlq.fifo", "ssd-workshop-builds-check"].map((name) => `arn:aws:sqs:${REGION}:${ACCOUNT}:${name}`);
+      for (const queue of queues) {
+        for (const action of ["sqs:SendMessage", "sqs:SetQueueAttributes", "sqs:PurgeQueue"]) {
+          expect(allowedBy(deploy, action, queue, CLAUDE), `${action} ${queue}`).toBe(false);
+          // Deploys from main still manage them.
+          expect(allowedBy(deploy, action, queue, DEPLOY), `${action} ${queue}`).toBe(true);
+        }
+        expect(allowedBy(deploy, "sqs:GetQueueAttributes", queue, CLAUDE), queue).toBe(true);
+      }
+      // Other workshop queues stay open to sessions (the AI queue, the deploy queue).
+      expect(allowedBy(deploy, "sqs:SendMessage", `arn:aws:sqs:${REGION}:${ACCOUNT}:ssd-workshop-ai-messages`, CLAUDE)).toBe(true);
+      const deny = deploy.find((s) => s.Sid === "NoBuildQueueForSessions");
+      expect(deny?.Effect).toBe("Deny");
+    });
+
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {
       for (const action of ["iam:CreateRole", "iam:PassRole", "iam:PutRolePolicy"]) expect(allowedBy(deploy, action, BUILD_LAUNCHER_ROLE_ARN, DEPLOY), action).toBe(true);
       for (const action of ["lambda:CreateFunction", "lambda:UpdateFunctionCode"]) expect(allowedBy(deploy, action, FUNCTIONS[0] ?? "", DEPLOY), action).toBe(true);

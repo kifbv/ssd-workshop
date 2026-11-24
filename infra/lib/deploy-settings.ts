@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
+import { ACCOUNT, BUILDER_REPOSITORY_NAME, DEPLOY_ROLE_ARN, DOMAIN, HOSTED_ZONE_ID, REGION, STACK_NAMES } from "./config.js";
 
 /** The sign-in page source; the site stack publishes its build (same HTML). */
 const INDEX_HTML = fileURLToPath(new URL("../../platform/web/index.html", import.meta.url));
@@ -18,6 +18,10 @@ export interface DeploySettings {
   apiStack: string;
   /** rankly.games zone, snapshotted before and after the deploy (no record may change). */
   hostedZoneId: string;
+  /** ECR registry the builder image is pushed to (ticket 2.9). */
+  builderRegistry: string;
+  /** The builder image's repository in that registry. */
+  builderRepository: string;
 }
 
 /** Returns the text of the first <h1> of an HTML document, whitespace collapsed. */
@@ -37,6 +41,8 @@ export function deploySettings(): DeploySettings {
     heading: firstHeading(readFileSync(INDEX_HTML, "utf8")),
     apiStack: STACK_NAMES.api,
     hostedZoneId: HOSTED_ZONE_ID,
+    builderRegistry: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com`,
+    builderRepository: BUILDER_REPOSITORY_NAME,
   };
 }
 
@@ -49,6 +55,8 @@ export function toGitHubOutput(settings: DeploySettings): string {
     `heading=${settings.heading}`,
     `api_stack=${settings.apiStack}`,
     `hosted_zone_id=${settings.hostedZoneId}`,
+    `builder_registry=${settings.builderRegistry}`,
+    `builder_repository=${settings.builderRepository}`,
     "",
   ].join("\n");
 }

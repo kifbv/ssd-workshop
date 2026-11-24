@@ -20,6 +20,7 @@
  * | App data value       | `APPDATA#<nickname>`   | `DATA#<key>`         | never                     |
  * | App data usage       | `APPDATA#<nickname>`   | `DATA_USAGE`         | never                     |
  * | Build                | `BUILD#<build id>`     | `BUILD`              | never                     |
+ * | Launch watch entry   | `LAUNCHES`             | `BUILD#<build id>`   | never (removed by check)  |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
  *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email`,
@@ -390,6 +391,24 @@ export interface BuildItem extends Keyed {
   failureReasons?: string[];
   /** ISO 8601: when the deployer finished (live or failed). */
   finishedAt?: string;
+  /** The builder task's ARN (ticket 2.9, written by the launcher once RunTask answered; removed by a retry). */
+  taskArn?: string;
+  /** ISO 8601: when the launcher claimed the build (ticket 2.9). */
+  launchedAt?: string;
+}
+
+/**
+ * The launcher's watch entry for a build it claimed (ticket 2.9): one partition `LAUNCHES`, so the stuck-build check
+ * reads every running launch with one Query instead of scanning the table. Removed once the build's task stopped.
+ * Only the launcher's role writes it (`LAUNCHER_LAUNCH_ATTRIBUTES` in infra/lib/config.ts).
+ */
+export interface LaunchItem extends Keyed {
+  type: "launch";
+  buildId: string;
+  /** ISO 8601: when the claim happened. */
+  claimedAt: string;
+  /** Set once RunTask answered with a task. */
+  taskArn?: string;
 }
 
 export type TableItem =
@@ -406,4 +425,5 @@ export type TableItem =
   | AppLiveItem
   | AppDataItem
   | AppDataUsageItem
-  | BuildItem;
+  | BuildItem
+  | LaunchItem;

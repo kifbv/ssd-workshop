@@ -207,9 +207,27 @@ paths:
   CloudFront read to the workshop distribution's exact ARN (`DISTRIBUTION_ARN`), not `distribution/*`.
 - A queue that makes a worker publish (the deploy queue, ticket 2.5) gets its senders checked on the synth output: a test
   fails when any IAM policy may `sqs:SendMessage` to it (by name, ARN, logical id or wildcard) other than the one
-  allowed sender (none until ticket 2.9 adds the builder).
+  allowed sender (since ticket 2.9: the builder task role `ssd-workshop-builder`, the deploy queue's only sender; the
+  GitHub secret's only reader is the launcher role; both tested on the synth output).
 - CloudFront Function code lives in a plain `.js` file (`FunctionCode.fromFile`, inlined in the template, no asset) that
   a test evaluates (`new Function(code + "return handler;")`); `AWS::CloudFront::Function` takes `Tags`.
 - A role whose `GetItem` is limited by `dynamodb:Attributes` also needs `StringEquals` `dynamodb:Select` =
   `SPECIFIC_ATTRIBUTES`: a GetItem without a `ProjectionExpression` returns the whole item, and the attribute list alone
   may let it through (ticket 2.8, for 2.9's builder role).
+- A schedule that must run a Lambda (the stuck-build check, ticket 2.9) goes EventBridge Scheduler → an
+  `ssd-workshop-*` SQS queue → event source mapping: the boundary has no `lambda:InvokeFunction` for a scheduler role.
+  `AWS::Scheduler::Schedule` takes no tags (it is in `NOT_TAGGABLE`).
+- ECS task log groups are named `/ecs/ssd-workshop-*` (the access stack's log rights name that prefix); the names test
+  strips `/ecs/` before checking the `ssd-workshop-` start. A container's `Name` inside a task definition is not a
+  resource name (`NOT_NAME_PATHS`).
+- A container image is pinned by digest (`ContainerImage.fromEcrRepository(repo, "sha256:...")`, context
+  `builderImageDigest`, passed by the deploy workflow after its push), so pushing a tag cannot change what tasks run.
+  CI's synth uses a placeholder digest.
+- `NodejsFunction` bundles are CommonJS: code that a Lambda bundles must not use `import.meta` at load (esbuild
+  warns "import.meta is not available" and it is `{}` at run time); keep path helpers that need it in functions not
+  called by the handler, or in a separate module (`platform/api/github/template-files.ts`, ticket 2.9). Files the
+  function needs next to it are copied in `commandHooks.afterBundling`, and a synth test compares them with the source.
+- Docker Hub rate-limits anonymous pulls (429 in sessions and CI): base images come from the ECR Public mirror
+  `public.ecr.aws/docker/library/<image>:<exact version>`.
+- In a session, `docker build` cannot reach npm through the agent proxy's TLS (SELF_SIGNED_CERT_IN_CHAIN): build a
+  local copy of the Dockerfile that mounts the proxy CA (`--build-context`, `NODE_EXTRA_CA_CERTS`); never commit it.

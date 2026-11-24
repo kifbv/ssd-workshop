@@ -148,3 +148,8 @@ paths:
   address): the deployer downloads `codeload.github.com/<o>/<r>/tar.gz/refs/heads/main` (full ref: `tar.gz/main` picks a
   tag `main` first) with `redirect: "error"` and reads the commit from the first entry only (pax global header, one
   `comment=<40 hex>`), then publishes those same bytes when it equals the pushed one (ticket 2.8, `readTarGzArchive`).
+- A worker that starts something costly or hard to undo (the launcher's RunTask, ticket 2.9) claims the record first
+  (one conditional transaction, `queued` → `building`, plus a watch entry), then acts; any failure after the claim marks
+  the record failed and consumes the message, so a redelivery can never start a second task. Anything that can leave a
+  record stuck (a stopped task, a dead-lettered message) is swept by a scheduled check that writes only under the
+  condition that the record is still in the state the check saw (`#status = :building AND #taskArn = :taskArn ...`).
