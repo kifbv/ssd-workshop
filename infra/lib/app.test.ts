@@ -15,7 +15,13 @@ import {
   AI_QUEUE_VISIBILITY_SECONDS,
   AI_WORKER_MAX_CONCURRENCY,
   AI_WORKER_TIMEOUT_SECONDS,
+  APP_DATA_METHODS,
+  APP_DATA_PATH,
+  APP_DATA_PREFLIGHT_THROTTLE,
+  APP_DATA_READ_THROTTLE,
+  APP_DATA_WRITE_THROTTLE,
 } from "./api-stack.js";
+import { APP_DATA_ROUTES as APP_DATA_ROUTE_KEYS, PREFLIGHT_HEADERS } from "../../platform/api/app-data/data.js";
 import { STALE_PENDING_SECONDS } from "../../platform/api/conversation/state.js";
 import { WRITE_RESERVE_MS } from "../../platform/api/handlers/ai-worker.js";
 import { CONVERSATION_ROUTES as CONVERSATION_ROUTE_KEYS } from "../../platform/api/conversation/conversation.js";
@@ -33,6 +39,7 @@ import {
   IAM_PATH,
   PAGES_CONTENT_SECURITY_POLICY,
   PAGES_HEADERS_POLICY_NAME,
+  APP_DATA_HEADERS_POLICY_NAME,
   SENDER_ADDRESS,
   SES_CONFIGURATION_SET,
   SIGN_IN_CODE_FUNCTION_NAME,
@@ -40,6 +47,7 @@ import {
   PARTICIPANT_FUNCTION_NAME,
   CONVERSATION_FUNCTION_NAME,
   AI_WORKER_FUNCTION_NAME,
+  APP_DATA_FUNCTION_NAME,
   AI_QUEUE_NAME,
   AI_DLQ_NAME,
   REGION,
@@ -479,7 +487,8 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
 
   it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
     const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
-    expect(behaviours).toHaveLength(1);
+    // /api/* and the data API's /api/apps/* (ticket 2.4).
+    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*"]);
     const behaviour = apiBehaviour();
     expect(behaviour).toMatchObject({
       PathPattern: "/api/*",
@@ -510,11 +519,13 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
     for (const type of ["AWS::CloudFront::CachePolicy", "AWS::CloudFront::OriginRequestPolicy", "AWS::CloudFront::Function"]) {
       expect(ofType(type), type).toEqual([]);
     }
-    // The pages' headers policy (ticket 1.6) is the only custom CloudFront policy, and /api/*
-    // keeps the managed SecurityHeadersPolicy (asserted above), not the pages' policy.
+    // The pages' headers policy (ticket 1.6) and the data API's (ticket 2.4) are the only custom
+    // CloudFront policies, and /api/* keeps the managed SecurityHeadersPolicy (asserted above).
     const custom = ofType("AWS::CloudFront::ResponseHeadersPolicy");
-    expect(custom).toHaveLength(1);
-    expect(JSON.stringify(apiBehaviour())).not.toContain(custom[0]?.[1] ?? "-");
+    expect(custom.map(([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name).sort()).toEqual(
+      [APP_DATA_HEADERS_POLICY_NAME, PAGES_HEADERS_POLICY_NAME].sort(),
+    );
+    for (const [, id] of custom) expect(JSON.stringify(apiBehaviour())).not.toContain(id);
   });
 
   it("still creates exactly the A and AAAA records for workshop.rankly.games, and no other Route53 record", () => {
@@ -530,8 +541,79 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
   });
 });
 
+describe("CloudFront /api/apps/* behaviour: every data API answer readable by sandboxed apps, throttles included (ticket 2.4)", () => {
+  const distributionConfig = (): Record<string, unknown> =>
+    ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as Record<string, unknown>;
+  const behaviour = (pattern: string): Record<string, unknown> | undefined =>
+    (distributionConfig().CacheBehaviors as Record<string, unknown>[]).find((b) => b.PathPattern === pattern);
+  const policy = () =>
+    ofType("AWS::CloudFront::ResponseHeadersPolicy").find(
+      ([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name === APP_DATA_HEADERS_POLICY_NAME,
+    );
+  const config = (): Record<string, Record<string, unknown>> =>
+    policy()?.[2].Properties?.ResponseHeadersPolicyConfig as Record<string, Record<string, unknown>>;
+
+  it("sends /api/apps/* to the API exactly like /api/*, matched first, with its own headers policy", () => {
+    const apps = behaviour("/api/apps/*");
+    const api = behaviour("/api/*");
+    const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
+    expect(behaviours.indexOf(apps ?? {})).toBeLessThan(behaviours.indexOf(api ?? {}));
+    const without = (b: Record<string, unknown> | undefined) =>
+      Object.fromEntries(Object.entries(b ?? {}).filter(([name]) => name !== "PathPattern" && name !== "ResponseHeadersPolicyId"));
+    const [appsRest, apiRest] = [without(apps), without(api)];
+    const [appsPolicy, apiPolicy] = [apps?.ResponseHeadersPolicyId, api?.ResponseHeadersPolicyId];
+    // Same origin, methods, HTTPS only, caching disabled, origin request policy.
+    expect(appsRest).toEqual(apiRest);
+    expect(appsRest).toMatchObject({ ViewerProtocolPolicy: "https-only", CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac" });
+    expect((distributionConfig().Origins as unknown[]).length).toBe(2);
+    expect(apiPolicy).toBe("67f7725c-6f97-4210-82d7-5512b31e9d03");
+    expect(appsPolicy).toEqual({ Ref: policy()?.[1] });
+  });
+
+  it("names the policy ssd-workshop-app-data-v1 in the edge stack, retained, versioned in its logical id", () => {
+    const [stackName, id, resource] = policy() ?? [];
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(APP_DATA_HEADERS_POLICY_NAME).toBe("ssd-workshop-app-data-v1");
+    expect(id).toMatch(/^AppDataHeadersV1[0-9A-F]{8}$/);
+    expect(resource?.DeletionPolicy).toBe("Retain");
+    expect(resource?.UpdateReplacePolicy).toBe("Retain");
+  });
+
+  it("adds Access-Control-Allow-Origin: * to every answer, replacing the function's own (one header), never with credentials, like the function's preflight", () => {
+    expect(config().CorsConfig).toEqual({
+      AccessControlAllowOrigins: { Items: ["*"] },
+      AccessControlAllowCredentials: false,
+      AccessControlAllowMethods: { Items: ["GET", "PUT", "DELETE"] },
+      AccessControlAllowHeaders: { Items: ["content-type", "accept"] },
+      AccessControlMaxAgeSec: 600,
+      OriginOverride: true,
+    });
+    // The same values the function answers the preflight with.
+    expect((config().CorsConfig?.AccessControlAllowMethods as { Items: string[] }).Items.join(", ")).toBe(PREFLIGHT_HEADERS["access-control-allow-methods"]);
+    expect((config().CorsConfig?.AccessControlAllowHeaders as { Items: string[] }).Items.join(", ")).toBe(PREFLIGHT_HEADERS["access-control-allow-headers"]);
+    expect(String(config().CorsConfig?.AccessControlMaxAgeSec)).toBe(PREFLIGHT_HEADERS["access-control-max-age"]);
+    expect(PREFLIGHT_HEADERS["access-control-allow-origin"]).toBe("*");
+    expect(config().CorsConfig?.AccessControlExposeHeaders).toBeUndefined();
+    expect(JSON.stringify(config())).not.toMatch(/"AccessControlAllowCredentials":true/);
+  });
+
+  it("keeps the managed SecurityHeadersPolicy's headers (HSTS one year, nosniff, SAMEORIGIN, XSS block, referrer), without a CSP or custom headers", () => {
+    expect(config().SecurityHeadersConfig).toEqual({
+      StrictTransportSecurity: { AccessControlMaxAgeSec: 31536000, IncludeSubdomains: false, Preload: false, Override: false },
+      ContentTypeOptions: { Override: false },
+      FrameOptions: { FrameOption: "SAMEORIGIN", Override: false },
+      XSSProtection: { Protection: true, ModeBlock: true, Override: false },
+      ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: false },
+    });
+    expect(config().CustomHeadersConfig).toBeUndefined();
+  });
+});
+
 describe("pages' response headers (ticket 1.6 criterion 5)", () => {
-  const policies = (): [string, string, Resource][] => ofType("AWS::CloudFront::ResponseHeadersPolicy");
+  const policies = (): [string, string, Resource][] =>
+    ofType("AWS::CloudFront::ResponseHeadersPolicy").filter(
+      ([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name === PAGES_HEADERS_POLICY_NAME,
+    );
   const policyConfig = (): Record<string, unknown> =>
     policies()[0]?.[2].Properties?.ResponseHeadersPolicyConfig as Record<string, unknown>;
   const distributionConfig = (): Record<string, unknown> =>
@@ -669,13 +751,17 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/step",
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
+      "GET /api/apps/{nickname}/data/{key}",
+      "PUT /api/apps/{nickname}/data/{key}",
+      "DELETE /api/apps/{nickname}/data/{key}",
+      "OPTIONS /api/apps/{nickname}/data/{key}",
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(5);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(6);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -729,6 +815,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       PARTICIPANT_FUNCTION_NAME,
       CONVERSATION_FUNCTION_NAME,
       AI_WORKER_FUNCTION_NAME,
+      APP_DATA_FUNCTION_NAME,
     ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
       Runtime: "nodejs22.x",
@@ -1013,7 +1100,7 @@ describe("api stack: sign-in verify function (ticket 1.5)", () => {
     expect(SIGN_IN_VERIFY_ROUTE_KEY).toBe("POST /api/sign-in/verify");
     expect(SIGN_IN_VERIFY_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 10 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
-    expect(stage?.Properties?.RouteSettings).toEqual({
+    expect(stage?.Properties?.RouteSettings).toMatchObject({
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
     });
@@ -1155,6 +1242,116 @@ describe("api stack: participant function (ticket 1.5)", () => {
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
     const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
     await expect(quietly(() => bundle.handler({ routeKey: "GET /api/me" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describe("api stack: data API for apps (ticket 2.4)", () => {
+  const f = apiFunction(APP_DATA_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-app-data; Node.js 22 arm64, tagged, role on /ssd-workshop/ with the boundary", () => {
+    expect(APP_DATA_FUNCTION_NAME).toBe("ssd-workshop-api-app-data");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: 256,
+      Timeout: 10,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect(tagsOf(f.fnEntry()?.[1] as Resource).project).toBe("ssd-workshop");
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({
+      LogGroupName: APP_DATA_FUNCTION_NAME,
+      RetentionInDays: 14,
+    });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(f.roleEntry()?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
+    expect(tagsOf(f.roleEntry()?.[1] as Resource).project).toBe("ssd-workshop");
+  });
+
+  it("routes GET, PUT, DELETE and OPTIONS /api/apps/{nickname}/data/{key} to it, invoked only by this API", () => {
+    const keys = APP_DATA_METHODS.map((method) => `${method} ${APP_DATA_PATH}`);
+    expect(keys).toEqual([...APP_DATA_ROUTE_KEYS]);
+    for (const routeKey of keys) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({
+        IntegrationType: "AWS_PROXY",
+        PayloadFormatVersion: "2.0",
+        IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+      });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
+    expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
+    expect(source).toContain('"/*/*/*"');
+  });
+
+  it("leaves OPTIONS to the function: the HTTP API has no CORS configuration that would answer it first", () => {
+    for (const [, , api] of ofType("AWS::ApiGatewayV2::Api")) expect(api.Properties?.CorsConfiguration).toBeUndefined();
+  });
+
+  it("allows only its logs, GetItem in APP# and APPDATA#, and writes in APPDATA# of the data items' attributes only (never the live marker)", () => {
+    expect(f.statements()).toEqual([
+      {
+        Effect: "Allow",
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*", "APPDATA#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPDATA#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes", "sizes"] },
+        },
+      },
+    ]);
+    // The live marker lives in `APP#<nickname>` and needs `liveAt`: no write right reaches either.
+    const writes = f.statements().filter((s) => JSON.stringify(s.Action).match(/dynamodb:(Put|Update|Delete|BatchWrite)/));
+    for (const statement of writes) {
+      const condition = statement.Condition as Record<string, Record<string, string[]>>;
+      expect(condition["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]).toEqual(["APPDATA#*"]);
+      expect(condition["ForAllValues:StringEquals"]?.["dynamodb:Attributes"]).not.toContain("liveAt");
+    }
+    // `APP#*` in IAM's StringLike does not match an `APPDATA#` key, and the reverse.
+    const like = (pattern: string, value: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(value);
+    expect(like("APPDATA#*", "APP#ada")).toBe(false);
+    expect(like("APP#*", "APPDATA#ada")).toBe(false);
+    expect(like("APPDATA#*", "APPDATA#ada")).toBe(true);
+  });
+
+  it("throttles PUT and DELETE at 30 requests/s (burst 60), GET and OPTIONS at 20/s (burst 40), after the routes exist", () => {
+    expect(APP_DATA_WRITE_THROTTLE).toEqual({ rateLimit: 30, burstLimit: 60 });
+    expect(APP_DATA_READ_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    expect(APP_DATA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
+    // Every route setting of the stage, exactly: the sign-in routes' and the data API's.
+    expect(stage?.Properties?.RouteSettings).toEqual({
+      "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+      "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+      [`PUT ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
+      [`DELETE ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
+      [`GET ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+      [`OPTIONS ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+    });
+    for (const method of ["GET", "PUT", "DELETE", "OPTIONS"]) {
+      const routeId = f
+        .apiResources()
+        .find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === `${method} ${APP_DATA_PATH}`)?.[0];
+      expect(routeId, method).toBeDefined();
+      expect([stage?.DependsOn].flat(), method).toContain(routeId);
+    }
+  });
+
+  it("bundles the handler into a self-contained index.js that answers the preflight with CORS, without the table", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number; headers?: Record<string, string> }> }>();
+    const answer = await quietly(() => bundle.handler({ routeKey: `OPTIONS ${APP_DATA_PATH}` }));
+    expect(answer.statusCode).toBe(204);
+    expect(answer.headers?.["access-control-allow-origin"]).toBe("*");
   });
 });
 

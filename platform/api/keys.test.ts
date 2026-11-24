@@ -15,6 +15,9 @@ import {
   MESSAGE_ID_PATTERN,
   newMessageId,
   replyId,
+  appDataKey,
+  appDataUsageKey,
+  appLiveKey,
 } from "./keys.js";
 
 describe("normalizeEmail", () => {
@@ -112,5 +115,25 @@ describe("conversation keys (ticket 1.7)", () => {
   it("keeps the conversation state in the participant's partition", () => {
     expect(conversationKey("p-1")).toEqual({ pk: "PARTICIPANT#p-1", sk: "CONVERSATION" });
     expect(() => conversationKey("a#b")).toThrow(/separator/);
+  });
+});
+
+describe("app keys (ticket 2.4)", () => {
+  it("keys the live marker by the lower-cased nickname in its own APP# partition", () => {
+    expect(appLiveKey("Ada-42")).toEqual({ pk: "APP#ada-42", sk: "LIVE" });
+  });
+
+  it("keeps an app's values and totals in an APPDATA# partition, apart from the live marker", () => {
+    expect(appDataKey("Ada-42", "High_score-1")).toEqual({ pk: "APPDATA#ada-42", sk: "DATA#High_score-1" });
+    expect(appDataUsageKey("ADA-42")).toEqual({ pk: "APPDATA#ada-42", sk: "DATA_USAGE" });
+    // `APP#*` (the live marker's partitions) never matches a data partition, and the reverse.
+    expect(appDataKey("app", "k").pk.startsWith("APP#")).toBe(false);
+    expect(appLiveKey("data").pk.startsWith("APPDATA#")).toBe(false);
+  });
+
+  it("refuses the key separator in a nickname or a key", () => {
+    expect(() => appLiveKey("a#b")).toThrow(/separator/);
+    expect(() => appDataKey("ada", "a#b")).toThrow(/separator/);
+    expect(() => appDataUsageKey("")).toThrow(/empty/);
   });
 });

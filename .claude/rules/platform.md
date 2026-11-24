@@ -35,6 +35,21 @@ paths:
 - A limit on tries (sign-in codes: 5 wrong tries) is counted with one atomic DynamoDB `ADD` (`ReturnValues: UPDATED_NEW`,
   condition `attribute_exists(pk)`), never a read-then-conditional-write that gives up after lost races: parallel
   requests would otherwise escape the limit. Test it with a burst of parallel requests against the fake.
+- When a limit spans two items (data API totals, ticket 2.4), enforce it with conditions inside one TransactWriteItems;
+  retrying with a short random pause and then answering 409 is fine because a lost race can never pass the limit.
+  Writes that all update one item (an app's `DATA_USAGE`) cancel each other with `TransactionConflict` on DynamoDB,
+  which the in-memory fakes do not reproduce: pause 20 to 80 ms at random before another try.
+- A public write path whose limits a loop can stay under (replacing one value) needs a cost cap of its own: a daily
+  byte budget per app in the same transaction (ticket 2.4: 5 MB per UTC day, 429) and route throttles. Count what
+  DynamoDB bills: every item the transaction writes, in whole KB, at the larger of its old and new size (replacing
+  100 KB with 1 byte still costs 100 KB), and the totals item too (it grows with the keys).
+- DynamoDB bills a `GetItem` on the whole item's size, whatever the `ProjectionExpression`: a request path that may
+  be refused (429, 413) reads only small items. Keep what a write needs (each key's size) in the small totals item
+  (a map attribute, `sizes.#k` through `ExpressionAttributeNames`; IAM's `dynamodb:Attributes` sees only the
+  top-level `sizes`; create the map with the item, as a nested `SET` on a missing map fails) and never read the
+  value item on a write (ticket 2.4).
+- A date condition on a day counter only moves forward: `attribute_not_exists(#day) OR #day < :today` (ISO dates
+  compare as text), never `<>`, or an instance whose clock is behind resets the count.
 - Pages (`platform/web`): no inline `<script>`, `<style>`, `style=` or `on*=` attributes (the CSP has `script-src 'self'`
   and `style-src 'self'`); set text with `textContent`. Browser code gets DOM types from `platform/web/tsconfig.json`
   only. In Playwright, a `hidden` element is not in the accessibility tree: `getByRole` waits forever for it, so read
@@ -70,3 +85,9 @@ paths:
   two optional runs of the same characters side by side (`=\s*["']?\s*` is quadratic on spaces), and test it with
   long lines against a time limit with a margin over 10x (256 KB lines, 1 s: CI runners are slower and run test
   files in parallel with Chromium). Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters.
+- An API that sandboxed apps call (opaque origin `null`, ticket 2.4) puts `Access-Control-Allow-Origin: *` on every
+  answer, errors, 404 and the preflight included (else the page cannot read the reason), never with credentials, and
+  never reads or sets a cookie. Prove it in Chromium with the real handler behind a local server serving the page
+  under the apps' CSP (`platform/api/app-data/browser.test.ts`); Chromium logs every 4xx answer as a console error.
+- JSON from strangers: cap nesting depth by scanning the text (`nestingDepth` in `app-data/data.ts`); `JSON.stringify`
+  of a few thousand nested lists overflows the stack, while `JSON.parse` accepts it.

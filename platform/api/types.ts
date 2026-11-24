@@ -16,11 +16,18 @@
  * | Usage                | `PARTICIPANT#<id>`     | `USAGE`              | never                     |
  * | Spec version         | `PARTICIPANT#<id>`     | `SPEC#<0001..9999>`  | never                     |
  * | Nickname claim       | `NICK#<nickname>`      | `NICK`               | never                     |
+ * | App live marker      | `APP#<nickname>`       | `LIVE`               | never                     |
+ * | App data value       | `APPDATA#<nickname>`   | `DATA#<key>`         | never                     |
+ * | App data usage       | `APPDATA#<nickname>`   | `DATA_USAGE`         | never                     |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
  *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email`,
  *   and are never logged, shown to other participants or published.
  * - `<nickname>` in a `NICK#` key is lower-cased, so a nickname is unique regardless of case.
+ * - `<nickname>` in `APP#` and `APPDATA#` keys is lower-cased too. The live marker (written by the
+ *   deployer, ticket 2.5) and the app's data (written by anyone with the app's address through the
+ *   data API, ticket 2.4) live in different partitions, so the data API's role, limited to
+ *   `APPDATA#*`, can neither make an app live nor take it off.
  * - A participant's profile, conversation and usage share one partition, so every
  *   read by a participant names their own id and cannot reach another's items.
  * - Message ids sort by time (they start with the ISO creation time), so a query on
@@ -276,6 +283,53 @@ export interface UsageItem extends Keyed, TokenUsage {
   updatedAt: string;
 }
 
+/**
+ * An app is live (ticket 2.4): written by the deployer (ticket 2.5) when it publishes the app. The data
+ * API answers only for apps that have one, and requires `liveAt`.
+ */
+export interface AppLiveItem extends Keyed {
+  type: "app-live";
+  /** As the participant typed it. */
+  nickname: string;
+  /** ISO 8601: when the app first went live. */
+  liveAt: string;
+}
+
+/** One JSON value an app keeps (ticket 2.4), written only through the data API. */
+export interface AppDataItem extends Keyed {
+  type: "app-data";
+  /** The value as canonical JSON text (`JSON.stringify` of the parsed body). */
+  value: string;
+  /** UTF-8 bytes of `value`: what counts towards the limits. */
+  bytes: number;
+  /** ISO 8601. */
+  updatedAt: string;
+}
+
+/**
+ * An app's data totals (ticket 2.4): the sum of its values' `bytes` and the number of keys, updated in
+ * the same transaction as every value, with conditions that keep them within 1 MB and 100 keys.
+ */
+export interface AppDataUsageItem extends Keyed {
+  type: "app-data-usage";
+  bytes: number;
+  keys: number;
+  /** ISO 8601. */
+  updatedAt: string;
+  /**
+   * The UTC day (YYYY-MM-DD) that `writtenBytes` counts: the daily write budget (5 MB per app and
+   * day, each write counting what DynamoDB bills it, `writeCost` in app-data/data.ts), kept within it
+   * by the same transaction's condition. The first write of a later day starts the count again.
+   */
+  writeDay: string;
+  writtenBytes: number;
+  /**
+   * Each stored value's `bytes`, by data key, changed in the same transaction as the value: a write
+   * reads only this item, never the value item (DynamoDB bills a read on the whole item's size).
+   */
+  sizes: Record<string, number>;
+}
+
 export type TableItem =
   | AllowListEntry
   | CodeItem
@@ -286,4 +340,7 @@ export type TableItem =
   | ConversationMessage
   | ConversationItem
   | SpecItem
-  | UsageItem;
+  | UsageItem
+  | AppLiveItem
+  | AppDataItem
+  | AppDataUsageItem;

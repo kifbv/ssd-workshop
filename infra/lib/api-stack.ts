@@ -17,6 +17,8 @@ import {
   AI_WORKER_FUNCTION_NAME,
   AI_WORKER_UPDATE_ATTRIBUTES,
   API_NAME,
+  APP_DATA_FUNCTION_NAME,
+  APP_DATA_WRITE_ATTRIBUTES,
   CONVERSATION_FUNCTION_NAME,
   CONVERSATION_UPDATE_ATTRIBUTES,
   FOUNDATION_MODEL_ID,
@@ -59,6 +61,18 @@ export const SIGN_IN_CODE_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 export const SIGN_IN_VERIFY_ROUTE_KEY = "POST /api/sign-in/verify";
 export const SIGN_IN_VERIFY_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 
+/**
+ * Route throttles for the data API (ticket 2.4), for all apps together: reachable by anyone with an
+ * app's address. Each app's daily write budget caps what writes cost; the throttles cap the requests
+ * (and their reads of the small totals item). PUT and DELETE get 30 requests/s (burst 60), enough for a
+ * workshop room pressing shared counters (a throttled request answers 429), GET 20/s (burst 40).
+ * OPTIONS 20/s (burst 40) too: every preflight invokes the function.
+ */
+export const APP_DATA_WRITE_THROTTLE = { rateLimit: 30, burstLimit: 60 } as const;
+export const APP_DATA_READ_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+/** The data API's CORS preflight: browsers keep its answer 600 s, so few are sent; each still invokes the function. */
+export const APP_DATA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+
 /** The protected participant routes (ticket 1.5), all served by one function behind one session check. */
 export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
@@ -75,6 +89,14 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/spec", method: HttpMethod.GET },
   { path: "/api/conversation/spec/approve", method: HttpMethod.POST },
 ] as const;
+
+/**
+ * The data API for participants' apps (ticket 2.4), one function. `OPTIONS` is a route of its own:
+ * the HTTP API has no CORS configuration, so the function answers the preflight itself (with
+ * `Access-Control-Allow-Origin: *`), like every other answer of this path.
+ */
+export const APP_DATA_PATH = "/api/apps/{nickname}/data/{key}";
+export const APP_DATA_METHODS = [HttpMethod.GET, HttpMethod.PUT, HttpMethod.DELETE, HttpMethod.OPTIONS] as const;
 
 /**
  * The AI worker's timeout (ticket 1.7): a guardrail call and an answer of up to 2000 tokens fit with
@@ -105,7 +127,8 @@ export const TTL_ATTRIBUTE = "expiresAt";
 /**
  * The workshop's data and API (ticket 1.1): the single DynamoDB table, the HTTP
  * API and its Lambda functions. Pages and API share the workshop origin from
- * ticket 1.2 (CloudFront sends /api/* here), so the API has no CORS.
+ * ticket 1.2 (CloudFront sends /api/* here), so the API has no CORS configuration; only the data API
+ * for apps (ticket 2.4) answers CORS, from its own function.
  */
 export class ApiStack extends Stack {
   readonly table: Table;
@@ -376,6 +399,37 @@ export class ApiStack extends Stack {
     // consume rights on this queue only.
     worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1, maxConcurrency: AI_WORKER_MAX_CONCURRENCY }));
 
+    // Ticket 2.4: the data API for apps, reachable without sign-in by anyone with an app's address.
+    // It reads the live marker (`APP#*`, written only by the deployer) and the app's data
+    // (`APPDATA#*`), and puts, updates and deletes only in `APPDATA#*`, naming only the data items'
+    // attribute names: it can neither make an app live nor take one off, nor touch other items.
+    const appData = workshopFunction(this, "AppData", APP_DATA_FUNCTION_NAME, "app-data.ts");
+    appData.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*", "APPDATA#*"] } },
+      }),
+    );
+    appData.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPDATA#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_DATA_WRITE_ATTRIBUTES] },
+        },
+      }),
+    );
+    // One invoke permission scoped to this API (path parameter route, as for the participant routes).
+    const appDataRoutes = this.api.addRoutes({
+      path: APP_DATA_PATH,
+      methods: [...APP_DATA_METHODS],
+      integration: new HttpLambdaIntegration("AppDataIntegration", appData, { scopePermissionToRoute: false }),
+    });
+
     // Route-level throttles (L1 RouteSettings; the L2 stage has no per-route option). A route must
     // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
     const cfnStage = stage.node.defaultChild as CfnStage;
@@ -387,7 +441,19 @@ export class ApiStack extends Stack {
       ThrottlingRateLimit: SIGN_IN_VERIFY_THROTTLE.rateLimit,
       ThrottlingBurstLimit: SIGN_IN_VERIFY_THROTTLE.burstLimit,
     });
-    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes]) cfnStage.node.addDependency(route);
+    const appDataThrottles = [
+      [HttpMethod.PUT, APP_DATA_WRITE_THROTTLE],
+      [HttpMethod.DELETE, APP_DATA_WRITE_THROTTLE],
+      [HttpMethod.GET, APP_DATA_READ_THROTTLE],
+      [HttpMethod.OPTIONS, APP_DATA_PREFLIGHT_THROTTLE],
+    ] as const;
+    for (const [method, throttle] of appDataThrottles) {
+      cfnStage.addPropertyOverride(`RouteSettings.${method} ${APP_DATA_PATH}`, {
+        ThrottlingRateLimit: throttle.rateLimit,
+        ThrottlingBurstLimit: throttle.burstLimit,
+      });
+    }
+    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes, ...appDataRoutes]) cfnStage.node.addDependency(route);
 
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",

@@ -90,6 +90,14 @@ export const API_ORIGIN_DOMAIN = `${API_ID}.execute-api.${REGION}.amazonaws.com`
 export const PAGES_HEADERS_POLICY_VERSION = 1;
 export const PAGES_HEADERS_POLICY_NAME = `${PREFIX}-pages-v${PAGES_HEADERS_POLICY_VERSION}`;
 /**
+ * Version of the data API's response headers policy (ticket 2.4, CloudFront `/api/apps/*`): the managed
+ * SecurityHeadersPolicy's headers plus `Access-Control-Allow-Origin: *`, so that answers API Gateway or
+ * CloudFront make themselves (a throttle's 429) are readable by sandboxed apps too. Created, never
+ * updated, like the pages' policy: a change bumps this version.
+ */
+export const APP_DATA_HEADERS_POLICY_VERSION = 1;
+export const APP_DATA_HEADERS_POLICY_NAME = `${PREFIX}-app-data-v${APP_DATA_HEADERS_POLICY_VERSION}`;
+/**
  * Content-Security-Policy of the pages: scripts, styles, connections and images from the site
  * itself only (no inline scripts or styles), no framing, no plugins.
  */
@@ -176,6 +184,17 @@ export const PARTICIPANT_FUNCTION_NAME = `${PREFIX}-api-participant`;
 export const PARTICIPANT_NICK_PUT_ATTRIBUTES = ["pk", "sk", "type", "nickname", "participantId", "createdAt"] as const;
 /** The profile attribute names the participant function may update in `PARTICIPANT#*`. */
 export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "step"] as const;
+
+/** Lambda function, role and log group of the data API for apps (ticket 2.4). */
+export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
+/**
+ * The only attribute names the data API may write (PutItem, UpdateItem and DeleteItem, in `APPDATA#*`
+ * partitions only): a value item's and the totals item's (with the daily write count, `writeDay` and
+ * `writtenBytes`, and each key's size, the map `sizes`: IAM's `dynamodb:Attributes` holds only
+ * top-level names, so `sizes.<key>` counts as `sizes`). Never `liveAt` or `nickname` (the live
+ * marker's, in `APP#*`, which only the deployer writes).
+ */
+export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes", "sizes"] as const;
 
 /** Lambda function, role and log group of the conversation routes (ticket 1.7). */
 export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;

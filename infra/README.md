@@ -415,6 +415,54 @@ On a failure, `ssd-workshop-api-ai-worker`'s log has `"outcome":"failed"` lines 
 (`MalformedSpec` or `MissingSpec` for a spec of the wrong shape, `AccessDeniedException` for a missing right),
 and `ssd-workshop-api-conversation`'s `"route":"spec"` or `"route":"approve"` lines.
 
+## Check after the data API deploy (ticket 2.4)
+
+The data API for apps (`/api/apps/<nickname>/data/<key>`, function `ssd-workshop-api-app-data`) needs no sign-in.
+Until the deployer (ticket 2.5) marks an app live, every app answers 404; the preflight answers without one:
+
+```sh
+curl -sS -i -X OPTIONS -H 'origin: null' -H 'access-control-request-method: PUT' \
+  -H 'access-control-request-headers: content-type' \
+  https://workshop.rankly.games/api/apps/nobody-here/data/score
+# expect: 204 with access-control-allow-origin: *, access-control-allow-methods: GET, PUT, DELETE,
+#         access-control-allow-headers: content-type, accept (and no access-control-allow-credentials)
+curl -sS -i -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here/data/score
+# expect: 404 {"message":"Not found."} with access-control-allow-origin: * and no set-cookie
+```
+
+Once 2.5 has put an app live, `PUT` (with `content-type: application/json`), `GET` and `DELETE` on one of its keys
+round-trip a JSON value. Do a second `PUT` to the same key and a `DELETE`: they update `sizes.<key>` in the totals item,
+which proves IAM's `dynamodb:Attributes` sees only the top-level name `sizes` (an `AccessDeniedException` there means
+it does not). The log group `ssd-workshop-api-app-data` has one line per request with method, outcome,
+status and size only; a refusal from DynamoDB shows as `"outcome":"failed"` with the error name
+(`AccessDeniedException` for a missing right).
+
+Every answer under `/api/apps/*`, also those API Gateway makes itself (a throttle's 429, a 403 or 5xx before the
+function), gets `access-control-allow-origin: *` from CloudFront's `ssd-workshop-app-data-v1` headers policy, once:
+
+```sh
+curl -sS -D - -o /dev/null -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here/data/score \
+  | grep -i -E '^(access-control-|strict-transport-security|x-content-type-options|x-frame-options|referrer-policy)'
+# expect: exactly one "access-control-allow-origin: *", no access-control-allow-credentials, and the four security headers
+curl -sS -D - -o /dev/null -X POST -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here/data/score \
+  | grep -i -E '^(HTTP/|access-control-allow-origin)'
+# expect: an answer API Gateway makes itself (404 Not Found, no route for POST) that still carries access-control-allow-origin: *
+```
+
+The stage throttles `PUT` and `DELETE` on the route at 30 requests/s (burst 60) and `GET` and `OPTIONS` at 20/s (burst 40), read-only:
+
+```sh
+aws apigatewayv2 get-stage --region eu-central-1 --api-id <API id from infra/lib/config.ts> --stage-name '$default' \
+  --query 'RouteSettings'
+# expect: the two sign-in routes at 5/10, "PUT /api/apps/{nickname}/data/{key}" and "DELETE ..." at 30/60,
+#         "GET ..." and "OPTIONS ..." at 20/40
+```
+
+Each app may also write 5 MB per UTC day, counted as DynamoDB bills its writes (`writeDay`, `writtenBytes` in its
+`DATA_USAGE` item, which also holds each key's size in `sizes`); past that,
+`PUT` and `DELETE` answer 429 "This app has saved a lot of data today. Saving starts again tomorrow." until
+midnight UTC.
+
 ## Build network (ticket 2.1)
 
 ```mermaid
