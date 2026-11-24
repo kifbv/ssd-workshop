@@ -139,8 +139,12 @@ paths:
   `settingSources: []`, `strictMcpConfig`, and a deny-by-default PreToolUse hook (`onFailure: "block"`) that
   resolves real paths (symlinks, dangling links) against the workspace's real path; test the check on real temp
   folders with symlinks (`platform/builder/permissions.test.ts`).
-- The coding agent never holds AWS credentials: Claude Code reaches Bedrock only through the runner's 127.0.0.1 signing proxy (`platform/builder/bedrock-proxy.ts`, `ANTHROPIC_BEDROCK_BASE_URL` + `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`), which forwards only `POST /model/<build model>/invoke[-with-response-stream]` (Claude Code also sends `GET /inference-profiles` at start; a 403 is fine); Glob patterns with `{}`/`[]` can climb out (`.{.,}/*`), so refuse them outright.
+- The coding agent never holds AWS credentials: Claude Code reaches Bedrock only through the runner's 127.0.0.1 signing proxy (`platform/builder/bedrock-proxy.ts`, `ANTHROPIC_BEDROCK_BASE_URL` + `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`), which forwards only `POST /<run's random prefix>/model/<build model>/invoke[-with-response-stream]` with `Host` exactly `127.0.0.1:<port>`, no `Origin`, `content-type` exactly `application/json` (a browser page can POST `text/plain` to localhost without a preflight) and replaces non-2xx bodies (they name ARNs); Claude Code keeps the base URL's path and also sends `GET /inference-profiles` at start (a 403 is fine); Node's `fetch` sends `accept: */*` unless told. Glob patterns with `{}`/`[]` (`.{.,}/*`) or a segment of only dots and wildcards (`.?`) can climb out: refuse them outright.
 - `npm install <pkg> -w platform` can leave root dev dependencies (vitest) missing from `node_modules`: run `npm ci`
   after changing dependencies, before the checks.
 - The in-memory GitHub (`platform/api/github/fakes.ts`) accepts a non-forced ref update when the new commit descends
   from the branch's commit through any number of parents, like GitHub; a test pushing several commits at once relies on it.
+- Never trust a commit id to say which repository it came from (GitHub serves a fork's commit through the parent's
+  address): the deployer downloads `codeload.github.com/<o>/<r>/tar.gz/refs/heads/main` (full ref: `tar.gz/main` picks a
+  tag `main` first) with `redirect: "error"` and reads the commit from the first entry only (pax global header, one
+  `comment=<40 hex>`), then publishes those same bytes when it equals the pushed one (ticket 2.8, `readTarGzArchive`).
