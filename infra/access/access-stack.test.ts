@@ -68,7 +68,7 @@ interface Resource {
   Properties: Record<string, unknown>;
 }
 interface Template {
-  Parameters: Record<string, { Default?: unknown }>;
+  Parameters: Record<string, { Default?: unknown; NoEcho?: boolean }>;
   Resources: Record<string, Resource>;
 }
 
@@ -1369,14 +1369,22 @@ describe("policy sizes", () => {
 // Ticket 2.12 (Franck's choice, 2026-11-24): Claude sessions are read-only plus Bedrock, test emails and log
 // queries, so only deploys from main change live apps.
 // Reads a session must never get: table items (participants' email addresses), stream records, queue messages,
-// secret values and parameters; nor invoking a function (it runs with the function's rights).
+// secret values and parameters; nor invoking a function (it runs with the function's rights). Nor (try 2) the
+// "Get" actions that return credentials or secrets although isRead counts them as reads: registry and package
+// login tokens, temporary AWS credentials, S3 Access Grants credentials, Windows passwords and instance consoles.
 const SESSION_FORBIDDEN = [
   "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:PartiQLSelect",
   "dynamodb:ExportTableToPointInTime", "dynamodb:GetRecords", "dynamodb:GetShardIterator",
   "sqs:ReceiveMessage", "secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue",
   "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory",
   "lambda:InvokeFunction",
+  "ecr:GetAuthorizationToken", "ecr-public:GetAuthorizationToken", "codeartifact:GetAuthorizationToken",
+  "sts:GetFederationToken", "sts:GetSessionToken", "sso:GetRoleCredentials", "s3:GetDataAccess",
+  "ec2:GetPasswordData", "ec2:GetConsoleOutput", "ec2:GetConsoleScreenshot",
 ];
+// True when a Deny statement of the set applies to the request (whatever the Allows say).
+const deniedBy = (stmts: Statement[], action: string, resource: string, ctx: Ctx = {}) =>
+  stmts.some((s) => s.Effect === "Deny" && statementApplies(s, action, resource, ctx));
 // Every Allow action of a set of statements that is neither a read nor a listed exception, as "Sid/action".
 function sessionWrites(stmts: Statement[]): string[] {
   return stmts
@@ -1425,7 +1433,7 @@ describe("access stack: Claude sessions read-only (ticket 2.12)", () => {
 
   it("allows the Claude user only reads, Bedrock invoke, SES send from the workshop sender and log queries", () => {
     expect(sessionWrites(claude)).toEqual([]);
-    const put = withText("            Action: [\"s3:Get*\", \"s3:List*\"]\n", "            Action: [\"s3:Get*\", \"s3:List*\", s3:PutObject]\n");
+    const put = withText("\"s3:Get*Configuration\", \"s3:List*\"]\n", "\"s3:Get*Configuration\", \"s3:List*\", s3:PutObject]\n");
     expect(sessionWrites(claudeStatements(put))).toEqual(["WorkshopBucketReads/s3:PutObject"]);
     const wildcard = withText("              - lambda:GetFunction\n", "              - lambda:*\n");
     expect(sessionWrites(claudeStatements(wildcard))).toEqual(["WorkshopResourceReads/lambda:*"]);
@@ -1447,13 +1455,70 @@ describe("access stack: Claude sessions read-only (ticket 2.12)", () => {
     expect(secretReadGaps(template, claude)).toEqual([]);
   });
 
+  it("grants the Claude user no credential-returning read, also through a wildcard (try 2)", () => {
+    expect(sessionForbiddenReads(claude)).toEqual([]);
+    const ecr = withText("              - ecr:DescribeRepositories\n", "              - ecr:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(ecr))).toEqual(["WorkshopResourceReads/ecr:GetAuthorizationToken"]);
+    // The old bucket read s3:Get* also named S3 Access Grants' credentials.
+    const s3 = withText("[\"s3:GetObject*\", \"s3:GetBucket*\", \"s3:Get*Configuration\", \"s3:List*\"]", "[\"s3:Get*\", \"s3:List*\"]");
+    expect(sessionForbiddenReads(claudeStatements(s3))).toEqual(["WorkshopBucketReads/s3:GetDataAccess"]);
+    const sts = withText("              - ecr:DescribeRepositories\n", "              - sts:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(sts))).toEqual(["WorkshopResourceReads/sts:GetFederationToken", "WorkshopResourceReads/sts:GetSessionToken"]);
+    const ec2 = withText("              - ec2:Describe*\n", "              - ec2:Describe*\n              - ec2:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(ec2))).toEqual(["ReadsWithoutSecrets/ec2:GetPasswordData", "ReadsWithoutSecrets/ec2:GetConsoleOutput", "ReadsWithoutSecrets/ec2:GetConsoleScreenshot"]);
+    // The bucket reads still cover objects, bucket settings and listings.
+    const OBJECT = `arn:aws:s3:::${APPS_BUCKET_NAME}/apps/someone/index.html`;
+    for (const action of ["s3:GetObject", "s3:GetObjectTagging", "s3:GetBucketPolicy", "s3:GetLifecycleConfiguration", "s3:GetEncryptionConfiguration", "s3:ListBucket"]) {
+      expect(allowedBy(claude, action, action.includes("Object") ? OBJECT : `arn:aws:s3:::${APPS_BUCKET_NAME}`, CLAUDE), action).toBe(true);
+    }
+  });
+
+  it("denies the Claude user assuming any role or getting federation tokens, even if a trust policy names it (try 2)", () => {
+    const ROLE_NAMING_THE_USER = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-left-over`;
+    const OTHER_ROLE = `arn:aws:iam::${ACCOUNT}:role/letters-admin`;
+    const FED = `arn:aws:sts::${ACCOUNT}:federated-user/x`;
+    for (const [action, resource] of [
+      ["sts:AssumeRole", ROLE_NAMING_THE_USER], ["sts:AssumeRole", OTHER_ROLE], ["sts:AssumeRole", "*"],
+      ["sts:TagSession", ROLE_NAMING_THE_USER], ["sts:SetSourceIdentity", ROLE_NAMING_THE_USER],
+      ["sts:GetFederationToken", FED], ["sts:GetFederationToken", "*"],
+    ] as const) expect(deniedBy(claude, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+    // An explicit deny, so a trust policy naming the user (no identity allow needed in-account) cannot override it,
+    // nor a later Allow on the session policy.
+    const loose = withText("          - Sid: WorkshopEventSourceMappingReads\n", "          - Sid: Assume\n            Effect: Allow\n            Action: [\"sts:*\"]\n            Resource: \"*\"\n          - Sid: WorkshopEventSourceMappingReads\n");
+    expect(allowedBy(claudeStatements(loose), "sts:AssumeRole", ROLE_NAMING_THE_USER, CLAUDE)).toBe(false);
+    expect(allowedBy(claudeStatements(loose), "sts:GetFederationToken", FED, CLAUDE)).toBe(false);
+    // Without it nothing on the user would deny it (the deploy policies' NoSelfAssume is not attached).
+    const without = claude.filter((s) => s.Sid !== "NoAssumeForSessions");
+    expect(deniedBy(without, "sts:AssumeRole", ROLE_NAMING_THE_USER, CLAUDE)).toBe(false);
+    expect(deniedBy(without, "sts:GetFederationToken", FED, CLAUDE)).toBe(false);
+  });
+
+  it("denies the Claude user project-tagged instances' user data and launch template versions (try 2)", () => {
+    const TAGGED = { ...CLAUDE, "aws:ResourceTag/project": "ssd-workshop" };
+    const INSTANCE = `arn:aws:ec2:${REGION}:${ACCOUNT}:instance/i-0abc`;
+    const TEMPLATE = `arn:aws:ec2:${REGION}:${ACCOUNT}:launch-template/lt-0abc`;
+    for (const [action, resource] of [
+      ["ec2:DescribeInstanceAttribute", INSTANCE], ["ec2:DescribeLaunchTemplateVersions", TEMPLATE],
+      ["ec2:DescribeSpotFleetRequests", "*"], ["ec2:DescribeSpotInstanceRequests", "*"],
+    ] as const) {
+      expect(allowedBy(claude, action, resource, TAGGED), action).toBe(false);
+      // NoUserDataReads alone lets the project's own ones through.
+      expect(allowedBy(statements(template, "DeployPolicyRead"), action, resource, TAGGED), action).toBe(true);
+    }
+    expect(allowedBy(claude, "ec2:DescribeInstances", "*", TAGGED)).toBe(true);
+  });
+
   it("limits the session reads to workshop names", () => {
     expect(sessionScopeGaps(template)).toEqual([]);
     const loose = withText("              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/ssd-workshop-*\n          - Sid: WorkshopResourceReads", "              - \"*\"\n          - Sid: WorkshopResourceReads");
     expect(sessionScopeGaps(loose)).toEqual(["WorkshopLogReads"]);
+    // Foundation models only in EU regions (EU inference profiles route there), as the API stack's worker (try 2).
+    const model = (region: string) => `arn:aws:bedrock:${region}::foundation-model/anthropic.claude-sonnet-4-6`;
+    for (const region of ["eu-central-1", "eu-west-3", "eu-north-1"]) expect(allowedBy(claude, "bedrock:InvokeModel", model(region), CLAUDE), region).toBe(true);
+    for (const region of ["us-east-1", "ap-southeast-2"]) expect(allowedBy(claude, "bedrock:InvokeModel", model(region), CLAUDE), region).toBe(false);
     const bedrock = statements(template, "SessionPolicy").find((s) => s.Sid === "Bedrock");
     expect(list(bedrock?.Resource).map(text)).toEqual([
-      "arn:aws:bedrock:*::foundation-model/anthropic.*",
+      "arn:aws:bedrock:eu-*::foundation-model/anthropic.*",
       "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*",
     ]);
   });
@@ -1467,12 +1532,19 @@ describe("access stack: Claude sessions read-only (ticket 2.12)", () => {
     expect(grants(statements(template, "SessionPolicy"), "ses:Send")).toEqual(["SesForTesting"]);
   });
 
-  it("keeps the 2.6 and 2.9 session denies on the Claude user", () => {
+  it("keeps the 2.6 and 2.9 session denies on the Claude user, and adds the 2.12 ones", () => {
     const denies = claude.filter((s) => s.Effect === "Deny").map((s) => s.Sid);
     for (const sid of [
       "NoLauncherForSessions", "NoBuildQueueForSessions", "NoBuildTasksForSessions", "NoEventSourcesForSessions",
       "NoBuildCheckScheduleForSessions", "NoBuildsClusterTasksForSessions", "NoBuildsClusterServicesForSessions", "NoGitHubKey",
+      "NoAssumeForSessions", "NoUserDataForSessions",
     ]) expect(denies, sid).toContain(sid);
+  });
+
+  it("hides the budget address from DescribeStacks, which sessions may call on ssd-workshop-access (try 2)", () => {
+    expect(template.Parameters.BudgetEmail?.NoEcho).toBe(true);
+    // The session's stack reads do reach the access stack.
+    expect(allowedBy(claude, "cloudformation:DescribeStacks", `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/ssd-workshop-access/1234abcd`, CLAUDE)).toBe(true);
   });
 
   it("names all six managed policies in ProtectAccessIdentities", () => {

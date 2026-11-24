@@ -44,9 +44,9 @@ paths:
   `ResponseHeadersPolicy.SECURITY_HEADERS`, ...). Origin access controls and custom policies have no
   tags, so the deploy rights can only create them: give them `RemovalPolicy.RETAIN`, and changing
   or deleting one needs Franck (or a replacement under a new name).
-- The access stack denies, for the deploy role (the Claude user holds no writes since ticket 2.12): S3 ACLs (keep `BucketOwnerEnforced`, no legacy
-  CloudFront logging bucket), S3 server access logging, inventory, analytics export, replication
-  and (deploy principals only) bucket notifications, Lambda function URLs, resource policies on
+- The deploy policies deny (the deploy role is their only holder; the Claude user holds no writes since ticket 2.12):
+  S3 ACLs (keep `BucketOwnerEnforced`, no legacy CloudFront logging bucket), S3 server access logging, inventory,
+  analytics export, replication and bucket notifications, Lambda function URLs, resource policies on
   secrets, repositories, tables, parameters and log groups, DynamoDB exports, log subscription
   filters and log export tasks, SNS subscriptions other than workshop Lambda functions and queues,
   EventBridge targets outside the account, and Lambda invoke permissions for principals other than
@@ -111,6 +111,12 @@ paths:
   invoke, SES send from the workshop sender, log reads and queries on workshop log groups): never a table
   item read, queue receive, secret value or parameter (participants' email addresses live in the table).
   A live check that writes or reads items runs as `AWS_PROFILE=franck`, never from a session.
+  `isRead` also passes "Get" actions that return credentials (`ecr:GetAuthorizationToken`, `sts:GetFederationToken`,
+  `s3:GetDataAccess`, `ec2:GetPasswordData`, ...): keep them in the test's `SESSION_FORBIDDEN`, never grant `s3:Get*`
+  (or another service-wide `Get*`) to the user, and list `GetBucket*`/`GetObject*` instead (ticket 2.12 try 2).
+- A deny that sits on the deploy policies (`NoSelfAssume`, the sharing denies) does not reach the Claude user, which
+  carries only `-deploy-read` and `ssd-workshop-session`: a deny the user needs goes on one of those two. Same-account
+  role trust that names the user needs no identity Allow, so the user's own `NoAssumeForSessions` is what blocks it.
 - A secret only Franck and one workload role may read (the GitHub App's key, ticket 2.6): deny the deploy principals
   everything on it but create/describe/tag with a `NotAction` list (`NoGitHubKey`, new AWS actions denied too), AND
   deny its read in the boundary to every role but that one (`GitHubKeyForTheLauncherOnly`), and deny the Claude user

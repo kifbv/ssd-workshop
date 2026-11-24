@@ -26,7 +26,8 @@ Parameters:
       seen in CloudTrail AssumeRoleWithWebIdentity events)
   BudgetEmail:
     Type: String
-    Description: Address that receives budget alerts
+    NoEcho: true
+    Description: Address that receives budget alerts (hidden in DescribeStacks, which Claude sessions may call)
   MonthlyBudgetUsd:
     Type: Number
     Default: 100
@@ -837,9 +838,10 @@ Resources:
   # Claude's cloud sessions (ticket 2.12, Franck's choice 2026-11-24): reads of the workshop's own
   # resources, Bedrock and test emails, and no deploy rights, so only deploys from main change
   # live apps. Every Allow here is a read except the short list the access-stack test names
-  # (Bedrock invoke, SES send from the workshop sender, starting a log query or live tail).
+  # (Bedrock invoke, SES send from the workshop sender, log filters, queries and live tail).
   # Table items are never readable (participants' email addresses), nor queue messages, secret
-  # values or parameters. The user also keeps ssd-workshop-deploy-read and its session denies.
+  # values, parameters or credentials. The user also keeps ssd-workshop-deploy-read and its
+  # session denies. Only the Claude user carries this policy, so its denies need no condition.
   SessionPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -851,7 +853,7 @@ Resources:
             Effect: Allow
             Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
             Resource:
-              - arn:aws:bedrock:*::foundation-model/anthropic.*
+              - arn:aws:bedrock:eu-*::foundation-model/anthropic.*
               - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
           - Sid: SesForTesting
             Effect: Allow
@@ -922,12 +924,25 @@ Resources:
             Condition:
               ArnLike:
                 lambda:FunctionArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ssd-workshop-*
+          # Bucket and object reads only: s3:Get* would also name s3:GetDataAccess (Access Grants credentials).
           - Sid: WorkshopBucketReads
             Effect: Allow
-            Action: ["s3:Get*", "s3:List*"]
+            Action: ["s3:GetObject*", "s3:GetBucket*", "s3:Get*Configuration", "s3:List*"]
             Resource: arn:aws:s3:::ssd-workshop-*
             Condition:
               StringEquals: {aws:ResourceAccount: !Ref AWS::AccountId}
+          # The user lost ssd-workshop-deploy's NoSelfAssume in 2.12: a role whose trust policy names
+          # user/ssd-workshop-claude (left by an earlier session) needs no identity allow in this account.
+          - Sid: NoAssumeForSessions
+            Effect: Deny
+            Action: [sts:AssumeRole, sts:TagSession, sts:SetSourceIdentity, sts:GetFederationToken]
+            Resource: "*"
+          # ec2:Describe* (deploy-read) also returns project-tagged instances' user data and launch
+          # template versions; NoUserDataReads there denies them only outside the project tag.
+          - Sid: NoUserDataForSessions
+            Effect: Deny
+            Action: [ec2:DescribeInstanceAttribute, ec2:DescribeLaunchTemplateVersions, ec2:DescribeSpotFleetRequests, ec2:DescribeSpotInstanceRequests]
+            Resource: "*"
 
   DeployRole:
     Type: AWS::IAM::Role

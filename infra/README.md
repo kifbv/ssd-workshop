@@ -827,3 +827,45 @@ AWS_PROFILE=franck aws iam simulate-principal-policy \
 
 `cdk diff` from a session cannot create a change set (a write): it falls back to a template diff, or run it with
 `--method template`.
+
+### One-time audit: what sessions with deploy rights may have left (Franck)
+
+Before ticket 2.12 the user held deploy rights, so a session could have written a resource policy or a role trust
+naming `ssd-workshop-claude`, or left a function no stack owns. The new template cannot undo that. Run once after
+applying, from Franck's machine; every command only reads:
+
+```sh
+export AWS_PROFILE=franck
+U=ssd-workshop-claude
+aws iam list-groups-for-user --user-name $U --query 'Groups[].GroupName'
+# expect: []
+aws iam list-user-policies --user-name $U --query PolicyNames
+# expect: []
+aws iam list-attached-user-policies --user-name $U --query 'AttachedPolicies[].PolicyName'
+# expect: ["ssd-workshop-deploy-read", "ssd-workshop-session"] (in any order)
+aws iam list-roles --query "Roles[?contains(to_string(AssumeRolePolicyDocument), '$U')].Arn"
+# expect: [] (every role in the account, also /ssd-workshop/ and ssd-workshop-* ones, whose trust names the user)
+for b in $(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'ssd-workshop-')].Name" --output text); do
+  aws s3api get-bucket-policy --bucket "$b" --query Policy --output text 2>/dev/null | grep -q "$U" && echo "policy names the user: $b"
+done
+# expect: no output
+for q in $(aws sqs list-queues --region eu-central-1 --queue-name-prefix ssd-workshop- --query QueueUrls --output text); do
+  aws sqs get-queue-attributes --region eu-central-1 --queue-url "$q" --attribute-names Policy --query Attributes.Policy \
+    --output text | grep -q "$U" && echo "policy names the user: $q"
+done
+# expect: no output
+aws sns list-topics --region eu-central-1 --output text | grep ssd-workshop-
+aws events list-event-buses --region eu-central-1 --name-prefix ssd-workshop- --query 'EventBuses[].Name'
+# expect: no output, then [] (no workshop stack uses SNS topics or custom event buses; any found is a leftover)
+for r in eu-central-1 us-east-1; do
+  for f in $(aws lambda list-functions --region $r --query "Functions[?starts_with(FunctionName, 'ssd-workshop-')].FunctionName" --output text); do
+    aws cloudformation describe-stack-resources --region $r --physical-resource-id "$f" >/dev/null 2>&1 || echo "no stack owns: $r $f"
+  done
+done
+# expect: no output
+```
+
+Anything reported: tell Claude in a thread (names only), and remove it yourself in the console after a look.
+Lambda, ECR, secret, table, parameter and log group policies need no check: the deploy policies already denied
+writing them (`NoExternalSharing`, `InvokePermissionsForServicesOnly`); queues could take a policy through
+`sqs:SetQueueAttributes`, hence the queue loop.

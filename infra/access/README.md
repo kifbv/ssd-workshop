@@ -81,7 +81,9 @@ flowchart LR
    scoped or listed as an exception.
 3. Franck reviews and merges.
 4. Franck opens the `ssd-workshop-access` stack in the console, Update, Replace existing template,
-   uploads the merged `access-stack.yaml`, keeps the parameters, and submits.
+   uploads the merged `access-stack.yaml`, keeps the parameters, and submits. `BudgetEmail` is hidden
+   (`NoEcho`, since ticket 2.12) and shows as `****`: leave it as it is (the existing value is kept);
+   type the address again only to change it.
 
 ## Why each statement exists
 
@@ -219,7 +221,8 @@ flowchart LR
 
 **`ssd-workshop-session`** (ticket 2.12, the Claude user only: reads of the workshop's own resources, Bedrock and
 test emails; no deploy rights). Every Allow is a read except Bedrock invoke, SES send and the log reads
-`FilterLogEvents`, `StartQuery` and `StartLiveTail` (tested, with a mutation). Reads name `${AWS::Region}`
+`FilterLogEvents`, `StartQuery` and `StartLiveTail` (tested, with a mutation). Its two denies need no principal
+condition (only the Claude user carries it). Reads name `${AWS::Region}`
 (eu-central-1), except stacks (the edge stack is in us-east-1).
 
 ```mermaid
@@ -230,21 +233,25 @@ flowchart LR
   P -->|read| W[ssd-workshop-* stacks, logs, functions,<br/>queues, cluster, repositories,<br/>table settings, buckets, secret metadata]
   P -->|invoke| B[Bedrock: Anthropic models,<br/>eu.anthropic.* profiles]
   P -->|send| E[SES from ssd-workshop@rankly.games]
-  U -.->|refused: no Allow| X[deploys, function or bucket writes,<br/>table items, queue messages,<br/>secret values]
+  U -.->|refused: no Allow, or denied| X[deploys, function or bucket writes,<br/>table items, queue messages, secret values,<br/>credentials, role assumption, user data]
 ```
 
 | Sid | Why |
 | --- | --- |
-| `Bedrock` | Sessions test the platform's Bedrock calls (`npm run smoke -- bedrock`, the evals): Anthropic models and `eu.anthropic.*` inference profiles only. |
+| `Bedrock` | Sessions test the platform's Bedrock calls (`npm run smoke -- bedrock`, the evals): Anthropic models in EU regions (`foundation-model` in `eu-*`, where the EU inference profiles route, as the API stack's worker) and `eu.anthropic.*` inference profiles only. |
 | `SesForTesting` | Sessions test code emails (`npm run smoke -- ses <address>`), only through the identities `ssd-workshop@rankly.games` and `rankly.games`, only from `ssd-workshop@rankly.games` (`ses:FromAddress`), with the configuration set `ssd-workshop-email`. |
 | `WorkshopStackReads` | `cloudformation:Describe*`, `Get*`, `List*` on `stack/ssd-workshop-*/*` (outputs, events, templates; `cdk diff` falls back to a template diff, since creating a change set is a write). |
 | `WorkshopLogReads` | Read the log groups `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` and `/ecs/ssd-workshop-*`: streams, events, filters, Logs Insights queries (`StartQuery`, `GetQueryResults`) and live tails (`StartLiveTail`). `StopQuery` (Resource `*` only) is not granted. |
 | `WorkshopResourceReads` | Settings, never data: Lambda function configuration, policy, aliases, versions and tags (no `lambda:List*`, no invoke); SQS attributes, URL, tags and dead-letter sources (never `ReceiveMessage`); ECS clusters, services and tasks (build tasks stay denied by `NoBuildTasksForSessions`); ECR repositories and image lists (no pulls); DynamoDB table description, backups, TTL and tags (never an item: the table holds participants' email addresses); Secrets Manager description and version ids (never a value); Scheduler schedules and groups. All on `ssd-workshop-*` names. |
 | `WorkshopEventSourceMappingReads` | `lambda:GetEventSourceMapping` for `ssd-workshop-*` functions (`lambda:FunctionArn`; mapping ids are generated). |
-| `WorkshopBucketReads` | `s3:Get*`/`List*` on `ssd-workshop-*` buckets and their objects, in this account only (`aws:ResourceAccount`). The site and apps files are public anyway; the assets bucket holds deploy code. |
+| `WorkshopBucketReads` | `s3:GetObject*`, `GetBucket*`, `Get*Configuration` and `List*` on `ssd-workshop-*` buckets and their objects, in this account only (`aws:ResourceAccount`). The site and apps files are public anyway; the assets bucket holds deploy code. Not `s3:Get*`, which would also name `s3:GetDataAccess` (S3 Access Grants credentials; tested). |
+| `NoAssumeForSessions` | Deny `sts:AssumeRole`, `TagSession`, `SetSourceIdentity` and `GetFederationToken` on every resource. The user no longer carries `ssd-workshop-deploy`'s `NoSelfAssume`, and in the same account a role whose trust policy names `user/ssd-workshop-claude` needs no identity-based Allow: a role an earlier session (with deploy rights) left behind could otherwise still be assumed. |
+| `NoUserDataForSessions` | Deny `ec2:DescribeInstanceAttribute`, `DescribeLaunchTemplateVersions`, `DescribeSpotFleetRequests` and `DescribeSpotInstanceRequests` on every resource: `ec2:Describe*` (on `-deploy-read`) would return the project's own instances' user data and launch template versions (`NoUserDataReads` there denies them only outside the project tag). Sessions do not need them; the deploy role keeps them on project-tagged resources. |
 
 Not granted to sessions on purpose (ticket 2.12): every deploy right, `ecs:DescribeTaskDefinition`,
-`ecr:GetAuthorizationToken`, `dynamodb:GetItem`/`BatchGetItem`/`Query`/`Scan`/`PartiQLSelect`/exports/stream
+`ecr:GetAuthorizationToken` and the other credential-returning reads (`sts:GetFederationToken`/`GetSessionToken`,
+`sso:GetRoleCredentials`, `s3:GetDataAccess`, `ec2:GetPasswordData`/`GetConsoleOutput`/`GetConsoleScreenshot`,
+package login tokens; tested, wildcards expanded), `dynamodb:GetItem`/`BatchGetItem`/`Query`/`Scan`/`PartiQLSelect`/exports/stream
 records, `sqs:ReceiveMessage`, `secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `lambda:InvokeFunction`.
 
 Not granted on purpose: `lambda:List*` (returns every function's environment variables),
@@ -333,7 +340,11 @@ follow-up.
    deploy role (since ticket 2.12 the Claude user has none of them).
 4. **Long-lived access key of `ssd-workshop-claude`.** Impact: a leaked key carries the user's
    rights until it is deactivated: since ticket 2.12 reads (with the account-wide reads of risk 6),
-   Bedrock calls (cost) and emails from the workshop sender (risk 5), no deploy rights. Mitigation: it lives only as a network secret of the cloud
+   Bedrock calls (cost), Logs Insights queries and live tails on workshop log groups (cost per GB
+   scanned and per minute) and emails from the workshop sender (risk 5); no deploy rights, no role
+   assumption or federation token (`NoAssumeForSessions`). What IAM cannot undo: resource policies or
+   roles an earlier session (with deploy rights) may have left naming the user; `infra/README.md`
+   ("After applying ticket 2.12's access stack") has Franck's one-time audit. Mitigation: it lives only as a network secret of the cloud
    environment; rotate it every 90 days and after any suspected leak (IAM, Users, Security
    credentials).
 5. **SES sends from `ssd-workshop@rankly.games` to any recipient.** Participants' addresses are not
@@ -504,9 +515,9 @@ Not granted, so a later ticket brings it to Franck before it is needed:
 
 `access-stack.test.ts` (run by `npm test`) parses the template and checks the four deploy
 policies and the boundary with the same rules (and, since ticket 2.12, that the Claude user carries
-only `ssd-workshop-deploy-read` and `ssd-workshop-session`, every Allow of it a read or one of six
-listed exceptions, no table item, queue message, secret value or parameter read, and the session
-reads named `ssd-workshop-*`): every write is scoped by a resource name that
+only `ssd-workshop-deploy-read` and `ssd-workshop-session`, every Allow of it a read or one of seven
+listed exceptions (Bedrock invoke, SES send, three log reads), no table item, queue message, secret value,
+parameter or credential read, no role assumption, and the session reads named `ssd-workshop-*`): every write is scoped by a resource name that
 starts with `ssd-workshop-` (with the dash), the project resource tag, the workshop DNS names
 (with record types and a `Null` guard) or an `ssd-workshop-*` function, or is on a commented
 exception list. A request tag alone counts only for creates: never for a tag-adding action, never
@@ -524,8 +535,9 @@ boundary only the launcher role starts tasks (a small evaluator checks these per
 `ecs:DescribeTaskDefinition` is granted only on its own, to the deploy role; EventBridge rules need an
 `ssd-workshop.*` source; certificates only for workshop names; SES only through the workshop
 sender's identities; every bucket grant needs this account; the sharing and egress denies,
-`NoSelfAssume` and the identity denies cover the deploy role (the Claude user holds no Allow
-they would limit), and the sharing denies also the boundary; no IAM write reaches the deploy role; `iam:PassRole` names its services; roles can only
+`NoSelfAssume` and the identity denies cover the deploy role (the Claude user holds no write they
+would limit, and its own `NoAssumeForSessions` denies role assumption and federation tokens, since a
+trust policy naming the user needs no Allow), and the sharing denies also the boundary; no IAM write reaches the deploy role; `iam:PassRole` names its services; roles can only
 be created with the boundary; the boundary cannot be removed; the deploy role trusts only this
 repository's `main`; only `deploy.yml`, on push to `main`, may request an OIDC token; each
 managed policy stays under 6,144 characters. Each check also runs against the old, loose pattern
