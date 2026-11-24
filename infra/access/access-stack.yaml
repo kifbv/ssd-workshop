@@ -663,6 +663,20 @@ Resources:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
           # Registry login for the deploy workflow's base image pulls from ECR Public (anonymous pulls from
           # GitHub's runners get 429). Neither action takes a resource; the bearer token is limited to ECR Public.
+          # Event source mappings addressed by UUID (CloudFormation's read before a delete or update): Lambda checks
+          # GetEventSourceMapping on Resource "*" with no lambda:FunctionArn (denied live, rollback after 2.9), so
+          # WorkshopEventSourceMappings' condition cannot match. Reads on "*"; changes only on mappings tagged for the
+          # workshop (unverified live: whether Delete/Update by UUID also carry no ARN).
+          - Sid: ReadEventSourceMappings
+            Effect: Allow
+            Action: lambda:GetEventSourceMapping
+            Resource: "*"
+          - Sid: ChangeTaggedEventSourceMappings
+            Effect: Allow
+            Action: [lambda:DeleteEventSourceMapping, lambda:UpdateEventSourceMapping]
+            Resource: !Sub arn:aws:lambda:*:${AWS::AccountId}:event-source-mapping:*
+            Condition:
+              StringEquals: {aws:ResourceTag/project: ssd-workshop}
           - Sid: EcrPublicLogin
             Effect: Allow
             Action: ecr-public:GetAuthorizationToken

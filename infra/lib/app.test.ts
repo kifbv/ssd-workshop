@@ -2188,12 +2188,12 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(JSON.stringify(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties?.AssumeRolePolicyDocument)).toContain("scheduler.amazonaws.com");
   });
 
-  it("trusts the scheduler only for its own schedule, the builder's task role only for tasks on the builds cluster (ticket 2.9 try 2) and its execution role for ECS in this account (try 3)", () => {
+  it("trusts the scheduler only for the default schedule group of this account, the builder's task role only for tasks on the builds cluster (ticket 2.9 try 2) and its execution role for ECS in this account (try 3)", () => {
     const trust = (name: string) => (roleEntry(name)[1].Properties?.AssumeRolePolicyDocument as { Statement: { Principal: unknown; Condition: unknown }[] }).Statement;
     expect(trust(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([
       expect.objectContaining({
         Principal: { Service: "scheduler.amazonaws.com" },
-        Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` } },
+        Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule-group/default` } },
       }),
     ]);
     const sources: [string, string][] = [
