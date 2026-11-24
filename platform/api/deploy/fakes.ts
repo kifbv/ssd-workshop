@@ -44,6 +44,8 @@ export class FakeCdn implements Cdn {
 }
 
 export interface FakeBuild {
+  /** As stored by ticket 2.7 (as the participant typed it). */
+  nickname: string;
   status: BuildStatus;
   updatedAt?: string;
   deployedCommit?: string;
@@ -57,23 +59,33 @@ export class FakeDeployRecords implements DeployRecords {
   /** Live markers by lower-cased nickname. */
   readonly live = new Map<string, { nickname: string; liveAt: string }>();
 
-  private update(buildId: string, change: Partial<FakeBuild>): boolean {
+  /** When set, markFailed fails (a table problem). */
+  failMarkFailed = false;
+
+  /** Like the real UpdateItem: SET the change, REMOVE the listed attributes; false when the build is missing or the condition fails. */
+  private update(buildId: string, change: Partial<FakeBuild>, remove: ("failureReasons" | "deployedCommit")[] = [], condition: (build: FakeBuild) => boolean = () => true): boolean {
     const build = this.builds.get(buildId);
-    if (build === undefined) return false;
-    this.builds.set(buildId, { ...build, ...change });
+    if (build === undefined || !condition(build)) return false;
+    const next: FakeBuild = { ...build, ...change };
+    if (remove.includes("failureReasons")) delete next.failureReasons;
+    if (remove.includes("deployedCommit")) delete next.deployedCommit;
+    this.builds.set(buildId, next);
     return true;
   }
 
-  async startDeploy(buildId: string, nowIso: string): Promise<boolean> {
-    return this.update(buildId, { status: "deploying", updatedAt: nowIso });
+  async startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean> {
+    return this.update(buildId, { status: "deploying", updatedAt: nowIso }, [], (build) =>
+      build.nickname === nickname && ["queued", "building", "deploying"].includes(build.status),
+    );
   }
 
   async markLive(buildId: string, commit: string, nowIso: string): Promise<boolean> {
-    return this.update(buildId, { status: "live", updatedAt: nowIso, deployedCommit: commit, finishedAt: nowIso });
+    return this.update(buildId, { status: "live", updatedAt: nowIso, deployedCommit: commit, finishedAt: nowIso }, ["failureReasons"]);
   }
 
   async markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(buildId, { status: "failed", updatedAt: nowIso, failureReasons: [...reasons], finishedAt: nowIso });
+    if (this.failMarkFailed) throw Object.assign(new Error("table is down"), { name: "InternalServerError" });
+    return this.update(buildId, { status: "failed", updatedAt: nowIso, failureReasons: [...reasons], finishedAt: nowIso }, ["deployedCommit"]);
   }
 
   async markAppLive(nickname: string, nowIso: string): Promise<void> {

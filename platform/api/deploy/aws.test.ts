@@ -30,6 +30,9 @@ function namesOf(input: UpdateItemCommandInput): string[] {
   const defined = new Set([...Object.keys(input.ExpressionAttributeNames ?? {}), ...Object.keys(input.ExpressionAttributeValues ?? {})]);
   expect([...used].sort(), text).toEqual([...defined].sort());
   const bare = (input.ConditionExpression ?? "").match(/attribute_exists\((\w+)\)/)?.[1];
+  // Every bare name a condition uses goes through a placeholder, except the key in attribute_exists.
+  const words = (input.ConditionExpression ?? "").replace(/[#:][A-Za-z_]+/g, "").match(/[A-Za-z_]+/g) ?? [];
+  expect(words.filter((word) => !["attribute_exists", "AND", "IN", "pk"].includes(word)), input.ConditionExpression).toEqual([]);
   return [...Object.keys(input.Key ?? {}), ...Object.values(input.ExpressionAttributeNames ?? {}), ...(bare ? [bare] : [])];
 }
 
@@ -84,24 +87,48 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
   it("updates only an existing build, naming only the build attributes the deployer's role may write", async () => {
     const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
     const records = new DynamoDeployRecords(client, TABLE);
-    expect(await records.startDeploy("build-1", NOW)).toBe(true);
+    expect(await records.startDeploy("build-1", "Ada", NOW)).toBe(true);
     expect(await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(true);
     expect(await records.markFailed("build-1", ["index.html: no", "x"], NOW)).toBe(true);
     for (const command of sent) {
       expect(command).toBeInstanceOf(UpdateItemCommand);
       const input = command.input as UpdateItemCommandInput;
-      expect(input).toMatchObject({ TableName: TABLE, Key: { pk: { S: "BUILD#build-1" }, sk: { S: "BUILD" } }, ConditionExpression: "attribute_exists(pk)", ReturnValues: "NONE" });
+      expect(input).toMatchObject({ TableName: TABLE, Key: { pk: { S: "BUILD#build-1" }, sk: { S: "BUILD" } }, ReturnValues: "NONE" });
       for (const name of namesOf(input)) expect(DEPLOYER_BUILD_UPDATE_ATTRIBUTES, name).toContain(name);
     }
-    expect((sent[0]?.input as UpdateItemCommandInput).ExpressionAttributeValues?.[":status"]).toEqual({ S: "deploying" });
-    expect((sent[1]?.input as UpdateItemCommandInput).ExpressionAttributeValues).toMatchObject({ ":status": { S: "live" }, ":commit": { S: "0123456789abcdef0123456789abcdef01234567" } });
-    expect((sent[2]?.input as UpdateItemCommandInput).ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" }, ":reasons": { L: [{ S: "index.html: no" }, { S: "x" }] } });
+    const [start, live, failed] = sent.map((command) => command.input as UpdateItemCommandInput);
+    expect(start?.UpdateExpression).toBe("SET #status = :status, #updatedAt = :now");
+    expect(start?.ExpressionAttributeValues?.[":status"]).toEqual({ S: "deploying" });
+    expect(live).toMatchObject({ ConditionExpression: "attribute_exists(pk)" });
+    expect(live?.UpdateExpression).toMatch(/ REMOVE #failureReasons$/);
+    expect(live?.ExpressionAttributeNames?.["#failureReasons"]).toBe("failureReasons");
+    expect(live?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "live" }, ":commit": { S: "0123456789abcdef0123456789abcdef01234567" } });
+    expect(failed).toMatchObject({ ConditionExpression: "attribute_exists(pk)" });
+    expect(failed?.UpdateExpression).toMatch(/ REMOVE #deployedCommit$/);
+    expect(failed?.ExpressionAttributeNames?.["#deployedCommit"]).toBe("deployedCommit");
+    expect(failed?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" }, ":reasons": { L: [{ S: "index.html: no" }, { S: "x" }] } });
+  });
+
+  it("starts a deploy only for an existing build of the message's app (nickname exactly as typed) that is queued, building or deploying", async () => {
+    const { client, sent } = stub<DeployTableSender>([{}]);
+    await new DynamoDeployRecords(client, TABLE).startDeploy("build-1", "Ada", NOW);
+    const input = sent[0]?.input as UpdateItemCommandInput;
+    expect(input.ConditionExpression).toBe("attribute_exists(pk) AND #nickname = :nickname AND #status IN (:queued, :building, :deploying)");
+    expect(input.ExpressionAttributeNames).toMatchObject({ "#nickname": "nickname", "#status": "status" });
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ":nickname": { S: "Ada" },
+      ":queued": { S: "queued" },
+      ":building": { S: "building" },
+      ":deploying": { S: "deploying" },
+    });
+    // The condition's names count for IAM's dynamodb:Attributes too.
+    for (const name of ["nickname", "status"]) expect(DEPLOYER_BUILD_UPDATE_ATTRIBUTES).toContain(name);
   });
 
   it("answers false for a build that does not exist, and passes other errors on", async () => {
     const { client } = stub<DeployTableSender>([conditionFailed(), Object.assign(new Error("x"), { name: "ProvisionedThroughputExceededException" })]);
     const records = new DynamoDeployRecords(client, TABLE);
-    expect(await records.startDeploy("nope", NOW)).toBe(false);
+    expect(await records.startDeploy("nope", "Ada", NOW)).toBe(false);
     await expect(records.markFailed("nope", [], NOW)).rejects.toThrow("x");
   });
 

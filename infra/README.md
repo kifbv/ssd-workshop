@@ -508,7 +508,15 @@ curl -sS -I https://workshop.rankly.games/apps/<nickname>/ \
 #         referrer-policy: strict-origin-when-cross-origin
 curl -sS -I https://workshop.rankly.games/apps/<nickname> | grep -i -E '^(HTTP/|location)'
 # expect: 301 with location: /apps/<nickname>/ (the CloudFront Function; also for an upper-case nickname)
+curl -sS -I 'https://workshop.rankly.games/apps/<Nickname with an upper-case letter>?a=1%26b%3D2&c=%0A' | grep -i -E '^(HTTP/|location)'
+# expect: 301 with location: /apps/<nickname, lower-cased>/?a=1%26b%3D2&c=%0A — the query kept as sent: %26 and %0A
+#         stay encoded (no extra parameter, no line break or second header in the answer)
 ```
+
+The function rebuilds the query from CloudFront's `querystring` values as it receives them (unverified whether
+CloudFront hands them over still encoded). If the `location` shows a bare `&b=2` or a line break instead of `%26` and
+`%0A`, the values arrive decoded: re-encode each name and value in `infra/lib/apps-index.js` (`encodeURIComponent`) in
+a follow-up before 2.8 makes apps public.
 
 Criterion 5, an unknown address under `/apps/` (and anywhere on the site) shows the plain 404 page:
 
@@ -528,8 +536,22 @@ aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
 # expect: An error occurred (AccessDenied) when calling the PutObject operation ... with an explicit deny in a resource-based policy
 ```
 
-The first successful deploy also proves that `aws:PrincipalArn` matches the deployer's role (the policy names it with and
-without its path). A failing commit (add `shell.php` or a `https://` address to the repository and send a new
+The refusal names the deny `OnlyTheDeployerWritesApps`, so the `aws:PrincipalArn` form used by the deny is checked
+from both sides: the Claude user is refused, and the first successful deploy (the deployer's puts pass) proves that
+`aws:PrincipalArn` matches the deployer's role (the policy names it with and without its path). If the first deploy
+fails with `AccessDenied` on `PutObject` "with an explicit deny in a resource-based policy", the key carries a form
+that neither ARN matches: look up `userIdentity.sessionContext.sessionIssuer.arn` in CloudTrail and fix
+`DEPLOYER_ROLE_ARN`.
+
+The first deploy's invalidation must also pass under the boundary's tag condition (the distribution carries
+`project=ssd-workshop`; the deployer's role may invalidate only `DISTRIBUTION_ARN`):
+
+```sh
+aws cloudfront list-invalidations --distribution-id E2TOZV0ERAXKZ9 --max-items 1 \
+  --query 'InvalidationList.Items[0].[Status, CreateTime]'
+# expect: ["Completed" (or "InProgress"), <time of the deploy>]; the deployer's log line says outcome "live", not
+#         "retry" with error "AccessDenied" (which would mean the boundary refused CreateInvalidation)
+``` A failing commit (add `shell.php` or a `https://` address to the repository and send a new
 message with a new build id) leaves the live files as they were and gives the build `"failed"` with its
 `failureReasons`.
 

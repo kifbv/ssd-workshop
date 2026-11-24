@@ -95,3 +95,16 @@ paths:
   announced length first), unpack with `gunzipSync(..., { maxOutputLength })` (a zip bomb stops there), reject an
   absolute or `..` path before anything else, and never write to disk. In tests, a `ReadableStream` pulls its first
   chunk when constructed, so "nothing was read" cannot be asserted on it.
+- A queue message that makes a worker act on a record (the deployer's `{ buildId, nickname, commit }`, ticket 2.5) is
+  tied to that record by the write's condition: the build must exist, belong to the message's app (`nickname` equal
+  exactly, as 2.7 stores it) and be in a state that expects the work; a failed condition drops the message, and a
+  failure is recorded on the record only after that condition passed. The commit in a deploy message must come only
+  from the platform's own push result, never from participant input; ticket 2.8 stores it on the build so the
+  deployer can condition on it later.
+- Text that quotes participants' files (the deployer's `failureReasons`) is stored with control and other
+  non-printable characters replaced by `?` (`storedReason`), and pages (2.7, 2.10) render it with `textContent` only.
+- The API never answers 403: the distribution turns every 403 into the plain 404 page (ticket 2.5). Use 401 or 404;
+  `platform/api/statuses.test.ts` fails on a `403` or `Forbidden` in any API source.
+- An SQS-fed worker whose last delivery must record a failure (the deployer) takes its deadline from the Lambda
+  context (`getRemainingTimeInMillis()`), starts no phase with less than a reserve left (15 s) and cuts each phase off
+  at the reserve (race plus a network time limit bounded by the time left), so the failure write still fits.

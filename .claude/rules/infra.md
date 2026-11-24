@@ -157,7 +157,8 @@ paths:
 - DynamoDB `TransactWriteItems` has no IAM action of its own: each item is authorized as `PutItem`,
   `UpdateItem`, `DeleteItem` or `ConditionCheckItem`, with its own `LeadingKeys`/`Attributes` conditions.
   Under a `dynamodb:Attributes` list, return only `UPDATED_NEW`/`UPDATED_OLD`/`NONE` (`ALL_NEW` could
-  return attributes outside it), and list `pk`/`sk` plus every name an expression uses, conditions included.
+  return attributes outside it; enforce it with `StringEqualsIfExists` `dynamodb:ReturnValues`
+  [`ATTRIBUTE_LIMITED_RETURN_VALUES`], ticket 2.5), and list `pk`/`sk` plus every name an expression uses, conditions included.
 - A custom CloudFront policy (the pages' `ssd-workshop-pages-v1` response headers policy, ticket 1.6) can be created but
   never updated: a change to any of its settings must bump `PAGES_HEADERS_POLICY_VERSION`, which changes the name
   and the logical id (a new name alone is an in-place update), or the deploy fails on `UpdateResponseHeadersPolicy`.
@@ -191,6 +192,12 @@ paths:
   (ticket 2.5). Never map 404 there: the API's own JSON 404s would become the page.
 - A bucket only one role may write (the apps bucket, ticket 2.5): a bucket policy `Deny` of the object-changing actions
   for `AnyPrincipal` with `ArnNotEquals` `aws:PrincipalArn` [role ARN with path, same without] keeps even the deploy
-  role and the Claude user out; bucket-level actions stay allowed so deploys can still manage the bucket.
+  role and the Claude user out; bucket-level actions stay allowed so deploys can still manage the bucket (a deny there
+  could lock CloudFormation out). The boundary allows workload roles `s3:*` on `ssd-workshop-*`, so the synth test must
+  fail when any role is granted the bucket's policy, lifecycle, website, CORS or deletion actions on it. Limit the
+  CloudFront read to the workshop distribution's exact ARN (`DISTRIBUTION_ARN`), not `distribution/*`.
+- A queue that makes a worker publish (the deploy queue, ticket 2.5) gets its senders checked on the synth output: a test
+  fails when any IAM policy may `sqs:SendMessage` to it (by name, ARN, logical id or wildcard) other than the one
+  allowed sender (none until ticket 2.9 adds the builder).
 - CloudFront Function code lives in a plain `.js` file (`FunctionCode.fromFile`, inlined in the template, no asset) that
   a test evaluates (`new Function(code + "return handler;")`); `AWS::CloudFront::Function` takes `Tags`.

@@ -4,12 +4,17 @@ import { appArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
 import {
   CACHE_CONTROL,
   contentTypeOf,
+  DEPLOY_RESERVE_MS,
+  DOWNLOAD_TIMEOUT_MS,
   DownloadProblem,
   MAX_REASON_CHARS,
   MAX_REASONS_CHARS,
   SERVICE_PROBLEM_REASON,
+  TIME_UP_REASON,
   parseDeployJob,
   processDeploy,
+  storedReason,
+  storedReasons,
   type DeployDeps,
   type DeployLogEntry,
 } from "./deploy.js";
@@ -26,13 +31,15 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
   const objects = new FakeAppObjects();
   const cdn = new FakeCdn();
   const records = new FakeDeployRecords();
-  records.builds.set(BUILD, { status: "building" });
+  records.builds.set(BUILD, { nickname: "Ada", status: "building" });
   const downloads: string[] = [];
+  const downloadTimeouts: number[] = [];
   const logs: DeployLogEntry[] = [];
   let clock = NOW.getTime();
   const deps: DeployDeps = {
-    download: async (url) => {
+    download: async (url, timeoutMs) => {
       downloads.push(url);
+      downloadTimeouts.push(timeoutMs);
       return typeof archive === "function" ? archive() : archive;
     },
     objects,
@@ -41,7 +48,12 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
     now: () => new Date((clock += 5)),
     log: (entry) => logs.push(entry),
   };
-  return { deps, objects, cdn, records, downloads, logs };
+  /** Moves the fake clock forward. */
+  const advance = (ms: number): void => {
+    clock += ms;
+  };
+  const now = (): number => clock;
+  return { deps, objects, cdn, records, downloads, downloadTimeouts, logs, advance, now };
 }
 
 const passing = () => gzip(githubTar({ "index.html": PAGE, "app.js": "console.log(1);\n", "css/style.css": "p { color: red; }\n", "img/Logo.PNG": new Uint8Array([137, 80, 78, 71]) }));
@@ -257,6 +269,39 @@ describe("deploy messages", () => {
     expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
   });
 
+  it("drops a message whose build belongs to another app, without downloading or publishing (the build is left as it was)", async () => {
+    for (const nickname of ["Bob", "ada", "ADA"]) {
+      const t = setup(passing());
+      await expect(processDeploy(job({ nickname }), 1, t.deps)).resolves.toBeUndefined();
+      expect(t.downloads, nickname).toEqual([]);
+      expect(t.objects.puts).toEqual([]);
+      expect(t.records.live.size).toBe(0);
+      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status: "building" });
+      expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
+    }
+  });
+
+  it("drops a message whose build is already live or failed, without downloading or publishing", async () => {
+    for (const status of ["live", "failed"] as const) {
+      const t = setup(passing());
+      t.records.builds.set(BUILD, { nickname: "Ada", status, finishedAt: EARLIER });
+      await processDeploy(job(), 1, t.deps);
+      expect(t.downloads, status).toEqual([]);
+      expect(t.objects.puts).toEqual([]);
+      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status, finishedAt: EARLIER });
+      expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
+    }
+  });
+
+  it("deploys a build that is queued, building, or deploying (a redelivery after a crash)", async () => {
+    for (const status of ["queued", "building", "deploying"] as const) {
+      const t = setup(passing());
+      t.records.builds.set(BUILD, { nickname: "Ada", status });
+      await processDeploy(job(), 1, t.deps);
+      expect(t.records.builds.get(BUILD)?.status, status).toBe("live");
+    }
+  });
+
   it("marks the build deploying before it downloads", async () => {
     const t = setup(async () => {
       expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
@@ -299,13 +344,44 @@ describe("passing problems: retried by SQS, the build marked failed on the last 
     expect(JSON.stringify(t.logs)).not.toContain("S3 is down");
   });
 
-  it("a later delivery of the same message publishes the same files again (at-least-once delivery is harmless)", async () => {
+  it("a later delivery of the same message changes nothing once the build is live (at-least-once delivery is harmless)", async () => {
     const t = setup(passing());
     await processDeploy(job(), 1, t.deps);
     const first = new Map(t.objects.objects);
+    const build = t.records.builds.get(BUILD);
     await processDeploy(job(), 2, t.deps);
     expect(t.objects.objects).toEqual(first);
+    expect(t.downloads).toHaveLength(1);
+    expect(t.records.builds.get(BUILD)).toEqual(build);
+    expect(t.logs.at(-1)?.outcome).toBe("no-build");
+  });
+
+  it("a redelivery after a deploy stopped half-way (build still deploying) publishes the same files again", async () => {
+    const t = setup(passing());
+    t.objects.failPutOf = "apps/ada/app.js";
+    await expect(processDeploy(job(), 1, t.deps)).rejects.toThrow(/^deploy failed$/);
+    t.objects.failPutOf = undefined;
+    await processDeploy(job(), 2, t.deps);
     expect(t.records.builds.get(BUILD)?.status).toBe("live");
+    expect([...t.objects.objects.keys()].sort()).toEqual(["apps/ada/app.js", "apps/ada/css/style.css", "apps/ada/img/Logo.PNG", "apps/ada/index.html"]);
+  });
+
+  it("never marks a build failed that it could not check first (the table failed on the last delivery): dead-letter", async () => {
+    const t = setup(passing());
+    t.records.startDeploy = async () => {
+      throw Object.assign(new Error("table is down"), { name: "InternalServerError" });
+    };
+    await expect(processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps)).rejects.toThrow(/^deploy failed$/);
+    expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status: "building" });
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "dead-letter", error: "InternalServerError", durationMs: expect.any(Number) }]);
+  });
+
+  it("logs dead-letter (not retry) when even marking the build failed fails on the last delivery, and throws so the message reaches the dead-letter queue", async () => {
+    const t = unreachable();
+    t.records.failMarkFailed = true;
+    await expect(processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps)).rejects.toThrow(/^deploy failed$/);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "dead-letter", error: "DownloadProblem", durationMs: expect.any(Number) }]);
+    expect(JSON.stringify(t.logs)).not.toContain("table is down");
   });
 });
 
@@ -319,5 +395,114 @@ describe("content types", () => {
     expect(contentTypeOf("icon.svg")).toBe("image/svg+xml");
     expect(contentTypeOf("font.woff2")).toBe("font/woff2");
     expect(contentTypeOf("data.json")).toBe("application/json; charset=utf-8");
+  });
+});
+
+describe("build updates remove what no longer holds (like the real REMOVE clauses)", () => {
+  it("marking a build live removes the failure reasons of an earlier try", async () => {
+    const t = setup(passing());
+    t.records.builds.set(BUILD, { nickname: "Ada", status: "building", failureReasons: ["old reason"] });
+    await processDeploy(job(), 1, t.deps);
+    expect(t.records.builds.get(BUILD)?.status).toBe("live");
+    expect(t.records.builds.get(BUILD)).not.toHaveProperty("failureReasons");
+  });
+
+  it("marking a build failed removes a deployed commit of an earlier try", async () => {
+    const t = setup(gzip(githubTar({ "index.html": "x", "shell.php": "<?php ?>" })));
+    t.records.builds.set(BUILD, { nickname: "Ada", status: "building", deployedCommit: COMMIT });
+    await processDeploy(job(), 1, t.deps);
+    expect(t.records.builds.get(BUILD)?.status).toBe("failed");
+    expect(t.records.builds.get(BUILD)).not.toHaveProperty("deployedCommit");
+  });
+});
+
+describe("stored reasons hold no control or other non-printable characters (they quote anyone's file names and lines)", () => {
+  it("replaces each control, format, separator or lone surrogate character with ?, keeping the caps", () => {
+    const tricky = "a\u0000b\u0007c\u001bd\te\nf\rg\u007fh\u0085i\u200bj\u202ek\u2028l\u2029m\ufeffn\ud800o\ue000p";
+    const [stored] = storedReasons([{ file: `x${tricky}.php`, reason: tricky }]);
+    const clean = "a?b?c?d?e?f?g?h?i?j?k?l?m?n?o?p";
+    expect(stored).toBe(`x${clean}.php: ${clean}`);
+    expect([...(stored ?? "")].filter((char) => (char.codePointAt(0) ?? 0) < 0x20 || ((char.codePointAt(0) ?? 0) >= 0x7f && (char.codePointAt(0) ?? 0) <= 0x9f))).toEqual([]);
+    // Ordinary text, accents and emoji stay as they are.
+    expect(storedReasons([{ reason: "Café 👍 «ok» — fine" }])).toEqual(["Café 👍 «ok» — fine"]);
+    // A cut that would split a surrogate pair leaves no lone half.
+    const [cut] = storedReasons([{ reason: `${"x".repeat(MAX_REASON_CHARS - 2)}👍👍` }]);
+    expect(cut?.length).toBeLessThanOrEqual(MAX_REASON_CHARS);
+    expect(cut).not.toMatch(/[\ud800-\udfff](?![\udc00-\udfff])/u);
+    expect(storedReason("\u0000".repeat(2 * MAX_REASON_CHARS))).toBe(`${"?".repeat(MAX_REASON_CHARS - 1)}…`);
+  });
+
+  it("stores the check's reasons with control characters replaced", async () => {
+    const t = setup(gzip(githubTar({ "index.html": "x", "bad\u001b[31m\nname.php": "x" })));
+    await processDeploy(job(), 1, t.deps);
+    const reasons = t.records.builds.get(BUILD)?.failureReasons ?? [];
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toMatch(/^bad\?\[31m\?name\.php: /);
+  });
+});
+
+describe("the Lambda's deadline: the last delivery still marks the build failed when time runs out", () => {
+  it("does not start the download with less than DEPLOY_RESERVE_MS left, and marks the build failed on the last delivery", async () => {
+    const t = setup(passing());
+    // Enough to mark the build deploying (a few fake ms), not enough for the download.
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + DEPLOY_RESERVE_MS + 7);
+    expect(t.downloads).toEqual([]);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "gave-up", error: "DeployTimeUp", durationMs: expect.any(Number) }]);
+  });
+
+  it("before the last delivery, throws so SQS delivers again", async () => {
+    const t = setup(passing());
+    await expect(processDeploy(job(), 1, t.deps, t.now() + DEPLOY_RESERVE_MS - 1)).rejects.toThrow(/^deploy failed$/);
+    expect(t.downloads).toEqual([]);
+    expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "retry", error: "DeployTimeUp", durationMs: expect.any(Number) }]);
+  });
+
+  it("gives the download a time limit bounded by the time left (and at most DOWNLOAD_TIMEOUT_MS)", async () => {
+    const roomy = setup(passing());
+    await processDeploy(job(), 1, roomy.deps, roomy.now() + 120_000);
+    expect(roomy.downloadTimeouts).toEqual([DOWNLOAD_TIMEOUT_MS]);
+    const tight = setup(passing());
+    const deadline = tight.now() + DEPLOY_RESERVE_MS + 5_000;
+    await processDeploy(job(), 1, tight.deps, deadline);
+    expect(tight.downloadTimeouts).toHaveLength(1);
+    expect(tight.downloadTimeouts[0]).toBeLessThanOrEqual(5_000 + 1_000);
+    expect(tight.downloadTimeouts[0]).toBeGreaterThan(4_000);
+  });
+
+  it("stops waiting for a download that hangs when the time left is used up, and marks the build failed", async () => {
+    const t = setup(() => new Promise<Uint8Array>(() => undefined));
+    const started = Date.now();
+    // 60 real ms for the download phase (the fake clock moves only a few ms meanwhile).
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + DEPLOY_RESERVE_MS + 70);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
+    expect(t.objects.puts).toEqual([]);
+  });
+
+  it("stops between batches of puts when time runs out: no clean-up, no invalidation, the live marker untouched", async () => {
+    const files: Record<string, string> = { "index.html": PAGE, "app.js": "ok();\n", "css/style.css": "p {}\n" };
+    for (let i = 0; i < 20; i += 1) files[`f${i}.txt`] = "x";
+    const t = setup(gzip(githubTar(files)));
+    seed(t.objects);
+    t.records.live.set("ada", { nickname: "Ada", liveAt: EARLIER });
+    const deadline = t.now() + 120_000;
+    // Each put takes 40 fake seconds: the first batch ends with less than the reserve left.
+    const put = t.objects.put.bind(t.objects);
+    t.objects.put = async (...args) => {
+      t.advance(40_000 / 8);
+      return put(...args);
+    };
+    t.advance(0);
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, deadline);
+    expect(t.objects.puts.length).toBeGreaterThan(0);
+    expect(t.objects.puts.length).toBeLessThan(23);
+    expect(t.objects.puts.some((key) => key.endsWith(".html"))).toBe(false);
+    expect(t.objects.removed).toEqual([]);
+    expect(t.cdn.invalidations).toEqual([]);
+    expect(t.records.live.get("ada")).toEqual({ nickname: "Ada", liveAt: EARLIER });
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
   });
 });

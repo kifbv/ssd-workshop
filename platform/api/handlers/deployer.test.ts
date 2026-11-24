@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeAppObjects, FakeCdn, FakeDeployRecords } from "../deploy/fakes.js";
-import { DownloadProblem } from "../deploy/deploy.js";
+import { DEPLOY_RESERVE_MS, DownloadProblem, TIME_UP_REASON } from "../deploy/deploy.js";
 import { COMMIT, githubTar, gzip } from "../deploy/tar-fixtures.js";
 import { DEPLOY_MAX_RECEIVES } from "../settings.js";
 import { createHandler, logEntry } from "./deployer.js";
@@ -11,7 +11,7 @@ afterEach(() => {
 
 function deps(download: () => Promise<Uint8Array>) {
   const records = new FakeDeployRecords();
-  records.builds.set("b1", { status: "building" });
+  records.builds.set("b1", { nickname: "Ada", status: "building" });
   return { records, deps: { download, objects: new FakeAppObjects(), cdn: new FakeCdn(), records, now: () => new Date(), log: logEntry } };
 }
 
@@ -40,6 +40,18 @@ describe("deployer handler (ticket 2.5)", () => {
     const last = deps(failing);
     await createHandler(last.deps)({ Records: [{ body, attributes: { ApproximateReceiveCount: String(DEPLOY_MAX_RECEIVES) } }] });
     expect(last.records.builds.get("b1")?.status).toBe("failed");
+  });
+
+  it("takes the deadline from the Lambda context: with too little time left, the last delivery marks the build failed", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const t = deps(async () => gzip(githubTar({ "index.html": "<p>hi</p>" })));
+    const context = { getRemainingTimeInMillis: () => DEPLOY_RESERVE_MS - 1 };
+    await createHandler(t.deps)({ Records: [{ body, attributes: { ApproximateReceiveCount: String(DEPLOY_MAX_RECEIVES) } }] }, context);
+    expect(t.records.builds.get("b1")).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
+    // With time enough, the same record is published.
+    const roomy = deps(async () => gzip(githubTar({ "index.html": "<p>hi</p>" })));
+    await createHandler(roomy.deps)({ Records: [{ body, attributes: { ApproximateReceiveCount: "1" } }] }, { getRemainingTimeInMillis: () => 120_000 });
+    expect(roomy.records.builds.get("b1")?.status).toBe("live");
   });
 
   it("drops a malformed record without throwing", async () => {

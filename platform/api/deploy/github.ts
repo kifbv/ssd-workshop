@@ -3,14 +3,14 @@
  * anonymous (ticket 2.6 may add a token). The body is read as a stream and dropped past
  * MAX_DOWNLOAD_BYTES; the whole download has a time limit.
  */
-import { DownloadProblem } from "./deploy.js";
+import { DOWNLOAD_TIMEOUT_MS, DownloadProblem } from "./deploy.js";
+
+export { DOWNLOAD_TIMEOUT_MS };
 
 const MB = 1024 * 1024;
 
 /** At most this much is downloaded: an app holds at most 5 MB, and compressed text is smaller still. */
 export const MAX_DOWNLOAD_BYTES = 10 * MB;
-/** The whole download, answer and body, must end within this time. */
-export const DOWNLOAD_TIMEOUT_MS = 30_000;
 
 const TOO_BIG = `The repository's download is over ${MAX_DOWNLOAD_BYTES / MB} MB, so nothing was published.`;
 const UNREACHABLE = "GitHub could not be reached to download the commit.";

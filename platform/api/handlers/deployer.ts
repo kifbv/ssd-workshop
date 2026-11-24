@@ -23,22 +23,32 @@ export function logEntry(entry: DeployLogEntry): void {
   console.log(JSON.stringify(entry));
 }
 
-/** The handler on given dependencies (tests pass in-memory fakes). A thrown (bare) error makes SQS deliver the message again. */
-export function createHandler(deps: DeployDeps): (event: DeployEvent) => Promise<void> {
-  return async (event) => {
+/** The part of the Lambda context the deployer reads: the time left before the runtime stops it. */
+export interface DeployContext {
+  getRemainingTimeInMillis(): number;
+}
+
+/**
+ * The handler on given dependencies (tests pass in-memory fakes). A thrown (bare) error makes SQS deliver the
+ * message again. The deadline is now (on `deps.now`) plus the context's remaining time; without a context, none.
+ */
+export function createHandler(deps: DeployDeps): (event: DeployEvent, context?: DeployContext) => Promise<void> {
+  return async (event, context) => {
+    const left = context?.getRemainingTimeInMillis();
+    const deadline = typeof left === "number" && Number.isFinite(left) ? deps.now().getTime() + left : Number.POSITIVE_INFINITY;
     for (const record of event.Records ?? []) {
       const count = Number(record.attributes?.ApproximateReceiveCount ?? "1");
-      await processDeploy(record.body, Number.isInteger(count) && count > 0 ? count : 1, deps);
+      await processDeploy(record.body, Number.isInteger(count) && count > 0 ? count : 1, deps, deadline);
     }
   };
 }
 
-let live: ((event: DeployEvent) => Promise<void>) | undefined;
+let live: ((event: DeployEvent, context?: DeployContext) => Promise<void>) | undefined;
 
 /** The clients are created once per Lambda instance, on first use; the region is explicit. */
-export async function handler(event: DeployEvent): Promise<void> {
+export async function handler(event: DeployEvent, context?: DeployContext): Promise<void> {
   live ??= createHandler({
-    download: (url) => downloadArchive(url),
+    download: (url, timeoutMs) => downloadArchive(url, { timeoutMs }),
     objects: new S3AppObjects(new S3Client({
         region: REGION,
         maxAttempts: 3,
@@ -53,5 +63,5 @@ export async function handler(event: DeployEvent): Promise<void> {
     now: () => new Date(),
     log: logEntry,
   });
-  return live(event);
+  return live(event, context);
 }

@@ -2,7 +2,8 @@
  * The deployer (ticket 2.5): publishes one build of an app at `/apps/<nickname>/`. For one message
  * `{ buildId, nickname, commit }` from the deploy queue it:
  *
- * 1. marks the build `deploying` (only an existing build: a message for an unknown build is dropped);
+ * 1. marks the build `deploying`: only a build that exists, belongs to the message's app (same nickname) and
+ *    waits for its deploy (`queued`, `building`, or `deploying` on a redelivery); any other message is dropped;
  * 2. downloads the app's public repository at the commit from GitHub (tar.gz, size-capped) and unpacks
  *    it in memory (./tar.ts);
  * 3. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
@@ -13,7 +14,8 @@
  *
  * SQS delivers at least once and every step can run again: the same commit gives the same files. A
  * passing problem (GitHub or AWS) throws, so SQS delivers the message again; on the last delivery the
- * build is marked failed instead. Logs hold counts only: never a nickname, commit, file name, reason or
+ * build is marked failed instead. Every phase runs within the Lambda's remaining time less DEPLOY_RESERVE_MS, so
+ * the last delivery still has time to mark the build failed ("The deploy took too long."). Logs hold counts only: never a nickname, commit, file name, reason or
  * error message.
  */
 import { checkApp, type AppFile, type Problem } from "../build/check.js";
@@ -25,9 +27,12 @@ import { ArchiveProblem, readTarGz } from "./tar.js";
 
 export interface DeployJob {
   buildId: string;
-  /** As the participant typed it; keys and paths use it lower-cased. */
+  /** As the participant typed it (equal to the build's `nickname`); keys and paths use it lower-cased. */
   nickname: string;
-  /** The full commit id: 40 lower-case hex digits. */
+  /**
+   * The full commit id: 40 lower-case hex digits. Must come from the platform's own push result (tickets 2.7,
+   * 2.8), never from participant input: the deployer publishes whatever commit the message names.
+   */
   commit: string;
 }
 
@@ -67,14 +72,19 @@ export interface Cdn {
 
 /** The table's build items and live markers, as the deployer uses them. Build updates return false when the build does not exist. */
 export interface DeployRecords {
-  startDeploy(buildId: string, nowIso: string): Promise<boolean>;
+  /** Marks the build `deploying` only when it exists, its nickname equals `nickname` exactly and it is queued, building or deploying. */
+  startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean>;
   markLive(buildId: string, commit: string, nowIso: string): Promise<boolean>;
   markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Writes the live marker, keeping `liveAt` when it exists. */
   markAppLive(nickname: string, nowIso: string): Promise<void>;
 }
 
-export type DeployOutcome = "live" | "failed" | "invalid" | "no-build" | "retry" | "gave-up";
+/**
+ * `no-build`: no deployable build for the message (missing, another app's, or already live or failed).
+ * `dead-letter`: the last delivery could not even mark the build failed; the message goes to the dead-letter queue.
+ */
+export type DeployOutcome = "live" | "failed" | "invalid" | "no-build" | "retry" | "gave-up" | "dead-letter";
 
 /** The only things ever logged: counts, an outcome and an error name. */
 export interface DeployLogEntry {
@@ -89,8 +99,8 @@ export interface DeployLogEntry {
 }
 
 export interface DeployDeps {
-  /** Downloads the tarball at the address (GitHub). Throws DownloadProblem for what it can name. */
-  download: (url: string) => Promise<Uint8Array>;
+  /** Downloads the tarball at the address (GitHub) within `timeoutMs`. Throws DownloadProblem for what it can name. */
+  download: (url: string, timeoutMs: number) => Promise<Uint8Array>;
   objects: AppObjects;
   cdn: Cdn;
   records: DeployRecords;
@@ -114,6 +124,43 @@ export class DownloadProblem extends Error {
 
 /** Stored when a passing problem outlasts every delivery and has no reason of its own (an AWS error). */
 export const SERVICE_PROBLEM_REASON = "The workshop could not publish the app because of a problem on its side. Please try again.";
+
+/** The whole download, answer and body, must end within this time (less when the Lambda has less left). */
+export const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+/** Stored when the Lambda's time ran out before the deploy finished (last delivery). */
+export const TIME_UP_REASON = "The deploy took too long.";
+
+/**
+ * No phase (download, a batch of puts, the clean-up, the invalidation, a table write) starts with less than this
+ * much of the Lambda's time left, and each one is cut off this long before the end: room to mark the build failed.
+ */
+export const DEPLOY_RESERVE_MS = 15_000;
+
+/** The deploy ran out of time (see DEPLOY_RESERVE_MS). */
+export class DeployTimeUp extends Error {
+  constructor() {
+    super("time up");
+    this.name = "DeployTimeUp";
+  }
+}
+
+/** setTimeout's longest delay; a longer (or infinite) one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** `work`, or DeployTimeUp after `ms` (the work itself may go on in the background; nothing waits for it). */
+async function within<T>(work: Promise<T>, ms: number): Promise<T> {
+  if (!(ms < MAX_TIMER_MS)) return work;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeUp = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new DeployTimeUp()), ms);
+  });
+  try {
+    return await Promise.race([work, timeUp]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** What the Lambda runtime sees of a deploy to retry: no message or stack of the original error. */
 export const DEPLOY_FAILED = "deploy failed";
@@ -151,10 +198,22 @@ export function contentTypeOf(path: string): string {
 export const MAX_REASON_CHARS = 500;
 export const MAX_REASONS_CHARS = 16_000;
 
+/**
+ * Control, format (bidirectional overrides, zero-width), private-use, unassigned and lone surrogate characters, and
+ * line or paragraph separators. Reasons quote file names and lines from the participant's repository (anyone's
+ * text): each such character is stored as `?`, so a page shows exactly what is there.
+ */
+const NON_PRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}]/gu;
+
+/** A reason as stored: at most MAX_REASON_CHARS, non-printable characters as `?` (after the cut, which may split a pair). */
+export function storedReason(text: string): string {
+  const cut = text.length <= MAX_REASON_CHARS ? text : `${text.slice(0, MAX_REASON_CHARS - 1)}…`;
+  return cut.replace(NON_PRINTABLE, "?");
+}
+
 function reasonText(problem: Problem): string {
   const where = problem.file === undefined ? "" : problem.line === undefined ? `${problem.file}: ` : `${problem.file}, line ${problem.line}: `;
-  const text = `${where}${problem.reason}`;
-  return text.length <= MAX_REASON_CHARS ? text : `${text.slice(0, MAX_REASON_CHARS - 1)}…`;
+  return storedReason(`${where}${problem.reason}`);
 }
 
 /** The check's problems as the build's reasons, within the length caps; what does not fit is counted in a last line. */
@@ -180,14 +239,17 @@ const isPage = (path: string): boolean => path.toLowerCase().endsWith(".html");
 /** At most this many puts at once. */
 const PUT_CONCURRENCY = 8;
 
-async function putAll(files: readonly AppFile[], prefix: string, objects: AppObjects): Promise<void> {
+/** Runs one phase within the time left (throws DeployTimeUp when too little is left to start it). */
+type Bounded = <T>(work: (ms: number) => Promise<T>) => Promise<T>;
+
+async function putAll(files: readonly AppFile[], prefix: string, objects: AppObjects, bounded: Bounded): Promise<void> {
   // Pages last: a new page only ever names files that are already there.
   const putOne = (file: AppFile) => objects.put(`${prefix}${file.path}`, file.bytes, contentTypeOf(file.path), CACHE_CONTROL);
   const others = files.filter((f) => !isPage(f.path));
   const pages = files.filter((f) => isPage(f.path));
   for (const group of [others, pages]) {
     for (let at = 0; at < group.length; at += PUT_CONCURRENCY) {
-      await Promise.all(group.slice(at, at + PUT_CONCURRENCY).map(putOne));
+      await bounded(() => Promise.all(group.slice(at, at + PUT_CONCURRENCY).map(putOne)));
     }
   }
 }
@@ -195,9 +257,20 @@ async function putAll(files: readonly AppFile[], prefix: string, objects: AppObj
 /**
  * Handles one deploy message, delivered for the `receiveCount`-th time. Resolves when the message is
  * done with (published, failed, dropped); throws a bare error when SQS should deliver it again.
+ * `deadlineMs` (epoch ms, on the `deps.now` clock) is when the Lambda stops: now plus its remaining time.
  */
-export async function processDeploy(body: string | undefined, receiveCount: number, deps: DeployDeps): Promise<void> {
+export async function processDeploy(
+  body: string | undefined,
+  receiveCount: number,
+  deps: DeployDeps,
+  deadlineMs: number = Number.POSITIVE_INFINITY,
+): Promise<void> {
   const started = deps.now().getTime();
+  const bounded: Bounded = (work) => {
+    const left = deadlineMs - deps.now().getTime() - DEPLOY_RESERVE_MS;
+    if (!(left > 0)) return Promise.reject(new DeployTimeUp());
+    return within(work(left), left);
+  };
   const log = (entry: Omit<DeployLogEntry, "event" | "durationMs">): void =>
     deps.log({ event: "deployer", ...entry, durationMs: Math.max(0, deps.now().getTime() - started) });
   const nowIso = (): string => deps.now().toISOString();
@@ -210,19 +283,25 @@ export async function processDeploy(body: string | undefined, receiveCount: numb
 
   const nickname = job.nickname.toLowerCase();
   const prefix = `${APPS_KEY_PREFIX}${nickname}/`;
+  // Set once the build is known to be this app's and deployable: only then may a failure be recorded on it.
+  let claimed = false;
   try {
-    if (!(await deps.records.startDeploy(job.buildId, nowIso()))) {
+    // Not bounded: a short table call (the client's own timeouts), and nothing may be recorded before it.
+    if (!(await deps.records.startDeploy(job.buildId, job.nickname, nowIso()))) {
       log({ outcome: "no-build" });
       return;
     }
+    claimed = true;
 
     let files: AppFile[];
     try {
-      files = readTarGz(await deps.download(appArchiveUrl(job.nickname, job.commit)));
+      // The download's own time limit ends a second after the phase's, so a cut-off reads as the deploy's time running out.
+      const archive = await bounded((ms) => deps.download(appArchiveUrl(job.nickname, job.commit), Math.min(DOWNLOAD_TIMEOUT_MS, ms + 1000)));
+      files = readTarGz(archive);
     } catch (error) {
       const reason = error instanceof ArchiveProblem || (error instanceof DownloadProblem && !error.passing) ? error.reason : undefined;
       if (reason === undefined) throw error;
-      await deps.records.markFailed(job.buildId, [reason], nowIso());
+      await deps.records.markFailed(job.buildId, [storedReason(reason)], nowIso());
       log({ outcome: "failed", problems: 1 });
       return;
     }
@@ -235,13 +314,13 @@ export async function processDeploy(body: string | undefined, receiveCount: numb
       return;
     }
 
-    await putAll(published, prefix, deps.objects);
+    await putAll(published, prefix, deps.objects, bounded);
     const keep = new Set(published.map((file) => `${prefix}${file.path}`));
-    const stale = (await deps.objects.list(prefix)).filter((key) => key.startsWith(prefix) && !keep.has(key));
-    if (stale.length > 0) await deps.objects.remove(stale);
-    await deps.cdn.invalidate([`/${prefix}*`], `${job.buildId}-${deps.now().getTime()}`);
-    await deps.records.markAppLive(job.nickname, nowIso());
-    await deps.records.markLive(job.buildId, job.commit, nowIso());
+    const stale = (await bounded(() => deps.objects.list(prefix))).filter((key) => key.startsWith(prefix) && !keep.has(key));
+    if (stale.length > 0) await bounded(() => deps.objects.remove(stale));
+    await bounded(() => deps.cdn.invalidate([`/${prefix}*`], `${job.buildId}-${deps.now().getTime()}`));
+    await bounded(() => deps.records.markAppLive(job.nickname, nowIso()));
+    await bounded(() => deps.records.markLive(job.buildId, job.commit, nowIso()));
     log({ outcome: "live", files: published.length, bytes: result.totalBytes, removed: stale.length });
   } catch (error) {
     const name = errorName(error);
@@ -251,13 +330,19 @@ export async function processDeploy(body: string | undefined, receiveCount: numb
       // eslint-disable-next-line preserve-caught-error
       throw new Error(DEPLOY_FAILED);
     }
-    const reason = error instanceof DownloadProblem ? error.reason : SERVICE_PROBLEM_REASON;
+    if (!claimed) {
+      // The build was never checked: leave it alone; the message goes to the dead-letter queue.
+      log({ outcome: "dead-letter", error: name });
+      // eslint-disable-next-line preserve-caught-error -- no cause, as above
+      throw new Error(DEPLOY_FAILED);
+    }
+    const reason = error instanceof DeployTimeUp ? TIME_UP_REASON : error instanceof DownloadProblem ? storedReason(error.reason) : SERVICE_PROBLEM_REASON;
     // A failure here goes no further than its name either (the message then reaches the dead-letter queue).
     const recorded = await deps.records.markFailed(job.buildId, [reason], nowIso()).then(
       () => true,
       () => false,
     );
-    log({ outcome: recorded ? "gave-up" : "retry", error: name });
+    log({ outcome: recorded ? "gave-up" : "dead-letter", error: name });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
     if (!recorded) throw new Error(DEPLOY_FAILED);
   }

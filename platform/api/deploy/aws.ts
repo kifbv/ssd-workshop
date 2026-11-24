@@ -4,7 +4,8 @@
 // The function's role (infra/lib/apps-stack.ts) may put and delete objects under `apps/*` and list the
 // bucket under that prefix; invalidate the one distribution; in the table, only UpdateItem: in `APP#*`
 // naming only DEPLOYER_LIVE_UPDATE_ATTRIBUTES and in `BUILD#*` only DEPLOYER_BUILD_UPDATE_ATTRIBUTES
-// (infra/lib/config.ts). No call returns attributes (ReturnValues NONE).
+// (infra/lib/config.ts), condition names included. No call returns attributes (ReturnValues NONE; the role
+// allows only NONE, UPDATED_OLD and UPDATED_NEW).
 import { CreateInvalidationCommand, type CreateInvalidationCommandOutput } from "@aws-sdk/client-cloudfront";
 import {
   ConditionalCheckFailedException,
@@ -105,12 +106,13 @@ export class DynamoDeployRecords implements DeployRecords {
     private readonly table: string,
   ) {}
 
-  /** Updates an existing build only; false when there is none. */
+  /** Updates an existing build only; false when the condition fails (no such build, or not in the state the update needs). */
   private async updateBuild(
     buildId: string,
     expression: string,
     names: Record<string, string>,
     values: Record<string, AttributeValue>,
+    condition = "attribute_exists(pk)",
   ): Promise<boolean> {
     try {
       await this.client.send(
@@ -118,7 +120,7 @@ export class DynamoDeployRecords implements DeployRecords {
           TableName: this.table,
           Key: keyOf(buildKey(buildId)),
           UpdateExpression: expression,
-          ConditionExpression: "attribute_exists(pk)",
+          ConditionExpression: condition,
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ReturnValues: "NONE",
@@ -131,12 +133,18 @@ export class DynamoDeployRecords implements DeployRecords {
     }
   }
 
-  startDeploy(buildId: string, nowIso: string): Promise<boolean> {
+  /**
+   * Only a build that exists, belongs to the message's app (its `nickname` equals the message's exactly, as
+   * typed: DynamoDB cannot compare without case) and is still waiting to be deployed (`queued`, `building`,
+   * or `deploying` on a redelivery) is marked `deploying`.
+   */
+  startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean> {
     return this.updateBuild(
       buildId,
       "SET #status = :status, #updatedAt = :now",
-      { "#status": "status", "#updatedAt": "updatedAt" },
-      { ":status": str("deploying"), ":now": str(nowIso) },
+      { "#status": "status", "#updatedAt": "updatedAt", "#nickname": "nickname" },
+      { ":status": str("deploying"), ":now": str(nowIso), ":nickname": str(nickname), ":queued": str("queued"), ":building": str("building"), ":deploying": str("deploying") },
+      "attribute_exists(pk) AND #nickname = :nickname AND #status IN (:queued, :building, :deploying)",
     );
   }
 

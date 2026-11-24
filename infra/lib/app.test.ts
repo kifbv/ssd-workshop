@@ -235,6 +235,12 @@ function ofType(type: string): [string, string, Resource][] {
 }
 
 /** Tags as a map: most types take a list of {Key, Value}, API Gateway v2 a JSON map. */
+/** Whether an IAM action pattern (`*` and `?` wildcards, any letter case) covers the action. */
+function actionCovers(granted: string, action: string): boolean {
+  const pattern = granted.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${pattern}$`, "i").test(action);
+}
+
 function tagsOf(r: Resource): Record<string, unknown> {
   const tags = r.Properties?.Tags as { Key: string; Value: unknown }[] | Record<string, unknown> | undefined;
   if (tags === undefined) return {};
@@ -1737,15 +1743,16 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     });
   });
 
-  it("lets only CloudFront of this account read app files, only over TLS", () => {
+  it("lets only the workshop's distribution (its exact ARN) read app files, only over TLS", () => {
     const allows = bucketStatements().filter((st) => st.Effect === "Allow");
     expect(allows).toEqual([
       expect.objectContaining({
         Action: "s3:GetObject",
         Principal: { Service: "cloudfront.amazonaws.com" },
-        Condition: { StringEquals: { "AWS:SourceAccount": ACCOUNT }, ArnLike: { "AWS:SourceArn": `arn:aws:cloudfront::${ACCOUNT}:distribution/*` } },
+        Condition: { StringEquals: { "AWS:SourceAccount": ACCOUNT, "AWS:SourceArn": `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}` } },
       }),
     ]);
+    expect(JSON.stringify(bucketStatements())).not.toContain("distribution/*");
     expect(bucketStatements()).toContainEqual(
       expect.objectContaining({ Effect: "Deny", Action: "s3:*", Principal: { AWS: "*" }, Condition: { Bool: { "aws:SecureTransport": "false" } } }),
     );
@@ -1809,6 +1816,67 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     }
   });
 
+  it("criterion 4: no IAM policy in any stack, the deployer's included, may change the apps bucket's policy, lifecycle, website, CORS or delete it", () => {
+    // The bucket policy denies only object writes (a deny on bucket-level actions could lock CloudFormation out), and the
+    // boundary allows s3:* on ssd-workshop-*: the deny holds only while no workload role is granted these (decision "(2.5) Bucket-level actions").
+    const bucketActions = ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutLifecycleConfiguration", "s3:PutBucketWebsite", "s3:PutBucketCORS", "s3:DeleteBucket"];
+    const appsBucketIds = appsResources().filter(([, r]) => r.Type === "AWS::S3::Bucket").map(([id]) => id);
+    const reachesAppsBucket = (resource: unknown): boolean => {
+      const text = JSON.stringify(resource);
+      return (
+        text === '"*"' ||
+        text.includes("arn:aws:s3:::*") ||
+        text.includes("arn:aws:s3:::ssd-workshop-*") ||
+        text.includes("ssd-workshop-apps") ||
+        appsBucketIds.some((id) => text.includes(`"${id}"`))
+      );
+    };
+    expect(actionCovers("s3:Put*", "s3:PutBucketPolicy")).toBe(true);
+    expect(actionCovers("s3:*Bucket*", "s3:DeleteBucket")).toBe(true);
+    expect(actionCovers("s3:PutObject", "s3:PutBucketPolicy")).toBe(false);
+    let policies = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      policies += 1;
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        const granted = [st.Action].flat() as string[];
+        const covered = bucketActions.filter((action) => granted.some((g) => actionCovers(g, action)));
+        if (covered.length === 0) continue;
+        for (const resource of [st.Resource].flat()) expect(reachesAppsBucket(resource), `${s}/${id} ${covered.join(",")}: ${JSON.stringify(st)}`).toBe(false);
+      }
+    }
+    expect(policies).toBeGreaterThan(5);
+  });
+
+  it("no IAM policy in any stack may send to the deploy queue yet (ticket 2.9 adds the builder as the one sender)", () => {
+    const queueIds = appsResources().filter(([, r]) => r.Type === "AWS::SQS::Queue").map(([id]) => id);
+    const reachesDeployQueue = (resource: unknown): boolean => {
+      const text = JSON.stringify(resource);
+      return (
+        text === '"*"' ||
+        /arn:aws:sqs:[^"]*:\*/.test(text) ||
+        /arn:aws:sqs:[^"]*:ssd-workshop-\*/.test(text) ||
+        /:sqs:[^"]*\*"/.test(text) ||
+        text.includes("ssd-workshop-deploys") ||
+        queueIds.some((id) => text.includes(`"${id}"`))
+      );
+    };
+    expect(actionCovers("sqs:Send*", "sqs:SendMessage")).toBe(true);
+    expect(actionCovers("*", "sqs:SendMessage")).toBe(true);
+    let sends = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        if (!([st.Action].flat() as string[]).some((g) => actionCovers(g, "sqs:SendMessage"))) continue;
+        sends += 1;
+        for (const resource of [st.Resource].flat()) expect(reachesDeployQueue(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
+      }
+    }
+    // The conversation function's send to its own queue (ticket 1.7) was seen and passes.
+    expect(sends).toBeGreaterThanOrEqual(1);
+    expect(appsResources().filter(([, r]) => r.Type === "AWS::SQS::QueuePolicy")).toEqual([]);
+  });
+
   it("criterion 4: the site's BucketDeployment writes to the site bucket only, so it cannot remove app files", () => {
     const deployments = ofType("Custom::CDKBucketDeployment");
     expect(deployments).toHaveLength(1);
@@ -1843,6 +1911,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "nickname", "liveAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },
       {
@@ -1851,7 +1920,8 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
         Resource: expect.anything(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status", "nickname", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },
       {

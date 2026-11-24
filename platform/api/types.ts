@@ -336,20 +336,29 @@ export type BuildStatus = "queued" | "building" | "deploying" | "live" | "failed
 
 /**
  * One build of an app (ticket 2.5 defines it; ticket 2.7 creates it). The deployer only updates an existing
- * build (condition `attribute_exists(pk)`), and only `status`, `updatedAt`, `deployedCommit`,
- * `failureReasons` and `finishedAt` (`DEPLOYER_BUILD_UPDATE_ATTRIBUTES` in infra/lib/config.ts).
+ * build, and only `status`, `updatedAt`, `deployedCommit`, `failureReasons` and `finishedAt`
+ * (`DEPLOYER_BUILD_UPDATE_ATTRIBUTES` in infra/lib/config.ts, which also lists the compared `nickname`). It starts
+ * a deploy only when the build's `nickname` equals the message's and its status is `queued`, `building` or
+ * `deploying`.
  */
 export interface BuildItem extends Keyed {
   type: "build";
   buildId: string;
-  /** As the participant typed it. */
+  /**
+   * As the participant typed it, exactly as the deploy message will carry it: the deployer compares the two exactly
+   * (DynamoDB conditions cannot ignore case), so 2.7 and 2.8 must both use the participant's stored nickname.
+   */
   nickname: string;
   status: BuildStatus;
   /** ISO 8601: the last status change. */
   updatedAt: string;
   /** The commit the deployer published (status `live`). */
   deployedCommit?: string;
-  /** Why the deploy failed (status `failed`): the deploy check's reasons, or a download or service problem. */
+  /**
+   * Why the deploy failed (status `failed`): the deploy check's reasons, or a download or service problem. They quote
+   * the participant's file names and lines (anyone's text; non-printable characters stored as `?`): pages render
+   * them with `textContent` only.
+   */
   failureReasons?: string[];
   /** ISO 8601: when the deployer finished (live or failed). */
   finishedAt?: string;

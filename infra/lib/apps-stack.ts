@@ -9,6 +9,7 @@ import { workshopFunction } from "./api-stack.js";
 import {
   ACCOUNT,
   APPS_BUCKET_NAME,
+  ATTRIBUTE_LIMITED_RETURN_VALUES,
   DEPLOY_DLQ_NAME,
   DEPLOY_QUEUE_NAME,
   DEPLOYER_BUILD_UPDATE_ATTRIBUTES,
@@ -73,23 +74,20 @@ export class AppsStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    // Only CloudFront distributions of this account may read objects (Origin Access Control), as for the
-    // site bucket. No ListBucket: a missing key answers 403, which the distribution turns into its 404 page.
+    // Only the workshop's distribution may read objects (Origin Access Control, its exact ARN). No ListBucket: a missing key answers 403, which the distribution turns into its 404 page.
     this.bucket.addToResourcePolicy(
       new PolicyStatement({
         sid: "CloudFrontReadOnly",
         actions: ["s3:GetObject"],
         principals: [new ServicePrincipal("cloudfront.amazonaws.com")],
         resources: [this.bucket.arnForObjects("*")],
-        conditions: {
-          StringEquals: { "AWS:SourceAccount": ACCOUNT },
-          ArnLike: { "AWS:SourceArn": `arn:aws:cloudfront::${ACCOUNT}:distribution/*` },
-        },
+        conditions: { StringEquals: { "AWS:SourceAccount": ACCOUNT, "AWS:SourceArn": DISTRIBUTION_ARN } },
       }),
     );
     // Only the deployer changes app files: every other principal (the deploy role, the Claude user, any
     // other workload role) is refused, whatever its own policy grants. Bucket settings are not covered, so
-    // the deploys can still manage the bucket itself.
+    // the deploys can still manage the bucket itself (no deny that could lock CloudFormation out); a synth test
+    // checks that no workload role is granted the bucket's policy, lifecycle, website, CORS or deletion.
     this.bucket.addToResourcePolicy(
       new PolicyStatement({
         sid: "OnlyTheDeployerWritesApps",
@@ -147,6 +145,7 @@ export class AppsStack extends Stack {
         conditions: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...DEPLOYER_LIVE_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
         },
       }),
     );
@@ -158,6 +157,7 @@ export class AppsStack extends Stack {
         conditions: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...DEPLOYER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
         },
       }),
     );

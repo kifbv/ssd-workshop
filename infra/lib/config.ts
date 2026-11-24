@@ -224,8 +224,14 @@ export const DEPLOY_DLQ_NAME = `${PREFIX}-deploys-dlq.fifo`;
  */
 export const DISTRIBUTION_ID = "E2TOZV0ERAXKZ9";
 export const DISTRIBUTION_ARN = `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}`;
-/** The attribute names the deployer may update in `BUILD#*` (UpdateItem only, on existing builds). */
-export const DEPLOYER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] as const;
+/**
+ * The attribute names the deployer may name in `BUILD#*` (UpdateItem only, on existing builds). IAM's
+ * `dynamodb:Attributes` counts the names a condition uses too: `nickname` is only compared (the deploy must be
+ * for the build's own app), never written.
+ */
+export const DEPLOYER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] as const;
+/** What an UpdateItem under a `dynamodb:Attributes` list may return (`ALL_NEW`/`ALL_OLD` could return other attributes). */
+export const ATTRIBUTE_LIMITED_RETURN_VALUES = ["NONE", "UPDATED_OLD", "UPDATED_NEW"] as const;
 /** The live marker's attribute names, which the deployer may update in `APP#*` (UpdateItem only). */
 export const DEPLOYER_LIVE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "nickname", "liveAt"] as const;
 /**
