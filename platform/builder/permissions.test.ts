@@ -80,6 +80,13 @@ describe("criterion 2: the permission hook refuses anything outside the workspac
     expect(checkToolCall(ws, "Glob", { pattern: "**/*", path: ws })).toEqual(allowed);
   });
 
+  it("refuses a pattern segment of only dots and wildcards that holds a dot and a wildcard (it could match . or ..; try 3)", () => {
+    const patterns = [".?/*", ".*/*", "*/.?/*", "?./*", "*.*/x", "images/.?", ".??/*", "**/.*/*"];
+    for (const pattern of patterns) expect(checkToolCall(ws, "Glob", { pattern }).allow, pattern).toBe(false);
+    // Wildcards next to letters, or a dot with letters, stay allowed.
+    for (const pattern of ["*.css", "**/*.js", "images/*", "a?.html", "**/*"]) expect(checkToolCall(ws, "Glob", { pattern }), pattern).toEqual(allowed);
+  });
+
   it("refuses writes and edits to tool and CI settings in any letter case, and still lets the agent read them", () => {
     const paths = [
       ".github/workflows/ci.yml",

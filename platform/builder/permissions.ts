@@ -63,11 +63,26 @@ export function isConfigPath(path: string): boolean {
 }
 
 /**
+ * A pattern segment made only of dots and wildcards that holds both (`.?`, `.*`, `*.*`, `?.`): it could match `.` or
+ * `..` and climb out (try 3).
+ */
+const dotWildcardSegment = (segment: string): boolean => /^[.?*]+$/.test(segment) && segment.includes(".") && /[?*]/.test(segment);
+
+/**
  * A Glob pattern or folder the check can reason about: not empty, relative, no `~`, backslash or NUL, no `..` anywhere,
- * and none of the expansion characters `{`, `}`, `[`, `]` (with them, `.{.,}/*` or `[.][.]/*` would climb out).
+ * none of the expansion characters `{`, `}`, `[`, `]` (with them, `.{.,}/*` or `[.][.]/*` would climb out), and no
+ * segment of only dots and wildcards (dotWildcardSegment).
  */
 function plainGlobText(text: string): boolean {
-  return text !== "" && !text.startsWith("/") && !text.startsWith("~") && !isAbsolute(text) && !/[{}[\]\\\0]/.test(text) && !text.includes("..");
+  return (
+    text !== "" &&
+    !text.startsWith("/") &&
+    !text.startsWith("~") &&
+    !isAbsolute(text) &&
+    !/[{}[\]\\\0]/.test(text) &&
+    !text.includes("..") &&
+    !text.split("/").some(dotWildcardSegment)
+  );
 }
 
 export type ToolDecision = { allow: true } | { allow: false; reason: string };
