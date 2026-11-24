@@ -4,6 +4,13 @@ import { usageOf } from "../../api/conversation/model.js";
 import { answerMessage } from "../../api/conversation/answer.js";
 import { FakeModel } from "../../api/conversation/fakes.js";
 import {
+  formatBuildResult,
+  formatBuildSummary,
+  missingScreens,
+  scoreBuild,
+  screenNames,
+  specTitle,
+  type BuildEvalOutcome,
   exitCode,
   formatClarifyResult,
   formatClarifySummary,
@@ -324,5 +331,91 @@ describe("readiness (ticket 2.7)", () => {
     expect(formatReadinessSummary(results)).toEqual(["Readiness: 1/2 passed", "Tokens: 1000 in, 50 out, cost $0.0041", "  expected ready: 1/1", "  expected not-ready: 0/1"]);
     expect(formatReadinessResult({ example: login, pass: true, detail: "d", outcome: { verdict: "not-ready", reasons: ["r1"], usage } }, 3)).toBe(`PASS  4 [login] ${login.name}: d\n     | r1`);
     expect(exitCode(results)).toBe(1);
+  });
+});
+
+// ---- build (ticket 2.8) ----
+
+describe("the build suite's arguments", () => {
+  it("takes --model (an EU profile) and --example (a number), each once, for build only", () => {
+    expect(parseEvalArgs(["build"])).toEqual({ suite: "build" });
+    expect(parseEvalArgs(["build", "--example", "2"])).toEqual({ suite: "build", example: 2 });
+    expect(parseEvalArgs(["build", "--model", "eu.anthropic.claude-opus-4-6-v1", "--example", "1"])).toEqual({
+      suite: "build",
+      model: "eu.anthropic.claude-opus-4-6-v1",
+      example: 1,
+    });
+    const error = { error: "build takes --model <eu.anthropic.* profile> and --example <number>" };
+    expect(parseEvalArgs(["build", "--model", "us.anthropic.claude-sonnet-4-6"])).toEqual(error);
+    expect(parseEvalArgs(["build", "--model"])).toEqual(error);
+    expect(parseEvalArgs(["build", "--example", "0"])).toEqual(error);
+    expect(parseEvalArgs(["build", "--example", "x"])).toEqual(error);
+    expect(parseEvalArgs(["build", "--example", "1", "--example", "2"])).toEqual(error);
+    expect(parseEvalArgs(["build", "x"])).toEqual(error);
+    expect(parseEvalArgs(["readiness", "--example", "1"])).toEqual({ error: "readiness takes no arguments" });
+  });
+});
+
+describe("the build suite's title check", () => {
+  const examples = parseReadinessExamples(readFileSync(new URL("../../api/eval/readiness.json", import.meta.url), "utf8"));
+  if ("error" in examples) throw new Error(examples.error);
+  const specs = examples.filter((e) => e.category === "example").map((e) => e.spec);
+
+  it("reads the title and the screens of the three workshop example specs", () => {
+    expect(specs).toHaveLength(3);
+    expect(specs.map(specTitle)).toEqual(["Run Log", "Movie Watchlist", "Calorie Counter"]);
+    expect(specs.map(screenNames)).toEqual([
+      ["Home", "Add a run"],
+      ["Watchlist", "Add a film", "Watched"],
+      ["Today", "Add a food", "Daily goal"],
+    ]);
+    expect(screenNames("# X\n\n## Screens\n- **Main**: a list\n* Other: more\n\n## Data it keeps\n- Ignored: x")).toEqual(["Main", "Other"]);
+    expect(screenNames("# X\n")).toEqual([]);
+  });
+
+  it("finds the title in <title> and each screen in a label, ignoring case and spacing, and lists what is missing", () => {
+    const page = { title: "Movie   watchlist", labels: ["Watchlist", "ADD A  FILM", "Seen it"] };
+    expect(missingScreens("Movie Watchlist", ["Watchlist", "Add a film"], page)).toEqual([]);
+    expect(missingScreens("Movie Watchlist", ["Watchlist", "Watched"], page)).toEqual(["Watched"]);
+    expect(missingScreens("Run Log", [], page)).toEqual(['title "Run Log"']);
+  });
+});
+
+describe("scoreBuild", () => {
+  const ok: BuildEvalOutcome = {
+    outcome: "handed-over",
+    failureReasons: [],
+    steps: ["preparing", "writing", "checking", "committing", "deploying"],
+    files: 3,
+    commits: 2,
+    checkPassed: true,
+    consoleErrors: [],
+    overflow: 0,
+    missing: [],
+    durationMs: 185_000,
+    usage: { inputTokens: 600_000, outputTokens: 20_000, costUsd: 0.75 },
+  };
+
+  it("passes a handed-over build with the steps in order, a commit, a passing check, no error, no overflow and every screen", () => {
+    expect(scoreBuild(ok).pass).toBe(true);
+  });
+
+  it("names each problem", () => {
+    expect(scoreBuild({ ...ok, outcome: "failed", failureReasons: ["The build took too long."] })).toEqual({ pass: false, detail: "build failed: The build took too long." });
+    const bad = scoreBuild({ ...ok, steps: ["preparing", "writing"], commits: 0, checkPassed: false, consoleErrors: ["boom"], overflow: 12, missing: ["Watched"] });
+    expect(bad.pass).toBe(false);
+    for (const part of ["steps preparing,writing", "no commit", "deploy check failed", "1 console error(s): boom", "scrolls sideways by 12 px", "missing Watched"]) {
+      expect(bad.detail).toContain(part);
+    }
+  });
+
+  it("prints the duration, tokens and cost of each build and of all", () => {
+    const example = { name: "fitness tracker (example)", category: "example", expected: "ready" as const, spec: "", keywords: [] };
+    const result = { example, outcome: ok, ...scoreBuild(ok) };
+    expect(formatBuildResult(result, 0)).toContain("3m05s, 600000 tokens in, 20000 out, cost $0.7500");
+    expect(formatBuildSummary([result, { example, pass: false, detail: "eval failed" }])).toEqual([
+      "Build: 1/2 passed",
+      "Duration: 3m05s in all; tokens: 600000 in, 20000 out, cost $0.7500",
+    ]);
   });
 });
