@@ -634,6 +634,20 @@ Resources:
           # The GitHub App's private key (ticket 2.6): only Franck loads it and only the build
           # launcher (2.9) reads it. Everything but creating, describing and tagging is denied, so
           # actions AWS adds later are denied too.
+          # Claude sessions never reach the key through the launcher (Franck, 2026-11-24): the Claude
+          # user may not create, pass or change its role or function, nor write deploy assets (a
+          # planted asset would become its code). Deploys from main stay trusted (Franck reviews).
+          - Sid: NoLauncherForSessions
+            Effect: Deny
+            NotAction: [iam:GetRole, iam:GetRolePolicy, iam:ListRolePolicies, iam:ListAttachedRolePolicies, iam:ListRoleTags, "lambda:Get*", "lambda:List*", lambda:InvokeFunction, "s3:Get*", "s3:List*"]
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-builds-launcher
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher:*
+              - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}/*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey
             Effect: Deny
             NotAction:
