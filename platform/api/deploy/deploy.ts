@@ -4,11 +4,14 @@
  *
  * 1. marks the build `deploying`: only a build that exists, belongs to the message's app (same nickname), whose
  *    builder pushed the message's commit (`pushedCommit`, ticket 2.8) and waits for its deploy (`queued`, `building`, or `deploying` on a redelivery); any other message is dropped;
- * 2. downloads the app's public repository at the commit from GitHub (tar.gz, size-capped) and unpacks
+ * 2. asks GitHub whether the commit is on the app repository's own `main` (`identical` or `behind`; ticket 2.8 try 2:
+ *    GitHub serves a fork's commit through the parent's archive address); otherwise the build is marked failed and
+ *    nothing is published;
+ * 3. downloads the app's public repository at the commit from GitHub (tar.gz, size-capped) and unpacks
  *    it in memory (./tar.ts);
- * 3. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
+ * 4. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
  *    marker is left alone and the build is marked `failed` with the check's reasons;
- * 4. otherwise puts every file under `apps/<lower-cased nickname>/` (pages last), removes the keys the
+ * 5. otherwise puts every file under `apps/<lower-cased nickname>/` (pages last), removes the keys the
  *    new version no longer has, invalidates `/apps/<nickname>/*` on CloudFront, writes the app's live
  *    marker (keeping the first `liveAt`) and marks the build `live` with the commit.
  *
@@ -112,6 +115,11 @@ export interface DeployLogEntry {
 
 export interface DeployDeps {
   /**
+   * Where `commit` stands against the app repository's `main` on GitHub (`compareWithMain` in ./github.ts): `identical`,
+   * `behind`, `ahead`, `diverged` or `not-found`, within `timeoutMs`. Throws a passing DownloadProblem on a GitHub error.
+   */
+  compare: (nickname: string, commit: string, timeoutMs: number, signal?: AbortSignal) => Promise<string>;
+  /**
    * Downloads the tarball at the address (GitHub) within `timeoutMs`, stopping when `signal` is aborted. Throws
    * DownloadProblem for what it can name.
    */
@@ -136,6 +144,15 @@ export class DownloadProblem extends Error {
     this.name = "DownloadProblem";
   }
 }
+
+/** The answers of GitHub's compare (main...commit) under which the commit is on the app's main. */
+export const ON_MAIN = ["identical", "behind"] as const;
+
+/** Stored when the commit is not on the app repository's main branch (a fork's commit, or main moved elsewhere). */
+export const NOT_ON_MAIN_REASON = "The commit is not on the app's main branch on GitHub, so nothing was published.";
+
+/** Stored when GitHub knows no such repository or commit. */
+export const NOT_FOUND_REASON = "GitHub does not know the app's repository or the commit, so nothing was published.";
 
 /** Stored when a passing problem outlasts every delivery and has no reason of its own (an AWS error). */
 export const SERVICE_PROBLEM_REASON = "The workshop could not publish the app because of a problem on its side. Please try again.";
@@ -321,6 +338,13 @@ export async function processDeploy(
       return;
     }
     claimed = true;
+
+    const relation = await bounded((ms, signal) => deps.compare(job.nickname, job.commit, Math.min(DOWNLOAD_TIMEOUT_MS, ms + 1000), signal));
+    if (!(ON_MAIN as readonly string[]).includes(relation)) {
+      const marked = await deps.records.markFailed(job.buildId, [relation === "not-found" ? NOT_FOUND_REASON : NOT_ON_MAIN_REASON], nowIso());
+      log({ outcome: marked ? "failed" : "no-build", problems: 1 });
+      return;
+    }
 
     let files: AppFile[];
     try {

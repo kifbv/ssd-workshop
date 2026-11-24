@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DownloadProblem } from "./deploy.js";
-import { MAX_DOWNLOAD_BYTES, downloadArchive } from "./github.js";
+import { MAX_DOWNLOAD_BYTES, compareUrl, compareWithMain, downloadArchive } from "./github.js";
 
 const URL_ = "https://codeload.github.com/ssd-workshop-apps/ssd-ada/tar.gz/0123456789abcdef0123456789abcdef01234567";
 
@@ -112,5 +112,52 @@ describe("downloadArchive (ticket 2.5)", () => {
     );
     expect(problem.passing).toBe(true);
     expect(problem.reason).toBe("GitHub could not be reached to download the commit.");
+  });
+});
+
+describe("compareWithMain (ticket 2.8, try 2): is the commit on the app repository's own main?", () => {
+  const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+  const answer = (status: number, body: unknown) => async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+  it("asks GitHub's compare API for main...<commit> on ssd-workshop-apps/ssd-<lower-cased nickname>, with the API's headers and a time limit", async () => {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    const status = await compareWithMain("Ada", COMMIT, {
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ status: "identical" }), { status: 200 });
+      },
+    });
+    expect(status).toBe("identical");
+    expect(compareUrl("Ada", COMMIT)).toBe(`https://api.github.com/repos/ssd-workshop-apps/ssd-ada/compare/main...${COMMIT}?per_page=1`);
+    expect(calls.map((call) => call.url)).toEqual([compareUrl("Ada", COMMIT)]);
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[0]?.init?.redirect).toBe("error");
+    expect(calls[0]?.init?.headers).toMatchObject({ accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "ssd-workshop-platform" });
+  });
+
+  it("returns GitHub's status: identical, behind, ahead, diverged (and anything else as is)", async () => {
+    for (const status of ["identical", "behind", "ahead", "diverged", "something-new"]) {
+      expect(await compareWithMain("Ada", COMMIT, { fetch: answer(200, { status }) })).toBe(status);
+    }
+  });
+
+  it("returns not-found when GitHub answers 404 (no such repository or commit)", async () => {
+    expect(await compareWithMain("Ada", COMMIT, { fetch: answer(404, { message: "Not Found" }) })).toBe("not-found");
+  });
+
+  it("is a passing problem (retried) when GitHub answers another error, an answer without a status, or cannot be reached", async () => {
+    for (const fetch of [answer(500, {}), answer(403, { message: "API rate limit exceeded" }), answer(429, {}), answer(200, { nope: 1 }), answer(200, "text")]) {
+      const problem = await problemOf(compareWithMain("Ada", COMMIT, { fetch }));
+      expect(problem.passing).toBe(true);
+      expect(problem.reason).toBe("GitHub could not tell whether the commit is on the app's main branch.");
+    }
+    const unreachable = await problemOf(
+      compareWithMain("Ada", COMMIT, {
+        fetch: async () => {
+          throw new TypeError("fetch failed");
+        },
+      }),
+    );
+    expect(unreachable.passing).toBe(true);
   });
 });

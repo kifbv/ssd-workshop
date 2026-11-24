@@ -9,6 +9,8 @@ import {
   DownloadProblem,
   MAX_REASON_CHARS,
   MAX_REASONS_CHARS,
+  NOT_ON_MAIN_REASON,
+  NOT_FOUND_REASON,
   SERVICE_PROBLEM_REASON,
   TIME_UP_REASON,
   parseDeployJob,
@@ -34,9 +36,16 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
   records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status: "building" });
   const downloads: string[] = [];
   const downloadTimeouts: number[] = [];
+  const compares: string[] = [];
   const logs: DeployLogEntry[] = [];
   let clock = NOW.getTime();
+  /** What GitHub's compare of main...<commit> answers (ticket 2.8, try 2); a function may throw. */
+  const github: { compare: string | (() => Promise<string>) } = { compare: "identical" };
   const deps: DeployDeps = {
+    compare: async (nickname, commit) => {
+      compares.push(`${nickname}:${commit}`);
+      return typeof github.compare === "function" ? github.compare() : github.compare;
+    },
     download: async (url, timeoutMs) => {
       downloads.push(url);
       downloadTimeouts.push(timeoutMs);
@@ -53,7 +62,7 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
     clock += ms;
   };
   const now = (): number => clock;
-  return { deps, objects, cdn, records, downloads, downloadTimeouts, logs, advance, now };
+  return { deps, objects, cdn, records, downloads, downloadTimeouts, compares, github, logs, advance, now };
 }
 
 const passing = () => gzip(githubTar({ "index.html": PAGE, "app.js": "console.log(1);\n", "css/style.css": "p { color: red; }\n", "img/Logo.PNG": new Uint8Array([137, 80, 78, 71]) }));
@@ -323,6 +332,64 @@ describe("deploy messages", () => {
     });
     await processDeploy(job(), 1, t.deps);
     expect(t.records.builds.get(BUILD)?.status).toBe("live");
+  });
+});
+
+describe("the commit must be on the app repository's own main (ticket 2.8, try 2: the fork-network route)", () => {
+  it("asks GitHub about the message's app and commit before downloading, and publishes when main is the commit (identical) or holds it (behind)", async () => {
+    for (const status of ["identical", "behind"]) {
+      const t = setup(passing());
+      t.github.compare = status;
+      await processDeploy(job(), 1, t.deps);
+      expect(t.compares).toEqual([`Ada:${COMMIT}`]);
+      expect(t.downloads).toHaveLength(1);
+      expect(t.records.builds.get(BUILD)?.status, status).toBe("live");
+    }
+  });
+
+  it("publishes nothing and marks the build failed with a plain reason when the commit is not on main (ahead, diverged, anything else)", async () => {
+    for (const status of ["ahead", "diverged", "something-new"]) {
+      const t = setup(passing());
+      t.records.live.set("ada", { nickname: "Ada", liveAt: EARLIER });
+      t.github.compare = status;
+      await processDeploy(job(), 1, t.deps);
+      expect(t.downloads, status).toEqual([]);
+      expect(t.objects.puts).toEqual([]);
+      expect(t.cdn.invalidations).toEqual([]);
+      expect(t.records.live.get("ada")).toEqual({ nickname: "Ada", liveAt: EARLIER });
+      expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [NOT_ON_MAIN_REASON] });
+      expect(t.logs).toEqual([{ event: "deployer", outcome: "failed", problems: 1, durationMs: expect.any(Number) }]);
+    }
+  });
+
+  it("publishes nothing and marks the build failed when GitHub knows no such repository or commit (404)", async () => {
+    const t = setup(passing());
+    t.github.compare = "not-found";
+    await processDeploy(job(), 1, t.deps);
+    expect(t.downloads).toEqual([]);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [NOT_FOUND_REASON] });
+  });
+
+  it("a GitHub error is a passing problem: retried before the last delivery, then the build failed with its reason; nothing published", async () => {
+    const t = setup(passing());
+    t.github.compare = async () => {
+      throw new DownloadProblem("GitHub could not tell whether the commit is on the app's main branch.", true);
+    };
+    await expect(processDeploy(job(), 1, t.deps)).rejects.toThrow(/^deploy failed$/);
+    expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "retry", error: "DownloadProblem", durationMs: expect.any(Number) }]);
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps);
+    expect(t.downloads).toEqual([]);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: ["GitHub could not tell whether the commit is on the app's main branch."] });
+  });
+
+  it("never asks GitHub for a message the build does not expect (no claim, nothing recorded)", async () => {
+    const t = setup(passing());
+    await processDeploy(job({ commit: "f".repeat(40) }), 1, t.deps);
+    expect(t.compares).toEqual([]);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
   });
 });
 
