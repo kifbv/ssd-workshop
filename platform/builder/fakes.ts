@@ -94,14 +94,15 @@ export class FakeDeployQueue implements DeployQueue {
   }
 }
 
-/** One step of a scripted agent: write a file (relative path), spend tokens, or wait until aborted. */
-export type AgentStep = { write: string; content: string } | { tokens: AgentTokens } | { hang: true } | { fail: true };
+/** One step of a scripted agent: write a file (relative path), spend tokens, wait until aborted, or run `call` (a test's hook). */
+export type AgentStep = { write: string; content: string } | { tokens: AgentTokens } | { hang: true } | { fail: true } | { call: () => void | Promise<void> };
 
 /** A coding agent that follows a script, writing into the workspace as the real one would. */
 export class FakeAgent implements CodingAgent {
   readonly runs: AgentRun[] = [];
 
-  constructor(private readonly script: AgentStep[]) {}
+  /** The script (a test may add steps that need its fakes). */
+  constructor(readonly script: AgentStep[]) {}
 
   async run(run: AgentRun): Promise<AgentResult> {
     this.runs.push(run);
@@ -115,6 +116,8 @@ export class FakeAgent implements CodingAgent {
       } else if ("tokens" in step) {
         tokens = step.tokens;
         run.onTokens(tokens);
+      } else if ("call" in step) {
+        await step.call();
       } else if ("hang" in step) {
         await new Promise<void>((resolve) => {
           if (run.signal.aborted) resolve();

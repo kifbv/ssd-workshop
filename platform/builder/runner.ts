@@ -12,7 +12,9 @@
  *    and sends `{buildId, nickname, commit}` to the deploy queue; the deployer then marks the build live or failed.
  *
  * Any failure marks the build `failed` with one plain reason ("The build took too long." at the time limit), only
- * while it is still `building`. Logs are one JSON line per phase: the phase, its outcome, counts, the duration and an
+ * while it is still `building`. When a feed write is refused (the build is no longer `building`: someone else marked
+ * it failed), the runner stops at once (try 3): it aborts the agent, pushes no commit, sends no message, writes nothing
+ * more on the build and ends with `no-build`. Logs are one JSON line per phase: the phase, its outcome, counts, the duration and an
  * error name; never a token, nickname, build id, path, spec text or error message.
  */
 import { mkdir, writeFile } from "node:fs/promises";
@@ -106,6 +108,14 @@ export const NOT_PLAIN_FILES_REASON = "The app's repository holds something othe
 export const HAND_OVER_REASON = "The finished app could not be handed to the publishing step.";
 export const SERVICE_REASON = "The build stopped because of a problem on the workshop's side.";
 
+/** A feed write was refused: the build is no longer `building` (someone else finished it). The runner stops. */
+class BuildGone extends Error {
+  constructor() {
+    super("build gone");
+    this.name = "BuildGone";
+  }
+}
+
 /** A failure with a plain reason for the build record. */
 class BuildFailure extends Error {
   constructor(readonly reasons: string[]) {
@@ -168,12 +178,15 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
   }
   log("start", "ok");
 
-  // Feed writes run one after the other, in order; a refused one (the build was marked failed) ends nothing here.
+  // Feed writes run one after the other, in order. A refused one (the build is no longer `building`) rejects with
+  // BuildGone, and the run stops: nothing more is written, pushed or sent.
   let feedQueue: Promise<unknown> = Promise.resolve();
   const feed = (...events: FeedEvent[]): Promise<void> => {
     const next = feedQueue.then(() => deps.records.addFeed(job.buildId, events, nowIso()));
     feedQueue = next.catch(() => undefined);
-    return next.then(() => undefined);
+    return next.then((written) => {
+      if (!written) throw new BuildGone();
+    });
   };
 
   let workspace: string | undefined;
@@ -197,6 +210,12 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     const controller = new AbortController();
     const limit = deps.agentTimeoutMs ?? BUILD_AGENT_TIMEOUT_MS;
     let timedOut = false;
+    // Set when a file event is refused (the build was finished elsewhere): the agent is aborted and not waited for.
+    let gone = false;
+    let stopGone: (() => void) | undefined;
+    const goneNow = new Promise<"gone">((resolve) => {
+      stopGone = () => resolve("gone");
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeUp = new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => {
@@ -216,7 +235,14 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
           onFileWritten: (path) => {
             if (written.has(path) || written.size >= MAX_FEED_FILES || controller.signal.aborted) return;
             written.add(path);
-            fileWrites.push(feed({ kind: "file", path: feedPath(path), at: nowIso() }).catch(() => undefined));
+            fileWrites.push(
+              feed({ kind: "file", path: feedPath(path), at: nowIso() }).catch((error: unknown) => {
+                if (!(error instanceof BuildGone)) return;
+                gone = true;
+                controller.abort();
+                stopGone?.();
+              }),
+            );
           },
           onTokens: (total) => {
             tokens = total;
@@ -227,20 +253,22 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
           () => ({ outcome: "error" as const, tokens }),
         ),
       timeUp,
+      goneNow,
     ]);
     clearTimeout(timer);
-    if (result !== "timeout") tokens = result.tokens;
+    if (result !== "timeout" && result !== "gone") tokens = result.tokens;
     await Promise.all(fileWrites);
     const usage: TokenUsage = usageOfTokens(tokens, deps.model.price);
-    log("writing", timedOut ? "timeout" : result === "timeout" || result.outcome !== "done" ? "error" : "ok", { files: written.size });
+    if (!gone) log("writing", timedOut ? "timeout" : result === "timeout" || result === "gone" || result.outcome !== "done" ? "error" : "ok", { files: written.size });
     try {
       await deps.records.addUsage(participantId, usage, nowIso());
       log("usage", "ok", { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd });
     } catch (error) {
       log("usage", "error", { error: errorName(error), inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd });
     }
+    if (gone) throw new BuildGone();
     if (timedOut) throw new BuildFailure([TIME_UP_REASON]);
-    if (result === "timeout" || result.outcome !== "done") throw new BuildFailure([AGENT_FAILED_REASON]);
+    if (result === "timeout" || result === "gone" || result.outcome !== "done") throw new BuildFailure([AGENT_FAILED_REASON]);
 
     // checking
     phase = "checking";
@@ -289,6 +317,11 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     return "handed-over";
   } catch (error) {
     await feedQueue;
+    if (error instanceof BuildGone) {
+      // Finished elsewhere: nothing more is written on it (a markFailed would be refused anyway).
+      log(phase, "no-build");
+      return "no-build";
+    }
     // Reasons quote file names and lines of the app: email-shaped text is removed, as in the feed.
     const reasons = reasonsFor(error).map((reason) => storedReason(removeEmailAddresses(reason)));
     let marked: boolean;

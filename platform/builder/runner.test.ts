@@ -185,6 +185,97 @@ describe("criterion 3: the feed holds the steps in order and every written file,
   });
 });
 
+describe("a build marked failed by someone else while it runs (try 3): the runner stops, pushes and sends nothing", () => {
+  /** Marks the build failed as another writer would (the launcher's stuck-build check, an operator). */
+  const failElsewhere = (records: FakeBuildRecords) => () => {
+    const build = records.builds.get(BUILD);
+    if (build) build.status = "failed";
+  };
+
+  it("between writing and checking: no check step, no commit, no message, outcome no-build", async () => {
+    const t = await setup([...goodScript()]);
+    t.agent.script.push({ call: failElsewhere(t.records) });
+    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    const build = t.records.builds.get(BUILD);
+    expect(build?.status).toBe("failed");
+    expect(steps(build?.feed)).toEqual(["preparing", "writing"]);
+    expect(build?.pushedCommit).toBeUndefined();
+    expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([t.start]);
+    expect(t.queue.sent).toEqual([]);
+    // The runner did not write over the other writer's failure.
+    expect(t.records.writes.filter((write) => write.method === "markFailed")).toEqual([]);
+    expect(t.logs).toContainEqual(expect.objectContaining({ event: "builder", phase: "checking", outcome: "no-build" }));
+  });
+
+  it("mid-writing: the refused file event aborts the agent at once; no commit, no message, outcome no-build", async () => {
+    const t = await setup([
+      { write: "index.html", content: PAGE },
+      { write: "style.css", content: "main { max-width: 640px; }\n" },
+      { hang: true },
+      { write: "app.js", content: '"use strict";\n' },
+    ]);
+    // Once index.html's event is stored, the build is finished elsewhere; style.css's event is then refused.
+    t.agent.script.splice(1, 0, {
+      call: async () => {
+        await settle(() => filesOf(t.records.builds.get(BUILD)?.feed).length === 1);
+        failElsewhere(t.records)();
+      },
+    });
+    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(t.agent.runs[0]?.signal.aborted).toBe(true);
+    const build = t.records.builds.get(BUILD);
+    expect(build?.status).toBe("failed");
+    expect(filesOf(build?.feed)).toEqual(["index.html"]);
+    expect(steps(build?.feed)).toEqual(["preparing", "writing"]);
+    expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([t.start]);
+    expect(t.queue.sent).toEqual([]);
+    expect(t.records.writes.filter((write) => write.method === "markFailed")).toEqual([]);
+    expect(t.logs).toContainEqual(expect.objectContaining({ event: "builder", phase: "writing", outcome: "no-build" }));
+  });
+
+  it("mid-writing, with an agent that ignores its signal: the runner still stops without waiting for it", async () => {
+    const t = await setup([]);
+    let signal: AbortSignal | undefined;
+    t.deps.agent = {
+      run: (run) => {
+        signal = run.signal;
+        const target = t.records;
+        const build = target.builds.get(BUILD);
+        if (build) build.status = "failed";
+        run.onFileWritten("index.html");
+        return new Promise(() => undefined);
+      },
+    };
+    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(signal?.aborted).toBe(true);
+    expect(t.queue.sent).toEqual([]);
+  });
+
+  it("before writing (the writing step refused): the agent never starts", async () => {
+    const t = await setup(goodScript());
+    const original = t.records.addFeed.bind(t.records);
+    t.records.addFeed = async (buildId, events, nowIso) => {
+      failElsewhere(t.records)();
+      return original(buildId, events, nowIso);
+    };
+    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(t.agent.runs).toEqual([]);
+    expect(t.queue.sent).toEqual([]);
+  });
+
+  it("before committing (the committing step refused): nothing is pushed", async () => {
+    const t = await setup(goodScript());
+    const original = t.records.addFeed.bind(t.records);
+    t.records.addFeed = async (buildId, events, nowIso) => {
+      if (events.some((event) => event.kind === "step" && event.step === "committing")) failElsewhere(t.records)();
+      return original(buildId, events, nowIso);
+    };
+    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([t.start]);
+    expect(t.queue.sent).toEqual([]);
+  });
+});
+
 describe("the token reaches one repository: the stored build's nickname decides where the runner works (finding 10)", () => {
   it("fails, and pushes nothing anywhere, when the stored build names another app than the repository the token reaches", async () => {
     const t = await setup(goodScript(), { nickname: "Bob" });
