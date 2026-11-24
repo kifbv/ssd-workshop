@@ -177,3 +177,8 @@ paths:
   `availabilityZones` getter with the fixed zones from `config.ts` (ticket 2.1); the app test checks the
   assembly lists no missing context. Set `restrictDefaultSecurityGroup: false` (the default group is untagged,
   and the restriction is a custom-resource Lambda).
+- A role that must not touch a marker item (the data API and an app's `LIVE` marker, ticket 2.4) gets no write in the
+  marker's partition at all: put the role's items under another prefix (`APPDATA#` beside `APP#`) and check that the
+  `StringLike` patterns cannot overlap (`APP#*` never matches `APPDATA#...`, since the `#` comes right after `APP`).
+- An HTTP API route that must answer a CORS preflight itself (the data API, ticket 2.4) gets an explicit `OPTIONS`
+  route to the function, and the API keeps no `corsPreflight`: with one, API Gateway answers `OPTIONS` itself.

@@ -415,6 +415,26 @@ On a failure, `ssd-workshop-api-ai-worker`'s log has `"outcome":"failed"` lines 
 (`MalformedSpec` or `MissingSpec` for a spec of the wrong shape, `AccessDeniedException` for a missing right),
 and `ssd-workshop-api-conversation`'s `"route":"spec"` or `"route":"approve"` lines.
 
+## Check after the data API deploy (ticket 2.4)
+
+The data API for apps (`/api/apps/<nickname>/data/<key>`, function `ssd-workshop-api-app-data`) needs no sign-in.
+Until the deployer (ticket 2.5) marks an app live, every app answers 404; the preflight answers without one:
+
+```sh
+curl -sS -i -X OPTIONS -H 'origin: null' -H 'access-control-request-method: PUT' \
+  -H 'access-control-request-headers: content-type' \
+  https://workshop.rankly.games/api/apps/nobody-here/data/score
+# expect: 204 with access-control-allow-origin: *, access-control-allow-methods: GET, PUT, DELETE,
+#         access-control-allow-headers: content-type, accept (and no access-control-allow-credentials)
+curl -sS -i -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here/data/score
+# expect: 404 {"message":"Not found."} with access-control-allow-origin: * and no set-cookie
+```
+
+Once 2.5 has put an app live, `PUT` (with `content-type: application/json`), `GET` and `DELETE` on one of its keys
+round-trip a JSON value. The log group `ssd-workshop-api-app-data` has one line per request with method, outcome,
+status and size only; a refusal from DynamoDB shows as `"outcome":"failed"` with the error name
+(`AccessDeniedException` for a missing right).
+
 ## Build network (ticket 2.1)
 
 ```mermaid

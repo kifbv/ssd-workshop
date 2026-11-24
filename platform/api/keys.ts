@@ -59,6 +59,31 @@ export const nicknameKey = (nickname: string): ItemKey => ({
   sk: "NICK",
 });
 
+/**
+ * An app's live marker (ticket 2.4): present once the deployer (ticket 2.5) has published the app at
+ * `/apps/<nickname>/`. Keyed by the lower-cased nickname, like the claim. The data API answers 404
+ * without it. Its partition (`APP#`) is not the data's (`APPDATA#`), so the data API's role, which
+ * may write only in `APPDATA#*`, can never make an app live or take it off.
+ */
+export const appLiveKey = (nickname: string): ItemKey => ({
+  pk: `APP#${checkId("nickname", nickname).toLowerCase()}`,
+  sk: "LIVE",
+});
+
+/** Prefix of every stored value's sort key in an app's data partition (ticket 2.4). */
+export const APP_DATA_PREFIX = "DATA#";
+
+const appDataPk = (nickname: string): string => `APPDATA#${checkId("nickname", nickname).toLowerCase()}`;
+
+/** One JSON value an app keeps (ticket 2.4), at `APPDATA#<nickname>` / `DATA#<key>`. */
+export const appDataKey = (nickname: string, key: string): ItemKey => ({
+  pk: appDataPk(nickname),
+  sk: `${APP_DATA_PREFIX}${checkId("data key", key)}`,
+});
+
+/** The running totals of an app's data (ticket 2.4): bytes and keys, written with every value. */
+export const appDataUsageKey = (nickname: string): ItemKey => ({ pk: appDataPk(nickname), sk: "DATA_USAGE" });
+
 /** A new participant id: a random UUID (never holds the key separator). */
 export function newParticipantId(randomUUID: () => string): string {
   return checkId("participant id", randomUUID());

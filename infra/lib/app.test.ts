@@ -15,7 +15,10 @@ import {
   AI_QUEUE_VISIBILITY_SECONDS,
   AI_WORKER_MAX_CONCURRENCY,
   AI_WORKER_TIMEOUT_SECONDS,
+  APP_DATA_METHODS,
+  APP_DATA_PATH,
 } from "./api-stack.js";
+import { APP_DATA_ROUTES as APP_DATA_ROUTE_KEYS } from "../../platform/api/app-data/data.js";
 import { STALE_PENDING_SECONDS } from "../../platform/api/conversation/state.js";
 import { WRITE_RESERVE_MS } from "../../platform/api/handlers/ai-worker.js";
 import { CONVERSATION_ROUTES as CONVERSATION_ROUTE_KEYS } from "../../platform/api/conversation/conversation.js";
@@ -40,6 +43,7 @@ import {
   PARTICIPANT_FUNCTION_NAME,
   CONVERSATION_FUNCTION_NAME,
   AI_WORKER_FUNCTION_NAME,
+  APP_DATA_FUNCTION_NAME,
   AI_QUEUE_NAME,
   AI_DLQ_NAME,
   REGION,
@@ -669,13 +673,17 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/step",
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
+      "GET /api/apps/{nickname}/data/{key}",
+      "PUT /api/apps/{nickname}/data/{key}",
+      "DELETE /api/apps/{nickname}/data/{key}",
+      "OPTIONS /api/apps/{nickname}/data/{key}",
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(5);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(6);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -729,6 +737,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       PARTICIPANT_FUNCTION_NAME,
       CONVERSATION_FUNCTION_NAME,
       AI_WORKER_FUNCTION_NAME,
+      APP_DATA_FUNCTION_NAME,
     ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
       Runtime: "nodejs22.x",
@@ -1155,6 +1164,93 @@ describe("api stack: participant function (ticket 1.5)", () => {
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
     const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
     await expect(quietly(() => bundle.handler({ routeKey: "GET /api/me" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describe("api stack: data API for apps (ticket 2.4)", () => {
+  const f = apiFunction(APP_DATA_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-app-data; Node.js 22 arm64, tagged, role on /ssd-workshop/ with the boundary", () => {
+    expect(APP_DATA_FUNCTION_NAME).toBe("ssd-workshop-api-app-data");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: 256,
+      Timeout: 10,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect(tagsOf(f.fnEntry()?.[1] as Resource).project).toBe("ssd-workshop");
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({
+      LogGroupName: APP_DATA_FUNCTION_NAME,
+      RetentionInDays: 14,
+    });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(f.roleEntry()?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
+    expect(tagsOf(f.roleEntry()?.[1] as Resource).project).toBe("ssd-workshop");
+  });
+
+  it("routes GET, PUT, DELETE and OPTIONS /api/apps/{nickname}/data/{key} to it, invoked only by this API", () => {
+    const keys = APP_DATA_METHODS.map((method) => `${method} ${APP_DATA_PATH}`);
+    expect(keys).toEqual([...APP_DATA_ROUTE_KEYS]);
+    for (const routeKey of keys) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({
+        IntegrationType: "AWS_PROXY",
+        PayloadFormatVersion: "2.0",
+        IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+      });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
+    expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
+    expect(source).toContain('"/*/*/*"');
+  });
+
+  it("leaves OPTIONS to the function: the HTTP API has no CORS configuration that would answer it first", () => {
+    for (const [, , api] of ofType("AWS::ApiGatewayV2::Api")) expect(api.Properties?.CorsConfiguration).toBeUndefined();
+  });
+
+  it("allows only its logs, GetItem in APP# and APPDATA#, and writes in APPDATA# of the data items' attributes only (never the live marker)", () => {
+    expect(f.statements()).toEqual([
+      {
+        Effect: "Allow",
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*", "APPDATA#*"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPDATA#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt"] },
+        },
+      },
+    ]);
+    // The live marker lives in `APP#<nickname>` and needs `liveAt`: no write right reaches either.
+    const writes = f.statements().filter((s) => JSON.stringify(s.Action).match(/dynamodb:(Put|Update|Delete|BatchWrite)/));
+    for (const statement of writes) {
+      const condition = statement.Condition as Record<string, Record<string, string[]>>;
+      expect(condition["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]).toEqual(["APPDATA#*"]);
+      expect(condition["ForAllValues:StringEquals"]?.["dynamodb:Attributes"]).not.toContain("liveAt");
+    }
+    // `APP#*` in IAM's StringLike does not match an `APPDATA#` key, and the reverse.
+    const like = (pattern: string, value: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(value);
+    expect(like("APPDATA#*", "APP#ada")).toBe(false);
+    expect(like("APP#*", "APPDATA#ada")).toBe(false);
+    expect(like("APPDATA#*", "APPDATA#ada")).toBe(true);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers the preflight with CORS, without the table", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number; headers?: Record<string, string> }> }>();
+    const answer = await quietly(() => bundle.handler({ routeKey: `OPTIONS ${APP_DATA_PATH}` }));
+    expect(answer.statusCode).toBe(204);
+    expect(answer.headers?.["access-control-allow-origin"]).toBe("*");
   });
 });
 

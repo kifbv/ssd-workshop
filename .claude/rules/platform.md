@@ -70,3 +70,9 @@ paths:
   two optional runs of the same characters side by side (`=\s*["']?\s*` is quadratic on spaces), and test it with
   long lines against a time limit with a margin over 10x (256 KB lines, 1 s: CI runners are slower and run test
   files in parallel with Chromium). Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters.
+- An API that sandboxed apps call (opaque origin `null`, ticket 2.4) puts `Access-Control-Allow-Origin: *` on every
+  answer, errors, 404 and the preflight included (else the page cannot read the reason), never with credentials, and
+  never reads or sets a cookie. Prove it in Chromium with the real handler behind a local server serving the page
+  under the apps' CSP (`platform/api/app-data/browser.test.ts`); Chromium logs every 4xx answer as a console error.
+- JSON from strangers: cap nesting depth by scanning the text (`nestingDepth` in `app-data/data.ts`); `JSON.stringify`
+  of a few thousand nested lists overflows the stack, while `JSON.parse` accepts it.
