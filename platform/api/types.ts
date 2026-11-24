@@ -44,8 +44,11 @@
 
 export type Role = "participant" | "facilitator" | "admin";
 
-/** Where a participant is in the workshop (phase 1 covers clarify and spec). */
-export type Step = "nickname" | "clarify" | "spec" | "approved";
+/**
+ * Where a participant is in the workshop (phase 1 covers clarify and spec). `approved` while the readiness
+ * check runs, then `building` once it passed and the build was queued (ticket 2.7), or back to `spec`.
+ */
+export type Step = "nickname" | "clarify" | "spec" | "approved" | "building";
 
 interface Keyed {
   pk: string;
@@ -254,6 +257,11 @@ export interface ConversationItem extends Keyed {
    * (until phase 2's build flow takes over).
    */
   approvedSpecVersion?: number;
+  /**
+   * The build the readiness check started (ticket 2.7), written in the same transaction as the build and the
+   * step `building`: `GET /api/build` reads it to find the caller's own build.
+   */
+  buildId?: string;
   /** ISO 8601. */
   updatedAt: string;
 }
@@ -349,7 +357,11 @@ export interface BuildItem extends Keyed {
    * (DynamoDB conditions cannot ignore case), so 2.7 and 2.8 must both use the participant's stored nickname.
    */
   nickname: string;
+  /** The participant whose approved spec this build makes (ticket 2.7): `GET /api/build` answers only them. */
+  participantId: string;
   status: BuildStatus;
+  /** ISO 8601: when the readiness check created it (ticket 2.7). */
+  createdAt: string;
   /** ISO 8601: the last status change. */
   updatedAt: string;
   /** The commit the deployer published (status `live`). */

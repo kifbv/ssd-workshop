@@ -17,7 +17,12 @@ export const SPEC_TEXTS = {
   answering: "The AI is writing…",
   notYet: "Your spec is not written yet. Press the button to ask the AI for it.",
   approveHint: "Happy with it? Approve your spec. You can still ask questions or ask for changes until you do.",
-  approved: "Spec approved. Next comes the build: the AI turns this spec into your app. Your facilitator will tell you when the build starts.",
+  /** Ticket 2.7: while the readiness check runs (the same words are in index.html). */
+  approved:
+    "Spec approved. Next comes the build: first the AI checks that your spec is ready to build (no login, payments or outside services, and no open questions). This takes a few seconds.",
+  checking: "The AI is checking your spec…",
+  /** Ticket 2.7: the check passed and the build is queued (ticket 2.10 brings the step 3 screen). */
+  building: "Your spec is ready and the build is starting: the AI now turns your spec into your app.",
   drawing: "Drawing the diagram…",
   noDiagram: "The diagram could not be drawn. Ask the AI to fix it, or read it as text below.",
   diagramText: "Diagram as text",

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { GetItemCommand, ScanCommand, TransactWriteItemsCommand, type TransactWriteItem } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
 import { handleConversationRequest, POLL_ROUTE, SEND_ROUTE, type ConversationDeps } from "../../api/conversation/conversation.js";
-import { FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "../../api/conversation/fakes.js";
+import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "../../api/conversation/fakes.js";
 import { CLARIFY_SYSTEM_PROMPT } from "../../api/conversation/answer.js";
 import { DEFAULT_SUGGESTION } from "../../api/conversation/guardrail.js";
 import { processJob } from "../../api/conversation/worker.js";
@@ -25,7 +25,7 @@ async function setupFlagged() {
   const model = new FakeModel();
   let clock = NOW;
   const api: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, 5), log: () => undefined };
-  const workerDeps = { store: table, model, modelId: MODEL_ID, now: () => clock, log: () => undefined };
+  const workerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), now: () => clock, log: () => undefined };
   const send = (text: string, t = TOKEN): HttpRequest => ({
     routeKey: SEND_ROUTE,
     cookies: [`${SESSION_COOKIE}=${t}`],

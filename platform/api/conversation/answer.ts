@@ -50,6 +50,7 @@ export function systemPromptFor(step: Step, currentSpec?: string): { prompt: str
   switch (step) {
     case "spec":
     case "approved":
+    case "building":
       return { prompt: specSystemPrompt(currentSpec), version: SPEC_PROMPT_VERSION };
     default:
       return { prompt: CLARIFY_SYSTEM_PROMPT, version: CLARIFY_PROMPT_VERSION };

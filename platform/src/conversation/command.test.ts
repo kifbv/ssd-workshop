@@ -68,7 +68,7 @@ class FakeResetStore implements ResetStore {
 }
 
 /** Ada and Bob, each with an answered message, a reply and a spec, Ada at the given step. */
-function setup(step: "clarify" | "spec" | "approved" = "spec") {
+function setup(step: "clarify" | "spec" | "approved" | "building" = "spec") {
   const table = new FakeConversationTable();
   table.addParticipant("p-ada", "Ada", hashToken(ADA), NOW_S + 3600, step);
   table.addParticipant("p-bob", "Bob", hashToken(BOB), NOW_S + 3600, "spec");
@@ -178,6 +178,20 @@ describe("npm run conversation -- reset <nickname>", () => {
     const { deps, send } = setup("approved");
     expect((await send("hello")).statusCode).toBe(409);
     expect(await runConversation(["reset", "Ada", "--yes"], deps)).toBe(0);
+    expect((await send("hello")).statusCode).toBe(202);
+  });
+
+  it("WHEN the participant is at step 3 (building) THEN a reset sends them back to step 1, keeps the build record, and a new approval can start a new build (ticket 2.7)", async () => {
+    const { deps, out, table, send } = setup("building");
+    table.conversations.set("p-ada", { state: "open", latestSpecVersion: 2, approvedSpecVersion: 2, buildId: "b-1" });
+    table.builds.set("b-1", { buildId: "b-1", nickname: "Ada", participantId: "p-ada", status: "queued", createdAt: "x", updatedAt: "x" });
+    expect(await runConversation(["reset", "Ada"], deps)).toBe(0);
+    expect(out[0]).toBe("Ada is at step 3 (Build), with 2 messages and replies and 2 spec versions.");
+    expect(await runConversation(["reset", "Ada", "--yes"], deps)).toBe(0);
+    expect(out).toContain("Ada's earlier build stays on record; a new approved spec starts a new build.");
+    expect(table.profiles.get("p-ada")?.step).toBe("clarify");
+    expect(table.conversations.has("p-ada")).toBe(false);
+    expect(table.builds.has("b-1")).toBe(true);
     expect((await send("hello")).statusCode).toBe(202);
   });
 

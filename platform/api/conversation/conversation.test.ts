@@ -12,7 +12,7 @@ import {
   type ConversationDeps,
   type ConversationLogEntry,
 } from "./conversation.js";
-import { FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "./fakes.js";
+import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "./fakes.js";
 import { GUARDRAIL_SYSTEM_PROMPT } from "./guardrail.js";
 import { FAILURE_REPLY, STALE_PENDING_SECONDS, jobBody, parseJob } from "./state.js";
 import { FINISH_ATTEMPTS, FINISH_BACKOFF_MS, processJob, type WorkerDeps, type WorkerLogEntry } from "./worker.js";
@@ -54,6 +54,7 @@ function setup() {
     store: table,
     model,
     modelId: MODEL_ID,
+    builds: new FakeBuildQueue(),
     now: () => clock,
     log: (e) => workerLogs.push(e),
     sleep: async (ms) => {

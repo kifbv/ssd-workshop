@@ -173,7 +173,7 @@ let pollRound = 0;
 let localVersion = 0;
 
 /** Step 2 (ticket 1.9): the newest and approved versions, and the version on the page. */
-let specInfo: { latest?: number; approved?: number; atApproved: boolean } = { atApproved: false };
+let specInfo: { latest?: number; approved?: number; atApproved: boolean; building: boolean } = { atApproved: false, building: false };
 let shownSpec: SpecVersion | null = null;
 
 function stopPolling(): void {
@@ -223,14 +223,22 @@ function renderStepOne(): void {
   byId<HTMLButtonElement>("write-spec-button").disabled = waiting !== null;
 }
 
-/** Step 2 (ticket 1.9): the approved notice, the missing-spec button, the form and Approve spec. */
+/**
+ * Step 2 (ticket 1.9): the approved notice, the missing-spec button, the form and Approve spec. Ticket 2.7: while the
+ * readiness check runs (step approved, its request in flight) the notice says so; once it passed (step building) it
+ * says the build is starting. At step approved with nothing in flight (an approval from before 2.7, a check that never
+ * finished) Approve spec shows again, to ask for the check.
+ */
 function renderStepTwo(): void {
-  const approved = specInfo.approved !== undefined || specInfo.atApproved;
-  byId("spec-approved").hidden = !approved;
+  const checking = specInfo.atApproved && waiting !== null;
+  const approved = checking || specInfo.building;
+  const notice = byId("spec-approved");
+  notice.hidden = !approved;
+  notice.textContent = specInfo.building ? SPEC_TEXTS.building : SPEC_TEXTS.approved;
   byId("spec-doc").hidden = shownSpec === null;
-  byId("spec-missing").hidden = approved || specInfo.latest !== undefined || waiting !== null;
-  byId("spec-typing-text").textContent = specInfo.latest === undefined ? SPEC_TEXTS.writing : SPEC_TEXTS.answering;
-  byId("spec-chat-form").hidden = approved;
+  byId("spec-missing").hidden = approved || specInfo.atApproved || specInfo.latest !== undefined || waiting !== null;
+  byId("spec-typing-text").textContent = specInfo.atApproved ? SPEC_TEXTS.checking : specInfo.latest === undefined ? SPEC_TEXTS.writing : SPEC_TEXTS.answering;
+  byId("spec-chat-form").hidden = specInfo.atApproved || specInfo.building;
   byId("spec-approve").hidden = approved || shownSpec === null;
   byId<HTMLButtonElement>("approve-spec-button").disabled = waiting !== null || shownSpec?.version !== specInfo.latest;
 }
@@ -301,7 +309,7 @@ async function loadConversation(): Promise<void> {
     return;
   }
   const { conversation } = result;
-  if (conversation.step !== "clarify" && conversation.step !== "spec" && conversation.step !== "approved") {
+  if (conversation.step !== "clarify" && conversation.step !== "spec" && conversation.step !== "approved" && conversation.step !== "building") {
     await goToOwnStep(view.screen);
     return;
   }
@@ -311,6 +319,7 @@ async function loadConversation(): Promise<void> {
     ...(conversation.latestSpecVersion === undefined ? {} : { latest: conversation.latestSpecVersion }),
     ...(conversation.approvedSpecVersion === undefined ? {} : { approved: conversation.approvedSpecVersion }),
     atApproved: conversation.step === "approved",
+    building: conversation.step === "building",
   };
   stopPolling();
   const pending = conversation.pendingId;

@@ -1,17 +1,20 @@
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { SQSClient } from "@aws-sdk/client-sqs";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { clientSettings } from "../aws.js";
 import { BedrockModel } from "../conversation/model.js";
+import { SqsBuildQueue } from "../conversation/queue.js";
 import { parseJob } from "../conversation/state.js";
 import { DynamoConversationStore } from "../conversation/store.js";
 import { errorName } from "../sign-in/code-request.js";
 import { processJob, type WorkerDeps, type WorkerLogEntry } from "../conversation/worker.js";
-import { MODEL_ID, REGION, TABLE_NAME } from "../settings.js";
+import { BUILD_QUEUE_URL, MODEL_ID, REGION, TABLE_NAME } from "../settings.js";
 
 /**
  * The AI worker (ticket 1.7): one SQS record per invocation (batch size 1), holding a participant id
- * and a message id. Rules in ../conversation/worker.ts.
+ * and a message id. Rules in ../conversation/worker.ts; since ticket 2.7 it also runs the readiness check and
+ * sends a passed build's id to the launch queue.
  */
 
 /** The parts of an SQS event the worker reads. */
@@ -78,6 +81,7 @@ export async function handler(event: SqsEvent, context?: WorkerContext): Promise
       MODEL_ID,
     ),
     modelId: MODEL_ID,
+    builds: new SqsBuildQueue(new SQSClient(clientSettings()), BUILD_QUEUE_URL),
     now: () => new Date(),
     log: logEntry,
   });

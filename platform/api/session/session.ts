@@ -18,7 +18,7 @@ const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const ROLES: readonly Role[] = ["participant", "facilitator", "admin"];
 export const isRole = (value: unknown): value is Role => typeof value === "string" && (ROLES as string[]).includes(value);
 
-const STEPS: readonly Step[] = ["nickname", "clarify", "spec", "approved"];
+const STEPS: readonly Step[] = ["nickname", "clarify", "spec", "approved", "building"];
 export const isStep = (value: unknown): value is Step => typeof value === "string" && (STEPS as string[]).includes(value);
 
 export const SIGN_IN_REQUIRED_MESSAGE = "Please sign in.";

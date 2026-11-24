@@ -1,12 +1,13 @@
 // `npm run eval -- <suite>` (ticket 1.7): runs a suite of examples against the real model and
-// scores the answers. `guardrails` (ticket 1.7), `clarify` (ticket 1.8) and `spec` (ticket 1.9).
+// scores the answers. `guardrails` (ticket 1.7), `clarify` (ticket 1.8), `spec` (ticket 1.9) and `readiness` (ticket 2.7).
 // The scoring is pure and unit tested; ./main.ts calls Bedrock.
 import type { Exchange } from "../../api/conversation/answer.js";
 import { addUsage } from "../../api/conversation/model.js";
+import type { ReadinessVerdict } from "../../api/conversation/readiness.js";
 import { checkSpec, extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import type { GuardrailVerdict, TokenUsage } from "../../api/types.js";
 
-export const SUITES = ["guardrails", "clarify", "spec"] as const;
+export const SUITES = ["guardrails", "clarify", "spec", "readiness"] as const;
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
@@ -21,6 +22,9 @@ Suites:
                a new spec has the sections and a Mermaid diagram that parses and draws (Mermaid in
                Chromium, the page's own diagram.js), a question leaves the spec unchanged, and a
                change request gives a new version
+  readiness    every approved spec in platform/api/eval/readiness.json through the real readiness check:
+               the workshop's three example specs pass, and specs needing a login, a payment, an outside
+               service or a server, or leaving a question open, fail with a reason that names it
 
 Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example).`;
 
@@ -418,6 +422,106 @@ export function formatSpecSummary(results: readonly SpecResult[]): string[] {
   for (const check of SPEC_CHECKS) {
     const group = results.filter((r) => r.example.check === check);
     lines.push(`  ${check}: ${group.filter((r) => r.pass).length}/${group.length}`);
+  }
+  return lines;
+}
+
+// ---- readiness (ticket 2.7) ----
+
+export interface ReadinessExample {
+  name: string;
+  /** "example" for the workshop's example specs; otherwise what makes the spec not ready (login, payment, ...). */
+  category: string;
+  expected: "ready" | "not-ready";
+  /** The approved spec (it must have the spec's shape). */
+  spec: string;
+  /** not-ready: some reason names one of these (any case). */
+  keywords: string[];
+}
+
+/** The examples of a readiness file, or an error naming the first bad entry. */
+export function parseReadinessExamples(json: string): ReadinessExample[] | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return { error: "the examples file is not JSON" };
+  }
+  const examples = (parsed as { examples?: unknown } | null)?.examples;
+  if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
+  const result: ReadinessExample[] = [];
+  for (const [i, e] of examples.entries()) {
+    const { name, category, expected, spec, keywords = [] } = (e ?? {}) as Record<string, unknown>;
+    const bad =
+      typeof name !== "string" ||
+      typeof category !== "string" ||
+      (expected !== "ready" && expected !== "not-ready") ||
+      typeof spec !== "string" ||
+      checkSpec(spec).length > 0 ||
+      !isStringList(keywords) ||
+      (expected === "not-ready" && keywords.length === 0);
+    if (bad) {
+      return { error: `example ${i + 1} needs a name, a category, an expected verdict (ready or not-ready), a spec of the right shape, and for not-ready keywords` };
+    }
+    result.push({ name, category, expected, spec, keywords });
+  }
+  return result;
+}
+
+export interface ReadinessOutcome {
+  verdict: ReadinessVerdict;
+  reasons: string[];
+  usage: TokenUsage;
+}
+
+export interface ReadinessResult extends ClarifyScore {
+  example: ReadinessExample;
+  outcome?: ReadinessOutcome;
+}
+
+/** Scores one verdict: the expected verdict, and for a failing spec a reason naming the problem. */
+export function scoreReadiness(example: ReadinessExample, outcome: Pick<ReadinessOutcome, "verdict" | "reasons">): ClarifyScore {
+  if (outcome.verdict !== example.expected) return { pass: false, detail: `${outcome.verdict} (expected ${example.expected})` };
+  if (example.expected === "ready") return { pass: true, detail: "ready" };
+  const named = example.keywords.filter((k) => outcome.reasons.some((r) => r.toLowerCase().includes(k.toLowerCase())));
+  if (named.length === 0) return { pass: false, detail: `not-ready, but no reason names ${example.keywords.join(" / ")}` };
+  return { pass: true, detail: `not-ready, naming ${named.join(", ")}` };
+}
+
+/** Runs every example, one at a time; a failed call counts as a failure. */
+export async function runReadinessEval(
+  examples: readonly ReadinessExample[],
+  check: (example: ReadinessExample) => Promise<ReadinessOutcome>,
+  onResult: (result: ReadinessResult, index: number) => void = () => undefined,
+): Promise<ReadinessResult[]> {
+  const results: ReadinessResult[] = [];
+  for (const [i, example] of examples.entries()) {
+    let result: ReadinessResult;
+    try {
+      const outcome = await check(example);
+      result = { example, outcome, ...scoreReadiness(example, outcome) };
+    } catch (error) {
+      result = { example, pass: false, detail: `error ${error instanceof Error ? error.name : "Error"}` };
+    }
+    results.push(result);
+    onResult(result, i);
+  }
+  return results;
+}
+
+/** One line per example, then its reasons (indented), so a reviewer sees what was scored. */
+export function formatReadinessResult(result: ReadinessResult, index: number): string {
+  const head = `${result.pass ? "PASS" : "FAIL"} ${String(index + 1).padStart(2)} [${result.example.category}] ${result.example.name}: ${result.detail}`;
+  return [head, ...(result.outcome?.reasons ?? []).map((r) => `     | ${r}`)].join("\n");
+}
+
+export function formatReadinessSummary(results: readonly ReadinessResult[]): string[] {
+  const passed = results.filter((r) => r.pass).length;
+  const total = addUsage(...results.map((r) => r.outcome?.usage));
+  const lines = [`Readiness: ${passed}/${results.length} passed`, `Tokens: ${total.inputTokens} in, ${total.outputTokens} out, cost $${total.costUsd.toFixed(4)}`];
+  for (const expected of ["ready", "not-ready"]) {
+    const group = results.filter((r) => r.example.expected === expected);
+    lines.push(`  expected ${expected}: ${group.filter((r) => r.pass).length}/${group.length}`);
   }
   return lines;
 }

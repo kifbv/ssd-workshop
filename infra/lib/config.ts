@@ -259,7 +259,8 @@ export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
  * spec (Write my spec, ticket 1.8). Ticket 1.9: the approval, `approvedSpecVersion` on the conversation,
  * `approvedAt` on the spec version and the step to approved (the condition names `latestSpecVersion`).
  * Never `role`, `group`, `nickname`, `id`, `approvedTextHash` or `specVersion` (readers of a spec version
- * require it, so this role cannot make one).
+ * require it, so this role cannot make one). Ticket 2.7: `buildId`, only compared (asking for the readiness check
+ * again needs no build yet); `GET /api/build` answers only a build whose own `participantId` is the caller.
  */
 export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "pk",
@@ -279,6 +280,7 @@ export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "approvedSpecVersion",
   "latestSpecVersion",
   "approvedAt",
+  "buildId",
 ] as const;
 /** Lambda function, role and log group of the AI worker (ticket 1.7). */
 export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
@@ -289,6 +291,11 @@ export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
  * facilitator's approval sets it, and it skips the guardrail check for that exact text). Ticket 1.9: a
  * new spec version (`specVersion`, `messageId`) and the conversation's `latestSpecVersion`; never
  * `approvedSpecVersion` or `approvedAt` (only the participant's Approve spec sets them).
+ * Ticket 2.7: the readiness check's outcome moves the profile's `step` (approved to building, or back to spec),
+ * writes the conversation's `buildId`, and on a failed check removes `approvedSpecVersion` (so the participant can
+ * approve again); every such write is conditional on the step being `approved` and that version being approved
+ * with the readiness message in flight. Still never `approvedAt`, `role`, `group`, `nickname`, `id` or
+ * `approvedTextHash`.
  */
 export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",
@@ -322,7 +329,23 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "specVersion",
   "messageId",
   "latestSpecVersion",
+  "step",
+  "buildId",
+  "approvedSpecVersion",
 ] as const;
+/**
+ * The attribute names the AI worker may name in `BUILD#*` (UpdateItem only; ticket 2.7): a new build record, created
+ * only if absent (`attribute_not_exists(pk)`), queued. Never `deployedCommit`, `failureReasons`, `finishedAt` (the
+ * deployer's) or `pushedCommit` (the builder's, ticket 2.8).
+ */
+export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt"] as const;
+/**
+ * The launch queue from the AI worker (after a passed readiness check, ticket 2.7) to the build launcher (ticket 2.9),
+ * and its dead-letter queue, in the builds stack. FIFO: deduplication id the build id, message group the participant id.
+ * The AI worker is its only sender (tested); its body is `{"buildId": "<id>"}`.
+ */
+export const BUILD_QUEUE_NAME = `${PREFIX}-builds.fifo`;
+export const BUILD_DLQ_NAME = `${PREFIX}-builds-dlq.fifo`;
 /** The queue from the conversation function to the AI worker, and its dead-letter queue (ticket 1.7). */
 export const AI_QUEUE_NAME = `${PREFIX}-ai-messages`;
 export const AI_DLQ_NAME = `${PREFIX}-ai-messages-dlq`;

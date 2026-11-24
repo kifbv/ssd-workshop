@@ -16,6 +16,8 @@ import {
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import {
+  buildKey,
+  BUILD_ID_PATTERN,
   conversationKey,
   MESSAGE_PREFIX,
   messageKey,
@@ -28,7 +30,7 @@ import {
   type ItemKey,
 } from "../keys.js";
 import { isStep } from "../session/session.js";
-import type { ConversationState, MessageStatus, TokenUsage } from "../types.js";
+import type { BuildStatus, ConversationState, MessageStatus, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 import { addUsage } from "./model.js";
 import {
@@ -43,6 +45,10 @@ import {
   type NewMessage,
   type StoredConversation,
   type StoredMessage,
+  type ParticipantInfo,
+  type ReadinessFinish,
+  type ReadinessRequestResult,
+  type StoredBuild,
 } from "./state.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -123,6 +129,9 @@ function specOf(item: Record<string, AttributeValue> | undefined): StoredSpec | 
   if (item === undefined || version === undefined || text === undefined || !(item["sk"]?.S ?? "").startsWith(SPEC_PREFIX)) return undefined;
   return { version, text, createdAt: item["createdAt"]?.S ?? "", approved: item["approvedAt"]?.S !== undefined };
 }
+
+const BUILD_STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "live", "failed"];
+const isBuildStatus = (v: unknown): v is BuildStatus => typeof v === "string" && (BUILD_STATUSES as string[]).includes(v);
 
 const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure" } as const;
 
@@ -231,11 +240,13 @@ export class DynamoConversationStore implements ConversationStore {
     const pendingId = output.Item?.["pendingId"]?.S;
     const latestSpecVersion = versionOf(output.Item?.["latestSpecVersion"]);
     const approvedSpecVersion = versionOf(output.Item?.["approvedSpecVersion"]);
+    const buildId = output.Item?.["buildId"]?.S;
     return {
       state: state as ConversationState,
       ...(pendingId === undefined ? {} : { pendingId }),
       ...(latestSpecVersion === undefined ? {} : { latestSpecVersion }),
       ...(approvedSpecVersion === undefined ? {} : { approvedSpecVersion }),
+      ...(buildId !== undefined && BUILD_ID_PATTERN.test(buildId) ? { buildId } : {}),
     };
   }
 
@@ -383,7 +394,7 @@ export class DynamoConversationStore implements ConversationStore {
     return spec?.version === version ? spec : undefined;
   }
 
-  async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<ApproveResult> {
+  async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string, readiness: NewMessage): Promise<ApproveResult> {
     try {
       await this.client.send(
         new TransactWriteItemsCommand({
@@ -395,21 +406,28 @@ export class DynamoConversationStore implements ConversationStore {
             setItem(
               this.tableName,
               conversationKey(participantId),
-              { approvedSpecVersion: num(version), updatedAt: str(nowIso) },
               {
-                // This version is the newest, none was approved, and nothing is in flight (a stale pending
-                // message is let go: its late answer can no longer land, since pendingId is removed).
+                approvedSpecVersion: num(version),
+                state: str("open"),
+                // Ticket 2.7: the readiness request becomes the message in flight (a stale pending message is
+                // let go: its late answer can no longer land, since pendingId changes).
+                pendingId: str(readiness.id),
+                pendingSince: num(readiness.nowSeconds),
+                updatedAt: str(nowIso),
+              },
+              {
+                // This version is the newest, none was approved, and nothing is in flight.
                 expression:
                   "#latestSpecVersion = :version AND attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
-                names: { "#latestSpecVersion": "latestSpecVersion", "#state": "state" },
+                names: { "#latestSpecVersion": "latestSpecVersion" },
                 values: { ":version": num(version), ":open": str("open"), ":staleBefore": num(nowSeconds - STALE_PENDING_SECONDS) },
               },
-              { remove: ["pendingId", "pendingSince"] },
             ),
             setItem(this.tableName, specKey(participantId, version), { approvedAt: str(nowIso) }, {
               expression: "attribute_exists(#pk)",
               names: { "#pk": "pk" },
             }),
+            this.newMessageItem(participantId, readiness),
           ],
         }),
       );
@@ -424,6 +442,166 @@ export class DynamoConversationStore implements ConversationStore {
       if (conversation.state === "waiting") return "waiting";
       return "busy";
     }
+  }
+
+  async requestReadiness(participantId: string, version: number, message: NewMessage): Promise<ReadinessRequestResult> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(
+              this.tableName,
+              conversationKey(participantId),
+              { state: str("open"), pendingId: str(message.id), pendingSince: num(message.nowSeconds), updatedAt: str(message.createdAt) },
+              {
+                // Still this approval, no build yet, and nothing in flight (or only a stale pending message).
+                expression:
+                  "#approvedSpecVersion = :version AND attribute_not_exists(#buildId) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+                names: { "#approvedSpecVersion": "approvedSpecVersion", "#buildId": "buildId" },
+                values: { ":version": num(version), ":open": str("open"), ":staleBefore": num(message.nowSeconds - STALE_PENDING_SECONDS) },
+              },
+            ),
+            this.newMessageItem(participantId, message),
+          ],
+        }),
+      );
+      return "created";
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      const conversation = await this.getConversation(participantId);
+      return conversation?.approvedSpecVersion !== version || conversation.buildId !== undefined ? "wrong-step" : "busy";
+    }
+  }
+
+  /** A new pending participant message, only if its key is free. */
+  private newMessageItem(participantId: string, message: NewMessage): TransactWriteItem {
+    return setItem(
+      this.tableName,
+      messageKey(participantId, message.id),
+      {
+        type: str("message"),
+        author: str("participant"),
+        step: str(message.step),
+        text: str(message.text),
+        status: str("pending"),
+        createdAt: str(message.createdAt),
+        pendingSince: num(message.nowSeconds),
+      },
+      { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+    );
+  }
+
+  async finishReadiness(participantId: string, messageId: string, outcome: ReadinessFinish, nowIso: string): Promise<boolean> {
+    const ready = outcome.kind === "ready";
+    const answer = outcome.kind === "failed" ? undefined : outcome.answer;
+    const items: TransactWriteItem[] = [
+      setItem(this.tableName, messageKey(participantId, messageId), { status: str(outcome.kind === "failed" ? "failed" : "done") }, {
+        expression: "#status = :pending",
+        values: { ":pending": str("pending") },
+      }),
+      setItem(
+        this.tableName,
+        messageKey(participantId, replyId(messageId)),
+        {
+          type: str("message"),
+          author: str("assistant"),
+          text: str(outcome.reply),
+          kind: str(outcome.kind === "failed" ? "failure" : "answer"),
+          replyTo: str(messageId),
+          createdAt: str(nowIso),
+          ...(answer === undefined
+            ? {}
+            : {
+                prompt: str(answer.prompt),
+                modelId: str(answer.modelId),
+                promptVersion: str(answer.promptVersion),
+                historyCount: num(answer.historyCount),
+                inputTokens: num(answer.usage.inputTokens),
+                outputTokens: num(answer.usage.outputTokens),
+                costUsd: num(answer.usage.costUsd),
+              }),
+        },
+        { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+      ),
+      setItem(
+        this.tableName,
+        conversationKey(participantId),
+        { state: str("open"), updatedAt: str(nowIso), ...(ready ? { buildId: str(outcome.build.buildId) } : {}) },
+        {
+          expression: "#pendingId = :messageId AND #approvedSpecVersion = :version",
+          names: { "#pendingId": "pendingId", "#approvedSpecVersion": "approvedSpecVersion" },
+          values: { ":messageId": str(messageId), ":version": num(outcome.version) },
+        },
+        // Not ready (or no verdict): the approval is cleared, so Approve spec works again.
+        { remove: ready ? ["pendingId", "pendingSince"] : ["pendingId", "pendingSince", "approvedSpecVersion"] },
+      ),
+      setItem(this.tableName, participantKey(participantId), { step: str(ready ? "building" : "spec") }, {
+        expression: "#step = :approved",
+        values: { ":approved": str("approved") },
+      }),
+    ];
+    if (ready) {
+      items.push(
+        setItem(
+          this.tableName,
+          buildKey(outcome.build.buildId),
+          {
+            type: str("build"),
+            buildId: str(outcome.build.buildId),
+            nickname: str(outcome.build.nickname),
+            participantId: str(participantId),
+            status: str("queued"),
+            createdAt: str(nowIso),
+            updatedAt: str(nowIso),
+          },
+          { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+        ),
+      );
+    }
+    const spent = outcome.kind === "failed" ? outcome.usage : outcome.answer.usage;
+    if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) items.push(this.usageItem(participantId, spent, nowIso));
+    try {
+      await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  async getParticipantInfo(participantId: string): Promise<ParticipantInfo | undefined> {
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: keyOf(participantKey(participantId)),
+        ConsistentRead: true,
+        ProjectionExpression: "#step, #nickname",
+        ExpressionAttributeNames: { "#step": "step", "#nickname": "nickname" },
+      }),
+    );
+    const step = output.Item?.["step"]?.S;
+    const nickname = output.Item?.["nickname"]?.S;
+    if (!isStep(step)) return undefined;
+    return { step, ...(nickname === undefined ? {} : { nickname }) };
+  }
+
+  async getBuild(buildId: string): Promise<StoredBuild | undefined> {
+    if (!BUILD_ID_PATTERN.test(buildId)) return undefined;
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: keyOf(buildKey(buildId)),
+        ConsistentRead: true,
+        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons",
+        ExpressionAttributeNames: { "#type": "type", "#buildId": "buildId", "#participantId": "participantId", "#status": "status", "#failureReasons": "failureReasons" },
+      }),
+    );
+    const item = output.Item;
+    const participantId = item?.["participantId"]?.S;
+    const status = item?.["status"]?.S;
+    if (item?.["type"]?.S !== "build" || item["buildId"]?.S !== buildId || participantId === undefined || !isBuildStatus(status)) return undefined;
+    const reasons = item["failureReasons"]?.L?.flatMap((r) => (r.S === undefined ? [] : [r.S]));
+    return { buildId, participantId, status, ...(reasons === undefined ? {} : { failureReasons: reasons }) };
   }
 
   async finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean> {

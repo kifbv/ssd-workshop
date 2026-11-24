@@ -3,7 +3,7 @@
 // a message is created only when the conversation has none in flight, and every status change
 // names the status it expects and the message in flight, all or nothing.
 import { FakeTable } from "../fakes.js";
-import type { ConversationState, MessageStatus, ReplyKind, Step, TokenUsage } from "../types.js";
+import type { BuildStatus, ConversationState, MessageStatus, ReplyKind, Step, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 import type { ModelClient, ModelReply, ModelRequest } from "./model.js";
 import {
@@ -11,7 +11,13 @@ import {
   textHash,
   type AiJob,
   type ApproveResult,
+  type BuildJob,
+  type BuildQueue,
   type ConversationStore,
+  type ParticipantInfo,
+  type ReadinessFinish,
+  type ReadinessRequestResult,
+  type StoredBuild,
   type CreateResult,
   type Finish,
   type ListedItem,
@@ -49,6 +55,18 @@ export interface FakeConversation {
   pendingSince?: number;
   latestSpecVersion?: number;
   approvedSpecVersion?: number;
+  buildId?: string;
+}
+
+/** A build record as the readiness check writes it (ticket 2.7). */
+export interface FakeBuild {
+  buildId: string;
+  nickname: string;
+  participantId: string;
+  status: BuildStatus;
+  createdAt: string;
+  updatedAt: string;
+  failureReasons?: string[];
 }
 
 export interface FakeSpec {
@@ -78,6 +96,8 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   readonly usage = new Map<string, TokenUsage>();
   /** Spec versions by participant id, oldest first (ticket 1.9). */
   readonly specs = new Map<string, FakeSpec[]>();
+  /** Build records by build id (ticket 2.7). */
+  readonly builds = new Map<string, FakeBuild>();
   conversationFailOn: Method | undefined;
   /** How many calls of `conversationFailOn` fail before it works again (undefined: every call). */
   conversationFailTimes: number | undefined;
@@ -154,6 +174,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
         ...(c.pendingId === undefined ? {} : { pendingId: c.pendingId }),
         ...(c.latestSpecVersion === undefined ? {} : { latestSpecVersion: c.latestSpecVersion }),
         ...(c.approvedSpecVersion === undefined ? {} : { approvedSpecVersion: c.approvedSpecVersion }),
+        ...(c.buildId === undefined ? {} : { buildId: c.buildId }),
       }
     );
   }
@@ -259,7 +280,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     return spec && { version: spec.version, text: spec.text, createdAt: spec.createdAt, approved: spec.approvedAt !== undefined };
   }
 
-  async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<ApproveResult> {
+  async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string, readiness: NewMessage): Promise<ApproveResult> {
     this.fail("approveSpec");
     const profile = this.profiles.get(participantId);
     if (profile?.step !== "spec") return "wrong-step";
@@ -271,10 +292,90 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     if (!free) return c.state === "waiting" ? "waiting" : "busy";
     const spec = this.specs.get(participantId)?.find((v) => v.version === version);
     if (spec === undefined) return "no-spec";
-    this.conversations.set(participantId, { ...withoutInFlight(c), approvedSpecVersion: version });
+    if (this.messagesOf(participantId).has(readiness.id)) throw new Error("message id taken");
+    this.conversations.set(participantId, { ...c, state: "open", approvedSpecVersion: version, pendingId: readiness.id, pendingSince: readiness.nowSeconds });
     this.profiles.set(participantId, { ...profile, step: "approved" });
     spec.approvedAt = nowIso;
+    this.storeMessage(participantId, readiness);
     return "approved";
+  }
+
+  async requestReadiness(participantId: string, version: number, message: NewMessage): Promise<ReadinessRequestResult> {
+    this.fail("requestReadiness");
+    const c = this.conversations.get(participantId);
+    if (c?.approvedSpecVersion !== version || c.buildId !== undefined) return "wrong-step";
+    const free = c.pendingId === undefined || (c.state === "open" && (c.pendingSince ?? 0) < message.nowSeconds - STALE_PENDING_SECONDS);
+    if (!free) return "busy";
+    if (this.messagesOf(participantId).has(message.id)) throw new Error("message id taken");
+    this.conversations.set(participantId, { ...c, state: "open", pendingId: message.id, pendingSince: message.nowSeconds });
+    this.storeMessage(participantId, message);
+    return "created";
+  }
+
+  private storeMessage(participantId: string, message: NewMessage): void {
+    this.messagesOf(participantId).set(message.id, {
+      id: message.id,
+      step: message.step,
+      text: message.text,
+      status: "pending",
+      pendingSince: message.nowSeconds,
+      createdAt: message.createdAt,
+    });
+  }
+
+  async finishReadiness(participantId: string, messageId: string, outcome: ReadinessFinish, nowIso: string): Promise<boolean> {
+    this.fail("finishReadiness");
+    const message = this.messages.get(participantId)?.get(messageId);
+    const conversation = this.conversations.get(participantId);
+    const profile = this.profiles.get(participantId);
+    // The same conditions as the DynamoDB transaction, all or nothing.
+    if (message?.status !== "pending" || this.repliesOf(participantId).has(messageId)) return false;
+    if (conversation?.pendingId !== messageId || conversation.approvedSpecVersion !== outcome.version) return false;
+    if (profile?.step !== "approved") return false;
+    if (outcome.kind === "ready" && this.builds.has(outcome.build.buildId)) return false;
+
+    const answer = outcome.kind === "failed" ? undefined : outcome.answer;
+    this.messagesOf(participantId).set(messageId, { ...message, status: outcome.kind === "failed" ? "failed" : "done" });
+    this.repliesOf(participantId).set(messageId, {
+      text: outcome.reply,
+      kind: outcome.kind === "failed" ? "failure" : "answer",
+      createdAt: nowIso,
+      ...(answer === undefined
+        ? {}
+        : { prompt: answer.prompt, modelId: answer.modelId, promptVersion: answer.promptVersion, historyCount: answer.historyCount, usage: answer.usage }),
+    });
+    const rest = withoutInFlight(conversation);
+    if (outcome.kind === "ready") {
+      this.conversations.set(participantId, { ...rest, state: "open", buildId: outcome.build.buildId });
+      this.profiles.set(participantId, { ...profile, step: "building" });
+      this.builds.set(outcome.build.buildId, {
+        buildId: outcome.build.buildId,
+        nickname: outcome.build.nickname,
+        participantId,
+        status: "queued",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    } else {
+      delete rest.approvedSpecVersion;
+      this.conversations.set(participantId, { ...rest, state: "open" });
+      this.profiles.set(participantId, { ...profile, step: "spec" });
+    }
+    const spent = outcome.kind === "failed" ? outcome.usage : outcome.answer.usage;
+    if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) this.add(participantId, spent);
+    return true;
+  }
+
+  async getParticipantInfo(participantId: string): Promise<ParticipantInfo | undefined> {
+    this.fail("getParticipantInfo");
+    const p = this.profiles.get(participantId);
+    return p && { step: p.step, ...(p.nickname === undefined ? {} : { nickname: p.nickname }) };
+  }
+
+  async getBuild(buildId: string): Promise<StoredBuild | undefined> {
+    this.fail("getBuild");
+    const b = this.builds.get(buildId);
+    return b && { buildId: b.buildId, participantId: b.participantId, status: b.status, ...(b.failureReasons === undefined ? {} : { failureReasons: [...b.failureReasons] }) };
   }
 
   async addUsage(participantId: string, usage: TokenUsage): Promise<void> {
@@ -331,6 +432,31 @@ export class FakeQueue implements MessageQueue {
     this.sent.push({ ...job });
   }
 }
+
+export class FakeBuildQueue implements BuildQueue {
+  readonly sent: BuildJob[] = [];
+  failure: Error | undefined;
+  /** How many sends fail before it works again (undefined: every send while `failure` is set). */
+  failTimes: number | undefined;
+
+  async send(job: BuildJob): Promise<void> {
+    if (this.failure !== undefined) {
+      if (this.failTimes === undefined) throw this.failure;
+      if (this.failTimes > 0) {
+        this.failTimes--;
+        throw this.failure;
+      }
+    }
+    this.sent.push({ ...job });
+  }
+}
+
+/** A readiness answer as the model would give it (ticket 2.7). */
+export const readinessReply = (verdict: string, reasons: string[] = [], tokens = { input: 900, output: 60 }): ModelReply => ({
+  text: JSON.stringify({ verdict, reasons }),
+  inputTokens: tokens.input,
+  outputTokens: tokens.output,
+});
 
 /** A scripted model: answers in order from `replies` (an Error is thrown), recording every request. */
 export class FakeModel implements ModelClient {

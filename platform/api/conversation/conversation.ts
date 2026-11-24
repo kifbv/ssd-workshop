@@ -5,7 +5,8 @@
 // `POST /api/conversation/step` (Write my spec: from step 1 to step 2). Ticket 1.9 adds
 // `GET /api/conversation/spec` (the newest spec version, or `?version=n`) and
 // `POST /api/conversation/spec/approve` (Approve spec), and Write my spec now also asks the AI worker
-// for the first version. Every route starts with the
+// for the first version. Ticket 2.7: Approve spec also stores the readiness request for the AI worker (see
+// ./readiness.ts), and `GET /api/build` returns the caller's own build. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -22,6 +23,7 @@ import { requireSession, type ParticipantRecord, type SessionReader } from "../s
 import { errorName } from "../sign-in/code-request.js";
 import type { ConversationState, MessageStatus, Step } from "../types.js";
 import { MAX_SPEC_VERSION } from "../keys.js";
+import { READINESS_FAILURE_REPLY, READINESS_REQUEST } from "./readiness.js";
 import { WRITE_SPEC_REQUEST } from "./spec.js";
 import {
   FAILURE_REPLY,
@@ -39,7 +41,8 @@ export const HISTORY_ROUTE = "GET /api/conversation";
 export const STEP_ROUTE = "POST /api/conversation/step";
 export const SPEC_ROUTE = "GET /api/conversation/spec";
 export const APPROVE_ROUTE = "POST /api/conversation/spec/approve";
-export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE] as const;
+export const BUILD_ROUTE = "GET /api/build";
+export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE, BUILD_ROUTE] as const;
 
 /** A message holds 1 to 2000 characters (Unicode code points) after trimming. */
 export const MAX_MESSAGE_CHARS = 2000;
@@ -60,7 +63,7 @@ export const MESSAGES = {
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -125,7 +128,7 @@ async function send(request: HttpRequest, participant: ParticipantRecord, deps: 
   if (text === undefined) return refused("invalid", 400);
   if (participant.nickname === undefined || participant.step === "nickname") return refused("no-nickname", 409);
   // Ticket 1.9: once the spec is approved, nothing changes it until phase 2's build flow takes over.
-  if (participant.step === "approved") return refused("approved", 409);
+  if (participant.step === "approved" || participant.step === "building") return refused("approved", 409);
   const created = await createAndQueue(participant.id, participant.step, text, deps);
   if (created.result !== "created") return refused(created.result, 409);
   return { outcome: "accepted", response: jsonResponse(202, { id: created.id }) };
@@ -293,28 +296,75 @@ async function spec(request: HttpRequest, participant: ParticipantRecord, deps: 
     found = await deps.store.getSpec(participant.id, version);
   }
   if (found === undefined) return notFound;
-  return { outcome: "ok", response: jsonResponse(200, { version: found.version, text: found.text, createdAt: found.createdAt, approved: found.approved }) };
+  // Ticket 2.7: a version whose readiness check failed was approved once (`approvedAt` stays) but is no longer
+  // the approved one: it shows as approved only while the conversation still holds that approval.
+  const approved = found.approved && (await deps.store.getConversation(participant.id))?.approvedSpecVersion === found.version;
+  return { outcome: "ok", response: jsonResponse(200, { version: found.version, text: found.text, createdAt: found.createdAt, approved }) };
 }
 
-/** Approve spec (ticket 1.9): the version the participant saw, only while it is the newest. */
+/**
+ * Approve spec (ticket 1.9): the version the participant saw, only while it is the newest. Ticket 2.7: the
+ * approval stores the readiness request as the message in flight and hands it to the AI worker. Pressed again at
+ * step approved for the same version, it answers as approved, and asks for the check again only when nothing is
+ * in flight (an approval from before 2.7, a check that never finished).
+ */
 async function approve(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
   if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
   const version = readJsonObject(request)?.["version"];
   if (typeof version !== "number" || !Number.isInteger(version) || version < 1 || version > MAX_SPEC_VERSION) return refused("invalid-approve", 400);
   if (participant.nickname === undefined || participant.step === "nickname") return refused("no-nickname", 409);
-  const approved: Result = { outcome: "ok", response: jsonResponse(200, { step: "approved", version }) };
   if (participant.step === "clarify") return refused("no-spec", 409);
-  if (participant.step === "approved") {
+  const now = deps.now();
+  const nowSeconds = Math.floor(now.getTime() / 1000);
+  const readiness = { id: newMessageId(now, deps.randomBytes), step: "approved" as const, text: READINESS_REQUEST, createdAt: now.toISOString(), nowSeconds };
+  const approved = (id?: string): Result => ({ outcome: "ok", response: jsonResponse(200, { step: "approved", version, ...(id === undefined ? {} : { id }) }) });
+  if (participant.step === "approved" || participant.step === "building") {
     // Pressed twice (or in two tabs): the same version again is fine.
     const conversation = await deps.store.getConversation(participant.id);
-    return conversation?.approvedSpecVersion === version ? approved : refused("approved", 409);
+    if (conversation?.approvedSpecVersion !== version) return refused("approved", 409);
+    if (participant.step === "building") return approved();
+    const asked = await deps.store.requestReadiness(participant.id, version, readiness);
+    if (asked !== "created") return approved();
+    await queueReadiness(participant.id, readiness.id, version, deps);
+    return approved(readiness.id);
   }
-  const now = deps.now();
-  const result = await deps.store.approveSpec(participant.id, version, Math.floor(now.getTime() / 1000), now.toISOString());
-  if (result === "approved") return approved;
-  // The step moved meanwhile (another tab approved): answer as for a press at step approved.
-  if (result === "wrong-step") return refused("approved", 409);
-  return refused(result, 409);
+  const result = await deps.store.approveSpec(participant.id, version, nowSeconds, now.toISOString(), readiness);
+  // The step moved meanwhile (another tab approved this version at the same moment): answer as for a second press.
+  if (result === "wrong-step") return (await deps.store.getConversation(participant.id))?.approvedSpecVersion === version ? approved() : refused("approved", 409);
+  if (result !== "approved") return refused(result, 409);
+  await queueReadiness(participant.id, readiness.id, version, deps);
+  return approved(readiness.id);
+}
+
+/** Hands the readiness request to the AI worker; a queue failure sends the participant back to step 2 at once (approve again). */
+async function queueReadiness(participantId: string, messageId: string, version: number, deps: ConversationDeps): Promise<void> {
+  try {
+    await deps.queue.send({ participantId, messageId });
+  } catch (error) {
+    await deps.store.finishReadiness(participantId, messageId, { kind: "failed", reply: READINESS_FAILURE_REPLY, version }, deps.now().toISOString());
+    throw error;
+  }
+}
+
+/**
+ * The caller's own build (ticket 2.7; the step 3 page polls it from ticket 2.10): its id, status and, when it
+ * failed, the reasons. Found through the caller's own conversation, and only a build that names the caller:
+ * anyone else's build (or none yet) is simply not found.
+ */
+async function build(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  const notFound: Result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
+  const buildId = (await deps.store.getConversation(participant.id))?.buildId;
+  if (buildId === undefined) return notFound;
+  const found = await deps.store.getBuild(buildId);
+  if (found === undefined || found.participantId !== participant.id) return notFound;
+  return {
+    outcome: "ok",
+    response: jsonResponse(200, {
+      buildId: found.buildId,
+      status: found.status,
+      ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
+    }),
+  };
 }
 
 function routeOf(request: HttpRequest): ConversationRoute {
@@ -324,6 +374,7 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === STEP_ROUTE) return "step";
   if (request.routeKey === SPEC_ROUTE) return "spec";
   if (request.routeKey === APPROVE_ROUTE) return "approve";
+  if (request.routeKey === BUILD_ROUTE) return "build";
   return "unknown";
 }
 
@@ -340,6 +391,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "step") result = await moveStep(request, session.participant, deps);
     else if (route === "spec") result = await spec(request, session.participant, deps);
     else if (route === "approve") result = await approve(request, session.participant, deps);
+    else if (route === "build") result = await build(session.participant, deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

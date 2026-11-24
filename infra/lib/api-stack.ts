@@ -15,10 +15,13 @@ import {
   AI_DLQ_NAME,
   AI_QUEUE_NAME,
   AI_WORKER_FUNCTION_NAME,
+  AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
   AI_WORKER_UPDATE_ATTRIBUTES,
   API_NAME,
   APP_DATA_FUNCTION_NAME,
   APP_DATA_WRITE_ATTRIBUTES,
+  ATTRIBUTE_LIMITED_RETURN_VALUES,
+  BUILD_QUEUE_NAME,
   CONVERSATION_FUNCTION_NAME,
   CONVERSATION_UPDATE_ATTRIBUTES,
   FOUNDATION_MODEL_ID,
@@ -88,6 +91,8 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/step", method: HttpMethod.POST },
   { path: "/api/conversation/spec", method: HttpMethod.GET },
   { path: "/api/conversation/spec/approve", method: HttpMethod.POST },
+  // Ticket 2.7: the caller's own build (the step 3 page polls it from ticket 2.10).
+  { path: "/api/build", method: HttpMethod.GET },
 ] as const;
 
 /**
@@ -120,6 +125,9 @@ export const BEDROCK_INVOKE_RESOURCES = [
   `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/${MODEL_ID}`,
   `arn:aws:bedrock:eu-*::foundation-model/${FOUNDATION_MODEL_ID}`,
 ] as const;
+
+/** The launch queue (builds stack, ticket 2.7), named by its fixed ARN: the AI worker is its one sender. */
+export const BUILD_QUEUE_ARN = `arn:aws:sqs:${REGION}:${ACCOUNT}:${BUILD_QUEUE_NAME}`;
 
 /** The TTL attribute (epoch seconds) of sign-in codes and sessions. */
 export const TTL_ATTRIBUTE = "expiresAt";
@@ -333,12 +341,13 @@ export class ApiStack extends Stack {
 
     const participantPartitions = { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] };
     const conversation = workshopFunction(this, "Conversation", CONVERSATION_FUNCTION_NAME, "conversation.ts");
+    // Ticket 2.7: also reads builds (`GET /api/build` answers only a build whose participantId is the caller).
     conversation.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["dynamodb:GetItem"],
         resources: [this.table.tableArn],
-        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*", "BUILD#*"] } },
       }),
     );
     // The page's history (ticket 1.8): a Query of the caller's own partition (requireSession picks it).
@@ -392,9 +401,24 @@ export class ApiStack extends Stack {
         },
       }),
     );
+    // Ticket 2.7: a passed readiness check creates the build record (UpdateItem only, its listed attribute names, only
+    // if absent by the code's condition) and sends its id to the launch queue.
+    worker.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...AI_WORKER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
     worker.addToRolePolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["bedrock:InvokeModel"], resources: [...BEDROCK_INVOKE_RESOURCES] }),
     );
+    worker.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [BUILD_QUEUE_ARN] }));
     // One job per invocation, at most AI_WORKER_MAX_CONCURRENCY at once; the source grants the role the
     // consume rights on this queue only.
     worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1, maxConcurrency: AI_WORKER_MAX_CONCURRENCY }));

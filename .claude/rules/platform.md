@@ -127,3 +127,8 @@ paths:
   message alone, before forcing a branch over it. That "empty" 404 can be GitHub's brief one on a repository with
   history, where the Contents `PUT` lands on top of `main` (or answers 422 when the file exists): force a branch only
   to replace a commit whose answer has an empty `parents` list (missing list = has parents), else commit on top.
+- A worker that sends to a queue after its transaction (the readiness check's launch message, ticket 2.7) throws on a
+  failed send and makes the redelivery re-send: derive the new record's id from the job's own id (`buildIdFor`), so a
+  redelivery finds the stored outcome and sends the same id again instead of acting twice; the consumer acts only on a
+  record still in the state that expects it. A platform request that gets a different worker path (`READINESS_REQUEST`)
+  is recognised by its exact text at a step where participants cannot send (`approved`), never by its text alone.

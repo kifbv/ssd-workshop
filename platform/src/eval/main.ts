@@ -1,5 +1,6 @@
-// `npm run eval -- guardrails | clarify | spec` (tickets 1.7, 1.8 and 1.9): the real guardrail check,
-// or the real step 1 or step 2 answer call, against Claude on Bedrock with your own AWS credentials.
+// `npm run eval -- guardrails | clarify | spec | readiness` (tickets 1.7, 1.8, 1.9 and 2.7): the real guardrail
+// check, the real step 1 or step 2 answer call, or the real readiness check, against Claude on Bedrock with your
+// own AWS credentials.
 // The scoring lives in ./logic.ts; spec diagrams are parsed and drawn by Mermaid in Chromium (./diagram.ts).
 import { readFileSync } from "node:fs";
 import { Agent, type AgentOptions } from "node:https";
@@ -8,6 +9,7 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { answerMessage, answerRequest } from "../../api/conversation/answer.js";
 import { extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import { checkGuardrail } from "../../api/conversation/guardrail.js";
+import { checkReadiness } from "../../api/conversation/readiness.js";
 import { BedrockModel, usageOf } from "../../api/conversation/model.js";
 import { MODEL_ID, REGION } from "../../api/settings.js";
 import { proxyFromEnv, redactError } from "../smoke/logic.js";
@@ -20,6 +22,10 @@ import {
   formatSpecResult,
   formatSpecSummary,
   formatSummary,
+  formatReadinessResult,
+  formatReadinessSummary,
+  parseReadinessExamples,
+  runReadinessEval,
   parseClarifyExamples,
   parseSpecExamples,
   runSpecEval,
@@ -75,6 +81,21 @@ async function main(): Promise<number> {
     } finally {
       await diagrams.close();
     }
+  }
+  if (parsed.suite === "readiness") {
+    const examples = parseReadinessExamples(file);
+    if ("error" in examples) {
+      console.error(examples.error);
+      return 1;
+    }
+    console.log(`Model: ${MODEL_ID} (${REGION}), ${examples.length} examples`);
+    const results = await runReadinessEval(
+      examples,
+      (example) => checkReadiness(model, example.spec),
+      (result, index) => console.log(formatReadinessResult(result, index)),
+    );
+    for (const line of formatReadinessSummary(results)) console.log(line);
+    return exitCode(results);
   }
   if (parsed.suite === "clarify") {
     const examples = parseClarifyExamples(file);

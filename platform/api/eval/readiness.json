@@ -1,0 +1,97 @@
+{
+  "description": "Readiness check examples (ticket 2.7): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v1). The three workshop example specs must pass (verdict ready); each spec needing a login, a payment, an outside service, a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case).",
+  "examples": [
+    {
+      "name": "fitness tracker (example)",
+      "category": "example",
+      "expected": "ready",
+      "spec": "# Run Log\n\n```mermaid\nflowchart TD\n  home[Home] -->|add a run| add[Add a run]\n  add -->|saves| runs[(Runs)]\n  runs -->|weekly total and longest run| home\n```\n\n## What it does\nA personal log of your runs. You add each run with its date, distance and time, and the home screen shows this week's total distance and your longest run so far.\n\n## Screens\n- Home: this week's total distance, your longest run and the list of runs, newest first.\n- Add a run: date, distance in km and time in minutes, with a Save button.\n\n## Data it keeps\n- Runs: date, distance in km and time in minutes for each run."
+    },
+    {
+      "name": "movie tracker (example)",
+      "category": "example",
+      "expected": "ready",
+      "spec": "# Movie Watchlist\n\n```mermaid\nflowchart TD\n  list[Watchlist] -->|add a film| add[Add a film]\n  add -->|saves| films[(Films)]\n  list -->|tick off and rate| films\n  films -->|watched films| watched[Watched]\n```\n\n## What it does\nA watchlist of films you want to see. You add a film with its title and year, tick it off once watched and give it 1 to 5 stars.\n\n## Screens\n- Watchlist: the films still to watch, each with a Watched button.\n- Add a film: title and year, with a Save button.\n- Watched: the films you have seen, with their stars, best rated first.\n\n## Data it keeps\n- Films: title, year, whether it was watched and its rating from 1 to 5 stars."
+    },
+    {
+      "name": "nutrition calculator (example)",
+      "category": "example",
+      "expected": "ready",
+      "spec": "# Calorie Counter\n\n```mermaid\nflowchart TD\n  today[Today] -->|add a food| add[Add a food]\n  add -->|saves| foods[(Foods eaten)]\n  foods -->|daily total| today\n  today -->|set goal| goal[Daily goal]\n  goal -->|saves| settings[(Goal)]\n```\n\n## What it does\nA daily calorie counter. You type in each food you eat with its calories, and the app adds them up for the day and compares the total with your daily goal.\n\n## Screens\n- Today: the foods eaten today, the total calories and how much is left of the goal.\n- Add a food: the food's name and its calories, with an Add button.\n- Daily goal: the number of calories you aim for each day.\n\n## Data it keeps\n- Foods eaten: name, calories and the day it was eaten.\n- Goal: the daily calorie goal."
+    },
+    {
+      "name": "habit tracker with personal accounts",
+      "category": "login",
+      "expected": "not-ready",
+      "keywords": [
+        "login",
+        "log in",
+        "sign in",
+        "sign-in"
+      ],
+      "spec": "# Team Habit Tracker\n\n```mermaid\nflowchart TD\n  signin[Sign in] -->|password| home[My habits]\n  home -->|tick a habit| habits[(Habits)]\n  habits -->|streaks| home\n```\n\n## What it does\nEach colleague signs in with their own username and password and sees only their own habits. They tick off habits every day and see their streaks.\n\n## Screens\n- Sign in: username and password; new colleagues create an account here.\n- My habits: today's habits to tick off and each habit's streak, visible only to the person signed in.\n\n## Data it keeps\n- Accounts: username and password of each colleague.\n- Habits: name, days ticked off and the owner's account."
+    },
+    {
+      "name": "bake sale shop with card payment",
+      "category": "payment",
+      "expected": "not-ready",
+      "keywords": [
+        "payment",
+        "pay"
+      ],
+      "spec": "# Bake Sale Shop\n\n```mermaid\nflowchart TD\n  menu[Cakes] -->|add to basket| basket[Basket]\n  basket -->|pay by card| checkout[Checkout]\n  checkout -->|saves| orders[(Orders)]\n```\n\n## What it does\nAn online shop for our office bake sale. Colleagues choose cakes, put them in a basket and pay by credit card at checkout, so the money goes to charity.\n\n## Screens\n- Cakes: the cakes on sale with their prices.\n- Basket: the chosen cakes and the total price.\n- Checkout: card number, expiry date and a Pay button.\n\n## Data it keeps\n- Orders: the cakes ordered, the total paid and the time of the order."
+    },
+    {
+      "name": "weather dashboard with a live forecast",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service",
+        "outside api",
+        "api",
+        "external",
+        "another website",
+        "other website",
+        "weather service"
+      ],
+      "spec": "# Office Weather Board\n\n```mermaid\nflowchart TD\n  board[Weather board] -->|fetch forecast| forecast[(Forecast)]\n  board -->|add a city| cities[Cities]\n  cities -->|saves| list[(City list)]\n```\n\n## What it does\nA dashboard that shows today's live weather forecast for the cities of our offices, fetched every hour from a weather forecast API.\n\n## Screens\n- Weather board: the current temperature and today's forecast for each city, updated every hour.\n- Cities: add or remove the cities shown.\n\n## Data it keeps\n- City list: the names of the cities shown.\n- Forecast: the latest forecast fetched from the weather API for each city."
+    },
+    {
+      "name": "plant reminders sent by email",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service",
+        "external",
+        "server"
+      ],
+      "spec": "# Plant Care\n\n```mermaid\nflowchart TD\n  plants[My plants] -->|add a plant| add[Add a plant]\n  add -->|saves| list[(Plants)]\n  list -->|due today| reminders[Reminders]\n```\n\n## What it does\nA list of house plants with how often each needs water. Every morning the app sends me an email listing the plants to water that day.\n\n## Screens\n- My plants: each plant and when it was last watered.\n- Add a plant: name and how many days between waterings.\n\n## Data it keeps\n- Plants: name, days between waterings and the date it was last watered."
+    },
+    {
+      "name": "quiz with an undecided scoring rule",
+      "category": "open question",
+      "expected": "not-ready",
+      "keywords": [
+        "open question",
+        "decide",
+        "decided",
+        "undecided",
+        "choose",
+        "not clear",
+        "unclear"
+      ],
+      "spec": "# Coffee Quiz\n\n```mermaid\nflowchart TD\n  start[Start] -->|play| question[Question]\n  question -->|answer| question\n  question -->|finished| result[Result]\n  result -->|saves| scores[(Scores)]\n```\n\n## What it does\nA quiz about our office's coffee machine for a team event. We still need to decide whether wrong answers cost points or not; to be decided with the team before the event.\n\n## Screens\n- Start: the quiz's title and a Play button.\n- Question: one question at a time with four answers.\n- Result: your score and the best scores so far.\n\n## Data it keeps\n- Scores: player's chosen nickname and score.\n- Questions: to be decided: either the ten questions written by Sam or questions anyone can add."
+    },
+    {
+      "name": "expense splitter with a server that runs at night",
+      "category": "server",
+      "expected": "not-ready",
+      "keywords": [
+        "server",
+        "background",
+        "schedule"
+      ],
+      "spec": "# Trip Splitter\n\n```mermaid\nflowchart TD\n  trip[Trip] -->|add an expense| add[Add an expense]\n  add -->|saves| expenses[(Expenses)]\n  expenses -->|balances| trip\n```\n\n## What it does\nSplits the costs of a team trip. People add what they paid, and every night at midnight a server program recalculates who owes whom, even when nobody has the app open.\n\n## Screens\n- Trip: who paid what and the balances.\n- Add an expense: who paid, what for and how much.\n\n## Data it keeps\n- Expenses: payer, description and amount.\n- Balances: what each person owes, recalculated every night."
+    }
+  ]
+}
