@@ -184,6 +184,26 @@ describe("deploy workflow (ticket 0.5)", () => {
     expect(deploySteps[cdk]?.run).toContain(`-c "${BUILDER_IMAGE_DIGEST_CONTEXT}=$BUILDER_IMAGE_DIGEST"`);
   });
 
+  // Ticket 2.9 follow-up: the first deploy got 429 from public.ecr.aws pulling the builder's base image anonymously.
+  it("logs in to ECR Public (us-east-1) before building the builder image, and retries the build at most 3 times", () => {
+    const index = (match: (step: Step) => boolean) => deploySteps.findIndex(match);
+    const credentials = index((step) => !!step.uses?.startsWith("aws-actions/configure-aws-credentials"));
+    const login = index((step) => !!step.run?.includes("aws ecr-public get-login-password"));
+    const image = index((step) => step.id === "builder");
+    expect(login).toBeGreaterThan(credentials);
+    expect(login).toBeLessThan(image);
+    const run = deploySteps[login]?.run ?? "";
+    expect(run).toContain("aws ecr-public get-login-password --region us-east-1");
+    expect(run).toContain("docker login --username AWS --password-stdin public.ecr.aws");
+    const build = deploySteps[image]?.run ?? "";
+    expect(build).toContain("for attempt in 1 2 3; do");
+    expect(build).toMatch(/if docker build -f platform\/builder\/Dockerfile -t "\$image" \.; then break; fi/);
+    expect(build).toContain("sleep $((attempt * 30))");
+    expect(build).toContain('if [ "$attempt" = 3 ]; then');
+    // The login comes before any docker build.
+    expect(deploySteps.slice(0, login).some((step) => step.run?.includes("docker build"))).toBe(false);
+  });
+
   it("pins every action to a major version", () => {
     for (const step of deploySteps.filter((s) => s.uses)) {
       expect(step.uses).toMatch(/^[\w.-]+\/[\w.-]+@v\d+$/);

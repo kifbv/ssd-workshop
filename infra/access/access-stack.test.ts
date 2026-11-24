@@ -457,6 +457,23 @@ function resolve(v: unknown): unknown {
   if (typeof o["Fn::Sub"] === "string") return o["Fn::Sub"].replace(/\$\{([^}]+)\}/g, (_, k: string) => SAMPLE[k] ?? k);
   return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, resolve(x)]));
 }
+// The resource part of an IAM ARN IAM accepts in a policy's Resource: "*", root, or one of its resource types.
+const IAM_RESOURCE_PREFIXES = ["user/", "federated-user/", "role/", "group/", "policy/", "instance-profile/", "mfa/", "sms-mfa/", "server-certificate/", "saml-provider/", "oidc-provider/", "access-report/"];
+function invalidIamResources(t: Template): string[] {
+  return ALL_POLICIES.flatMap((id) =>
+    statements(t, id).flatMap((s) =>
+      [...list(s.Resource), ...list(s.NotResource as Value | Value[] | undefined)]
+        .map((r) => live(r))
+        .filter((arn) => {
+          const m = /^arn:aws:iam::[^:]*:(.*)$/.exec(arn);
+          if (!m) return false;
+          const part = m[1] ?? "";
+          return !(part === "*" || part === "root" || IAM_RESOURCE_PREFIXES.some((p) => part.startsWith(p)));
+        })
+        .map((arn) => `${id}/${s.Sid}: ${arn}`),
+    ),
+  );
+}
 const policySize = (t: Template, id: string) =>
   JSON.stringify(resolve((t.Resources[id]?.Properties as { PolicyDocument: unknown }).PolicyDocument)).length;
 
@@ -819,6 +836,20 @@ describe("access stack: deploy policies (criterion 2)", () => {
 
   it("keeps each managed policy under IAM's 6,144-character limit", () => {
     for (const id of ALL_POLICIES) expect(policySize(template, id), id).toBeLessThanOrEqual(6144);
+  });
+
+  // IAM validates a Resource/NotResource ARN on create and update; cfn-lint does not. The stack update after ticket
+  // 2.9 failed on "IAM resource path must either be "*", root, or start with user/, ..." for role*/<name>, which
+  // works only in a condition value (ArnNotLike aws:PrincipalArn).
+  it("gives every IAM ARN in a Resource or NotResource a resource part IAM accepts (no role*/)", () => {
+    expect(invalidIamResources(template)).toEqual([]);
+    const broken = withText(
+      "- !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builder\n",
+      "- !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder\n",
+    );
+    expect(invalidIamResources(broken)).toEqual([`DeployPolicyRead/NoLauncherForSessions: arn:aws:iam::${ACCOUNT}:role*/ssd-workshop-builder`]);
+    // Conditions are not path-validated: the boundary's role*/<name> values stay.
+    expect(templateText).toContain(":role*/ssd-workshop-builds-launcher");
   });
 });
 
@@ -1540,6 +1571,8 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
     const EXCEPTION_ROLES = [BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME, AI_WORKER_FUNCTION_NAME, BUILD_CHECK_SCHEDULER_ROLE_NAME, DEPLOYER_FUNCTION_NAME];
     const PASSES = ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com", "scheduler.amazonaws.com"];
 
+    // The deny names each role with its path (IAM rejects role*/<name> in a Resource); the path-less form has no
+    // allow at all, since sessions create, pass and change roles only under role/ssd-workshop/.
     it("denies the Claude user passing, changing or deleting the exception roles (both ARN forms), but not reading them", () => {
       for (const name of EXCEPTION_ROLES) {
         for (const arn of [role(name), role(name, false)]) {
@@ -1558,7 +1591,7 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
           expect(allowedBy(deploy, action, role(name), DEPLOY), `${action} ${name}`).toBe(true);
         }
         // Without the new resources a session could pass them.
-        const old = deploy.map((s) => (s.Sid === "NoLauncherForSessions" ? { ...s, Resource: list(s.Resource).filter((r) => !live(r).endsWith(`role*/${name}`)) } : s));
+        const old = deploy.map((s) => (s.Sid === "NoLauncherForSessions" ? { ...s, Resource: list(s.Resource).filter((r) => live(r) !== role(name)) } : s));
         expect(allowedBy(old, "iam:PassRole", role(name), CLAUDE), name).toBe(true);
       }
       // Other workshop roles (one a session creates for its own function) stay passable.
@@ -1586,7 +1619,8 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
 
     it("names the exception roles and functions of infra/lib/config.ts", () => {
       const resources = list(deploy.find((s) => s.Sid === "NoLauncherForSessions")?.Resource).map(live);
-      for (const name of EXCEPTION_ROLES) expect(resources).toContain(`arn:aws:iam::${ACCOUNT}:role*/${name}`);
+      for (const name of EXCEPTION_ROLES) expect(resources).toContain(role(name));
+      for (const r of resources) expect(r, r).not.toContain("role*/");
       for (const name of [AI_WORKER_FUNCTION_NAME, DEPLOYER_FUNCTION_NAME]) {
         expect(resources).toContain(`arn:aws:lambda:*:${ACCOUNT}:function:${name}`);
         expect(resources).toContain(`arn:aws:lambda:*:${ACCOUNT}:function:${name}:*`);
@@ -1696,5 +1730,43 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(names("BuildsFromTheirSendersOnly")).toEqual([either(AI_WORKER_FUNCTION_NAME), either(BUILD_CHECK_SCHEDULER_ROLE_NAME)]);
     });
 
+  });
+});
+
+// Ticket 2.9 follow-up: the deploy workflow logs in to ECR Public before building the builder image (anonymous pulls
+// from GitHub's runners got 429). Actions and condition key from the Service Authorization Reference
+// (servicereference.us-east-1.amazonaws.com/v1/ecr-public/ecr-public.json and sts.json, read 2026-11-24): neither action
+// takes a resource, and sts:GetServiceBearerToken carries sts:AWSServiceName.
+describe("access stack: ECR Public login for the deploy workflow (ticket 2.9 follow-up)", () => {
+  const deploy = deployStatements(template);
+  const boundary = boundaryStatements(template);
+  const DEPLOY_ROLE = { "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-deploy` };
+  const ECR_PUBLIC = { "sts:AWSServiceName": "ecr-public.amazonaws.com" };
+
+  it("lets the deploy principals get an ECR Public login token and its bearer token", () => {
+    expect(allowedBy(deploy, "ecr-public:GetAuthorizationToken", "*", DEPLOY_ROLE)).toBe(true);
+    expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", { ...DEPLOY_ROLE, ...ECR_PUBLIC })).toBe(true);
+  });
+
+  it("limits the bearer token to ECR Public and grants nothing else in ECR Public", () => {
+    for (const service of ["codeartifact.amazonaws.com", "ecr.amazonaws.com"]) {
+      expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", { ...DEPLOY_ROLE, "sts:AWSServiceName": service }), service).toBe(false);
+    }
+    expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", DEPLOY_ROLE)).toBe(false);
+    for (const action of ["ecr-public:PutImage", "ecr-public:CreateRepository", "ecr-public:InitiateLayerUpload"]) {
+      expect(allowedBy(deploy, action, `arn:aws:ecr-public::${ACCOUNT}:repository/ssd-workshop-x`, DEPLOY_ROLE), action).toBe(false);
+    }
+  });
+
+  it("puts both in the -deploy-ec2 policy (attached to both principals) and not in the boundary", () => {
+    const sids = statements(template, "DeployPolicyEc2").map((s) => s.Sid);
+    expect(sids).toContain("EcrPublicLogin");
+    expect(sids).toContain("EcrPublicBearerToken");
+    for (const action of ["ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken"]) {
+      expect(boundary.some((s) => s.Effect === "Allow" && list(s.Action).some((p) => matches(p, action))), action).toBe(false);
+    }
+    for (const id of ["DeployRole", "ClaudeUser"]) {
+      expect(JSON.stringify(template.Resources[id]?.Properties.ManagedPolicyArns), id).toContain("DeployPolicyEc2");
+    }
   });
 });
