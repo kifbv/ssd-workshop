@@ -4,7 +4,9 @@ import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "../gith
 import { FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../github/fakes.js";
 import { SPEC_FILE } from "../github/repository.js";
 import { loadTemplateFiles } from "../github/template.js";
-import { BUILD_TASK_MAX_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { runBuilds } from "../../src/builds/command.js";
+import { FakeBuildsStore, FakeLaunchQueue, FakeTaskWatch } from "../../src/builds/fakes.js";
 import { FakeBuildTable, FakeDeadLetters, FakeTasks } from "./fakes.js";
 import {
   DEPLOY_DEAD_REASON,
@@ -103,8 +105,13 @@ describe("launching a build (ticket 2.9)", () => {
     expect(grant?.repositories).toEqual(["ssd-ada-l"]);
     expect(grant?.permissions).toEqual({ contents: "write", metadata: "read" });
     expect(task?.token).not.toContain("PRIVATE KEY");
+    // The task starts from the commit the launcher prepared, under the claim's attempt id, startedBy the build id.
+    expect(task?.baseCommit).toBe(repo.main);
+    expect(task?.baseCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(task?.startedBy).toBe(BUILD);
     const build = s.table.builds.get(BUILD);
-    expect(build).toMatchObject({ status: "building", taskArn: task?.taskArn, launchedAt: "2026-11-24T10:00:00.000Z" });
+    expect(task?.attemptId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(build).toMatchObject({ status: "building", taskArn: task?.taskArn, attemptId: task?.attemptId, launchedAt: "2026-11-24T10:00:00.000Z" });
     expect(s.table.launches.get(BUILD)).toEqual({ buildId: BUILD, claimedAt: "2026-11-24T10:00:00.000Z", taskArn: task?.taskArn });
     expect(s.logs.at(-1)).toMatchObject({ event: "launcher", outcome: "started" });
     assertQuietLogs(s);
@@ -207,6 +214,36 @@ describe("launching a build (ticket 2.9)", () => {
     expect(t.logs.at(-1)).toMatchObject({ outcome: "failed", error: "ThrottlingException" });
   });
 
+  it("gives RunTask the launch's deadline signal; a RunTask cut off at the deadline marks the build failed", async () => {
+    const s = setup();
+    const deadline = new AbortController();
+    s.deps.signal = deadline.signal;
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    expect(s.tasks.started[0]?.signal).toBe(deadline.signal);
+
+    const t = setup();
+    const cut = new AbortController();
+    t.deps.signal = cut.signal;
+    cut.abort();
+    t.tasks.startError = Object.assign(new Error("aborted"), { name: "AbortError" });
+    expect(await processLaunch(message(), t.deps)).toBe("failed");
+    expect(t.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [LAUNCH_SERVICE_REASON] });
+    expect(t.logs.at(-1)).toMatchObject({ outcome: "failed", error: "AbortError" });
+  });
+
+  it("gives every launch its own attempt id (a retried build's new task cannot be confused with the earlier one's)", async () => {
+    const s = setup();
+    const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+    s.deps.newAttemptId = () => ids.shift() ?? "";
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    expect(s.table.builds.get(BUILD)?.attemptId).toBe("11111111-1111-4111-8111-111111111111");
+    const build = s.table.builds.get(BUILD);
+    if (build) Object.assign(build, { status: "queued" });
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    expect(s.tasks.started.map((task) => task.attemptId)).toEqual(["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"]);
+    expect(s.table.builds.get(BUILD)?.attemptId).toBe("22222222-2222-4222-8222-222222222222");
+  });
+
   it("stops a started task it could not record, and marks the build failed (no task runs unwatched)", async () => {
     const s = setup();
     s.table.failOnce.add("recordTask");
@@ -243,13 +280,55 @@ describe("the stuck-build check (ticket 2.9)", () => {
     expect(s.table.builds.get(BUILD)?.status).toBe("failed");
   });
 
-  it("leaves a build the builder finished: handed over (pushed commit) or marked failed with its own reason", async () => {
+  it("WHEN a handed-over build's task stopped and no deploy started within HANDED_OVER_GRACE_MS THEN the check marks it failed, and retry recovers it (checker 1)", async () => {
     const s = await launched();
     const build = s.table.builds.get(BUILD);
     if (build) build.pushedCommit = COMMIT;
     s.tasks.exit(s.taskArn);
+    // Within the grace period the deploy may still start: the build is left as it is and stays watched.
+    await runCheck(s.check);
+    s.advance(HANDED_OVER_GRACE_MS - 1000);
     await runCheck(s.check);
     expect(s.table.builds.get(BUILD)).toMatchObject({ status: "building", pushedCommit: COMMIT });
+    expect(s.table.launches.size).toBe(1);
+    // After it, no deploy will come.
+    s.advance(2000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [DEPLOY_DEAD_REASON], pushedCommit: COMMIT });
+    expect(s.table.launches.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", failed: 1 });
+    // Retry takes it back: queued without the pushed commit, then a new task on the same repository.
+    const out: string[] = [];
+    const code = await runBuilds(["retry", NICKNAME], {
+      connect: () => ({ store: new FakeBuildsStore(s.table), queue: new FakeLaunchQueue(), tasks: new FakeTaskWatch(s.tasks) }),
+      now: () => new Date("2026-11-24T10:30:00.000Z"),
+      out: (line) => out.push(line),
+      err: (line) => out.push(line),
+    });
+    expect(code, out.join("\n")).toBe(0);
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    expect(s.table.builds.get(BUILD)?.pushedCommit).toBeUndefined();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    expect(s.tasks.started).toHaveLength(2);
+  });
+
+  it("fails a handed-over build whose task ECS no longer knows (it stopped long ago) at the next check", async () => {
+    const s = await launched();
+    const build = s.table.builds.get(BUILD);
+    if (build) build.pushedCommit = COMMIT;
+    s.tasks.states.clear();
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [DEPLOY_DEAD_REASON] });
+    expect(s.table.launches.size).toBe(0);
+  });
+
+  it("leaves a build the deployer took (deploying) or that was marked failed with its own reason, and stops watching it", async () => {
+    const s = await launched();
+    const build = s.table.builds.get(BUILD);
+    if (build) Object.assign(build, { status: "deploying", pushedCommit: COMMIT });
+    s.tasks.exit(s.taskArn);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "deploying", pushedCommit: COMMIT });
     expect(s.table.launches.size).toBe(0);
 
     const t = await launched();
@@ -275,7 +354,7 @@ describe("the stuck-build check (ticket 2.9)", () => {
 
   it("marks failed a claim that got no task within LAUNCH_UNSTARTED_MS (the launcher stopped half-way), not before", async () => {
     const s = setup();
-    await s.table.claim(BUILD, NICKNAME, PARTICIPANT, "2026-11-24T10:00:00.000Z");
+    await s.table.claim(BUILD, NICKNAME, PARTICIPANT, "00000000-0000-4000-8000-000000000000", "2026-11-24T10:00:00.000Z");
     s.advance(LAUNCH_UNSTARTED_MS - 1000);
     await runCheck(s.check);
     expect(s.table.builds.get(BUILD)?.status).toBe("building");

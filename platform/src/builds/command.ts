@@ -66,6 +66,11 @@ export interface LaunchQueue {
 export interface TaskWatch {
   /** True when the task has stopped (or ECS no longer knows it). */
   isStopped(taskArn: string): Promise<boolean>;
+  /**
+   * How many tasks started for this build still run (ListTasks by `startedBy`, which the launcher sets to the build id):
+   * also a task the build no longer names (a RunTask cut off before its answer, ticket 2.9 try 2).
+   */
+  runningTasks(buildId: string): Promise<number>;
 }
 
 export interface BuildsDeps {
@@ -95,8 +100,8 @@ async function retry(nickname: string, deps: BuildsDeps, world: ReturnType<Build
     deps.err(`${nickname}'s build is ${build.status}; only a failed (or stuck queued) build can be retried. Nothing changed.`);
     return 1;
   }
-  // Never two tasks for one build: the earlier one must have stopped.
-  if (build.taskArn !== undefined && !(await tasks.isStopped(build.taskArn))) {
+  // Never two tasks for one build: the earlier one must have stopped, and no other task started for it may still run.
+  if ((build.taskArn !== undefined && !(await tasks.isStopped(build.taskArn))) || (await tasks.runningTasks(buildId)) > 0) {
     deps.err(`${nickname}'s earlier build task is still running; try again in a minute. Nothing changed.`);
     return 1;
   }

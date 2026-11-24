@@ -13,6 +13,8 @@ export interface FakeBuildItem {
   nickname: string;
   participantId: string;
   status: BuildStatus;
+  /** The launch this build is under (the launcher's claim, ticket 2.9 try 2). */
+  attemptId?: string;
   feed?: FeedEvent[];
   pushedCommit?: string;
   failureReasons?: string[];
@@ -33,9 +35,15 @@ export class FakeBuildRecords implements BuildRecords {
     return build && { nickname: build.nickname, participantId: build.participantId, status: build.status };
   }
 
-  async claim(buildId: string, nickname: string, first: FeedEvent, nowIso: string): Promise<boolean> {
+  /** DynamoBuildRecords' THIS_ATTEMPT condition. */
+  private thisAttempt(buildId: string, attemptId: string): FakeBuildItem | undefined {
     const build = this.builds.get(buildId);
-    if (!build || build.nickname !== nickname || (build.status !== "queued" && build.status !== "building") || build.pushedCommit !== undefined) return false;
+    return build && build.status === "building" && build.attemptId === attemptId ? build : undefined;
+  }
+
+  async claim(buildId: string, attemptId: string, nickname: string, first: FeedEvent, nowIso: string): Promise<boolean> {
+    const build = this.thisAttempt(buildId, attemptId);
+    if (!build || build.nickname !== nickname || build.pushedCommit !== undefined) return false;
     const next: FakeBuildItem = { ...build, status: "building", feed: [first], updatedAt: nowIso };
     delete next.failureReasons;
     delete next.finishedAt;
@@ -44,18 +52,18 @@ export class FakeBuildRecords implements BuildRecords {
     return true;
   }
 
-  async addFeed(buildId: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
-    const build = this.builds.get(buildId);
-    if (!build || build.status !== "building") return false;
+  async addFeed(buildId: string, attemptId: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
+    const build = this.thisAttempt(buildId, attemptId);
+    if (!build) return false;
     build.feed = [...(build.feed ?? []), ...events];
     build.updatedAt = nowIso;
     this.writes.push({ method: "addFeed", value: events });
     return true;
   }
 
-  async handOver(buildId: string, commit: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
-    const build = this.builds.get(buildId);
-    if (!build || build.status !== "building" || build.pushedCommit !== undefined) return false;
+  async handOver(buildId: string, attemptId: string, commit: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
+    const build = this.thisAttempt(buildId, attemptId);
+    if (!build || build.pushedCommit !== undefined) return false;
     build.pushedCommit = commit;
     build.feed = [...(build.feed ?? []), ...events];
     build.updatedAt = nowIso;
@@ -63,9 +71,9 @@ export class FakeBuildRecords implements BuildRecords {
     return true;
   }
 
-  async markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    const build = this.builds.get(buildId);
-    if (!build || build.status !== "building") return false;
+  async markFailed(buildId: string, attemptId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+    const build = this.thisAttempt(buildId, attemptId);
+    if (!build) return false;
     build.status = "failed";
     build.failureReasons = [...reasons];
     build.finishedAt = nowIso;

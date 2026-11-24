@@ -147,3 +147,11 @@ export const BUILD_CHECK_QUEUE_NAME = "ssd-workshop-builds-check";
 export const LAUNCH_UNSTARTED_MS = 20 * 60 * 1000;
 /** A build task running longer than this is stopped by the check (the agent alone stops at 12 minutes). */
 export const BUILD_TASK_MAX_MS = 30 * 60 * 1000;
+/**
+ * A build still `building` with a pushed commit (the builder handed it over) whose task has stopped is waiting for the
+ * deployer to take its message (the deployer moves it to `deploying`). After this long since the task stopped, no
+ * deploy will come (the message was lost, or never sent and the builder died), and the check marks it failed (ticket
+ * 2.9 try 2, checker 1). Longer than every delivery of a deploy message (3 deliveries, 150 s visibility, a 120 s
+ * deployer: about 7 minutes; tested in infra/lib/app.test.ts).
+ */
+export const HANDED_OVER_GRACE_MS = 20 * 60 * 1000;

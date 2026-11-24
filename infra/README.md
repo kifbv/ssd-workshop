@@ -698,8 +698,20 @@ stopped before its build was finished, a build that never started, and builds le
 deploy dead-letter queues are marked failed. Task logs: `/ecs/ssd-workshop-builder`; the launcher's:
 `ssd-workshop-builds-launcher`.
 
-Before the first deploy, Franck applies the access stack (`NoBuildQueueForSessions`, ticket 2.9) and
-the GitHub App secret must be loaded (section above).
+Before the first deploy, Franck applies the access stack (`NoBuildQueueForSessions`, ticket 2.9; and,
+once he agreed, try 2's `NoBuildTasksForSessions`, `NoLauncherSourcesForSessions` and the boundary's
+`WatchBuildsLauncherOnly`, `DeploysFromTheBuilderOnly` and `BuildsFromTheirSendersOnly`) and the GitHub
+App secret must be loaded (section above).
+
+Also checked by the first live build (ticket 2.9 try 2), since only AWS can prove them: the builder's
+task and execution roles trust only `aws:SourceArn` `task/ssd-workshop-builds/*` (if the task fails
+with "ECS was unable to assume the role", widen it back to `arn:aws:ecs:eu-central-1:<account>:*` in
+`infra/lib/builds-stack.ts`); the check's scheduler role trusts only its schedule's ARN (if the launcher
+logs no `build-check` line each minute, look at the schedule's target errors); `role*/<name>` in the
+boundary's `ArnNotLike` matches the launcher's, builder's, AI worker's and scheduler's sessions (a
+launch, a hand-over and a check all work); RunTask accepts `startedBy` = the build id, and
+`AWS_PROFILE=franck aws ecs list-tasks --region eu-central-1 --cluster ssd-workshop-builds --started-by <build id>`
+lists the running task.
 
 ### List and retry builds (Franck's machine)
 
@@ -714,7 +726,9 @@ AWS_PROFILE=franck npm run builds -- retry <nickname>
 ```
 
 Only a `failed` build (or one stuck `queued`) is retried; the command refuses while the earlier task
-still runs. The build keeps its id, so the participant's page follows the new run, and the task works
+still runs, or while any task started for the build (`startedBy` = the build id, ListTasks) runs. A
+build handed to the deployer whose deploy never started is marked failed 20 minutes after its task
+stopped, and can then be retried. The build keeps its id, so the participant's page follows the new run, and the task works
 on the same repository `ssd-<nickname>`.
 
 ### Live check (criterion 5, to verify after deploy)
@@ -742,11 +756,12 @@ on the same repository `ssd-<nickname>`.
    ```
 
 4. Criterion 3 live (optional): during a second build, stop its task
-   (`aws ecs stop-task --cluster ssd-workshop-builds --task <arn>`, Franck's credentials); within
-   2 minutes `npm run builds -- list` shows that build `failed`, and the page shows "The build stopped
+   (`AWS_PROFILE=franck aws ecs stop-task --region eu-central-1 --cluster ssd-workshop-builds --task <arn>`); within
+   2 minutes `AWS_PROFILE=franck npm run builds -- list` shows that build `failed`, and the page shows "The build stopped
    before it was finished." Then `AWS_PROFILE=franck npm run builds -- retry <nickname>` starts a new
    task on the same repository (criterion 4) and the app goes live again.
-5. Confirm the task holds no secret in its definition and only the two override variables:
+5. Confirm the task holds no secret in its definition (its four override variables, `BUILD_ID`,
+   `BUILDER_GITHUB_TOKEN`, `BUILDER_BASE_COMMIT` and `BUILDER_ATTEMPT_ID`, come from RunTask):
 
    ```sh
    AWS_PROFILE=franck aws ecs describe-task-definition --region eu-central-1 --task-definition ssd-workshop-builder \

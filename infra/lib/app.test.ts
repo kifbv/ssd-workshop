@@ -128,6 +128,7 @@ import {
   DEPLOY_QUEUE_NAME as PLATFORM_DEPLOY_QUEUE_NAME,
   DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
   GITHUB_SECRET_NAME as PLATFORM_GITHUB_SECRET_NAME,
+  HANDED_OVER_GRACE_MS,
 } from "../../platform/api/settings.js";
 
 function must<T>(value: T | undefined): T {
@@ -2185,6 +2186,29 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(statementsOf(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([{ Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn(BUILD_CHECK_QUEUE_NAME) }]);
     expect(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
     expect(JSON.stringify(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties?.AssumeRolePolicyDocument)).toContain("scheduler.amazonaws.com");
+  });
+
+  it("trusts the scheduler only for its own schedule, and the builder's roles only for tasks on the builds cluster (ticket 2.9 try 2)", () => {
+    const trust = (name: string) => (roleEntry(name)[1].Properties?.AssumeRolePolicyDocument as { Statement: { Principal: unknown; Condition: unknown }[] }).Statement;
+    expect(trust(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([
+      expect.objectContaining({
+        Principal: { Service: "scheduler.amazonaws.com" },
+        Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` } },
+      }),
+    ]);
+    for (const name of [BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME]) {
+      expect(trust(name), name).toEqual([
+        expect.objectContaining({
+          Principal: { Service: "ecs-tasks.amazonaws.com" },
+          Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT }, ArnLike: { "aws:SourceArn": `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*` } },
+        }),
+      ]);
+    }
+  });
+
+  it("WHEN a handed-over build waits for its deploy THEN the check gives it longer than every delivery of the deploy message (checker 1)", () => {
+    const lastDelivery = ((DEPLOY_QUEUE_MAX_RECEIVES - 1) * DEPLOY_QUEUE_VISIBILITY_SECONDS + DEPLOYER_TIMEOUT_SECONDS) * 1000;
+    expect(HANDED_OVER_GRACE_MS).toBeGreaterThan(2 * lastDelivery);
   });
 
   it("bundles the launcher with templates/basic as template/, file for file", () => {

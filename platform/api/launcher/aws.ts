@@ -35,7 +35,7 @@ import {
 import { buildKey, conversationKey, launchKey, LAUNCHES_PK, participantKey, specKey, type ItemKey } from "../keys.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
-import type { BuildTasks, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, TaskState } from "./launcher.js";
+import type { BuildTasks, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, TaskStart, TaskState } from "./launcher.js";
 
 const str = (value: string): AttributeValue => ({ S: value });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
@@ -144,7 +144,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
     return item.text?.S;
   }
 
-  async claim(buildId: string, nickname: string, participantId: string, nowIso: string): Promise<boolean> {
+  async claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string): Promise<boolean> {
     const launch = launchKey(buildId);
     try {
       await this.client.send(
@@ -154,10 +154,11 @@ export class DynamoLaunchRecords implements LaunchRecords {
               Update: {
                 TableName: this.table,
                 Key: keyOf(buildKey(buildId)),
-                UpdateExpression: "SET #status = :building, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn",
+                UpdateExpression: "SET #status = :building, #attemptId = :attemptId, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn",
                 ConditionExpression: "#status = :queued AND #nickname = :nickname AND #participantId = :participantId",
                 ExpressionAttributeNames: {
                   "#status": "status",
+                  "#attemptId": "attemptId",
                   "#launchedAt": "launchedAt",
                   "#updatedAt": "updatedAt",
                   "#taskArn": "taskArn",
@@ -167,6 +168,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
                 ExpressionAttributeValues: {
                   ":building": str("building"),
                   ":queued": str("queued"),
+                  ":attemptId": str(attemptId),
                   ":now": str(nowIso),
                   ":nickname": str(nickname),
                   ":participantId": str(participantId),
@@ -222,6 +224,16 @@ export class DynamoLaunchRecords implements LaunchRecords {
       buildKey(buildId),
       FAILED_SET,
       "#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)",
+      { ...failedNames, "#taskArn": "taskArn", "#pushedCommit": "pushedCommit" },
+      { ...failedValues(reasons, nowIso), ":building": str("building"), ":taskArn": str(taskArn) },
+    );
+  }
+
+  failHandedOver(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+    return this.update(
+      buildKey(buildId),
+      FAILED_SET,
+      "#status = :building AND #taskArn = :taskArn AND attribute_exists(#pushedCommit)",
       { ...failedNames, "#taskArn": "taskArn", "#pushedCommit": "pushedCommit" },
       { ...failedValues(reasons, nowIso), ":building": str("building"), ":taskArn": str(taskArn) },
     );
@@ -288,22 +300,25 @@ export class DynamoLaunchRecords implements LaunchRecords {
 
 /** The ECSClient methods the launcher uses. */
 export interface TaskSender {
-  send(command: RunTaskCommand): Promise<RunTaskCommandOutput>;
+  send(command: RunTaskCommand, options?: { abortSignal?: AbortSignal }): Promise<RunTaskCommandOutput>;
   send(command: DescribeTasksCommand): Promise<DescribeTasksCommandOutput>;
   send(command: StopTaskCommand): Promise<StopTaskCommandOutput>;
 }
 
 /**
  * The RunTask request (exported for its test): the builds cluster, the deployed task definition, Fargate, the two
- * workshop subnets with the builds security group and a public IP (the subnets have no NAT gateway), the build id and
- * its one-repository token as the container's only overrides, and the project tag.
+ * workshop subnets with the builds security group and a public IP (the subnets have no NAT gateway), the build id, its
+ * one-repository token, the commit the launcher prepared and the launch's attempt id as the container's only overrides,
+ * `startedBy` the build id (so `npm run builds -- retry` finds every task of the build with ListTasks, ticket 2.9 try 2),
+ * and the project tag.
  */
-export function runTaskRequest(taskDefinitionArn: string, securityGroupId: string, buildId: string, token: string): RunTaskCommand {
+export function runTaskRequest(taskDefinitionArn: string, securityGroupId: string, start: TaskStart): RunTaskCommand {
   return new RunTaskCommand({
     cluster: BUILDS_CLUSTER_NAME,
     taskDefinition: taskDefinitionArn,
     launchType: "FARGATE",
     count: 1,
+    startedBy: start.buildId,
     networkConfiguration: {
       awsvpcConfiguration: { subnets: [...BUILDS_SUBNET_IDS], securityGroups: [securityGroupId], assignPublicIp: "ENABLED" },
     },
@@ -312,8 +327,10 @@ export function runTaskRequest(taskDefinitionArn: string, securityGroupId: strin
         {
           name: BUILDER_CONTAINER_NAME,
           environment: [
-            { name: "BUILD_ID", value: buildId },
-            { name: "BUILDER_GITHUB_TOKEN", value: token },
+            { name: "BUILD_ID", value: start.buildId },
+            { name: "BUILDER_GITHUB_TOKEN", value: start.token },
+            { name: "BUILDER_BASE_COMMIT", value: start.baseCommit },
+            { name: "BUILDER_ATTEMPT_ID", value: start.attemptId },
           ],
         },
       ],
@@ -329,8 +346,9 @@ export class EcsBuildTasks implements BuildTasks {
     private readonly securityGroupId: string,
   ) {}
 
-  async start(buildId: string, token: string): Promise<{ taskArn: string } | { failure: string }> {
-    const answer = await this.client.send(runTaskRequest(this.taskDefinitionArn, this.securityGroupId, buildId, token));
+  async start(start: TaskStart, signal?: AbortSignal): Promise<{ taskArn: string } | { failure: string }> {
+    const request = runTaskRequest(this.taskDefinitionArn, this.securityGroupId, start);
+    const answer = await (signal === undefined ? this.client.send(request) : this.client.send(request, { abortSignal: signal }));
     const taskArn = answer.tasks?.[0]?.taskArn;
     if (taskArn === undefined) return { failure: answer.failures?.[0]?.reason ?? "no task" };
     return { taskArn };
@@ -342,7 +360,11 @@ export class EcsBuildTasks implements BuildTasks {
       const answer = await this.client.send(new DescribeTasksCommand({ cluster: BUILDS_CLUSTER_NAME, tasks: taskArns.slice(i, i + 100) }));
       for (const task of answer.tasks ?? []) {
         if (task.taskArn === undefined) continue;
-        states.set(task.taskArn, { stopped: task.lastStatus === "STOPPED", ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }) });
+        states.set(task.taskArn, {
+          stopped: task.lastStatus === "STOPPED",
+          ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }),
+          ...(task.stoppedAt === undefined ? {} : { stoppedAt: task.stoppedAt }),
+        });
       }
       // ECS forgets stopped tasks after about an hour: a task it reports MISSING has stopped.
       for (const failure of answer.failures ?? []) {

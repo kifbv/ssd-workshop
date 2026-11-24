@@ -124,6 +124,25 @@ describe("npm run builds -- retry <nickname> (criterion 4)", () => {
     expect(s.table.builds.get(BUILD)?.status).toBe("failed");
   });
 
+  it("WHEN a task started for the build still runs, even one the build no longer names THEN retry refuses (ListTasks by startedBy)", async () => {
+    const s = setup();
+    await processLaunch(JSON.stringify({ buildId: BUILD }), s.launcher);
+    const build = s.table.builds.get(BUILD);
+    // The build forgot its task (a RunTask cut off before its answer, or the task ARN removed): only ECS knows it.
+    if (build) {
+      build.status = "failed";
+      delete build.taskArn;
+    }
+    expect(await runBuilds(["retry", "Ada-L"], s.deps)).toBe(1);
+    expect(s.err[0]).toContain("still running");
+    expect(s.queue.sent).toEqual([]);
+    expect(s.table.builds.get(BUILD)?.status).toBe("failed");
+    // Once it stopped, the retry goes ahead.
+    s.tasks.exit(s.tasks.started[0]?.taskArn ?? "");
+    expect(await runBuilds(["retry", "Ada-L"], s.deps)).toBe(0);
+    expect(s.queue.sent).toHaveLength(1);
+  });
+
   it("answers plainly for an unknown nickname or a participant without a build", async () => {
     const s = setup();
     expect(await runBuilds(["retry", "Nobody"], s.deps)).toBe(1);

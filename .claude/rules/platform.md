@@ -153,3 +153,11 @@ paths:
   the record failed and consumes the message, so a redelivery can never start a second task. Anything that can leave a
   record stuck (a stopped task, a dead-lettered message) is swept by a scheduled check that writes only under the
   condition that the record is still in the state the check saw (`#status = :building AND #taskArn = :taskArn ...`).
+- A worker started for a record (the builder task, ticket 2.9 try 2) is bound to the launch that started it: the
+  launcher's claim stores a random `attemptId` on the record and passes it to the worker, and every worker write is
+  conditional on `#status = :working AND #attemptId = :attemptId`, so a stale or foreign worker cannot write. It also
+  gets the exact input the launcher prepared (`BUILDER_BASE_COMMIT`) and fails unless what it reads still equals it:
+  someone holding the worker's token could otherwise change the input between launch and start.
+- ECS: RunTask's `startedBy` takes up to 128 letters, digits, `-`, `_` and `/` (StartTask's only 36); ListTasks with
+  `startedBy` must use no other filter (the desired status defaults to `RUNNING`). Give RunTask the deadline's
+  `abortSignal`; a cut-off RunTask may still have started a task, which the attempt id makes harmless.

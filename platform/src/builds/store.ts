@@ -10,7 +10,7 @@ import {
   type ScanCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { DescribeTasksCommand, type DescribeTasksCommandOutput } from "@aws-sdk/client-ecs";
+import { DescribeTasksCommand, ListTasksCommand, type DescribeTasksCommandOutput, type ListTasksCommandOutput } from "@aws-sdk/client-ecs";
 import { SendMessageCommand, type SendMessageCommandOutput } from "@aws-sdk/client-sqs";
 import { buildKey, conversationKey, nicknameKey, type ItemKey } from "../../api/keys.js";
 import { BUILDS_CLUSTER_NAME } from "../../api/settings.js";
@@ -29,7 +29,7 @@ export interface BuildsTableSender {
 }
 
 /** What a retry removes from the build, so the launcher and the builder take it as new. */
-export const REQUEUE_REMOVED = ["failureReasons", "finishedAt", "pushedCommit", "deployedCommit", "taskArn", "launchedAt", "feed"] as const;
+export const REQUEUE_REMOVED = ["failureReasons", "finishedAt", "pushedCommit", "deployedCommit", "taskArn", "launchedAt", "attemptId", "feed"] as const;
 
 export class DynamoBuildsStore implements BuildsStore {
   constructor(
@@ -139,6 +139,7 @@ export class SqsLaunchQueue implements LaunchQueue {
 
 export interface TaskReader {
   send(command: DescribeTasksCommand): Promise<DescribeTasksCommandOutput>;
+  send(command: ListTasksCommand): Promise<ListTasksCommandOutput>;
 }
 
 export class EcsTaskWatch implements TaskWatch {
@@ -148,5 +149,12 @@ export class EcsTaskWatch implements TaskWatch {
     const answer = await this.client.send(new DescribeTasksCommand({ cluster: BUILDS_CLUSTER_NAME, tasks: [taskArn] }));
     const task = answer.tasks?.find((t) => t.taskArn === taskArn);
     return task === undefined || task.lastStatus === "STOPPED";
+  }
+
+  async runningTasks(buildId: string): Promise<number> {
+    // startedBy must be the only filter (ECS); the desired status defaults to RUNNING. One page holds up to 100 tasks:
+    // any at all is enough to refuse.
+    const answer = await this.client.send(new ListTasksCommand({ cluster: BUILDS_CLUSTER_NAME, startedBy: buildId }));
+    return answer.taskArns?.length ?? 0;
   }
 }

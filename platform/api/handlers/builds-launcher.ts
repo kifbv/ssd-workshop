@@ -109,6 +109,8 @@ export async function handler(event: LauncherEvent, context?: LauncherContext): 
         templateFiles: () => readTemplateFolder(join(process.env.LAMBDA_TASK_ROOT ?? ".", "template")),
         now,
         log,
+        // RunTask is cut off at the reserve too, so the failure write always fits (ticket 2.9 try 2).
+        signal: deadline.signal,
       });
     } finally {
       clearTimeout(timer);

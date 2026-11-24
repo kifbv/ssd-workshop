@@ -4,7 +4,26 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parse, type Scalar, type ScalarTag, type CollectionTag, type YAMLSeq } from "yaml";
-import { ACCOUNT, ASSETS_BUCKET_NAME, BUILD_LAUNCHER_ROLE_ARN, BUILDS_SUBNET_IDS, REGION } from "../lib/config.js";
+import {
+  ACCOUNT,
+  AI_WORKER_FUNCTION_NAME,
+  ASSETS_BUCKET_NAME,
+  BUILD_CHECK_QUEUE_NAME,
+  BUILD_CHECK_SCHEDULER_ROLE_NAME,
+  BUILD_DLQ_NAME,
+  BUILD_LAUNCHER_FUNCTION_NAME,
+  BUILD_LAUNCHER_ROLE_ARN,
+  BUILD_QUEUE_NAME,
+  BUILDER_EXECUTION_ROLE_NAME,
+  BUILDER_TASK_FAMILY,
+  BUILDER_TASK_ROLE_NAME,
+  BUILDS_CLUSTER_NAME,
+  BUILDS_SUBNET_IDS,
+  DEPLOY_DLQ_NAME,
+  DEPLOY_QUEUE_NAME,
+  IAM_PATH,
+  REGION,
+} from "../lib/config.js";
 
 // CloudFormation short-form intrinsics, turned into their long form ({ "Fn::Sub": ... }).
 function scalarIntrinsic(tag: string, key: string, split = false): ScalarTag {
@@ -1318,7 +1337,7 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
   const boundary = boundaryStatements(template);
   const SECRET = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-github-AbCdEf`;
   const OTHER = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-other-AbCdEf`;
-  const LAUNCHER_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-builds-launcher`;
+  const LAUNCHER_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/${BUILD_LAUNCHER_FUNCTION_NAME}`;
   // Every Secrets Manager action, per servicereference secretsmanager.json v1.5
   // (servicereference.us-east-1.amazonaws.com/v1/secretsmanager/secretsmanager.json), read 2026-11-24.
   const SECRETSMANAGER_ACTIONS = [
@@ -1374,10 +1393,10 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
     const REQUEST = { "aws:ResourceAccount": "Ref:AWS::AccountId", "iam:PermissionsBoundary": "Ref:BoundaryPolicy", "iam:PassedToService": "lambda.amazonaws.com" };
     const CLAUDE = { ...REQUEST, "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:user/ssd-workshop-claude` };
     const DEPLOY = { ...REQUEST, "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-deploy` };
-    const ROLES = [BUILD_LAUNCHER_ROLE_ARN, `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-builds-launcher`];
+    const ROLES = [BUILD_LAUNCHER_ROLE_ARN, `arn:aws:iam::${ACCOUNT}:role/${BUILD_LAUNCHER_FUNCTION_NAME}`];
     const FUNCTIONS = [
-      `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-builds-launcher`,
-      `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-builds-launcher:live`,
+      `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${BUILD_LAUNCHER_FUNCTION_NAME}`,
+      `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${BUILD_LAUNCHER_FUNCTION_NAME}:live`,
     ];
     const ASSET = `arn:aws:s3:::${ASSETS_BUCKET_NAME}/abc123.zip`;
     const ROLE_WRITES = [
@@ -1433,20 +1452,63 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(ROLES[0]).toBe(BUILD_LAUNCHER_ROLE_ARN);
     });
 
-    it("denies the Claude user sending to, changing or purging the builds queues (Franck, 2026-11-24, ticket 2.9)", () => {
-      const queues = ["ssd-workshop-builds.fifo", "ssd-workshop-builds-dlq.fifo", "ssd-workshop-builds-check"].map((name) => `arn:aws:sqs:${REGION}:${ACCOUNT}:${name}`);
+    it("denies the Claude user sending to, reading from, changing, purging or deleting the builds queues (Franck, 2026-11-24, ticket 2.9)", () => {
+      const queues = [BUILD_QUEUE_NAME, BUILD_DLQ_NAME, BUILD_CHECK_QUEUE_NAME].map((name) => `arn:aws:sqs:${REGION}:${ACCOUNT}:${name}`);
       for (const queue of queues) {
-        for (const action of ["sqs:SendMessage", "sqs:SetQueueAttributes", "sqs:PurgeQueue"]) {
+        for (const action of ["sqs:SendMessage", "sqs:SetQueueAttributes", "sqs:PurgeQueue", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:DeleteQueue"]) {
           expect(allowedBy(deploy, action, queue, CLAUDE), `${action} ${queue}`).toBe(false);
           // Deploys from main still manage them.
           expect(allowedBy(deploy, action, queue, DEPLOY), `${action} ${queue}`).toBe(true);
         }
         expect(allowedBy(deploy, "sqs:GetQueueAttributes", queue, CLAUDE), queue).toBe(true);
       }
-      // Other workshop queues stay open to sessions (the AI queue, the deploy queue).
+      // Other workshop queues stay open to sessions (the AI queue).
       expect(allowedBy(deploy, "sqs:SendMessage", `arn:aws:sqs:${REGION}:${ACCOUNT}:ssd-workshop-ai-messages`, CLAUDE)).toBe(true);
       const deny = deploy.find((s) => s.Sid === "NoBuildQueueForSessions");
       expect(deny?.Effect).toBe("Deny");
+    });
+
+    // Ticket 2.9 try 2, access review HIGH 1 (pending Franck's yes): a session could read a running build's token from
+    // its task (DescribeTasks shows the override), push with it, write pushedCommit and send a deploy message.
+    const BUILD_TASK = `${ECS_ARN}:task/${BUILDS_CLUSTER_NAME}/0123456789abcdef0123456789abcdef`;
+    const BUILDER_DEFINITION = `${ECS_ARN}:task-definition/${BUILDER_TASK_FAMILY}:7`;
+    const DEPLOY_QUEUES = [DEPLOY_QUEUE_NAME, DEPLOY_DLQ_NAME].map((name) => `arn:aws:sqs:${REGION}:${ACCOUNT}:${name}`);
+
+    it("denies the Claude user reading, starting or stopping build tasks (the token is in the task's override)", () => {
+      // ExecuteCommand too: a shell in the task would show its environment (the launcher never enables it; belt and braces).
+      for (const action of ["ecs:DescribeTasks", "ecs:StopTask", "ecs:ExecuteCommand"]) {
+        expect(allowedBy(deploy, action, BUILD_TASK, CLAUDE), action).toBe(false);
+        expect(allowedBy(deploy, action, BUILD_TASK, DEPLOY), action).toBe(true);
+        // Without the deny a session could (ecs:* on task/ssd-workshop-*/*).
+        expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildTasksForSessions"), action, BUILD_TASK, CLAUDE), action).toBe(true);
+      }
+      const run = { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER };
+      expect(allowedBy(deploy, "ecs:RunTask", BUILDER_DEFINITION, run)).toBe(false);
+      expect(allowedBy(deploy, "ecs:RunTask", BUILDER_DEFINITION, { ...run, "aws:PrincipalArn": DEPLOY["aws:PrincipalArn"] })).toBe(true);
+      // Tasks of other workshop clusters (none yet) stay readable.
+      expect(allowedBy(deploy, "ecs:DescribeTasks", `${ECS_ARN}:task/ssd-workshop-apps/0123`, CLAUDE)).toBe(true);
+    });
+
+    it("denies the Claude user sending to the deploy queue (a deploy message publishes pushedCommit)", () => {
+      for (const queue of DEPLOY_QUEUES) {
+        expect(allowedBy(deploy, "sqs:SendMessage", queue, CLAUDE), queue).toBe(false);
+        expect(allowedBy(deploy, "sqs:SendMessage", queue, DEPLOY), queue).toBe(true);
+        expect(allowedBy(deploy, "sqs:GetQueueAttributes", queue, CLAUDE), queue).toBe(true);
+      }
+    });
+
+    it("denies the Claude user adding, changing or removing the launcher's event sources (lambda:FunctionArn)", () => {
+      const mapping = `arn:aws:lambda:${REGION}:${ACCOUNT}:event-source-mapping:0123-4567`;
+      for (const action of ["lambda:CreateEventSourceMapping", "lambda:UpdateEventSourceMapping", "lambda:DeleteEventSourceMapping"]) {
+        const resource = action === "lambda:CreateEventSourceMapping" ? "*" : mapping;
+        for (const fn of FUNCTIONS) {
+          expect(allowedBy(deploy, action, resource, { ...CLAUDE, "lambda:FunctionArn": fn }), `${action} ${fn}`).toBe(false);
+          expect(allowedBy(deploy, action, resource, { ...DEPLOY, "lambda:FunctionArn": fn }), `${action} ${fn}`).toBe(true);
+        }
+        const other = `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-apps-deployer`;
+        expect(allowedBy(deploy, action, resource, { ...CLAUDE, "lambda:FunctionArn": other }), action).toBe(true);
+      }
+      expect(allowedBy(deploy, "lambda:GetEventSourceMapping", mapping, { ...CLAUDE, "lambda:FunctionArn": FUNCTIONS[0] ?? "" })).toBe(true);
     });
 
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {
@@ -1454,5 +1516,60 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       for (const action of ["lambda:CreateFunction", "lambda:UpdateFunctionCode"]) expect(allowedBy(deploy, action, FUNCTIONS[0] ?? "", DEPLOY), action).toBe(true);
       expect(allowedBy(deploy, "s3:PutObject", ASSET, DEPLOY)).toBe(true);
     });
+  });
+
+  describe("workload roles reach build tasks and the build and deploy queues only in their own role (ticket 2.9 try 2, access review MEDIUM 4)", () => {
+    const role = (name: string, withPath = true) => `arn:aws:iam::${ACCOUNT}:role${withPath ? IAM_PATH : "/"}${name}`;
+    const BUILD_TASK = `${ECS_ARN}:task/${BUILDS_CLUSTER_NAME}/0123456789abcdef0123456789abcdef`;
+    const queue = (name: string) => `arn:aws:sqs:${REGION}:${ACCOUNT}:${name}`;
+    // A role a session could create: the path and a name that ends like an allowed one.
+    const LOOKALIKES = [WORKLOAD_ROLE, role(`x-${BUILDER_TASK_ROLE_NAME}`), role(`${BUILDER_TASK_ROLE_NAME}x`), role(BUILDER_EXECUTION_ROLE_NAME), role(`x-${BUILD_LAUNCHER_FUNCTION_NAME}`)];
+
+    it("lets only the launcher read or stop build tasks (with or without its path)", () => {
+      for (const action of ["ecs:DescribeTasks", "ecs:StopTask"]) {
+        for (const ok of [role(BUILD_LAUNCHER_FUNCTION_NAME), role(BUILD_LAUNCHER_FUNCTION_NAME, false)]) {
+          expect(allowedBy(boundary, action, BUILD_TASK, { "aws:PrincipalArn": ok }), `${action} ${ok}`).toBe(true);
+        }
+        for (const other of [...LOOKALIKES, role(BUILDER_TASK_ROLE_NAME), role(AI_WORKER_FUNCTION_NAME)]) {
+          expect(allowedBy(boundary, action, BUILD_TASK, { "aws:PrincipalArn": other }), `${action} ${other}`).toBe(false);
+        }
+        // Without the deny any workload role could (WatchBuilds).
+        expect(allowedBy(boundary.filter((s) => s.Sid !== "WatchBuildsLauncherOnly"), action, BUILD_TASK, { "aws:PrincipalArn": WORKLOAD_ROLE }), action).toBe(true);
+      }
+    });
+
+    it("lets only the builder's task role send to the deploy queue", () => {
+      for (const target of [queue(DEPLOY_QUEUE_NAME), queue(DEPLOY_DLQ_NAME)]) {
+        for (const ok of [role(BUILDER_TASK_ROLE_NAME), role(BUILDER_TASK_ROLE_NAME, false)]) {
+          expect(allowedBy(boundary, "sqs:SendMessage", target, { "aws:PrincipalArn": ok }), ok).toBe(true);
+        }
+        for (const other of [...LOOKALIKES, role(BUILD_LAUNCHER_FUNCTION_NAME), role(AI_WORKER_FUNCTION_NAME)]) {
+          expect(allowedBy(boundary, "sqs:SendMessage", target, { "aws:PrincipalArn": other }), other).toBe(false);
+        }
+      }
+      expect(allowedBy(boundary.filter((s) => s.Sid !== "DeploysFromTheBuilderOnly"), "sqs:SendMessage", queue(DEPLOY_QUEUE_NAME), { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
+    });
+
+    it("lets only the AI worker and the check's scheduler role send to the builds queues", () => {
+      for (const target of [queue(BUILD_QUEUE_NAME), queue(BUILD_DLQ_NAME), queue(BUILD_CHECK_QUEUE_NAME)]) {
+        for (const ok of [AI_WORKER_FUNCTION_NAME, BUILD_CHECK_SCHEDULER_ROLE_NAME].flatMap((name) => [role(name), role(name, false)])) {
+          expect(allowedBy(boundary, "sqs:SendMessage", target, { "aws:PrincipalArn": ok }), ok).toBe(true);
+        }
+        for (const other of [...LOOKALIKES, role(BUILDER_TASK_ROLE_NAME), role(BUILD_LAUNCHER_FUNCTION_NAME)]) {
+          expect(allowedBy(boundary, "sqs:SendMessage", target, { "aws:PrincipalArn": other }), other).toBe(false);
+        }
+      }
+      // Other workshop queues are untouched (the AI queue's sender is the conversation function).
+      expect(allowedBy(boundary, "sqs:SendMessage", queue("ssd-workshop-ai-messages"), { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
+    });
+
+    it("names the roles of infra/lib/config.ts", () => {
+      const names = (sid: string) => condValues(boundary.find((s) => s.Sid === sid)?.Condition, "ArnNotLike", "aws:PrincipalArn").map(live);
+      const either = (name: string) => `arn:aws:iam::${ACCOUNT}:role*/${name}`;
+      expect(names("WatchBuildsLauncherOnly")).toEqual([either(BUILD_LAUNCHER_FUNCTION_NAME)]);
+      expect(names("DeploysFromTheBuilderOnly")).toEqual([either(BUILDER_TASK_ROLE_NAME)]);
+      expect(names("BuildsFromTheirSendersOnly")).toEqual([either(AI_WORKER_FUNCTION_NAME), either(BUILD_CHECK_SCHEDULER_ROLE_NAME)]);
+    });
+
   });
 });

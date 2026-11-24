@@ -2,7 +2,7 @@
 // bundled): one table holding builds, profiles, conversations, specs, nickname claims and the watch list, following
 // DynamoLaunchRecords' and DynamoBuildsStore's conditions; the builder's tasks; a dead-letter queue.
 import type { BuildStatus } from "../types.js";
-import type { BuildTasks, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, TaskState } from "./launcher.js";
+import type { BuildTasks, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, TaskStart, TaskState } from "./launcher.js";
 
 export interface FakeBuild {
   nickname: string;
@@ -11,6 +11,7 @@ export interface FakeBuild {
   createdAt?: string;
   updatedAt?: string;
   launchedAt?: string;
+  attemptId?: string;
   taskArn?: string;
   pushedCommit?: string;
   deployedCommit?: string;
@@ -64,11 +65,12 @@ export class FakeBuildTable implements LaunchRecords {
     return spec?.approved ? spec.text : undefined;
   }
 
-  async claim(buildId: string, nickname: string, participantId: string, nowIso: string): Promise<boolean> {
+  async claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string): Promise<boolean> {
     this.maybeFail("claim");
     const build = this.builds.get(buildId);
     if (!build || build.status !== "queued" || build.nickname !== nickname || build.participantId !== participantId) return false;
     build.status = "building";
+    build.attemptId = attemptId;
     build.launchedAt = nowIso;
     build.updatedAt = nowIso;
     delete build.taskArn;
@@ -111,6 +113,13 @@ export class FakeBuildTable implements LaunchRecords {
     return true;
   }
 
+  async failHandedOver(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+    const build = this.builds.get(buildId);
+    if (!build || build.status !== "building" || build.taskArn !== taskArn || build.pushedCommit === undefined) return false;
+    this.fail(build, reasons, nowIso);
+    return true;
+  }
+
   async failQueued(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
     const build = this.builds.get(buildId);
     if (!build || build.status !== "queued") return false;
@@ -138,7 +147,7 @@ export class FakeBuildTable implements LaunchRecords {
 
 /** The builder's tasks: started tasks run until a test stops them. */
 export class FakeTasks implements BuildTasks {
-  readonly started: { buildId: string; token: string; taskArn: string }[] = [];
+  readonly started: (TaskStart & { taskArn: string; startedBy: string; signal?: AbortSignal })[] = [];
   readonly states = new Map<string, TaskState>();
   readonly stopCalls: string[] = [];
   /** When set, RunTask answers with this failure and no task. */
@@ -149,12 +158,13 @@ export class FakeTasks implements BuildTasks {
 
   constructor(private readonly now: () => Date) {}
 
-  async start(buildId: string, token: string): Promise<{ taskArn: string } | { failure: string }> {
+  async start(start: TaskStart, signal?: AbortSignal): Promise<{ taskArn: string } | { failure: string }> {
     if (this.startError) throw this.startError;
     if (this.failure !== undefined) return { failure: this.failure };
     this.count += 1;
     const taskArn = `arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/${String(this.count).padStart(32, "0")}`;
-    this.started.push({ buildId, token, taskArn });
+    // startedBy is the build id, as runTaskRequest sets it.
+    this.started.push({ ...start, taskArn, startedBy: start.buildId, ...(signal === undefined ? {} : { signal }) });
     this.states.set(taskArn, { stopped: false, createdAt: this.now() });
     return { taskArn };
   }
@@ -171,14 +181,21 @@ export class FakeTasks implements BuildTasks {
 
   async stop(taskArn: string): Promise<void> {
     this.stopCalls.push(taskArn);
-    const state = this.states.get(taskArn);
-    if (state) state.stopped = true;
+    this.exit(taskArn);
   }
 
   /** The task exits (as ECS reports it once the container stopped). */
   exit(taskArn: string): void {
     const state = this.states.get(taskArn);
-    if (state) state.stopped = true;
+    if (state) {
+      state.stopped = true;
+      state.stoppedAt = this.now();
+    }
+  }
+
+  /** Running tasks started for the build (ListTasks with `startedBy`, desired status RUNNING). */
+  running(buildId: string): string[] {
+    return this.started.filter((task) => task.startedBy === buildId && this.states.get(task.taskArn)?.stopped === false).map((task) => task.taskArn);
   }
 }
 

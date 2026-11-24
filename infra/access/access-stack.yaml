@@ -123,6 +123,31 @@ Resources:
             Effect: Allow
             Action: [ecs:StopTask, ecs:DescribeTasks]
             Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/ssd-workshop-*/*
+          # Ticket 2.9 try 2 (pending Franck's yes): whatever a role's own policy says, only the launcher reads or
+          # stops build tasks (the task's override holds the build's GitHub token), only the builder sends deploy
+          # messages, and only the AI worker and the check's schedule send to the builds queues. role*/<name> is the
+          # role with or without its path: a role name is unique in an account.
+          - Sid: WatchBuildsLauncherOnly
+            Effect: Deny
+            Action: [ecs:DescribeTasks, ecs:StopTask]
+            Resource: !Sub arn:aws:ecs:*:${AWS::AccountId}:task/ssd-workshop-builds/*
+            Condition:
+              ArnNotLike: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-launcher"}
+          - Sid: DeploysFromTheBuilderOnly
+            Effect: Deny
+            Action: sqs:SendMessage
+            Resource: !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-deploys*
+            Condition:
+              ArnNotLike: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder"}
+          - Sid: BuildsFromTheirSendersOnly
+            Effect: Deny
+            Action: sqs:SendMessage
+            Resource: !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-builds*
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-api-ai-worker
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-check-scheduler
           - Sid: PullImages
             Effect: Allow
             Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
@@ -662,12 +687,32 @@ Resources:
           # Sessions cannot start, redirect or empty builds (Franck, 2026-11-24, ticket 2.9): the
           # launch queue's messages make the launcher mint a repository token and start a task.
           # Retries run from Franck's machine (npm run builds -- retry). Deploys from main may manage
-          # the queues; only the Claude user is denied.
+          # the queues; only the Claude user is denied. Ticket 2.9 try 2 (pending Franck's yes): nor
+          # read, delete or remove them, nor send a deploy message (the deployer publishes the commit
+          # a build names), nor read, start or stop build tasks (a task's override holds its build's
+          # GitHub token), nor point another queue at the launcher.
           - Sid: NoBuildQueueForSessions
             Effect: Deny
-            Action: [sqs:SendMessage, sqs:SetQueueAttributes, sqs:PurgeQueue]
-            Resource: !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-builds*
+            Action: [sqs:SendMessage, sqs:SetQueueAttributes, sqs:PurgeQueue, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:DeleteQueue]
+            Resource:
+              - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-builds*
+              - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-deploys*
             Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoBuildTasksForSessions
+            Effect: Deny
+            Action: [ecs:DescribeTasks, ecs:RunTask, ecs:StopTask, ecs:ExecuteCommand]
+            Resource:
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task/ssd-workshop-builds/*
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop-builder:*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoLauncherSourcesForSessions
+            Effect: Deny
+            Action: [lambda:CreateEventSourceMapping, lambda:UpdateEventSourceMapping, lambda:DeleteEventSourceMapping]
+            Resource: "*"
+            Condition:
+              ArnLike: {lambda:FunctionArn: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher*"}
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey
             Effect: Deny

@@ -5,7 +5,9 @@
  * - `BUILD_ID`: the build to run (the nickname and participant come from the stored build record, never from here);
  * - `BUILDER_GITHUB_TOKEN`: the build's one-repository token (`builderToken`, ticket 2.6), minted by the launcher and
  *   passed in RunTask's container override (ticket 2.9; Franck accepted that ECS and CloudTrail show it for its hour,
- *   decision "(2.9) Token hand-off"). Never the app's key or the organization-wide token.
+ *   decision "(2.9) Token hand-off"). Never the app's key or the organization-wide token;
+ * - `BUILDER_BASE_COMMIT`: the commit the launcher prepared on `main` (the build starts from it or fails);
+ * - `BUILDER_ATTEMPT_ID`: the launch this task belongs to (every write on the build is conditional on it).
  *
  * The token is deleted from `process.env` as soon as it is read. That keeps it out of anything that copies the
  * environment later, but it is not what keeps it from the agent: the agent's process gets an explicit environment

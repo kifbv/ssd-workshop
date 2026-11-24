@@ -40,18 +40,22 @@ const TABLE = "ssd-workshop-data";
 const NOW = "2026-11-24T10:00:00.000Z";
 const ARN = "arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/0123";
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const ATTEMPT = "6f1c2a9e-1111-4222-8333-444455556666";
+const START = { buildId: "b-1", token: "ghs_token", baseCommit: COMMIT, attemptId: ATTEMPT };
 
 function stub(answers: unknown[] = []) {
   const sent: { input: unknown }[] = [];
+  const options: unknown[] = [];
   const client = {
-    send: async (command: { input: unknown }) => {
+    send: async (command: { input: unknown }, option?: unknown) => {
       sent.push(command);
+      options.push(option);
       const answer = answers.shift();
       if (answer instanceof Error) throw answer;
       return answer ?? {};
     },
   } as unknown as LauncherTableSender & TaskSender;
-  return { client, sent };
+  return { client, sent, options };
 }
 
 type Expressions = { UpdateExpression?: string; ConditionExpression?: string; ProjectionExpression?: string; KeyConditionExpression?: string };
@@ -88,10 +92,11 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.readProfileNickname("p-1")).toBe("Ada");
     expect(await records.readConversation("p-1")).toEqual({ buildId: "b-1", approvedSpecVersion: 2 });
     expect(await records.readApprovedSpec("p-1", 2)).toBe("# Spec");
-    expect(await records.claim("b-1", "Ada", "p-1", NOW)).toBe(true);
+    expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).toBe(true);
     await records.recordTask("b-1", ARN, NOW);
     expect(await records.failUnstarted("b-1", ["x"], NOW)).toBe(true);
     expect(await records.failStopped("b-1", ARN, ["x"], NOW)).toBe(true);
+    expect(await records.failHandedOver("b-1", ARN, ["x"], NOW)).toBe(true);
     expect(await records.failQueued("b-1", ["x"], NOW)).toBe(true);
     expect(await records.failDeploy("b-1", "Ada", COMMIT, ["x"], NOW)).toBe(true);
     expect(await records.listLaunches()).toEqual([]);
@@ -149,14 +154,15 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
   it("claims only a queued build of the read nickname and participant, with its watch-list entry, in one transaction", async () => {
     const { client, sent } = stub([Object.assign(new Error("x"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "ConditionalCheckFailed" }, { Code: "None" }] })]);
     const records = new DynamoLaunchRecords(client, TABLE);
-    expect(await records.claim("b-1", "Ada", "p-1", NOW)).toBe(false);
+    expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).toBe(false);
     const [update, put] = (sent[0] as TransactWriteItemsCommand).input.TransactItems ?? [];
     expect(update?.Update?.ConditionExpression).toBe("#status = :queued AND #nickname = :nickname AND #participantId = :participantId");
-    expect(update?.Update?.UpdateExpression).toBe("SET #status = :building, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn");
+    expect(update?.Update?.UpdateExpression).toBe("SET #status = :building, #attemptId = :attemptId, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn");
+    expect(update?.Update?.ExpressionAttributeValues?.[":attemptId"]).toEqual({ S: ATTEMPT });
     expect(put?.Put?.Item).toEqual({ pk: { S: "LAUNCHES" }, sk: { S: "BUILD#b-1" }, type: { S: "launch" }, buildId: { S: "b-1" }, claimedAt: { S: NOW } });
     // A conflict that is not a condition is an error.
     const other = stub([Object.assign(new Error("x"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "TransactionConflict" }] })]);
-    await expect(new DynamoLaunchRecords(other.client, TABLE).claim("b-1", "Ada", "p-1", NOW)).rejects.toThrow();
+    await expect(new DynamoLaunchRecords(other.client, TABLE).claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).rejects.toThrow();
   });
 
   it("fails builds only in the state each case expects", async () => {
@@ -165,11 +171,13 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     await records.failStopped("b-1", ARN, ["x"], NOW);
     await records.failQueued("b-1", ["x"], NOW);
     await records.failDeploy("b-1", "Ada", COMMIT, ["x"], NOW);
-    const [stopped, queued, deploy] = sent.map((command) => command.input as UpdateItemCommandInput);
+    await records.failHandedOver("b-1", ARN, ["x"], NOW);
+    const [stopped, queued, deploy, handedOver] = sent.map((command) => command.input as UpdateItemCommandInput);
     expect(stopped?.ConditionExpression).toBe("#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)");
+    expect(handedOver?.ConditionExpression).toBe("#status = :building AND #taskArn = :taskArn AND attribute_exists(#pushedCommit)");
     expect(queued?.ConditionExpression).toBe("#status = :queued");
     expect(deploy?.ConditionExpression).toBe("#status IN (:building, :deploying) AND #nickname = :nickname AND #pushedCommit = :commit");
-    for (const input of [stopped, queued, deploy]) {
+    for (const input of [stopped, queued, deploy, handedOver]) {
       expect(input?.UpdateExpression).toBe("SET #status = :failed, #failureReasons = :reasons, #finishedAt = :now, #updatedAt = :now");
       // Compared only, never set.
       expect(input?.UpdateExpression).not.toMatch(/#nickname|#pushedCommit|#participantId/);
@@ -186,9 +194,12 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
 
 describe("the builder's task (criterion 2)", () => {
   it("criterion 2: WHEN the launcher starts a task THEN it names the ssd-workshop-builds cluster and the two workshop subnets with a public IP", async () => {
-    const { client, sent } = stub([{ tasks: [{ taskArn: ARN }] }]);
+    const { client, sent, options } = stub([{ tasks: [{ taskArn: ARN }] }]);
     const tasks = new EcsBuildTasks(client, "arn:aws:ecs:eu-central-1:360206963848:task-definition/ssd-workshop-builder:7", "sg-0123");
-    expect(await tasks.start("b-1", "ghs_token")).toEqual({ taskArn: ARN });
+    const deadline = new AbortController();
+    expect(await tasks.start(START, deadline.signal)).toEqual({ taskArn: ARN });
+    // RunTask is cut off with the launch's deadline (ticket 2.9 try 2).
+    expect(options[0]).toEqual({ abortSignal: deadline.signal });
     expect(sent[0]).toBeInstanceOf(RunTaskCommand);
     const input = sent[0]?.input as RunTaskCommandInput;
     expect(input).toEqual({
@@ -196,11 +207,22 @@ describe("the builder's task (criterion 2)", () => {
       taskDefinition: "arn:aws:ecs:eu-central-1:360206963848:task-definition/ssd-workshop-builder:7",
       launchType: "FARGATE",
       count: 1,
+      startedBy: "b-1",
       networkConfiguration: {
         awsvpcConfiguration: { subnets: ["subnet-05229d71b1e0b41ff", "subnet-0965bcee41d455dba"], securityGroups: ["sg-0123"], assignPublicIp: "ENABLED" },
       },
       overrides: {
-        containerOverrides: [{ name: "builder", environment: [{ name: "BUILD_ID", value: "b-1" }, { name: "BUILDER_GITHUB_TOKEN", value: "ghs_token" }] }],
+        containerOverrides: [
+          {
+            name: "builder",
+            environment: [
+              { name: "BUILD_ID", value: "b-1" },
+              { name: "BUILDER_GITHUB_TOKEN", value: "ghs_token" },
+              { name: "BUILDER_BASE_COMMIT", value: COMMIT },
+              { name: "BUILDER_ATTEMPT_ID", value: ATTEMPT },
+            ],
+          },
+        ],
       },
       tags: [{ key: "project", value: "ssd-workshop" }],
     });
@@ -209,10 +231,10 @@ describe("the builder's task (criterion 2)", () => {
     expect(BUILDER_CONTAINER_NAME).toBe(INFRA_BUILDER_CONTAINER_NAME);
   });
 
-  it("criterion 1 (overrides): the override carries the build id and the one-repository token only, nothing else", () => {
-    const input = runTaskRequest("td", "sg", "b-1", "ghs_token").input;
+  it("criterion 1 (overrides): the override carries the build id, the one-repository token, the prepared commit and the attempt id only, nothing else", () => {
+    const input = runTaskRequest("td", "sg", START).input;
     const environment = input.overrides?.containerOverrides?.flatMap((override) => override.environment ?? []) ?? [];
-    expect(environment.map((variable) => variable.name)).toEqual(["BUILD_ID", "BUILDER_GITHUB_TOKEN"]);
+    expect(environment.map((variable) => variable.name)).toEqual(["BUILD_ID", "BUILDER_GITHUB_TOKEN", "BUILDER_BASE_COMMIT", "BUILDER_ATTEMPT_ID"]);
     expect(input.overrides?.containerOverrides?.[0]).toEqual({ name: "builder", environment });
     expect(input.overrides).toEqual({ containerOverrides: [{ name: "builder", environment }] });
   });
@@ -220,12 +242,19 @@ describe("the builder's task (criterion 2)", () => {
   it("reports no task when ECS starts none, and a task ECS no longer knows as stopped", async () => {
     const { client, sent } = stub([
       { tasks: [], failures: [{ reason: "RESOURCE:ENI" }] },
-      { tasks: [{ taskArn: ARN, lastStatus: "RUNNING", createdAt: new Date(NOW) }], failures: [{ arn: `${ARN}9`, reason: "MISSING" }] },
+      {
+        tasks: [
+          { taskArn: ARN, lastStatus: "RUNNING", createdAt: new Date(NOW) },
+          { taskArn: `${ARN}8`, lastStatus: "STOPPED", createdAt: new Date(NOW), stoppedAt: new Date("2026-11-24T10:05:00.000Z") },
+        ],
+        failures: [{ arn: `${ARN}9`, reason: "MISSING" }],
+      },
     ]);
     const tasks = new EcsBuildTasks(client, "td", "sg");
-    expect(await tasks.start("b-1", "t")).toEqual({ failure: "RESOURCE:ENI" });
-    const states = await tasks.describe([ARN, `${ARN}9`]);
+    expect(await tasks.start(START)).toEqual({ failure: "RESOURCE:ENI" });
+    const states = await tasks.describe([ARN, `${ARN}8`, `${ARN}9`]);
     expect(states.get(ARN)).toEqual({ stopped: false, createdAt: new Date(NOW) });
+    expect(states.get(`${ARN}8`)).toEqual({ stopped: true, createdAt: new Date(NOW), stoppedAt: new Date("2026-11-24T10:05:00.000Z") });
     expect(states.get(`${ARN}9`)).toEqual({ stopped: true });
     expect((sent[1]?.input as DescribeTasksCommandInput).cluster).toBe("ssd-workshop-builds");
     expect(sent[1]).toBeInstanceOf(DescribeTasksCommand);

@@ -345,11 +345,12 @@ export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "buildId",
  *
  * - BUILDER_BUILD_READ_ATTRIBUTES: GetItem, its keys and projection (`nickname`, `participantId`, `status`);
  * - BUILDER_BUILD_UPDATE_ATTRIBUTES: UpdateItem (claim, feed, hand-over, failure), every name in its update and
- *   condition expressions. `nickname` is only compared (the claim's condition), never set. Never `participantId` (only
+ *   condition expressions. `nickname` and `attemptId` (the launch the task belongs to, ticket 2.9 try 2) are only
+ *   compared, never set. Never `participantId` (only
  *   read), `deployedCommit` or `liveAt` (the deployer's), `type`, `buildId` or `createdAt` (the AI worker's).
  */
 export const BUILDER_BUILD_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status"] as const;
-export const BUILDER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "pushedCommit", "feed", "updatedAt", "finishedAt", "failureReasons"] as const;
+export const BUILDER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "attemptId", "pushedCommit", "feed", "updatedAt", "finishedAt", "failureReasons"] as const;
 /** The attribute names the builder may name in `PARTICIPANT#*` (UpdateItem of the `USAGE` item only): the build's tokens and cost. */
 export const BUILDER_USAGE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "participantId", "updatedAt", "inputTokens", "outputTokens", "costUsd"] as const;
 /**
@@ -417,10 +418,10 @@ export const BUILD_CHECK_SCHEDULER_ROLE_NAME = `${PREFIX}-builds-check-scheduler
 export const LAUNCHER_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status", "buildId", "approvedSpecVersion", "specVersion", "text", "approvedAt"] as const;
 /**
  * The attribute names the launcher may name in `BUILD#*` (UpdateItem, also inside its claim transaction): the move from
- * `queued` to `building`, the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only
+ * `queued` to `building` under a new launch (`attemptId`, ticket 2.9 try 2), the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only
  * compared (IAM counts condition names).
  */
-export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "participantId", "pushedCommit", "taskArn", "launchedAt", "updatedAt", "failureReasons", "finishedAt"] as const;
+export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "participantId", "pushedCommit", "attemptId", "taskArn", "launchedAt", "updatedAt", "failureReasons", "finishedAt"] as const;
 /** The watch list's attribute names (`LAUNCHES` partition: PutItem, UpdateItem, DeleteItem, Query). */
 export const LAUNCHER_LAUNCH_ATTRIBUTES = ["pk", "sk", "type", "buildId", "taskArn", "claimedAt"] as const;
 /** The watch list's partition key (platform/api/keys.ts LAUNCHES_PK). */

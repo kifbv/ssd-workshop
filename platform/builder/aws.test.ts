@@ -13,6 +13,7 @@ import { jobFromEnvironment } from "./runner.js";
 const TABLE = "ssd-workshop-data";
 const NOW = "2026-11-24T10:00:00.000Z";
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const ATTEMPT = "6f1c2a9e-1111-4222-8333-444455556666";
 
 function stub(answers: unknown[]) {
   const sent: (GetItemCommand | UpdateItemCommand)[] = [];
@@ -66,10 +67,10 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     const { client, sent } = stub([{ Item: { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "queued" } } }]);
     const records = new DynamoBuildRecords(client, TABLE);
     expect(await records.read("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued" });
-    expect(await records.claim("b-1", "Ada", step, NOW)).toBe(true);
-    expect(await records.addFeed("b-1", [{ kind: "file", path: "index.html", at: NOW }], NOW)).toBe(true);
-    expect(await records.handOver("b-1", COMMIT, [{ kind: "step", step: "deploying", at: NOW }], NOW)).toBe(true);
-    expect(await records.markFailed("b-1", ["The build took too long."], NOW)).toBe(true);
+    expect(await records.claim("b-1", ATTEMPT, "Ada", step, NOW)).toBe(true);
+    expect(await records.addFeed("b-1", ATTEMPT, [{ kind: "file", path: "index.html", at: NOW }], NOW)).toBe(true);
+    expect(await records.handOver("b-1", ATTEMPT, COMMIT, [{ kind: "step", step: "deploying", at: NOW }], NOW)).toBe(true);
+    expect(await records.markFailed("b-1", ATTEMPT, ["The build took too long."], NOW)).toBe(true);
     await records.addUsage("p-1", { inputTokens: 10, outputTokens: 2, costUsd: 0.01 }, NOW);
     expect(sent).toHaveLength(6);
     const [read, ...updates] = sent;
@@ -97,29 +98,31 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     expect(BUILDER_BUILD_UPDATE_ATTRIBUTES).not.toContain("participantId");
   });
 
-  it("claims only an existing queued or building build of the nickname that has no pushed commit, with a new feed", async () => {
+  it("claims only an existing build of the nickname, building under this launch, that has no pushed commit, with a new feed", async () => {
     const { client, sent } = stub([]);
-    await new DynamoBuildRecords(client, TABLE).claim("b-1", "Ada", step, NOW);
+    await new DynamoBuildRecords(client, TABLE).claim("b-1", ATTEMPT, "Ada", step, NOW);
     const input = sent[0]?.input as UpdateItemCommandInput;
-    expect(input.ConditionExpression).toBe("attribute_exists(pk) AND #nickname = :nickname AND #status IN (:queued, :building) AND attribute_not_exists(#pushedCommit)");
-    expect(input.UpdateExpression).toBe("SET #status = :building, #feed = :feed, #updatedAt = :now REMOVE #failureReasons, #finishedAt");
+    expect(input.ConditionExpression).toBe("attribute_exists(pk) AND #nickname = :nickname AND #status = :building AND #attemptId = :attemptId AND attribute_not_exists(#pushedCommit)");
+    expect(input.UpdateExpression).toBe("SET #feed = :feed, #updatedAt = :now REMOVE #failureReasons, #finishedAt");
+    expect(input.ExpressionAttributeValues?.[":attemptId"]).toEqual({ S: ATTEMPT });
     expect(input.ExpressionAttributeValues?.[":feed"]).toEqual({ L: [{ M: { kind: { S: "step" }, at: { S: NOW }, step: { S: "preparing" } } }] });
     expect(input.ExpressionAttributeValues?.[":nickname"]).toEqual({ S: "Ada" });
   });
 
-  it("appends to the feed, hands over and fails only while the build is building; the hand-over only once", async () => {
+  it("appends to the feed, hands over and fails only while the build is building under this launch; the hand-over only once", async () => {
     const { client, sent } = stub([]);
     const records = new DynamoBuildRecords(client, TABLE);
-    await records.addFeed("b-1", [{ kind: "commit", sha: COMMIT, message: "Build", at: NOW }], NOW);
-    await records.handOver("b-1", COMMIT, [], NOW);
-    await records.markFailed("b-1", ["x"], NOW);
+    await records.addFeed("b-1", ATTEMPT, [{ kind: "commit", sha: COMMIT, message: "Build", at: NOW }], NOW);
+    await records.handOver("b-1", ATTEMPT, COMMIT, [], NOW);
+    await records.markFailed("b-1", ATTEMPT, ["x"], NOW);
     const [feed, handOver, failed] = sent.map((command) => command.input as UpdateItemCommandInput);
-    expect(feed?.ConditionExpression).toBe("attribute_exists(pk) AND #status = :building");
+    for (const input of [feed, handOver, failed]) expect(input?.ExpressionAttributeValues?.[":attemptId"]).toEqual({ S: ATTEMPT });
+    expect(feed?.ConditionExpression).toBe("attribute_exists(pk) AND #status = :building AND #attemptId = :attemptId");
     expect(feed?.UpdateExpression).toBe("SET #feed = list_append(if_not_exists(#feed, :empty), :events), #updatedAt = :now");
     expect(feed?.ExpressionAttributeValues?.[":events"]).toEqual({ L: [{ M: { kind: { S: "commit" }, at: { S: NOW }, sha: { S: COMMIT }, message: { S: "Build" } } }] });
-    expect(handOver?.ConditionExpression).toBe("attribute_exists(pk) AND #status = :building AND attribute_not_exists(#pushedCommit)");
+    expect(handOver?.ConditionExpression).toBe("attribute_exists(pk) AND #status = :building AND #attemptId = :attemptId AND attribute_not_exists(#pushedCommit)");
     expect(handOver?.ExpressionAttributeValues?.[":commit"]).toEqual({ S: COMMIT });
-    expect(failed?.ConditionExpression).toBe("attribute_exists(pk) AND #status = :building");
+    expect(failed?.ConditionExpression).toBe("attribute_exists(pk) AND #status = :building AND #attemptId = :attemptId");
     expect(failed?.ExpressionAttributeValues?.[":failed"]).toEqual({ S: "failed" });
     // The builder never sets the deployer's statuses or attributes.
     for (const input of [feed, handOver, failed]) {
@@ -132,8 +135,8 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     const { client } = stub([{}, conditionFailed, Object.assign(new Error("x"), { name: "InternalServerError" })]);
     const records = new DynamoBuildRecords(client, TABLE);
     expect(await records.read("b-1")).toBeUndefined();
-    expect(await records.claim("b-1", "Ada", step, NOW)).toBe(false);
-    await expect(records.addFeed("b-1", [], NOW)).rejects.toThrow("x");
+    expect(await records.claim("b-1", ATTEMPT, "Ada", step, NOW)).toBe(false);
+    await expect(records.addFeed("b-1", ATTEMPT, [], NOW)).rejects.toThrow("x");
   });
 
   it("adds usage with one atomic ADD, and nothing for a run that spent no tokens", async () => {
@@ -166,13 +169,24 @@ describe("the deploy message (decision \"(2.5) Deploy message\")", () => {
 });
 
 describe("the job from the task's environment (for ticket 2.9)", () => {
-  it("reads BUILD_ID and BUILDER_GITHUB_TOKEN, and removes the token from the environment", () => {
-    const env: Record<string, string | undefined> = { BUILD_ID: "b-1", BUILDER_GITHUB_TOKEN: "ghs_secret", PATH: "/bin" };
-    expect(jobFromEnvironment(env)).toEqual({ buildId: "b-1", token: "ghs_secret" });
-    expect(env).toEqual({ BUILD_ID: "b-1", PATH: "/bin" });
-    expect(jobFromEnvironment({ BUILDER_GITHUB_TOKEN: "x" })).toEqual({ error: "BUILD_ID is missing or not a build id" });
-    expect(jobFromEnvironment({ BUILD_ID: "../x", BUILDER_GITHUB_TOKEN: "x" })).toEqual({ error: "BUILD_ID is missing or not a build id" });
-    const noToken = jobFromEnvironment({ BUILD_ID: "b-1" });
+  it("reads BUILD_ID, BUILDER_GITHUB_TOKEN, BUILDER_BASE_COMMIT and BUILDER_ATTEMPT_ID, and removes the token from the environment", () => {
+    const rest = { BUILDER_BASE_COMMIT: COMMIT, BUILDER_ATTEMPT_ID: ATTEMPT };
+    const env: Record<string, string | undefined> = { BUILD_ID: "b-1", BUILDER_GITHUB_TOKEN: "ghs_secret", PATH: "/bin", ...rest };
+    expect(jobFromEnvironment(env)).toEqual({ buildId: "b-1", token: "ghs_secret", baseCommit: COMMIT, attemptId: ATTEMPT });
+    expect(env).toEqual({ BUILD_ID: "b-1", PATH: "/bin", ...rest });
+    expect(jobFromEnvironment({ BUILDER_GITHUB_TOKEN: "x", ...rest })).toEqual({ error: "BUILD_ID is missing or not a build id" });
+    expect(jobFromEnvironment({ BUILD_ID: "../x", BUILDER_GITHUB_TOKEN: "x", ...rest })).toEqual({ error: "BUILD_ID is missing or not a build id" });
+    const noToken = jobFromEnvironment({ BUILD_ID: "b-1", ...rest });
     expect(noToken).toEqual({ error: "BUILDER_GITHUB_TOKEN is missing" });
+    for (const commit of [undefined, "main", COMMIT.toUpperCase(), `${COMMIT}0`]) {
+      expect(jobFromEnvironment({ BUILD_ID: "b-1", BUILDER_GITHUB_TOKEN: "x", BUILDER_ATTEMPT_ID: ATTEMPT, BUILDER_BASE_COMMIT: commit }), String(commit)).toEqual({
+        error: "BUILDER_BASE_COMMIT is missing or not a commit id",
+      });
+    }
+    for (const attempt of [undefined, "", "x", ATTEMPT.toUpperCase()]) {
+      expect(jobFromEnvironment({ BUILD_ID: "b-1", BUILDER_GITHUB_TOKEN: "x", BUILDER_BASE_COMMIT: COMMIT, BUILDER_ATTEMPT_ID: attempt }), String(attempt)).toEqual({
+        error: "BUILDER_ATTEMPT_ID is missing or not an attempt id",
+      });
+    }
   });
 });

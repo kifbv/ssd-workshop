@@ -39,6 +39,7 @@ export class FakeBuildsStore implements BuildsStore {
     delete build.deployedCommit;
     delete build.taskArn;
     delete build.launchedAt;
+    delete build.attemptId;
     delete build.feed;
     build.status = "queued";
     build.updatedAt = nowIso;
@@ -64,5 +65,9 @@ export class FakeTaskWatch implements TaskWatch {
 
   async isStopped(taskArn: string): Promise<boolean> {
     return (await this.tasks.describe([taskArn])).get(taskArn)?.stopped ?? true;
+  }
+
+  async runningTasks(buildId: string): Promise<number> {
+    return this.tasks.running(buildId).length;
   }
 }

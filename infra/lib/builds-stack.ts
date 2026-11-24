@@ -187,11 +187,14 @@ export class BuildsStack extends Stack {
     // Ticket 2.9: the builder's task. Its image is the deploy workflow's push, named by digest.
     const digest = String(this.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT) ?? BUILDER_IMAGE_DIGEST_UNSET);
     if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${BUILDER_IMAGE_DIGEST_CONTEXT} must be sha256:<64 hex digits>`);
+    // Only tasks on the builds cluster may assume the builder's roles (ticket 2.9 try 2). Unverified until the first live
+    // build: that ECS names the task's ARN as aws:SourceArn for both roles (the execution role too); if a task fails with
+    // "ECS was unable to assume the role", widen this back to `arn:aws:ecs:<region>:<account>:*` (infra/README.md).
     const taskPrincipal = () =>
       new ServicePrincipal("ecs-tasks.amazonaws.com", {
         conditions: {
           StringEquals: { "aws:SourceAccount": ACCOUNT },
-          ArnLike: { "aws:SourceArn": `arn:aws:ecs:${REGION}:${ACCOUNT}:*` },
+          ArnLike: { "aws:SourceArn": `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*` },
         },
       });
     const builderLogs = new LogGroup(this, "BuilderLogs", {
@@ -363,7 +366,12 @@ export class BuildsStack extends Stack {
     // role: the boundary has no lambda:InvokeFunction). Its role may only send to that queue.
     const schedulerRole = new Role(this, "BuildsCheckSchedulerRole", {
       roleName: BUILD_CHECK_SCHEDULER_ROLE_NAME,
-      assumedBy: new ServicePrincipal("scheduler.amazonaws.com", { conditions: { StringEquals: { "aws:SourceAccount": ACCOUNT } } }),
+      // Only its own schedule (in the default group) may use it (ticket 2.9 try 2).
+      assumedBy: new ServicePrincipal("scheduler.amazonaws.com", {
+        conditions: {
+          StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` },
+        },
+      }),
       description: "Sends the stuck-build check's trigger to its queue every minute",
     });
     schedulerRole.addToPolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [checkQueue.queueArn] }));

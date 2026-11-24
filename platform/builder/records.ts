@@ -43,19 +43,20 @@ export interface BuildRecords {
   /** The build's nickname, participant and status, or undefined when there is no such build. */
   read(buildId: string): Promise<BuildToRun | undefined>;
   /**
-   * Takes the build: only one that exists, is `queued` or `building`, belongs to `nickname` and has no pushed commit
-   * yet. Sets `building`, a new feed holding `first` and removes earlier failure reasons. False when refused.
+   * Takes the build: only one that exists, is `building` under this launch (`attemptId`, set by the launcher's claim,
+   * ticket 2.9 try 2), belongs to `nickname` and has no pushed commit yet. Sets a new feed holding `first` and removes
+   * earlier failure reasons. False when refused.
    */
-  claim(buildId: string, nickname: string, first: FeedEvent, nowIso: string): Promise<boolean>;
-  /** Appends to the feed while the build is `building`; false otherwise (it was marked failed meanwhile). */
-  addFeed(buildId: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean>;
+  claim(buildId: string, attemptId: string, nickname: string, first: FeedEvent, nowIso: string): Promise<boolean>;
+  /** Appends to the feed while the build is `building` under this launch; false otherwise (it was marked failed or relaunched meanwhile). */
+  addFeed(buildId: string, attemptId: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean>;
   /**
    * Stores the commit the builder pushed (`pushedCommit`, the deployer's commit binding) and appends `events`, only
-   * while the build is `building` and has no pushed commit. False when refused.
+   * while the build is `building` under this launch and has no pushed commit. False when refused.
    */
-  handOver(buildId: string, commit: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean>;
-  /** Marks the build `failed` with `reasons`, only while it is `building`. False when refused. */
-  markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  handOver(buildId: string, attemptId: string, commit: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean>;
+  /** Marks the build `failed` with `reasons`, only while it is `building` under this launch. False when refused. */
+  markFailed(buildId: string, attemptId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Adds tokens and cost to the participant's `USAGE` totals (atomic ADD). */
   addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void>;
 }
@@ -85,6 +86,15 @@ export interface BuilderTableSender {
 }
 
 const STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "live", "failed"];
+
+/**
+ * Every write of the runner holds only while the build is `building` under the launch that started this task (ticket
+ * 2.9 try 2): a second runner for the same build (an earlier launch's task, or one started by someone else) can never
+ * claim, feed, hand over or fail it.
+ */
+const THIS_ATTEMPT = "#status = :building AND #attemptId = :attemptId";
+const attemptNames = { "#status": "status", "#attemptId": "attemptId" };
+const attemptValues = (attemptId: string): Record<string, AttributeValue> => ({ ":building": str("building"), ":attemptId": str(attemptId) });
 
 const conditionFailed = (error: unknown): boolean =>
   error instanceof ConditionalCheckFailedException || (error as { name?: unknown } | null)?.name === "ConditionalCheckFailedException";
@@ -139,51 +149,51 @@ export class DynamoBuildRecords implements BuildRecords {
     }
   }
 
-  claim(buildId: string, nickname: string, first: FeedEvent, nowIso: string): Promise<boolean> {
+  claim(buildId: string, attemptId: string, nickname: string, first: FeedEvent, nowIso: string): Promise<boolean> {
     return this.update(
       buildKey(buildId),
-      "SET #status = :building, #feed = :feed, #updatedAt = :now REMOVE #failureReasons, #finishedAt",
-      "attribute_exists(pk) AND #nickname = :nickname AND #status IN (:queued, :building) AND attribute_not_exists(#pushedCommit)",
+      "SET #feed = :feed, #updatedAt = :now REMOVE #failureReasons, #finishedAt",
+      `attribute_exists(pk) AND #nickname = :nickname AND ${THIS_ATTEMPT} AND attribute_not_exists(#pushedCommit)`,
       {
-        "#status": "status",
         "#feed": "feed",
         "#updatedAt": "updatedAt",
         "#failureReasons": "failureReasons",
         "#finishedAt": "finishedAt",
         "#nickname": "nickname",
         "#pushedCommit": "pushedCommit",
+        ...attemptNames,
       },
-      { ":building": str("building"), ":queued": str("queued"), ":feed": feedList([first]), ":now": str(nowIso), ":nickname": str(nickname) },
+      { ":feed": feedList([first]), ":now": str(nowIso), ":nickname": str(nickname), ...attemptValues(attemptId) },
     );
   }
 
-  addFeed(buildId: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
+  addFeed(buildId: string, attemptId: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
     return this.update(
       buildKey(buildId),
       "SET #feed = list_append(if_not_exists(#feed, :empty), :events), #updatedAt = :now",
-      "attribute_exists(pk) AND #status = :building",
-      { "#feed": "feed", "#updatedAt": "updatedAt", "#status": "status" },
-      { ":empty": { L: [] }, ":events": feedList(events), ":now": str(nowIso), ":building": str("building") },
+      `attribute_exists(pk) AND ${THIS_ATTEMPT}`,
+      { "#feed": "feed", "#updatedAt": "updatedAt", ...attemptNames },
+      { ":empty": { L: [] }, ":events": feedList(events), ":now": str(nowIso), ...attemptValues(attemptId) },
     );
   }
 
-  handOver(buildId: string, commit: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
+  handOver(buildId: string, attemptId: string, commit: string, events: readonly FeedEvent[], nowIso: string): Promise<boolean> {
     return this.update(
       buildKey(buildId),
       "SET #pushedCommit = :commit, #feed = list_append(if_not_exists(#feed, :empty), :events), #updatedAt = :now",
-      "attribute_exists(pk) AND #status = :building AND attribute_not_exists(#pushedCommit)",
-      { "#pushedCommit": "pushedCommit", "#feed": "feed", "#updatedAt": "updatedAt", "#status": "status" },
-      { ":commit": str(commit), ":empty": { L: [] }, ":events": feedList(events), ":now": str(nowIso), ":building": str("building") },
+      `attribute_exists(pk) AND ${THIS_ATTEMPT} AND attribute_not_exists(#pushedCommit)`,
+      { "#pushedCommit": "pushedCommit", "#feed": "feed", "#updatedAt": "updatedAt", ...attemptNames },
+      { ":commit": str(commit), ":empty": { L: [] }, ":events": feedList(events), ":now": str(nowIso), ...attemptValues(attemptId) },
     );
   }
 
-  markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+  markFailed(buildId: string, attemptId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
     return this.update(
       buildKey(buildId),
       "SET #status = :failed, #failureReasons = :reasons, #finishedAt = :now, #updatedAt = :now",
-      "attribute_exists(pk) AND #status = :building",
-      { "#status": "status", "#failureReasons": "failureReasons", "#finishedAt": "finishedAt", "#updatedAt": "updatedAt" },
-      { ":failed": str("failed"), ":reasons": { L: reasons.map(str) }, ":now": str(nowIso), ":building": str("building") },
+      `attribute_exists(pk) AND ${THIS_ATTEMPT}`,
+      { "#failureReasons": "failureReasons", "#finishedAt": "finishedAt", "#updatedAt": "updatedAt", ...attemptNames },
+      { ":failed": str("failed"), ":reasons": { L: reasons.map(str) }, ":now": str(nowIso), ...attemptValues(attemptId) },
     );
   }
 

@@ -21,7 +21,9 @@
  * message is consumed: a new try is `npm run builds -- retry <nickname>`.
  *
  * Check (every minute, EventBridge Scheduler through the queue `ssd-workshop-builds-check`): a watched build whose task
- * has stopped (or is gone) while the build is still `building` without a pushed commit is marked failed; a claim that
+ * has stopped (or is gone) while the build is still `building` without a pushed commit is marked failed; one still
+ * `building` with a pushed commit (handed over, but no deploy started) is marked failed HANDED_OVER_GRACE_MS after its
+ * task stopped; a claim that
  * never got a task within LAUNCH_UNSTARTED_MS is marked failed; a task running past BUILD_TASK_MAX_MS is stopped; the
  * launch queue's dead-letter messages fail their `queued` builds, and the deploy queue's fail their builds still
  * waiting for that deploy (decision "(2.5) Deploy message", "(2.7) For 2.9").
@@ -29,11 +31,12 @@
  * Logs: one JSON line per launch or check, with an outcome, counts and an error name; never a token, nickname, build id,
  * repository name or error message.
  */
+import { randomUUID } from "node:crypto";
 import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/app.js";
 import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
-import { BUILD_TASK_MAX_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { BuildStatus } from "../types.js";
 
@@ -62,16 +65,22 @@ export interface LaunchRecords {
   /** The text of the spec version, only when that version exists and was approved. */
   readApprovedSpec(participantId: string, version: number): Promise<string | undefined>;
   /**
-   * One transaction: the build from `queued` to `building` (only while its nickname and participant are the ones read)
-   * and its watch-list entry. False when the build is no longer `queued` (a duplicate message).
+   * One transaction: the build from `queued` to `building` under a new launch (`attemptId`, which the task's runner
+   * must name in every write; only while its nickname and participant are the ones read) and its watch-list entry.
+   * False when the build is no longer `queued` (a duplicate message).
    */
-  claim(buildId: string, nickname: string, participantId: string, nowIso: string): Promise<boolean>;
+  claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string): Promise<boolean>;
   /** Stores the started task on the watch-list entry and on the build. */
   recordTask(buildId: string, taskArn: string, nowIso: string): Promise<void>;
   /** Marks a claimed build that has no task failed (only while `building` without a task); removes its entry. */
   failUnstarted(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Marks failed a build still `building` with this task and no pushed commit. */
   failStopped(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  /**
+   * Marks failed a build still `building` with this task and a pushed commit (handed over), whose deploy never started:
+   * the task stopped and no deploy message moved it to `deploying` within HANDED_OVER_GRACE_MS.
+   */
+  failHandedOver(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Marks failed a build still `queued`. */
   failQueued(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Marks failed a build of this app still waiting for the deploy of this pushed commit (`building` or `deploying`). */
@@ -86,11 +95,24 @@ export interface TaskState {
   stopped: boolean;
   /** When ECS created it. */
   createdAt?: Date;
+  /** When ECS stopped it (unknown for a task ECS no longer knows, which stopped long ago). */
+  stoppedAt?: Date;
+}
+
+/** What a task is started with: the container's overrides (decision "(2.9) Token hand-off"). */
+export interface TaskStart {
+  buildId: string;
+  /** The build's one-repository token. */
+  token: string;
+  /** The commit `prepareRepository` left on `main`: the runner builds from it or fails. */
+  baseCommit: string;
+  /** The launch's attempt id, stored on the build by the claim. */
+  attemptId: string;
 }
 
 export interface BuildTasks {
-  /** Starts the builder for the build; the token goes in the container's override. */
-  start(buildId: string, token: string): Promise<{ taskArn: string } | { failure: string }>;
+  /** Starts the builder for the build (`startedBy` the build id); the token goes in the container's override. */
+  start(start: TaskStart, signal?: AbortSignal): Promise<{ taskArn: string } | { failure: string }>;
   /** The state of each task; a task ECS no longer knows counts as stopped. */
   describe(taskArns: readonly string[]): Promise<Map<string, TaskState>>;
   stop(taskArn: string): Promise<void>;
@@ -129,6 +151,10 @@ export interface LauncherDeps {
   templateFiles: () => Promise<RepositoryFile[]>;
   now: () => Date;
   log: (entry: LauncherLogEntry) => void;
+  /** A new attempt id for each claim (default a random UUID). */
+  newAttemptId?: () => string;
+  /** The launch's deadline (the handler aborts it LAUNCH_RESERVE_MS before the Lambda's timeout): RunTask gets it too. */
+  signal?: AbortSignal;
 }
 
 export interface CheckDeps {
@@ -194,6 +220,7 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
   }
 
   let build: LaunchBuild | undefined;
+  let attemptId: string;
   let checked: { ok: boolean; specVersion?: number };
   // Before and including the claim, a failed read or write is thrown: SQS delivers the message again, and the claim's
   // condition keeps a redelivery from acting twice.
@@ -215,7 +242,8 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
       log("ignored");
       return "ignored";
     }
-    if (!(await deps.records.claim(buildId, build.nickname, build.participantId, deps.now().toISOString()))) {
+    attemptId = (deps.newAttemptId ?? randomUUID)();
+    if (!(await deps.records.claim(buildId, build.nickname, build.participantId, attemptId, deps.now().toISOString()))) {
       log("duplicate");
       return "duplicate";
     }
@@ -233,9 +261,11 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
     const spec = version === undefined ? undefined : await deps.records.readApprovedSpec(participantId, version);
     if (spec === undefined) throw new LaunchFailure(SPEC_MISSING_REASON);
     const credentials = await deps.credentials();
-    await prepareRepository({ credentials, nickname, spec, templateFiles: await deps.templateFiles() }, deps.github);
+    const prepared = await prepareRepository({ credentials, nickname, spec, templateFiles: await deps.templateFiles() }, deps.github);
     const { token } = await builderToken(credentials, nickname, deps.github);
-    const result = await deps.tasks.start(buildId, token);
+    // The prepared commit pins what the runner builds from (a push to main after this point fails the build), and the
+    // deadline's signal keeps RunTask from outlasting the reserve the failure write needs.
+    const result = await deps.tasks.start({ buildId, token, baseCommit: prepared.commit, attemptId }, deps.signal);
     if ("failure" in result) throw new LaunchFailure(START_FAILED_REASON);
     taskArn = result.taskArn;
     await deps.records.recordTask(buildId, taskArn, deps.now().toISOString());
@@ -291,7 +321,20 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
       }
       const state = states.get(entry.taskArn) ?? { stopped: true };
       if (state.stopped) {
-        if (await deps.records.failStopped(entry.buildId, entry.taskArn, [STOPPED_REASON], nowIso())) failed += 1;
+        if (await deps.records.failStopped(entry.buildId, entry.taskArn, [STOPPED_REASON], nowIso())) {
+          failed += 1;
+          await deps.records.removeLaunch(entry.buildId, entry.taskArn);
+          continue;
+        }
+        // Handed over (a pushed commit) and still `building`: the deploy message may not have started the deployer yet.
+        // Watched until HANDED_OVER_GRACE_MS after the task stopped (longer than the deploy queue's deliveries), then
+        // failed: no deploy will come, and `retry` recovers it. A task ECS forgot (no stop time) stopped long ago.
+        const build = await deps.records.readBuild(entry.buildId);
+        if (build?.status === "building") {
+          const stoppedAt = state.stoppedAt?.getTime();
+          if (stoppedAt !== undefined && started - stoppedAt < HANDED_OVER_GRACE_MS) continue;
+          if (await deps.records.failHandedOver(entry.buildId, entry.taskArn, [DEPLOY_DEAD_REASON], nowIso())) failed += 1;
+        }
         await deps.records.removeLaunch(entry.buildId, entry.taskArn);
       } else if (state.createdAt !== undefined && started - state.createdAt.getTime() > BUILD_TASK_MAX_MS) {
         // Marked failed by the next check, once ECS reports it stopped.

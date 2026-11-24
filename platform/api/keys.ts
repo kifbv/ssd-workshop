@@ -76,6 +76,11 @@ export const appLiveKey = (nickname: string): ItemKey => ({
  * of `APP#*`). The id is chosen by its creator: 1 to 64 letters, digits, dashes or underscores.
  */
 export const BUILD_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * One launch of a build (ticket 2.9 try 2): a random UUID the launcher's claim stores on the build (`attemptId`) and
+ * passes to the task it starts; the runner's writes hold only under it, so a second runner for the build is refused.
+ */
+export const ATTEMPT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function buildKey(buildId: string): ItemKey {
   if (!BUILD_ID_PATTERN.test(buildId)) throw new Error("build id is not 1 to 64 letters, digits, dashes or underscores");
