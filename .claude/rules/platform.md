@@ -122,8 +122,8 @@ paths:
   `metadata: read`, `expires_at` within an hour) before using it, and never log a token, the JWT or a repository name.
   Every id from GitHub that goes into a URL path (commit, tree, blob) must match `^[0-9a-f]{40}$` first. Right after
   creating or opening a repository GitHub briefly answers 404 or 409: retry those Git Data steps a bounded number of
-  times (3 tries, 1 s and 2 s, injected `sleep`), never on 401, 403 or 422, and never the call whose 404/409 means
-  "empty" (`get-branch`). Recognise the platform's own leftover commit by its content (tree and blob id), not its
+  times (3 tries, 1 s and 2 s, injected `sleep`), never on 401, 403 or 422, and never the first read of the branch
+  (`get-branch`), whose 404/409 means "empty" (the re-read after a 422 is retried). Recognise the platform's own leftover commit by its content (tree and blob id), not its
   message alone, before forcing a branch over it. That "empty" 404 can be GitHub's brief one on a repository with
   history, where the Contents `PUT` lands on top of `main` (or answers 422 when the file exists): force a branch only
   to replace a commit whose answer has an empty `parents` list (missing list = has parents), else commit on top.

@@ -42,8 +42,9 @@ export const FIRST_COMMIT_MESSAGE = "Start from the workshop template and the ap
 /** Message of a rebuild's starting commit (the repository existed). */
 export const REBUILD_COMMIT_MESSAGE = "Start again from the workshop template and the newly approved spec";
 /**
- * Message of the one-file commit that opens an empty repository (GitHub's Git Data API refuses an empty one). It
- * is replaced at once by the parentless first commit, so it never shows in the history.
+ * Message of the one-file commit that opens an empty repository (GitHub's Git Data API refuses an empty one). When
+ * it opened an empty repository it is replaced at once by the parentless first commit; when it landed on top of
+ * history (GitHub's brief 404), it stays below the rebuild commit (decision "(2.6) Opening commit checked").
  */
 export const BOOTSTRAP_MESSAGE = "Open the repository for the workshop";
 export const BOOTSTRAP_FILE = "README.md";
