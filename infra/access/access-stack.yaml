@@ -620,6 +620,23 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          # The GitHub App's private key (ticket 2.6): only Franck loads it and only the build
+          # launcher (2.9) reads it. CloudFormation can still create and describe the secret.
+          - Sid: NoGitHubKey
+            Effect: Deny
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:UpdateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:RestoreSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:CancelRotateSecret
+              - secretsmanager:UpdateSecretVersionStage
+              - secretsmanager:ReplicateSecretToRegions
+              - secretsmanager:RemoveRegionsFromReplication
+              - secretsmanager:StopReplicationToReplica
+            Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:ssd-workshop-github-*
           - Sid: ReadsWithoutSecrets
             Effect: Allow
             Action:

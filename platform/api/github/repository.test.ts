@@ -16,6 +16,7 @@ import {
   prepareRepository,
   repositoryNameFor,
   withSpec,
+  removeEmailAddresses,
   type RepositoryFile,
 } from "./repository.js";
 import { TEMPLATE_DIR, loadTemplateFiles } from "./template.js";
@@ -23,6 +24,8 @@ import { TEMPLATE_DIR, loadTemplateFiles } from "./template.js";
 const NOW = new Date("2026-11-24T10:00:00Z");
 const credentials = parseGitHubSecret(TEST_SECRET_TEXT);
 const SPEC = "# Plant diary\n\nAda (ada.lovelace@example.com) wants to note when each plant was watered.\n";
+/** SPEC as published: its address removed (decision "(2.6) Email addresses removed from SPEC.md"). */
+const PUBLISHED_SPEC = "# Plant diary\n\nAda ([email removed]) wants to note when each plant was watered.\n";
 
 interface Setup {
   github: FakeGitHub;
@@ -75,7 +78,29 @@ describe("loadTemplateFiles and withSpec", () => {
     expect(TEMPLATE_DIR.endsWith("/templates/basic/")).toBe(true);
     const files = withSpec(template, SPEC);
     expect(files.map((file) => file.path)).toEqual(paths);
-    expect(decode(files.find((file) => file.path === "SPEC.md")?.bytes ?? new Uint8Array())).toBe(SPEC);
+    expect(decode(files.find((file) => file.path === "SPEC.md")?.bytes ?? new Uint8Array())).toBe(PUBLISHED_SPEC);
+  });
+});
+
+describe("removeEmailAddresses", () => {
+  it("replaces every email-shaped text, in any form a participant may type it, and leaves the rest as written", () => {
+    const cases: [string, string][] = [
+      ["Contact: ada@example.org.", "Contact: [email removed]."],
+      ["mail Ada.Lovelace+app@Mail.Example.CO.UK now", "mail [email removed] now"],
+      ["<bob_o'neil@sub-domain.example.com>", "<[email removed]>"],
+      ["mailto:x@y.io", "mailto:[email removed]"],
+      ["two: a@b.cd, c-d@e.fg", "two: [email removed], [email removed]"],
+      ["josé.garcía@exämple.de", "[email removed]"],
+      ["full width ａｄａ＠ｅｘａｍｐｌｅ．ｏｒｇ", "full width [email removed]"],
+    ];
+    for (const [input, output] of cases) expect(removeEmailAddresses(input)).toBe(output);
+    const plain = "# Movie tracker\n\n- A list of films @ home, rated 1-5.\n- Price: 3.50 @ the cinema\n";
+    expect(removeEmailAddresses(plain)).toBe(plain);
+  });
+
+  it("withSpec writes the spec with its addresses removed", () => {
+    const files = withSpec(template, "Owner: ada@example.org\n");
+    expect(decode(files.find((file) => file.path === "SPEC.md")?.bytes ?? new Uint8Array())).toBe("Owner: [email removed]\n");
   });
 });
 
@@ -112,7 +137,7 @@ describe("prepareRepository: a new repository (criterion 1)", () => {
     const files = github.filesAt("ssd-ada-lovelace", result.commit);
     const expected = Object.fromEntries(withSpec(template, SPEC).map((file) => [file.path, decode(file.bytes)]));
     expect(files).toEqual(expected);
-    expect(files["SPEC.md"]).toBe(SPEC);
+    expect(files["SPEC.md"]).toBe(PUBLISHED_SPEC);
     expect(files["index.html"]).toBe(decode(template.find((f) => f.path === "index.html")?.bytes ?? new Uint8Array()));
     // The opening commit (Git Data API refuses an empty repository) is no longer reachable from main.
     expect([...repo.commits.values()].some((c) => c.message === BOOTSTRAP_MESSAGE)).toBe(true);
@@ -163,7 +188,7 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     expect(history[0]?.message).toBe(REBUILD_COMMIT_MESSAGE);
     expect(history[0]?.parents).toEqual([first.commit]);
     expect(github.filesAt("ssd-dora", second.commit)["SPEC.md"]).toBe(newSpec);
-    expect(github.filesAt("ssd-dora", first.commit)["SPEC.md"]).toBe(SPEC);
+    expect(github.filesAt("ssd-dora", first.commit)["SPEC.md"]).toBe(PUBLISHED_SPEC);
   });
 
   it("starts the history in an existing empty repository (409 from the Git Data API), as for a new one", async () => {
@@ -261,8 +286,11 @@ describe("commit identity (criterion 4)", () => {
       onlyNoreply([commit.author, commit.committer, commit.message]);
       expect(commit.message).not.toContain("@");
     }
-    // The spec's addresses only reach the SPEC.md file, as the participant wrote it.
-    expect(github.filesAt("ssd-ivy", github.history("ssd-ivy")[0]?.sha ?? "")["SPEC.md"]).toContain("someone@example.org");
+    // The spec's addresses never reach GitHub, not even in SPEC.md (decision "(2.6) Email addresses removed from SPEC.md").
+    const published = github.filesAt("ssd-ivy", github.history("ssd-ivy")[0]?.sha ?? "")["SPEC.md"];
+    expect(published).not.toContain("someone@example.org");
+    expect(published).toContain("Contact: [email removed]");
+    for (const call of github.calls) expect(JSON.stringify(call.body ?? "")).not.toContain("someone@example.org");
     // And every request body that is commit metadata (not file content).
     for (const call of github.calls.filter((c) => c.path.endsWith("/git/commits") || c.path.includes("/contents/"))) {
       onlyNoreply([call.body?.author, call.body?.committer, call.body?.message]);

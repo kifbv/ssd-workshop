@@ -61,10 +61,23 @@ export function repositoryNameFor(nickname: string): string {
 }
 
 /** The template's files with SPEC.md replaced whole by the approved spec (decision "(2.3) Template app"). */
+/**
+ * Email-shaped text: a local part, `@` (or the full-width `＠`), and a domain with at least one dot (`.`, `．` or `。`)
+ * ending in a label of two letters or more. Letters of any script count, so `josé@exämple.de` and full-width forms
+ * match. Addresses written with spaces or words ("ada at example dot org") are not caught.
+ */
+const EMAIL_SHAPED = /[\p{L}\p{N}._%+'-]+[@＠][\p{L}\p{N}-]+(?:[.．。][\p{L}\p{N}-]+)*[.．。]\p{L}{2,}/gu;
+export const EMAIL_REMOVED = "[email removed]";
+
+/** The spec as published: every email-shaped text replaced (decision "(2.6) Email addresses removed from SPEC.md"). */
+export function removeEmailAddresses(text: string): string {
+  return text.replace(EMAIL_SHAPED, EMAIL_REMOVED);
+}
+
 export function withSpec(templateFiles: readonly RepositoryFile[], spec: string): RepositoryFile[] {
   return [
     ...templateFiles.filter((file) => file.path !== SPEC_FILE),
-    { path: SPEC_FILE, bytes: new TextEncoder().encode(spec) },
+    { path: SPEC_FILE, bytes: new TextEncoder().encode(removeEmailAddresses(spec)) },
   ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 

@@ -1312,3 +1312,36 @@ describe("policy sizes", () => {
     expect(Object.keys(sizes)).toHaveLength(5);
   });
 });
+
+describe("access stack: the GitHub App's key (ticket 2.6)", () => {
+  const deploy = deployStatements(template);
+  const SECRET = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-github-AbCdEf`;
+  const OTHER = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-other-AbCdEf`;
+  const KEY_ACTIONS = [
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:PutSecretValue",
+    "secretsmanager:UpdateSecret",
+    "secretsmanager:DeleteSecret",
+    "secretsmanager:RestoreSecret",
+    "secretsmanager:RotateSecret",
+    "secretsmanager:CancelRotateSecret",
+    "secretsmanager:UpdateSecretVersionStage",
+    "secretsmanager:ReplicateSecretToRegions",
+    "secretsmanager:RemoveRegionsFromReplication",
+    "secretsmanager:StopReplicationToReplica",
+  ];
+
+  it("denies the deploy principals reading, replacing, rotating, replicating or deleting the key", () => {
+    for (const action of KEY_ACTIONS) expect(allowedBy(deploy, action, SECRET), action).toBe(false);
+    // Without the deny they could (secretsmanager:* on ssd-workshop-*).
+    const old = deploy.filter((s) => s.Sid !== "NoGitHubKey");
+    expect(allowedBy(old, "secretsmanager:GetSecretValue", SECRET)).toBe(true);
+  });
+
+  it("still lets CloudFormation create and describe it, and leaves other workshop secrets as they were", () => {
+    for (const action of ["secretsmanager:CreateSecret", "secretsmanager:DescribeSecret", "secretsmanager:TagResource"]) {
+      expect(allowedBy(deploy, action, SECRET), action).toBe(true);
+    }
+    expect(allowedBy(deploy, "secretsmanager:GetSecretValue", OTHER)).toBe(true);
+  });
+});

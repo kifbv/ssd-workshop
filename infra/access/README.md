@@ -187,6 +187,7 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `ReadsWithoutSecrets` | Account-wide reads that CDK or Claude need and whose answers hold no secrets: stack list, template validation, EC2 and ECS listings, certificates, hosted zone list, Bedrock models and inference profiles, service quotas, the SES send quota and identities, bucket names, a random password (`secretsmanager:GetRandomPassword`, which CloudFormation calls to fill a new secret such as `ssd-workshop-github`; no resource scope, and it reads nothing), log group names, costs. |
+| `NoGitHubKey` | Deny reading, replacing, rotating, replicating, restoring or deleting the GitHub App's private key (`secret:ssd-workshop-github-*`, ticket 2.6): only Franck loads it and only the build launcher (2.9) reads it. Creating, describing and tagging the secret through CloudFormation stay allowed; a change of its settings (`UpdateSecret`) goes through Franck. In this policy because `ssd-workshop-deploy` is at its size limit. |
 | `WorkshopZoneReads` | The rankly.games zone and its records. |
 | `WorkshopIamReads` | Read roles and instance profiles on `/ssd-workshop/` and `ssd-workshop-*` policies (not `GetAccountAuthorizationDetails` or other projects' roles). |
 | `WorkshopApiReads` | Read APIs tagged with the project (other APIs' stage variables and configuration stay hidden). |

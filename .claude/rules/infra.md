@@ -105,6 +105,10 @@ paths:
   `ssd-workshop-deploy`, `-edge`, `-ec2`, `-read`), each at most 6,144 characters minified
   (tested). A new deploy policy must be attached to both the deploy role and the Claude user and
   listed in `ProtectAccessIdentities`.
+- A secret only Franck and one workload role may read (the GitHub App's key, ticket 2.6): deny the deploy principals
+  every value and lifecycle action on it (`NoGitHubKey`), keep `CreateSecret`/`DescribeSecret`/tagging so
+  CloudFormation still creates it, and load the value only after Franck applied the deny. `ssd-workshop-deploy` is at
+  the 6,144-character limit: new denies go in another deploy policy both principals carry.
 - `ec2:DescribeLaunchTemplateVersions` is not available: the first ticket that deploys an EC2 launch
   template brings this to Franck before building. `ecs:DescribeTaskDefinition` (Resource `*` only) is
   granted to the deploy principals since ticket 2.2 (accepted risk 15), never in the boundary.
