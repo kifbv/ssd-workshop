@@ -199,7 +199,9 @@ Resources:
             Action: ecs:StartTask
             Resource: "*"
           # Same sharing and egress denies as the deploy policies, except s3:PutBucketNotification,
-          # which CDK's bucket notifications handler (a workshop role) needs.
+          # which CDK's bucket notifications handler (a workshop role) needs. Plus queue attribute writes
+          # and deletes (a queue Policy would open the deploy and builds queues to outside senders); only
+          # CloudFormation (the deploy role, no boundary) changes queues.
           - Sid: NoExternalSharing
             Effect: Deny
             Action:
@@ -216,6 +218,9 @@ Resources:
               - lambda:UpdateFunctionUrlConfig
               - lambda:AddLayerVersionPermission
               - sqs:AddPermission
+              - sqs:SetQueueAttributes
+              - sqs:DeleteQueue
+              - sqs:PurgeQueue
               - sns:AddPermission
               - dynamodb:PutResourcePolicy
               - dynamodb:ExportTableToPointInTime
@@ -743,6 +748,15 @@ Resources:
             Resource: "*"
             Condition:
               ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-builds"}
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Nor a service or task set there: their tasks would run as a session-chosen task definition.
+          - Sid: NoBuildsClusterServicesForSessions
+            Effect: Deny
+            Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateTaskSet]
+            Resource:
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:service/ssd-workshop-builds/*
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-set/ssd-workshop-builds/*
+            Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey
             Effect: Deny

@@ -404,6 +404,15 @@ export const BUILDER_MEMORY_MB = 2048;
 export const BUILDER_IMAGE_DIGEST_CONTEXT = "builderImageDigest";
 /** Used by `cdk synth` without that context (CI): a digest no image has, so a deploy that forgets it cannot start builds. */
 export const BUILDER_IMAGE_DIGEST_UNSET = `sha256:${"0".repeat(64)}`;
+/**
+ * The builder image digest from the CDK context (BUILDER_IMAGE_DIGEST_UNSET when absent), refused unless it is
+ * `sha256:<64 hex digits>`. `buildApp` calls it before building any stack (fails fast) and the builds stack uses its result.
+ */
+export function builderImageDigest(context: unknown): string {
+  const digest = String(context ?? BUILDER_IMAGE_DIGEST_UNSET);
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${BUILDER_IMAGE_DIGEST_CONTEXT} must be sha256:<64 hex digits>`);
+  return digest;
+}
 /** The launcher's Lambda function (and its role, BUILD_LAUNCHER_ROLE_NAME, and its log group). */
 export const BUILD_LAUNCHER_FUNCTION_NAME = BUILD_LAUNCHER_ROLE_NAME;
 /** The queue EventBridge Scheduler fills every minute for the launcher's stuck-build check, the schedule and its role. */

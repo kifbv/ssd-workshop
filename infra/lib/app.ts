@@ -6,6 +6,8 @@ import { AssetsStack } from "./assets-stack.js";
 import { BuildsStack } from "./builds-stack.js";
 import {
   ACCOUNT,
+  BUILDER_IMAGE_DIGEST_CONTEXT,
+  builderImageDigest,
   DOMAIN,
   EDGE_REGION,
   REGION,
@@ -29,6 +31,8 @@ export { REGION, EDGE_REGION } from "./config.js";
  */
 export function buildApp(props?: AppProps): App {
   const app = new App(props);
+  // Checked before any stack is built (bundling every Lambda takes seconds); the builds stack uses the same rule.
+  builderImageDigest(app.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT));
   Tags.of(app).add(TAG_KEY, TAG_VALUE);
   // One mechanism for every role, also those CDK constructs create (see aspects.ts).
   Aspects.of(app).add(new WorkshopIamAspect());

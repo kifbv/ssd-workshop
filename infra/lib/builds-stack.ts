@@ -33,7 +33,7 @@ import {
   BUILDER_CPU,
   BUILDER_EXECUTION_ROLE_NAME,
   BUILDER_IMAGE_DIGEST_CONTEXT,
-  BUILDER_IMAGE_DIGEST_UNSET,
+  builderImageDigest,
   BUILDER_LOG_GROUP_NAME,
   BUILDER_MEMORY_MB,
   BUILDER_TASK_FAMILY,
@@ -185,8 +185,7 @@ export class BuildsStack extends Stack {
     });
 
     // Ticket 2.9: the builder's task. Its image is the deploy workflow's push, named by digest.
-    const digest = String(this.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT) ?? BUILDER_IMAGE_DIGEST_UNSET);
-    if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${BUILDER_IMAGE_DIGEST_CONTEXT} must be sha256:<64 hex digits>`);
+    const digest = builderImageDigest(this.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT));
     // Only tasks on the builds cluster may assume the builder's task role (ticket 2.9 try 2). Unverified until the first
     // live build: that ECS names the task's ARN as aws:SourceArn there; if a task fails with "ECS was unable to assume the
     // role", widen it to `arn:aws:ecs:<region>:<account>:*` (infra/README.md). The execution role keeps the account-wide

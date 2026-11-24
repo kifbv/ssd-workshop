@@ -100,7 +100,7 @@ flowchart LR
 | `NoStartTask` | Deny `ecs:StartTask` (tasks on EC2 container instances), as in the deploy policies. |
 | `K3sNodeHeartbeat` | Advanced-track k3s nodes report to Systems Manager, only for instances tagged with the project. |
 | `K3sNodeChannels` | Session Manager and Run Command channels of the calling instance, and reading instance tags. |
-| `NoExternalSharing` | Deny, for workload roles too: the same sharing and egress actions as the deploy policies' `NoExternalSharing`, except `s3:PutBucketNotification`, which CDK's bucket notifications handler (a workshop role) needs (accepted risk 12). |
+| `NoExternalSharing` | Deny, for workload roles too: the same sharing and egress actions as the deploy policies' `NoExternalSharing`, except `s3:PutBucketNotification`, which CDK's bucket notifications handler (a workshop role) needs (accepted risk 12). Also (access review follow-up) `sqs:SetQueueAttributes`, `sqs:DeleteQueue` and `sqs:PurgeQueue`: a role a session creates could otherwise set a queue `Policy` opening `ssd-workshop-deploys*` or `ssd-workshop-builds*` to outside senders, or delete or purge them. No workload role uses them; CloudFormation changes queues as the deploy role, which has no boundary. |
 
 **`ssd-workshop-deploy`** (deploy rights, part 1: stacks, named resources, IAM, and the denies that guard them):
 
@@ -198,6 +198,7 @@ flowchart LR
 | `NoEventSourcesForSessions` | Ticket 2.9 try 3 (pending Franck's yes; replaces try 2's `NoLauncherSourcesForSessions`). For the Claude user only: deny `lambda:CreateEventSourceMapping`, `UpdateEventSourceMapping` and `DeleteEventSourceMapping`, with no other condition: no condition key names a mapping's queue (Service Authorization Reference, read 2026-11-24), and a call by mapping UUID may carry no function ARN. A session cannot feed the launch or deploy queue to its own function, nor feed the launcher from another queue or cut off its check. Reading a mapping stays allowed; deploys from `main` still manage mappings. |
 | `NoBuildCheckScheduleForSessions` | Ticket 2.9 try 3 (pending Franck's yes). For the Claude user only: deny `scheduler:Create*`, `Update*` and `Delete*` on `schedule/*/ssd-workshop-builds-check`, so a session cannot stop or redirect the stuck-build check. |
 | `NoBuildsClusterTasksForSessions` | Ticket 2.9 try 3 (pending Franck's yes). For the Claude user only: deny `ecs:RunTask` of any task definition where `ecs:cluster` is `cluster/ssd-workshop-builds` (the builder's own definition is already denied by `NoBuildTasksForSessions`). |
+| `NoBuildsClusterServicesForSessions` | Access review follow-up to ticket 2.9 (pending Franck's yes). For the Claude user only: deny `ecs:CreateService`, `ecs:UpdateService` and `ecs:CreateTaskSet` on `service/ssd-workshop-builds/*` and `task-set/ssd-workshop-builds/*`, so a session cannot run tasks on the builds cluster through a service or task set either (no deploy policy grants task sets today). |
 | `NoGitHubKey` | Deny every Secrets Manager action on the GitHub App's private key (`secret:ssd-workshop-github-*`, ticket 2.6) except creating, describing, tagging and reading its policy or version ids (a `NotAction` list, so new actions are denied too): only Franck loads it and only the build launcher (2.9) reads it. CloudFormation still creates the secret; any later change of it (settings or tags: CloudFormation's update handler reads the value) and drift detection on it go through Franck. In this policy because `ssd-workshop-deploy` is too close to its size limit. |
 | `WorkshopZoneReads` | The rankly.games zone and its records. |
 | `WorkshopIamReads` | Read roles and instance profiles on `/ssd-workshop/` and `ssd-workshop-*` policies (not `GetAccountAuthorizationDetails` or other projects' roles). |
@@ -395,7 +396,8 @@ follow-up.
     (its deploy rights) but may not send to `ssd-workshop-deploys*` (`NoBuildQueueForSessions`);
     under the boundary only the builder's task role may (`DeploysFromTheBuilderOnly`), and since try
     3 a session can neither pass that role nor run any task on the builds cluster
-    (`NoBuildsClusterTasksForSessions`), nor map a queue to a function (`NoEventSourcesForSessions`),
+    (`NoBuildsClusterTasksForSessions`, and through a service or task set
+    `NoBuildsClusterServicesForSessions`), nor map a queue to a function (`NoEventSourcesForSessions`),
     nor change the check's schedule (`NoBuildCheckScheduleForSessions`). An account admin with both
     table and SQS rights could; that is the residual.
 
@@ -407,10 +409,15 @@ follow-up.
       session wrote, which the platform's own roles build and publish. The session never sees
       that build's token.
     - Create its own function (with its own boundary role) and invoke it to receive and delete
-      launch or deploy messages (the boundary allows `sqs:*` on workshop queues and has 226
-      characters left, too few for a receive deny). A denial of service only: a swallowed deploy
+      launch or deploy messages (the boundary allows `sqs:ReceiveMessage` and `DeleteMessage` on
+      workshop queues and has 166 characters left, too few for a receive deny; it denies queue
+      attribute writes, deletes and purges). A denial of service only: a swallowed deploy
       message fails the build after the check's grace, a swallowed launch leaves it `queued`
       until `retry`.
+    - Deregister the builder's task definition (`ecs:DeregisterTaskDefinition` has Resource `*`
+      only) or delete images in `ssd-workshop-*` ECR repositories (their deploy rights). Also a
+      denial of service only: new builds fail to start until the next deploy from `main`
+      registers and pushes them again; nothing live changes.
 
     Accepted residual (IAM cannot pin a build id): the builder's task role may update any
     `BUILD#*` item within `BUILDER_BUILD_UPDATE_ATTRIBUTES`, so a compromised builder task (the

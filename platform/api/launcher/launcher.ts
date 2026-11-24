@@ -36,7 +36,7 @@ import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/a
 import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
-import { BUILD_TASK_MAX_MS, BUILDS_CLUSTER_NAME, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { ACCOUNT, BUILD_TASK_MAX_MS, BUILDS_CLUSTER_NAME, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, REGION } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { BuildStatus } from "../types.js";
 
@@ -307,10 +307,11 @@ async function drain(queue: DeadLetters, handle: (body: string | undefined) => P
 }
 
 /**
- * A task of the builds cluster (long ARN form, 32 hexadecimal digits). The watch list is in the shared table, so the check
- * asks ECS only about such ARNs: one malformed entry would otherwise make DescribeTasks fail for every build.
+ * A task of the builds cluster in the workshop's own region and account (long ARN form, 32 hexadecimal digits). The watch
+ * list is in the shared table, so the check asks ECS only about such ARNs: one malformed or forged entry (another cluster,
+ * region or account) would otherwise make DescribeTasks fail for every build.
  */
-const BUILD_TASK_ARN = new RegExp(`^arn:aws:ecs:[a-z0-9-]+:\\d{12}:task/${BUILDS_CLUSTER_NAME}/[0-9a-f]{32}$`);
+const BUILD_TASK_ARN = new RegExp(`^arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/[0-9a-f]{32}$`);
 
 /** The stuck-build check. Every write is conditional, so two checks at once (or a check racing a launch) are harmless. */
 export async function runCheck(deps: CheckDeps): Promise<void> {

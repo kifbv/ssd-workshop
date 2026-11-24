@@ -1159,6 +1159,19 @@ describe("access stack: sharing outside the account", () => {
     expect(BOUNDARY_SHARING.filter((a) => !denied(without, "*", a))).toEqual(BOUNDARY_SHARING);
   });
 
+  it("denies workload roles setting queue attributes (a queue Policy), deleting or purging queues (access review)", () => {
+    const boundary = boundaryStatements(template);
+    const QUEUE_WRITES = ["sqs:SetQueueAttributes", "sqs:DeleteQueue", "sqs:PurgeQueue"];
+    for (const name of ["ssd-workshop-deploys", "ssd-workshop-builds", "ssd-workshop-other"]) {
+      const queue = `arn:aws:sqs:${REGION}:${ACCOUNT}:${name}`;
+      for (const a of QUEUE_WRITES) expect(allowedBy(boundary, a, queue, { "aws:PrincipalArn": WORKLOAD_ROLE }), `${a} ${name}`).toBe(false);
+    }
+    const without = boundary.filter((s) => s.Sid !== "NoExternalSharing");
+    for (const a of QUEUE_WRITES) expect(denied(without, "*", a), a).toBe(false);
+    // The deploy policies keep them: CloudFormation (the deploy role, no boundary) manages the queues.
+    for (const a of QUEUE_WRITES) expect(denied(deployStatements(template), "*", a), a).toBe(false);
+  });
+
   it("denies invoke permissions, event targets and subscriptions that leave the workshop", () => {
     expect(conditionalDeny(stmts, "lambda:AddPermission", "StringNotEquals", "lambda:Principal")?.Resource).toBe("*");
     const targets = conditionalDeny(stmts, "events:PutTargets", "ForAnyValue:ArnNotLike", "events:TargetArn");
@@ -1603,6 +1616,24 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildsClusterTasksForSessions"), "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
       expect(allowedBy(deploy, "ecs:RunTask", own, { ...DEPLOY, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
       expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": `${ECS_ARN}:cluster/ssd-workshop-other` })).toBe(true);
+    });
+
+    it("denies the Claude user creating or updating a service or task set on the builds cluster (access review)", () => {
+      const service = (cluster: string) => `${ECS_ARN}:service/${cluster}/ssd-workshop-session-own`;
+      const taskSet = (cluster: string) => `${ECS_ARN}:task-set/${cluster}/ssd-workshop-session-own/ecs-svc-0123`;
+      const withoutDeny = deploy.filter((s) => s.Sid !== "NoBuildsClusterServicesForSessions");
+      for (const action of ["ecs:CreateService", "ecs:UpdateService"]) {
+        expect(allowedBy(deploy, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(false);
+        expect(allowedBy(withoutDeny, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(true);
+        expect(allowedBy(deploy, action, service("ssd-workshop-builds"), DEPLOY), action).toBe(true);
+        expect(allowedBy(deploy, action, service("ssd-workshop-other"), CLAUDE), action).toBe(true);
+      }
+      // No deploy policy grants task sets today; the deny keeps the builds cluster's closed if one ever does.
+      expect(allowedBy(deploy, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(false);
+      const deny = deploy.find((s) => s.Sid === "NoBuildsClusterServicesForSessions");
+      expect(deny && statementApplies(deny, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(true);
+      expect(deny && statementApplies(deny, "ecs:CreateTaskSet", taskSet("ssd-workshop-other"), CLAUDE)).toBe(false);
+      expect(deny && statementApplies(deny, "ecs:CreateService", service("ssd-workshop-builds"), DEPLOY)).toBe(false);
     });
 
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {

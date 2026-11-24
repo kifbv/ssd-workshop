@@ -441,10 +441,17 @@ describe("the stuck-build check (ticket 2.9)", () => {
     expect(s.table.builds.get(BUILD)?.status).toBe("building");
   });
 
-  it("WHEN a watch entry names a task outside the builds cluster THEN the check removes it without asking ECS, and still checks the other builds (try 3, access review LOW 4)", async () => {
+  it("WHEN a watch entry names a task outside the builds cluster (or in another account or region) THEN the check removes it without asking ECS, and still checks the other builds (try 3, access review LOW 4)", async () => {
     const s = await launched();
     s.tasks.exit(s.taskArn);
-    const bad = ["not-an-arn", "arn:aws:ecs:eu-central-1:360206963848:task/other-cluster/0123", "arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/../x"];
+    const hex = "0123456789abcdef0123456789abcdef";
+    const bad = [
+      "not-an-arn",
+      "arn:aws:ecs:eu-central-1:360206963848:task/other-cluster/0123",
+      "arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/../x",
+      `arn:aws:ecs:eu-central-1:111122223333:task/ssd-workshop-builds/${hex}`,
+      `arn:aws:ecs:us-east-1:360206963848:task/ssd-workshop-builds/${hex}`,
+    ];
     bad.forEach((taskArn, i) => s.table.launches.set(`bad-${String(i)}`, { buildId: `bad-${String(i)}`, claimedAt: "2026-11-24T10:00:00.000Z", taskArn }));
     const asked: string[][] = [];
     const describe = s.tasks.describe.bind(s.tasks);

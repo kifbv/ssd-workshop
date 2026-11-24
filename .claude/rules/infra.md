@@ -234,8 +234,8 @@ paths:
 - A deny "for every role but X" in the boundary (ticket 2.9 try 2): `ArnNotLike` `aws:PrincipalArn`
   `arn:aws:iam::<account>:role*/<name>` covers X with and without its path in one value (a role name is unique in
   an account), half the size of listing both forms; test look-alikes (`x-<name>`, `<name>x`, `<name>-execution`). The
-  boundary is close to 6,144 characters (5,918 after 2.9): check the size test before adding to it. Every role such a
-  deny lets through by name is then a target to borrow: deny the Claude user everything but reads on it (and on the
+  boundary is close to 6,144 characters (5,978 after 2.9's access review; `-deploy-read` 6,106): check the size test
+  before adding to it. Every role such a deny lets through by name is then a target to borrow: deny the Claude user everything but reads on it (and on the
   functions that run as it) in `NoLauncherForSessions` (ticket 2.9 try 3; `role*/<name>` works in `Resource` too), or a
   session passes it to its own task or function.
 - Lambda has no condition key for an event source mapping's queue, and calls by mapping UUID may carry no
@@ -245,3 +245,6 @@ paths:
   `requestParameters`): a secret passed there (2.9's builder token) needs `DescribeTasks` denied to sessions and, in the
   boundary, to every role but the one that must watch the task; and the action that would turn the secret into an
   effect (the deploy message) denied too, so a leak alone changes nothing live.
+- Validate CDK context (`builderImageDigest`) at the top of `buildApp`, before any stack: a stack's constructor runs
+  after every earlier stack has bundled its Lambdas, so a refusal test that waits for it times out on CI's runner. One
+  helper in `config.ts` holds the rule for both places.
