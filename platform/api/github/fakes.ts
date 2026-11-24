@@ -236,15 +236,25 @@ export class FakeGitHub {
     }
     if (!repo || !this.canUse(auth, name, "contents")) return json(404, { message: "Not Found" });
     if (method === "PUT" && rest.startsWith("/contents/")) {
+      // As GitHub does: the file is added to the default branch's tree, in a commit on top of it when it exists;
+      // a file that is already there needs its blob id (`sha`), else 422.
       const file = rest.slice("/contents/".length);
+      const base = repo.main === undefined ? undefined : repo.commits.get(repo.main);
+      const entries = new Map(base === undefined ? [] : (repo.trees.get(base.tree) ?? []));
+      if (entries.has(file) && body.sha === undefined) return json(422, { message: 'Invalid request.\n\n"sha" wasn\'t supplied.' });
       const bytes = Buffer.from(String(body.content), "base64");
       const blob = gitBlobSha(bytes);
       repo.blobs.set(blob, bytes);
-      const tree = sha1(`tree ${file} ${blob}`);
-      repo.trees.set(tree, new Map([[file, blob]]));
-      const commit = this.addCommit(repo, { message: String(body.message), tree, parents: repo.main ? [repo.main] : [], author: body.author, committer: body.committer });
+      entries.set(file, blob);
+      const tree = sha1(`tree ${JSON.stringify([...entries].sort())}`);
+      repo.trees.set(tree, entries);
+      const parents = repo.main ? [repo.main] : [];
+      const commit = this.addCommit(repo, { message: String(body.message), tree, parents, author: body.author, committer: body.committer });
       repo.main = commit;
-      return json(201, { commit: { sha: commit } });
+      return json(201, {
+        content: { path: file, sha: blob },
+        commit: { sha: commit, tree: { sha: tree }, parents: parents.map((sha) => ({ sha })) },
+      });
     }
     if (repo.main === undefined) return json(409, { message: "Git Repository is empty." });
     if (method === "GET" && rest === "/git/ref/heads/main") return json(200, { ref: "refs/heads/main", object: { sha: repo.main, type: "commit" } });

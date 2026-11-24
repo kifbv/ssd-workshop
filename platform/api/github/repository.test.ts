@@ -65,6 +65,7 @@ beforeAll(async () => {
 });
 
 const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
+const EARLIER_FILES = { "SPEC.md": "# Earlier app\n" };
 const EMAIL = /[^\s<>"'()]+@[^\s<>"'()]+\.[a-z]{2,}/gi;
 
 describe("loadTemplateFiles and withSpec", () => {
@@ -220,7 +221,7 @@ describe("builderToken (criterion 3)", () => {
       const { github, deps } = setup();
       github.tokenLifetimeMs = lifetime;
       await expect(builderToken(credentials, "Hana", deps)).rejects.toThrow(/within an hour/);
-      }
+    }
   });
 
   it("refuses an answer that reaches all repositories, another repository or more rights", async () => {
@@ -237,7 +238,7 @@ describe("builderToken (criterion 3)", () => {
       const { github, deps } = setup();
       github.overrideTokenAnswer = answer;
       await expect(builderToken(credentials, "Hana", deps), JSON.stringify(answer)).rejects.toThrow(/more than the one repository/);
-      }
+    }
   });
 });
 
@@ -374,6 +375,103 @@ describe("a parentless commit with the opening message is replaced only when it 
       const update = github.calls.find((c) => c.method === "PATCH");
       expect(update?.body?.force).toBe(false);
     }
+  });
+});
+
+describe("a rebuild whose get-branch answers GitHub's brief 404 is never forced over the earlier history", () => {
+  const getBranch = (url: string, init: RequestInit): boolean => (init.method ?? "GET") === "GET" && url.endsWith("/git/ref/heads/main");
+  /** Answers 404 to the first get-branch, then lets GitHub answer. */
+  const branch404Once = (s: Setup): void => {
+    let first = true;
+    intercept(s, (url, init) => {
+      if (!first || !getBranch(url, init)) return undefined;
+      first = false;
+      return jsonAnswer(404, { message: "Not Found" });
+    });
+  };
+  const EARLIER_APP = { "SPEC.md": "# Earlier app\n", "app.js": "console.log('earlier');\n" };
+
+  it("without README.md: the opening commit lands on top of main, and the rebuild goes on top of it, not forced", async () => {
+    const s = setup();
+    s.github.addRepository("ssd-olga");
+    const root = s.github.seedCommit("ssd-olga", EARLIER_APP, FIRST_COMMIT_MESSAGE);
+    const earlier = s.github.seedCommit("ssd-olga", EARLIER_APP, REBUILD_COMMIT_MESSAGE, [root]);
+    branch404Once(s);
+    const result = await prepareRepository({ credentials, nickname: "olga", spec: SPEC, templateFiles: template }, s.deps);
+    const history = s.github.history("ssd-olga");
+    expect(history.map((c) => c.sha)).toContain(earlier);
+    expect(history.map((c) => c.sha)).toContain(root);
+    expect(history[0]?.sha).toBe(result.commit);
+    expect(history[0]?.message).toBe(REBUILD_COMMIT_MESSAGE);
+    expect(history[1]?.message).toBe(BOOTSTRAP_MESSAGE);
+    expect(history[2]?.sha).toBe(earlier);
+    const update = s.github.calls.find((c) => c.method === "PATCH");
+    expect(update?.body?.force).toBe(false);
+  });
+
+  it("with README.md: GitHub's 422 to the opening commit makes it read main again, and the rebuild goes on top, not forced", async () => {
+    const s = setup();
+    s.github.addRepository("ssd-otto");
+    const earlier = s.github.seedCommit("ssd-otto", { ...EARLIER_APP, "README.md": "# Earlier app\n" }, FIRST_COMMIT_MESSAGE);
+    branch404Once(s);
+    const result = await prepareRepository({ credentials, nickname: "otto", spec: SPEC, templateFiles: template }, s.deps);
+    expect(s.github.history("ssd-otto").map((c) => c.sha)).toEqual([result.commit, earlier]);
+    expect(s.github.calls.filter((c) => c.method === "PUT")).toHaveLength(1);
+    // The second read of main (the first, answered 404 by the interception, never reached the fake).
+    expect(s.github.calls.filter((c) => c.method === "GET" && c.path.endsWith("/git/ref/heads/main"))).toHaveLength(1);
+    const update = s.github.calls.find((c) => c.method === "PATCH");
+    expect(update?.body?.force).toBe(false);
+  });
+
+  it("an opening commit that was made but answered 409 (so tried again, then 422) is still replaced, as a lone opening commit", async () => {
+    const s = setup();
+    let first = true;
+    const fetch = s.github.fetch;
+    s.deps.fetch = async (url, init) => {
+      const answer = await fetch(url, init);
+      if (first && init.method === "PUT") {
+        first = false;
+        return jsonAnswer(409, { message: "Conflict" });
+      }
+      return answer;
+    };
+    const result = await prepareRepository({ credentials, nickname: "Pia", spec: SPEC, templateFiles: template }, s.deps);
+    expect(s.github.history("ssd-pia").map((c) => c.sha)).toEqual([result.commit]);
+    expect(s.github.history("ssd-pia")[0]?.message).toBe(FIRST_COMMIT_MESSAGE);
+  });
+
+  it("an opening commit's answer without a valid id or a parents list fails plainly, and main is not moved", async () => {
+    const answers: { body: unknown; error: string }[] = [
+      { body: { commit: { sha: "abc123", parents: [] } }, error: 'GitHub\'s answer to the step "bootstrap" holds no valid id.' },
+      { body: { commit: { sha: "a".repeat(40) } }, error: 'GitHub\'s answer to the step "bootstrap" holds no list of parents.' },
+      { body: { commit: { sha: "a".repeat(40), parents: "none" } }, error: 'GitHub\'s answer to the step "bootstrap" holds no list of parents.' },
+    ];
+    for (const one of answers) {
+      const s = setup();
+      intercept(s, (url, init) => (init.method === "PUT" ? jsonAnswer(201, one.body) : undefined));
+      await expect(prepareRepository({ credentials, nickname: "Quinn", spec: SPEC, templateFiles: template }, s.deps), JSON.stringify(one.body)).rejects.toThrow(
+        one.error,
+      );
+      expect(s.github.calls.some((c) => c.method === "PATCH")).toBe(false);
+    }
+  });
+});
+
+describe("a leftover opening commit whose answer lists no parents", () => {
+  it("is not taken for a lone opening commit: the rebuild goes on top, not forced", async () => {
+    const s = setup();
+    s.github.addRepository("ssd-rosa");
+    const root = s.github.seedCommit("ssd-rosa", EARLIER_FILES, FIRST_COMMIT_MESSAGE);
+    const leftover = s.github.seedCommit("ssd-rosa", { [BOOTSTRAP_FILE]: BOOTSTRAP_TEXT }, BOOTSTRAP_MESSAGE, [root]);
+    const tree = s.github.repo("ssd-rosa").commits.get(leftover)?.tree;
+    intercept(s, (url, init) =>
+      (init.method ?? "GET") === "GET" && url.endsWith(`/git/commits/${leftover}`)
+        ? jsonAnswer(200, { sha: leftover, message: BOOTSTRAP_MESSAGE, tree: { sha: tree } })
+        : undefined,
+    );
+    const result = await prepareRepository({ credentials, nickname: "rosa", spec: SPEC, templateFiles: template }, s.deps);
+    expect(s.github.history("ssd-rosa").map((c) => c.sha)).toEqual([result.commit, leftover, root]);
+    expect(s.github.calls.find((c) => c.method === "PATCH")?.body?.force).toBe(false);
   });
 });
 

@@ -240,7 +240,8 @@ async function createOrFindRepository(deps: GitHubDeps, adminToken: string, name
  *   rebuild starts from the template, decision "(2.6) Rebuild").
  *
  * A repository whose `main` still points at the opening commit alone (an earlier try stopped half-way) is treated
- * as new.
+ * as new. Only a commit known to have no parent (the opening commit as GitHub answered it, or that leftover) is
+ * ever replaced by force; anything else gets the new commit on top, so no earlier history leaves `main`.
  */
 export async function prepareRepository(
   input: { credentials: AppCredentials; nickname: string; spec: string; templateFiles: readonly RepositoryFile[] },
@@ -263,30 +264,36 @@ export async function prepareRepository(
   const call = (step: GitHubStep, method: "GET" | "POST" | "PUT" | "PATCH", path: string, body?: unknown) =>
     withRetry(deps, () => once(step, method, path, body));
 
-  // Where `main` stands: 409 (empty) or 404 (no main yet) means the repository must be opened first.
-  let head: string | undefined;
-  // Not retried: its 404 or 409 is the expected answer for an empty repository.
+  // Where `main` stands: 409 (empty) or 404 (no main yet) means the repository must be opened first. Not retried:
+  // its 404 or 409 is the expected answer for an empty repository (but may also be GitHub's brief 404, see below).
   const branch = await once("get-branch", "GET", `/git/ref/heads/${APPS_DEFAULT_BRANCH}`);
-  if (branch.status === 200) {
-    head = gitId(record(branch.json.object).sha, "get-branch");
-  } else if (branch.status !== 404 && branch.status !== 409) {
-    expectStatus(branch, "get-branch", 200);
-  }
-
-  let fresh = head === undefined;
+  if (branch.status !== 200 && branch.status !== 404 && branch.status !== 409) expectStatus(branch, "get-branch", 200);
+  let head = branch.status === 200 ? gitId(record(branch.json.object).sha, "get-branch") : undefined;
+  // The parents of the commit written below: none for a first commit (forced over the opening one), else `head`.
+  let parents: string[];
   if (head === undefined) {
-    expectStatus(
-      await call("bootstrap", "PUT", `/contents/${BOOTSTRAP_FILE}`, {
-        message: BOOTSTRAP_MESSAGE,
-        content: Buffer.from(BOOTSTRAP_TEXT).toString("base64"),
-        author: { ...COMMIT_IDENTITY },
-        committer: { ...COMMIT_IDENTITY },
-      }),
-      "bootstrap",
-      201,
-    );
+    const opened = await call("bootstrap", "PUT", `/contents/${BOOTSTRAP_FILE}`, {
+      message: BOOTSTRAP_MESSAGE,
+      content: Buffer.from(BOOTSTRAP_TEXT).toString("base64"),
+      author: { ...COMMIT_IDENTITY },
+      committer: { ...COMMIT_IDENTITY },
+    });
+    if (opened.status === 422) {
+      // README.md is there already (GitHub asks for its blob id): the repository is not empty and get-branch's 404 was
+      // GitHub's brief one. Read `main` again, this time with retries (decision "(2.6) Opening refused").
+      const again = expectStatus(await call("get-branch", "GET", `/git/ref/heads/${APPS_DEFAULT_BRANCH}`), "get-branch", 200);
+      head = gitId(record(again.object).sha, "get-branch");
+      parents = (await isLoneOpeningCommit(head, call)) ? [] : [head];
+    } else {
+      // GitHub puts the opening commit on top of `main` when `main` exists: only a parentless one opened an empty
+      // repository and may be replaced; otherwise it is the head of a rebuild (decision "(2.6) Opening commit checked").
+      const commit = record(expectStatus(opened, "bootstrap", 201).commit);
+      const opening = gitId(commit.sha, "bootstrap");
+      if (!Array.isArray(commit.parents)) throw new GitHubProblem('GitHub\'s answer to the step "bootstrap" holds no list of parents.');
+      parents = commit.parents.length === 0 ? [] : [opening];
+    }
   } else {
-    fresh = await isLoneOpeningCommit(head, call);
+    parents = (await isLoneOpeningCommit(head, call)) ? [] : [head];
   }
 
   const entries: { path: string; mode: "100644"; type: "blob"; sha: string }[] = [];
@@ -301,7 +308,6 @@ export async function prepareRepository(
   }
   // No base_tree: the tree is exactly the template and the spec.
   const tree = gitId(expectStatus(await call("tree", "POST", "/git/trees", { tree: entries }), "tree", 201).sha, "tree");
-  const parents = fresh || head === undefined ? [] : [head];
   const message = parents.length === 0 ? FIRST_COMMIT_MESSAGE : REBUILD_COMMIT_MESSAGE;
   const commit = gitId(
     expectStatus(await call("commit", "POST", "/git/commits", commitRequest(message, tree, parents, deps.now())), "commit", 201).sha,
@@ -323,8 +329,8 @@ async function isLoneOpeningCommit(
   call: (step: GitHubStep, method: "GET", path: string) => Promise<GitHubAnswer>,
 ): Promise<boolean> {
   const commit = expectStatus(await call("get-commit", "GET", `/git/commits/${head}`), "get-commit", 200);
-  const parents = Array.isArray(commit.parents) ? commit.parents : [];
-  if (text(commit.message)?.trim() !== BOOTSTRAP_MESSAGE || parents.length !== 0) return false;
+  // Fail safe: an answer without a parents list is not taken for a parentless commit.
+  if (text(commit.message)?.trim() !== BOOTSTRAP_MESSAGE || !Array.isArray(commit.parents) || commit.parents.length !== 0) return false;
   const treeId = gitId(record(commit.tree).sha, "get-commit");
   const tree = expectStatus(await call("get-tree", "GET", `/git/trees/${treeId}`), "get-tree", 200);
   const entries = Array.isArray(tree.tree) ? tree.tree.map(record) : [];
