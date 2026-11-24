@@ -181,10 +181,11 @@ export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "s
 export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
 /**
  * The only attribute names the data API may write (PutItem, UpdateItem and DeleteItem, in `APPDATA#*`
- * partitions only): a value item's and the totals item's. Never `liveAt` or `nickname` (the live
- * marker's, in `APP#*`, which only the deployer writes).
+ * partitions only): a value item's and the totals item's (with the daily write count, `writeDay` and
+ * `writtenBytes`). Never `liveAt` or `nickname` (the live marker's, in `APP#*`, which only the deployer
+ * writes).
  */
-export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt"] as const;
+export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes"] as const;
 
 /** Lambda function, role and log group of the conversation routes (ticket 1.7). */
 export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;

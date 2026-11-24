@@ -61,6 +61,14 @@ export const SIGN_IN_CODE_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 export const SIGN_IN_VERIFY_ROUTE_KEY = "POST /api/sign-in/verify";
 export const SIGN_IN_VERIFY_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 
+/**
+ * Route throttles for the data API (ticket 2.4): reachable by anyone with an app's address. Writes
+ * cost DynamoDB write units by size, so PUT and DELETE get 10 requests/s (burst 20) on top of each
+ * app's daily write budget; reads cost far less, GET gets 20/s (burst 40). OPTIONS keeps the stage's.
+ */
+export const APP_DATA_WRITE_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
+export const APP_DATA_READ_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+
 /** The protected participant routes (ticket 1.5), all served by one function behind one session check. */
 export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
@@ -412,7 +420,7 @@ export class ApiStack extends Stack {
       }),
     );
     // One invoke permission scoped to this API (path parameter route, as for the participant routes).
-    this.api.addRoutes({
+    const appDataRoutes = this.api.addRoutes({
       path: APP_DATA_PATH,
       methods: [...APP_DATA_METHODS],
       integration: new HttpLambdaIntegration("AppDataIntegration", appData, { scopePermissionToRoute: false }),
@@ -429,7 +437,18 @@ export class ApiStack extends Stack {
       ThrottlingRateLimit: SIGN_IN_VERIFY_THROTTLE.rateLimit,
       ThrottlingBurstLimit: SIGN_IN_VERIFY_THROTTLE.burstLimit,
     });
-    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes]) cfnStage.node.addDependency(route);
+    const appDataThrottles = [
+      [HttpMethod.PUT, APP_DATA_WRITE_THROTTLE],
+      [HttpMethod.DELETE, APP_DATA_WRITE_THROTTLE],
+      [HttpMethod.GET, APP_DATA_READ_THROTTLE],
+    ] as const;
+    for (const [method, throttle] of appDataThrottles) {
+      cfnStage.addPropertyOverride(`RouteSettings.${method} ${APP_DATA_PATH}`, {
+        ThrottlingRateLimit: throttle.rateLimit,
+        ThrottlingBurstLimit: throttle.burstLimit,
+      });
+    }
+    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes, ...appDataRoutes]) cfnStage.node.addDependency(route);
 
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",

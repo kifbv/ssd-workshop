@@ -435,6 +435,19 @@ round-trip a JSON value. The log group `ssd-workshop-api-app-data` has one line 
 status and size only; a refusal from DynamoDB shows as `"outcome":"failed"` with the error name
 (`AccessDeniedException` for a missing right).
 
+The stage throttles `PUT` and `DELETE` on the route at 10 requests/s (burst 20) and `GET` at 20/s (burst 40), read-only:
+
+```sh
+aws apigatewayv2 get-stage --region eu-central-1 --api-id <API id from infra/lib/config.ts> --stage-name '$default' \
+  --query 'RouteSettings'
+# expect: the two sign-in routes at 5/10, "PUT /api/apps/{nickname}/data/{key}" and "DELETE ..." at 10/20,
+#         "GET ..." at 20/40
+```
+
+Each app may also write 20 MB per UTC day (`writeDay`, `writtenBytes` in its `DATA_USAGE` item); past that,
+`PUT` and `DELETE` answer 429 "This app has saved a lot of data today. Saving starts again tomorrow." until
+midnight UTC.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

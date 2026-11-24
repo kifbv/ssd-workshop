@@ -316,6 +316,13 @@ export interface AppDataUsageItem extends Keyed {
   keys: number;
   /** ISO 8601. */
   updatedAt: string;
+  /**
+   * The UTC day (YYYY-MM-DD) that `writtenBytes` counts: the daily write budget (20 MB per app and
+   * day, each PUT counting its value's bytes and at least 1 KB, each DELETE 1 KB), kept within it by
+   * the same transaction's condition. The first write of a new day starts the count again.
+   */
+  writeDay: string;
+  writtenBytes: number;
 }
 
 export type TableItem =

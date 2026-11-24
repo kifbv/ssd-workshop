@@ -35,6 +35,12 @@ paths:
 - A limit on tries (sign-in codes: 5 wrong tries) is counted with one atomic DynamoDB `ADD` (`ReturnValues: UPDATED_NEW`,
   condition `attribute_exists(pk)`), never a read-then-conditional-write that gives up after lost races: parallel
   requests would otherwise escape the limit. Test it with a burst of parallel requests against the fake.
+- When a limit spans two items (data API totals, ticket 2.4), enforce it with conditions inside one TransactWriteItems;
+  retrying with a short random pause and then answering 409 is fine because a lost race can never pass the limit.
+  Writes that all update one item (an app's `DATA_USAGE`) cancel each other with `TransactionConflict` on DynamoDB,
+  which the in-memory fakes do not reproduce: pause 20 to 80 ms at random before another try.
+- A public write path whose limits a loop can stay under (replacing one value) needs a cost cap of its own: a daily
+  byte budget per app in the same transaction (ticket 2.4: 20 MB per UTC day, 429) and route throttles.
 - Pages (`platform/web`): no inline `<script>`, `<style>`, `style=` or `on*=` attributes (the CSP has `script-src 'self'`
   and `style-src 'self'`); set text with `textContent`. Browser code gets DOM types from `platform/web/tsconfig.json`
   only. In Playwright, a `hidden` element is not in the accessibility tree: `getByRole` waits forever for it, so read

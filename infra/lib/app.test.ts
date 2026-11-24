@@ -17,6 +17,8 @@ import {
   AI_WORKER_TIMEOUT_SECONDS,
   APP_DATA_METHODS,
   APP_DATA_PATH,
+  APP_DATA_READ_THROTTLE,
+  APP_DATA_WRITE_THROTTLE,
 } from "./api-stack.js";
 import { APP_DATA_ROUTES as APP_DATA_ROUTE_KEYS } from "../../platform/api/app-data/data.js";
 import { STALE_PENDING_SECONDS } from "../../platform/api/conversation/state.js";
@@ -1022,7 +1024,7 @@ describe("api stack: sign-in verify function (ticket 1.5)", () => {
     expect(SIGN_IN_VERIFY_ROUTE_KEY).toBe("POST /api/sign-in/verify");
     expect(SIGN_IN_VERIFY_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 10 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
-    expect(stage?.Properties?.RouteSettings).toEqual({
+    expect(stage?.Properties?.RouteSettings).toMatchObject({
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
     });
@@ -1228,7 +1230,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPDATA#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes"] },
         },
       },
     ]);
@@ -1244,6 +1246,27 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     expect(like("APPDATA#*", "APP#ada")).toBe(false);
     expect(like("APP#*", "APPDATA#ada")).toBe(false);
     expect(like("APPDATA#*", "APPDATA#ada")).toBe(true);
+  });
+
+  it("throttles PUT and DELETE at 10 requests/s (burst 20) and GET at 20/s (burst 40), after the routes exist; OPTIONS keeps the stage's", () => {
+    expect(APP_DATA_WRITE_THROTTLE).toEqual({ rateLimit: 10, burstLimit: 20 });
+    expect(APP_DATA_READ_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
+    // Every route setting of the stage, exactly: the sign-in routes' and the data API's.
+    expect(stage?.Properties?.RouteSettings).toEqual({
+      "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+      "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+      [`PUT ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
+      [`DELETE ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
+      [`GET ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+    });
+    for (const method of ["GET", "PUT", "DELETE"]) {
+      const routeId = f
+        .apiResources()
+        .find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === `${method} ${APP_DATA_PATH}`)?.[0];
+      expect(routeId, method).toBeDefined();
+      expect([stage?.DependsOn].flat(), method).toContain(routeId);
+    }
   });
 
   it("bundles the handler into a self-contained index.js that answers the preflight with CORS, without the table", async () => {

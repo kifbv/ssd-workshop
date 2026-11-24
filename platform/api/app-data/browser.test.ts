@@ -70,7 +70,7 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
       void (async () => {
         const path = new URL(request.url ?? "/", "http://localhost").pathname;
         if (DATA_ROUTE.test(path)) {
-          const handle = createHandler({ store, now: () => new Date(), log: (entry) => logs.push(entry) });
+          const handle = createHandler({ store, now: () => new Date(), log: (entry) => logs.push(entry), pause: async () => {} });
           const answer = await handle(toEvent(request, path, await readBody(request)));
           seen.push({
             method: request.method ?? "",

@@ -49,7 +49,7 @@ describe("criterion 6: the function's logs hold no stored value", () => {
     const capture = captureConsole();
     const store = new FakeAppDataStore();
     store.live.add(NICK.toLowerCase());
-    const call = createHandler({ store, now: () => new Date("2026-11-24T10:00:00.000Z"), log: logEntry });
+    const call = createHandler({ store, now: () => new Date("2026-11-24T10:00:00.000Z"), log: logEntry, pause: async () => {} });
     const values = [
       "VALUE-MARKER-TEXT",
       { secretField: "VALUE-MARKER-OBJECT", list: ["VALUE-MARKER-LIST"] },

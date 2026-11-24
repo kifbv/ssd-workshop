@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { handleAppDataRequest, type AppDataDeps, type AppDataLogEntry } from "../app-data/data.js";
+import { handleAppDataRequest, pauseBeforeRetry, type AppDataDeps, type AppDataLogEntry } from "../app-data/data.js";
 import { DynamoAppDataStore } from "../app-data/store.js";
 import { clientSettings } from "../aws.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
@@ -29,6 +29,7 @@ export async function handler(event: HttpRequest): Promise<HttpResponse> {
     store: new DynamoAppDataStore(new DynamoDBClient(clientSettings()), TABLE_NAME),
     now: () => new Date(),
     log: logEntry,
+    pause: () => pauseBeforeRetry(),
   });
   return live(event);
 }

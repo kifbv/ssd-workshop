@@ -26,8 +26,24 @@ export const MAX_KEYS = 100;
 export const MAX_DEPTH = 100;
 /** 1 to 64 letters, digits, dashes or underscores (ASCII). */
 export const DATA_KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
-/** A write that lost a race with another write reads again and tries again, this many times in all. */
-export const WRITE_ATTEMPTS = 3;
+/**
+ * A write that lost a race with another write reads again and tries again, this many times in all,
+ * after a short random pause (RETRY_PAUSE_MS): every write of one app updates the same totals item,
+ * so writes at the same moment (a shared counter pressed by several visitors) cancel each other with
+ * `TransactionConflict` on DynamoDB, and retrying at once would collide again.
+ */
+export const WRITE_ATTEMPTS = 4;
+/** The pause before another try: a random whole number of milliseconds in this range. */
+export const RETRY_PAUSE_MS = { min: 20, max: 80 } as const;
+/**
+ * Bytes an app may write per UTC day (its daily write budget): about 20,000 small writes, ample for a
+ * workshop app, while a loop replacing one 100 KB value stops after 204 writes. Writes cost DynamoDB
+ * about 2 write units per KB (a transaction doubles them): ~30 live apps x 20 MB x 2 is ~1.2 M write
+ * units a day, about $1-2, at worst.
+ */
+export const DAILY_WRITE_BUDGET_BYTES = 20 * 1024 * 1024;
+/** What a write counts towards the budget at least (a PUT counts its value's bytes, a DELETE this). */
+export const MIN_WRITE_COST_BYTES = 1024;
 /** Base64 grows a body by 4/3: a raw body longer than this cannot decode to 100 KB or less. */
 const MAX_RAW_BASE64_BYTES = Math.ceil(MAX_VALUE_BYTES / 3) * 4;
 
@@ -54,6 +70,7 @@ export const APP_DATA_MESSAGES = {
   appFull: "This app has no room left: an app can store at most 1 MB.",
   tooManyKeys: "This app already has 100 keys, the most it can keep. Remove one to add another.",
   conflict: "This value was being changed by someone else at the same moment. Please try again.",
+  writeBudget: "This app has saved a lot of data today. Saving starts again tomorrow.",
   failed: "The data service had a problem. Please try again in a moment.",
 } as const;
 
@@ -61,6 +78,22 @@ export interface AppUsage {
   /** Sum of the values' bytes. */
   bytes: number;
   keys: number;
+  /** The UTC day (YYYY-MM-DD) `writtenBytes` counts, undefined before the app's first write. */
+  writeDay: string | undefined;
+  /** What the app's writes on `writeDay` counted towards the daily write budget. */
+  writtenBytes: number;
+}
+
+/**
+ * What a write counts towards the daily budget. `sameDay`: the totals read showed writes of `today`
+ * already, so the store adds `cost` to them (only while still today's and within the budget);
+ * otherwise the store starts today's count at `cost` (only while no write of today got in first).
+ */
+export interface WriteCharge {
+  /** UTC day, YYYY-MM-DD. */
+  today: string;
+  cost: number;
+  sameDay: boolean;
 }
 
 /** `limit`: the totals would pass 1 MB or 100 keys. `conflict`: the stored value changed since it was read. */
@@ -78,12 +111,12 @@ export interface AppDataStore {
   getUsage(nickname: string): Promise<AppUsage>;
   /**
    * In one all-or-nothing step: stores the value and moves the totals by the change, only while the
-   * stored value still has `previousBytes` (undefined: none stored) and the totals stay within 1 MB and
-   * 100 keys.
+   * stored value still has `previousBytes` (undefined: none stored), the totals stay within 1 MB and
+   * 100 keys, and the day's writes stay within the budget (`charge`).
    */
-  putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, nowIso: string): Promise<PutResult>;
+  putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, nowIso: string, charge: WriteCharge): Promise<PutResult>;
   /** Like putValue: removes the value and takes it off the totals, only while it still has `previousBytes`. */
-  deleteValue(nickname: string, key: string, previousBytes: number, nowIso: string): Promise<DeleteResult>;
+  deleteValue(nickname: string, key: string, previousBytes: number, nowIso: string, charge: WriteCharge): Promise<DeleteResult>;
 }
 
 export type AppDataOutcome =
@@ -100,6 +133,7 @@ export type AppDataOutcome =
   | "app-full"
   | "too-many-keys"
   | "conflict"
+  | "write-budget"
   | "failed";
 
 /** The only things ever logged: no nickname, no key, no value, no header. */
@@ -118,6 +152,30 @@ export interface AppDataDeps {
   store: AppDataStore;
   now: () => Date;
   log: (entry: AppDataLogEntry) => void;
+  /** Waits before another try after a lost race (`pauseBeforeRetry` in the function; tests pass no wait). */
+  pause: () => Promise<void>;
+}
+
+/** A random whole number of milliseconds within RETRY_PAUSE_MS. */
+export function retryPauseMs(random: () => number): number {
+  const { min, max } = RETRY_PAUSE_MS;
+  return Math.min(max, min + Math.floor(random() * (max - min + 1)));
+}
+
+/** Waits RETRY_PAUSE_MS (random) before another try. */
+export function pauseBeforeRetry(random: () => number = Math.random): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, retryPauseMs(random)));
+}
+
+/** UTC day of a time, YYYY-MM-DD: the daily write budget starts again at midnight UTC. */
+const utcDay = (time: Date): string => time.toISOString().slice(0, 10);
+
+/** What a write of `cost` counts towards today's budget, or undefined when it would pass the budget. */
+function chargeFor(usage: AppUsage, cost: number, now: Date): WriteCharge | undefined {
+  const today = utcDay(now);
+  const sameDay = usage.writeDay === today;
+  const written = sameDay ? usage.writtenBytes : 0;
+  return written + cost > DAILY_WRITE_BUDGET_BYTES ? undefined : { today, cost, sameDay };
 }
 
 interface Answer {
@@ -141,6 +199,7 @@ const LIMIT_ANSWERS = {
   "app-full": () => refuse(413, "app-full", APP_DATA_MESSAGES.appFull),
   "too-many-keys": () => refuse(413, "too-many-keys", APP_DATA_MESSAGES.tooManyKeys),
 } as const;
+const overBudget = (): Answer => refuse(429, "write-budget", APP_DATA_MESSAGES.writeBudget);
 
 function methodOf(request: HttpRequest): AppDataMethod | "other" {
   const index = APP_DATA_ROUTES.indexOf(request.routeKey ?? "");
@@ -199,14 +258,19 @@ async function putValue(request: HttpRequest, nickname: string, key: string, dep
   if (!isJsonContentType(request)) return refuse(415, "unsupported-media-type", UNSUPPORTED_MEDIA_TYPE_MESSAGE);
   const value = readValue(request);
   if (!value.ok) return value.answer;
+  const cost = Math.max(MIN_WRITE_COST_BYTES, value.bytes);
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await deps.pause();
     const [previous, usage] = await Promise.all([deps.store.getValueBytes(nickname, key), deps.store.getUsage(nickname)]);
     const keys = usage.keys + (previous === undefined ? 1 : 0);
     const bytes = usage.bytes - (previous ?? 0) + value.bytes;
     // Precise reasons from what was read; the store's conditions hold the limits against races.
     if (keys > MAX_KEYS) return { ...LIMIT_ANSWERS["too-many-keys"](), bytes: value.bytes };
     if (bytes > MAX_APP_DATA_BYTES) return { ...LIMIT_ANSWERS["app-full"](), bytes: value.bytes };
-    const result = await deps.store.putValue(nickname, key, value.json, value.bytes, previous, deps.now().toISOString());
+    const now = deps.now();
+    const charge = chargeFor(usage, cost, now);
+    if (charge === undefined) return { ...overBudget(), bytes: value.bytes };
+    const result = await deps.store.putValue(nickname, key, value.json, value.bytes, previous, now.toISOString(), charge);
     if (result === "saved") return { outcome: "saved", response: empty(), bytes: value.bytes };
     // `limit` or `conflict`: someone wrote in between; read again (a real limit is then reported).
   }
@@ -215,9 +279,14 @@ async function putValue(request: HttpRequest, nickname: string, key: string, dep
 
 async function deleteValue(nickname: string, key: string, deps: AppDataDeps): Promise<Answer> {
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
-    const previous = await deps.store.getValueBytes(nickname, key);
+    if (attempt > 0) await deps.pause();
+    const [previous, usage] = await Promise.all([deps.store.getValueBytes(nickname, key), deps.store.getUsage(nickname)]);
+    // Nothing to remove: no write, nothing counted.
     if (previous === undefined) return { outcome: "deleted", response: empty() };
-    if ((await deps.store.deleteValue(nickname, key, previous, deps.now().toISOString())) === "deleted") {
+    const now = deps.now();
+    const charge = chargeFor(usage, MIN_WRITE_COST_BYTES, now);
+    if (charge === undefined) return overBudget();
+    if ((await deps.store.deleteValue(nickname, key, previous, now.toISOString(), charge)) === "deleted") {
       return { outcome: "deleted", response: empty() };
     }
   }

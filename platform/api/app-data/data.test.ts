@@ -1,19 +1,24 @@
 // Ticket 2.4: the data API's rules, on the in-memory store (criteria 1 to 4; 5 is browser.test.ts,
 // 6 is handlers/app-data.test.ts).
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { FakeAppDataStore } from "./fakes.js";
 import {
   APP_DATA_MESSAGES,
   APP_DATA_ROUTES,
   CORS_HEADERS,
+  DAILY_WRITE_BUDGET_BYTES,
   DATA_KEY_PATTERN,
   handleAppDataRequest,
   MAX_APP_DATA_BYTES,
   MAX_DEPTH,
   MAX_KEYS,
   MAX_VALUE_BYTES,
+  MIN_WRITE_COST_BYTES,
+  pauseBeforeRetry,
   PREFLIGHT_HEADERS,
+  RETRY_PAUSE_MS,
+  retryPauseMs,
   WRITE_ATTEMPTS,
   type AppDataLogEntry,
 } from "./data.js";
@@ -25,9 +30,18 @@ function setup(live: string[] = [NICK]) {
   const store = new FakeAppDataStore();
   for (const nickname of live) store.live.add(nickname.toLowerCase());
   const logs: AppDataLogEntry[] = [];
+  const clock = { now: NOW };
+  let pauses = 0;
   const call = (request: HttpRequest): Promise<HttpResponse> =>
-    handleAppDataRequest(request, { store, now: () => NOW, log: (entry) => logs.push(entry) });
-  return { store, logs, call };
+    handleAppDataRequest(request, {
+      store,
+      now: () => clock.now,
+      log: (entry) => logs.push(entry),
+      pause: async () => {
+        pauses += 1;
+      },
+    });
+  return { store, logs, call, clock, pauses: () => pauses };
 }
 
 const route = (method: string) => `${method} /api/apps/{nickname}/data/{key}`;
@@ -52,7 +66,7 @@ const put = (key: string, value: unknown, options: Parameters<typeof request>[2]
 /** A JSON string value whose canonical text is exactly `bytes` bytes long. */
 const valueOfBytes = (bytes: number): string => "x".repeat(bytes - 2);
 
-const snapshot = (store: FakeAppDataStore) => JSON.stringify({ values: [...store.values], usage: [...store.usage] });
+const snapshot = (store: FakeAppDataStore) => JSON.stringify({ values: [...store.values], usage: [...store.usage], written: [...store.written] });
 
 describe("the data API's routes and limits", () => {
   it("serves GET, PUT, DELETE and OPTIONS on /api/apps/{nickname}/data/{key}", () => {
@@ -130,10 +144,9 @@ describe("criterion 1: an app stores a value and reads it back as the same JSON"
 describe("criterion 2: a write past a limit is refused with 413 and a plain reason, and nothing is stored", () => {
   it("refuses a value over 100 KB (canonical JSON), keeping the stored one", async () => {
     const { call, store } = setup();
-    await call(put("big", "small"));
-    const before = snapshot(store);
     expect((await call(put("big", valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(204);
     await call(put("big", "small"));
+    const before = snapshot(store);
     const response = await call(put("big", valueOfBytes(MAX_VALUE_BYTES + 1)));
     expect(response.statusCode).toBe(413);
     expect(JSON.parse(response.body ?? "")).toEqual({ message: APP_DATA_MESSAGES.valueTooBig });
@@ -210,8 +223,9 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
     expect(other.store.usage.get("ada-42")).toEqual({ bytes: total, keys: 10 });
   });
 
-  it("tries again when another write got in between, and answers 409 after 3 lost races, storing nothing", async () => {
-    const { call, store } = setup();
+  it("tries again when another write got in between, pausing between tries, and answers 409 after 4 lost races, storing nothing", async () => {
+    const { call, store, pauses } = setup();
+    expect(WRITE_ATTEMPTS).toBe(4);
     await call(put("score", 1));
     let races = 0;
     store.beforeWrite = () => {
@@ -221,6 +235,7 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
     };
     const response = await call(put("score", 2));
     expect(races).toBe(WRITE_ATTEMPTS);
+    expect(pauses()).toBe(WRITE_ATTEMPTS - 1);
     expect(response.statusCode).toBe(409);
     expect(JSON.parse(response.body ?? "")).toEqual({ message: APP_DATA_MESSAGES.conflict });
     expect(store.values.get("ada-42/score")?.json).toBe("9".repeat(WRITE_ATTEMPTS + 1));
@@ -232,6 +247,133 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
     };
     expect((await call(put("score", 5))).statusCode).toBe(204);
     expect((await call(request("GET", "score"))).body).toBe("5");
+  });
+});
+
+describe("the pause between tries after a lost race", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is a random 20 to 80 ms, so writers that collided on the totals item do not collide again", () => {
+    expect(RETRY_PAUSE_MS).toEqual({ min: 20, max: 80 });
+    expect(retryPauseMs(() => 0)).toBe(20);
+    expect(retryPauseMs(() => 0.5)).toBe(50);
+    expect(retryPauseMs(() => 0.999999)).toBe(80);
+    for (let i = 0; i < 200; i += 1) {
+      const ms = retryPauseMs(Math.random);
+      expect(Number.isInteger(ms) && ms >= 20 && ms <= 80, String(ms)).toBe(true);
+    }
+  });
+
+  it("waits that long on a timer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let done = false;
+    void pauseBeforeRetry(() => 0.5).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(49);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+  });
+
+  it("is not taken after a write that succeeded or failed on a real limit", async () => {
+    const { call, pauses } = setup();
+    await call(put("score", 1));
+    await call(put("big", valueOfBytes(MAX_VALUE_BYTES + 1)));
+    for (let i = 0; i < MAX_KEYS; i += 1) await call(put(`k${i}`, i));
+    expect((await call(put("one-more", 1))).statusCode).toBe(413);
+    expect(pauses()).toBe(0);
+  });
+});
+
+describe("the daily write budget: replacing values in a loop cannot run up the table's write cost", () => {
+  const TODAY = "2026-11-24";
+  const YESTERDAY = "2026-11-23";
+
+  it("allows 20 MB of writes per app and UTC day, counting each PUT as its value's bytes (at least 1 KB) and each DELETE as 1 KB", async () => {
+    expect(DAILY_WRITE_BUDGET_BYTES).toBe(20 * 1024 * 1024);
+    expect(MIN_WRITE_COST_BYTES).toBe(1024);
+    expect(APP_DATA_MESSAGES.writeBudget).toBe("This app has saved a lot of data today. Saving starts again tomorrow.");
+    const { call, store } = setup();
+    await call(put("score", 1));
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: 1024 });
+    await call(put("big", valueOfBytes(MAX_VALUE_BYTES)));
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: 1024 + MAX_VALUE_BYTES });
+    await call(request("DELETE", "big"));
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: 2048 + MAX_VALUE_BYTES });
+    // Reads, refused writes and deleting a missing key cost nothing.
+    await call(request("GET", "score"));
+    await call(request("DELETE", "missing"));
+    await call(put("bad key", 1));
+    await call(put("too-big", valueOfBytes(MAX_VALUE_BYTES + 1)));
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: 2048 + MAX_VALUE_BYTES });
+  });
+
+  it("refuses a PUT or DELETE past the budget with 429 and a plain reason, storing nothing; reads still work", async () => {
+    const { call, store, logs } = setup();
+    await call(put("score", 1));
+    store.written.set("ada-42", { day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES - 2 * 1024 });
+    expect((await call(put("score", 2))).statusCode).toBe(204);
+    // A 100 KB value no longer fits, a small one still does (exactly reaching the budget).
+    expect((await call(put("big", valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(429);
+    expect((await call(put("score", 3))).statusCode).toBe(204);
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES });
+    const before = snapshot(store);
+    for (const r of [put("score", 4), put("other", 1), request("DELETE", "score")]) {
+      const response = await call(r);
+      expect(response.statusCode, r.routeKey).toBe(429);
+      expect(JSON.parse(response.body ?? ""), r.routeKey).toEqual({ message: APP_DATA_MESSAGES.writeBudget });
+      expect(response.headers).toMatchObject({ ...CORS_HEADERS, "cache-control": "no-store" });
+    }
+    expect(snapshot(store)).toBe(before);
+    expect((await call(request("GET", "score"))).body).toBe("3");
+    expect(logs.filter((l) => l.status === 429).map((l) => l.outcome)).toEqual(["write-budget", "write-budget", "write-budget", "write-budget"]);
+  });
+
+  it("stops a loop of 100 KB replacements of one key after 20 MB", async () => {
+    const { call, store } = setup();
+    const allowed = Math.floor(DAILY_WRITE_BUDGET_BYTES / MAX_VALUE_BYTES); // 204
+    for (let i = 0; i < allowed; i += 1) {
+      expect((await call(put("same", valueOfBytes(MAX_VALUE_BYTES - (i % 2))))).statusCode, String(i)).toBe(204);
+    }
+    expect((await call(put("same", valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(429);
+    expect(store.written.get("ada-42")?.bytes).toBeLessThanOrEqual(DAILY_WRITE_BUDGET_BYTES);
+  });
+
+  it("starts again at 0 on the next UTC day", async () => {
+    const { call, store, clock } = setup();
+    clock.now = new Date("2026-11-24T23:59:59.999Z");
+    store.written.set("ada-42", { day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES });
+    expect((await call(put("score", 1))).statusCode).toBe(429);
+    clock.now = new Date("2026-11-25T00:00:00.000Z");
+    expect((await call(put("score", 1))).statusCode).toBe(204);
+    expect(store.written.get("ada-42")).toEqual({ day: "2026-11-25", bytes: 1024 });
+    // An old day's count, however high, never holds a write back.
+    store.written.set("ada-42", { day: YESTERDAY, bytes: DAILY_WRITE_BUDGET_BYTES * 3 });
+    clock.now = NOW;
+    expect((await call(request("DELETE", "score"))).statusCode).toBe(204);
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: 1024 });
+  });
+
+  it("never lets parallel writes pass the budget (the store's condition holds, not the earlier read)", async () => {
+    const { call, store } = setup();
+    store.written.set("ada-42", { day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES - 50 * 1024 });
+    const answers = await Promise.all(Array.from({ length: 90 }, (_, i) => call(put(`p${i}`, i))));
+    expect(answers.filter((r) => r.statusCode === 204)).toHaveLength(50);
+    expect(answers.every((r) => [204, 409, 429].includes(r.statusCode))).toBe(true);
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES });
+    expect(store.values.size).toBe(50);
+  });
+
+  it("counts every one of many parallel writes on the first write of a new day (one starts the day, the others add to it)", async () => {
+    const { call, store } = setup();
+    store.written.set("ada-42", { day: YESTERDAY, bytes: DAILY_WRITE_BUDGET_BYTES });
+    const answers = await Promise.all(Array.from({ length: 30 }, (_, i) => call(put(`p${i}`, i))));
+    const saved = answers.filter((r) => r.statusCode === 204).length;
+    expect(saved).toBe(30);
+    expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: saved * 1024 });
   });
 });
 
