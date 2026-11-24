@@ -139,6 +139,7 @@ paths:
   `settingSources: []`, `strictMcpConfig`, and a deny-by-default PreToolUse hook (`onFailure: "block"`) that
   resolves real paths (symlinks, dangling links) against the workspace's real path; test the check on real temp
   folders with symlinks (`platform/builder/permissions.test.ts`).
+- The coding agent never holds AWS credentials: Claude Code reaches Bedrock only through the runner's 127.0.0.1 signing proxy (`platform/builder/bedrock-proxy.ts`, `ANTHROPIC_BEDROCK_BASE_URL` + `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`), which forwards only `POST /model/<build model>/invoke[-with-response-stream]` (Claude Code also sends `GET /inference-profiles` at start; a 403 is fine); Glob patterns with `{}`/`[]` can climb out (`.{.,}/*`), so refuse them outright.
 - `npm install <pkg> -w platform` can leave root dev dependencies (vitest) missing from `node_modules`: run `npm ci`
   after changing dependencies, before the checks.
 - The in-memory GitHub (`platform/api/github/fakes.ts`) accepts a non-forced ref update when the new commit descends
