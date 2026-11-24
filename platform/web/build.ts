@@ -6,8 +6,12 @@ import { buildSync } from "esbuild";
 /** The pages' sources: static files plus TypeScript under src/. */
 export const WEB_SOURCE_DIR = fileURLToPath(new URL(".", import.meta.url));
 
-/** Files published as they are, next to the built app.js. */
-export const STATIC_FILES = ["index.html", "style.css"] as const;
+/**
+ * Files published as they are, next to the built app.js. `404.html` (ticket 2.5) is the plain page CloudFront
+ * shows for an address that does not exist (S3 answers a missing key with 403; the distribution turns it into
+ * this page with status 404), under `/apps/*` and on the site alike: no script, no stylesheet.
+ */
+export const STATIC_FILES = ["index.html", "style.css", "404.html"] as const;
 
 /** The scripts esbuild bundles: the page's own, and the diagram drawer (Mermaid, ticket 1.9), loaded only at step 2. */
 export const SCRIPTS = { "app.js": "main.ts", "diagram.js": "diagram.ts" } as const;

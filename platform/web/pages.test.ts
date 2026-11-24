@@ -917,13 +917,21 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
 });
 
 describe("built site", () => {
-  it("holds only the page, its stylesheet and its two scripts, and the page has no inline script, style or handler", () => {
-    expect(readdirSync(dir).sort()).toEqual(["app.js", "diagram.js", "index.html", "style.css"]);
+  it("holds only the page, its stylesheet, its two scripts and the 404 page, and the page has no inline script, style or handler", () => {
+    expect(readdirSync(dir).sort()).toEqual(["404.html", "app.js", "diagram.js", "index.html", "style.css"]);
     const html = readFileSync(join(dir, "index.html"), "utf8");
     expect(html).toContain('<script src="app.js" defer></script>');
     expect(html).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/);
     expect(html).not.toMatch(/<style/);
     expect(html).not.toMatch(/\son[a-z]+=/i);
     expect(html).not.toMatch(/\sstyle=/i);
+  });
+
+  it("holds a plain 404 page (ticket 2.5 criterion 5): no script, no stylesheet, no inline style or handler, no email address", () => {
+    const html = readFileSync(join(dir, "404.html"), "utf8");
+    expect(html).toContain("<title>Page not found - SSD Workshop</title>");
+    expect(html).toContain("This page does not exist.");
+    expect(html).not.toMatch(/<script|<style|<link rel="stylesheet"|\son[a-z]+=|\sstyle=/i);
+    expect(html).not.toMatch(/[^\s@]+@[^\s@]+\.[a-z]+/i);
   });
 });

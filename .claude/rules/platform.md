@@ -91,3 +91,27 @@ paths:
   under the apps' CSP (`platform/api/app-data/browser.test.ts`); Chromium logs every 4xx answer as a console error.
 - JSON from strangers: cap nesting depth by scanning the text (`nestingDepth` in `app-data/data.ts`); `JSON.stringify`
   of a few thousand nested lists overflows the stack, while `JSON.parse` accepts it.
+- Archives from strangers (the deployer's GitHub tarballs, ticket 2.5): cap the download while streaming (and the
+  announced length first), unpack with `gunzipSync(..., { maxOutputLength })` (a zip bomb stops there), reject an
+  absolute or `..` path before anything else, and never write to disk. In tests, a `ReadableStream` pulls its first
+  chunk when constructed, so "nothing was read" cannot be asserted on it.
+- A queue message that makes a worker act on a record (the deployer's `{ buildId, nickname, commit }`, ticket 2.5) is
+  tied to that record by the write's condition: the build must exist, belong to the message's app (`nickname` equal
+  exactly, as 2.7 stores it) and be in a state that expects the work; a failed condition drops the message, and a
+  failure is recorded on the record only after that condition passed. The commit in a deploy message must come only
+  from the platform's own push result, never from participant input. MANDATORY for 2.8/2.9: the builder stores the
+  commit it pushed on the build (`pushedCommit`) and the deployer's start condition then requires
+  `#pushedCommit = :commit` (added in that ticket, with the name in the IAM attribute list): a commit SHA alone does
+  not prove it came from the participant's repository (GitHub serves fork-network commits through the parent's URL).
+  Builds left `deploying` after a dead-letter are moved to `failed` by the launcher's stuck-build check (2.9).
+- A worker phase cut off by a deadline is aborted, not just abandoned: one `AbortController` per phase, its signal
+  passed to every call (`client.send(command, { abortSignal })`, `fetch`). The record's terminal writes are
+  conditional on the working state (`#status = :deploying`), so a late write can never flip a finished record
+  (ticket 2.5). When two items must both change, write first the one whose failure a retry repairs.
+- Text that quotes participants' files (the deployer's `failureReasons`) is stored with control and other
+  non-printable characters replaced by `?` (`storedReason`), and pages (2.7, 2.10) render it with `textContent` only.
+- The API never answers 403: the distribution turns every 403 into the plain 404 page (ticket 2.5). Use 401 or 404;
+  `platform/api/statuses.test.ts` fails on a `403` or `Forbidden` in any API source.
+- An SQS-fed worker whose last delivery must record a failure (the deployer) takes its deadline from the Lambda
+  context (`getRemainingTimeInMillis()`), starts no phase with less than a reserve left (15 s) and cuts each phase off
+  at the reserve (race plus a network time limit bounded by the time left), so the failure write still fits.

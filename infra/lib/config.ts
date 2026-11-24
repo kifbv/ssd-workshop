@@ -34,6 +34,7 @@ export const STACK_NAMES = {
   edge: `${PREFIX}-edge`,
   api: `${PREFIX}-api`,
   builds: `${PREFIX}-builds`,
+  apps: `${PREFIX}-apps`,
 } as const;
 
 /**
@@ -195,6 +196,52 @@ export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
  * marker's, in `APP#*`, which only the deployer writes).
  */
 export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes", "sizes"] as const;
+
+/**
+ * Apps hosting and the deployer (ticket 2.5, stack `ssd-workshop-apps`). The bucket name holds the account,
+ * like the site's (S3 names are global); every app's files live under `apps/<lower-cased nickname>/`.
+ */
+export const APPS_BUCKET_NAME = `${PREFIX}-apps-${ACCOUNT}`;
+/** Regional endpoint, so CloudFront reaches the eu-central-1 bucket directly. */
+export const APPS_BUCKET_REGIONAL_DOMAIN = `${APPS_BUCKET_NAME}.s3.${REGION}.amazonaws.com`;
+/** Lambda function, role and log group of the deployer. */
+export const DEPLOYER_FUNCTION_NAME = `${PREFIX}-apps-deployer`;
+export const DEPLOYER_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${DEPLOYER_FUNCTION_NAME}`;
+/**
+ * The same role as IAM may also name it without its path: role names are unique in an account whatever
+ * the path, so this still names only the deployer's role. The apps bucket's policy accepts both forms in
+ * `aws:PrincipalArn` (decision 2.2: unverified whether the key carries the path).
+ */
+export const DEPLOYER_ROLE_ARN_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/${DEPLOYER_FUNCTION_NAME}`;
+/** The deploy queue (FIFO, one message group per app, so an app's deploys run one at a time and in order) and its dead-letter queue. */
+export const DEPLOY_QUEUE_NAME = `${PREFIX}-deploys.fifo`;
+export const DEPLOY_DLQ_NAME = `${PREFIX}-deploys-dlq.fifo`;
+/**
+ * Id of the live CloudFront distribution of workshop.rankly.games (edge stack, us-east-1). A constant like
+ * API_ID: the deployer (eu-central-1) invalidates `/apps/<nickname>/*` on it and its role may invalidate this
+ * distribution only. If the edge stack is ever recreated, the distribution gets a new id and this constant
+ * (and platform/api/settings.ts DISTRIBUTION_ID, kept equal by a test) must be updated.
+ */
+export const DISTRIBUTION_ID = "E2TOZV0ERAXKZ9";
+export const DISTRIBUTION_ARN = `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}`;
+/**
+ * The attribute names the deployer may name in `BUILD#*` (UpdateItem only, on existing builds). IAM's
+ * `dynamodb:Attributes` counts the names a condition uses too: `nickname` is only compared (the deploy must be
+ * for the build's own app), never written.
+ */
+export const DEPLOYER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] as const;
+/** What an UpdateItem under a `dynamodb:Attributes` list may return (`ALL_NEW`/`ALL_OLD` could return other attributes). */
+export const ATTRIBUTE_LIMITED_RETURN_VALUES = ["NONE", "UPDATED_OLD", "UPDATED_NEW"] as const;
+/** The live marker's attribute names, which the deployer may update in `APP#*` (UpdateItem only). */
+export const DEPLOYER_LIVE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "nickname", "liveAt"] as const;
+/**
+ * Version of the apps' response headers policy (CloudFront `/apps/*`): the sandbox CSP, nosniff, HSTS and
+ * referrer policy. Created, never updated, like the pages' policy: a change bumps this version.
+ */
+export const APPS_HEADERS_POLICY_VERSION = 1;
+export const APPS_HEADERS_POLICY_NAME = `${PREFIX}-apps-v${APPS_HEADERS_POLICY_VERSION}`;
+/** The CloudFront Function on `/apps/*` (viewer request): trailing slash and lower-case redirects, `index.html` for folders. */
+export const APPS_INDEX_FUNCTION_NAME = `${PREFIX}-apps-index`;
 
 /** Lambda function, role and log group of the conversation routes (ticket 1.7). */
 export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
