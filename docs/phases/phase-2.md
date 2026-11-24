@@ -52,15 +52,12 @@ Depends on: 2.1 deployed, answer to question 3. Areas: infra (access).
 
 Acceptance criteria (each starts as FAIL):
 
-- WHEN the access-stack test runs THEN `RunTask` and `StartTask` without `ecs:subnet` in the two subnet ids are denied in the deploy policies and the boundary
+- WHEN the access-stack test runs THEN StartTask is denied, every action carrying `ecs:subnet` is denied outside the two subnets, and under the boundary only the launcher role may RunTask
 - WHEN `cfn-lint` and the policy size test run THEN they pass, every policy staying under 6,144 characters
-- WHEN `infra/access/README.md` is read THEN risk 1 is marked closed and the `DescribeTaskDefinition` risk is listed with its check
+- WHEN infra/access/README.md is read THEN risk 1 is marked narrowed with a CloudTrail check and the DescribeTaskDefinition risk is listed with its check
 - WHEN the template handed to Franck is diffed with the applied one THEN it holds every change already applied (lesson of 2026-11-23)
 
-Proposed wording (pending Franck, 2026-11-24; IAM has no subnet key on `RunTask`/`StartTask`, see `docs/decisions.md`), replacing the first and third criteria:
-
-- WHEN the access-stack test runs THEN StartTask is denied, every action carrying `ecs:subnet` is denied outside the two subnets, and under the boundary only the launcher role may RunTask
-- WHEN infra/access/README.md is read THEN risk 1 is marked narrowed with a CloudTrail check and the DescribeTaskDefinition risk is listed with its check
+Criteria 1 and 3 changed on 2026-11-24 (Franck's answer): IAM has no subnet key on `RunTask`/`StartTask`, see `docs/decisions.md`. They first read "RunTask and StartTask without `ecs:subnet` in the two subnet ids are denied" and "risk 1 is marked closed".
 
 ### 2.3 App template and the deploy check
 
