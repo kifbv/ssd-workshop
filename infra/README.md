@@ -446,9 +446,11 @@ aws ec2 describe-subnets --region eu-central-1 --filters Name=tag:project,Values
 #   subnet-0def...  eu-central-1b  10.42.1.0/24  ssd-workshop-builds-public-2
 ```
 
-Then the two subnet ids go into `infra/lib/config.ts` as constants (where the comment after
-`BUILDER_IMAGES_KEPT` says) for ticket 2.2, which pins `ecs:RunTask` to them. If the stack is ever
-recreated, the subnets get new ids: update the constants and the access stack.
+The two subnet ids are `BUILDS_SUBNET_IDS` in `infra/lib/config.ts` (ticket 2.2): the access stack
+pins ECS services to them (`ecs:subnet`), and the build launcher names them in `RunTask`, which IAM
+cannot pin to subnets (accepted risk 1 in `infra/access/README.md`). If the stack is ever recreated,
+the subnets get new ids: update the constants, the access stack and its README (a test keeps them in
+step), and Franck applies the access stack again.
 
 If the first deploy fails, read the CloudTrail `errorMessage` of the refused call: this is the first
 EC2 deploy under `ssd-workshop-deploy-ec2`, and a CloudFormation handler that tags in a separate call

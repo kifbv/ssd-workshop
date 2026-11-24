@@ -53,8 +53,20 @@ export const BUILDS_CLUSTER_NAME = `${PREFIX}-builds`;
 /** Image repository of the builder container; keeps the newest BUILDER_IMAGES_KEPT images. */
 export const BUILDER_REPOSITORY_NAME = `${PREFIX}-builder`;
 export const BUILDER_IMAGES_KEPT = 5;
-// After the first deploy of `ssd-workshop-builds`, the two subnet ids go here as constants
-// (BUILDS_SUBNET_IDS) for ticket 2.2, which pins ecs:RunTask to them (see infra/README.md).
+/**
+ * The two build subnets, live since the first deploy of `ssd-workshop-builds` (2026-11-24):
+ * `eu-central-1a` 10.42.0.0/24 and `eu-central-1b` 10.42.1.0/24. The access stack pins ECS services
+ * to them (`ecs:subnet`, ticket 2.2) and the build launcher names them in `RunTask` (ticket 2.9).
+ * If the stack is ever recreated, the subnets get new ids: update these and the access stack
+ * (a test keeps the two in step).
+ */
+export const BUILDS_SUBNET_IDS = ["subnet-05229d71b1e0b41ff", "subnet-0965bcee41d455dba"] as const;
+/**
+ * Role of the build launcher Lambda (ticket 2.9), on the path IAM_PATH. The boundary lets only this
+ * role start ECS tasks (`aws:PrincipalArn`, ticket 2.2), so it must keep exactly this name.
+ */
+export const BUILD_LAUNCHER_ROLE_NAME = `${PREFIX}-builds-launcher`;
+export const BUILD_LAUNCHER_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${BUILD_LAUNCHER_ROLE_NAME}`;
 
 /** The single DynamoDB table (key scheme in platform/api/types.ts). */
 export const TABLE_NAME = `${PREFIX}-data`;

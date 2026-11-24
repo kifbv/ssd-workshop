@@ -4,6 +4,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parse, type Scalar, type ScalarTag, type CollectionTag, type YAMLSeq } from "yaml";
+import { ACCOUNT, BUILD_LAUNCHER_ROLE_ARN, BUILDS_SUBNET_IDS, REGION } from "../lib/config.js";
 
 // CloudFormation short-form intrinsics, turned into their long form ({ "Fn::Sub": ... }).
 function scalarIntrinsic(tag: string, key: string, split = false): ScalarTag {
@@ -298,11 +299,18 @@ const SECRET_READS = [
   "cloudfront:GetDistributionConfig", "ses:ListContacts", "ses:GetContact", "ses:GetAccount",
   "ec2:DescribeVpnConnections",
 ];
-function secretReadGaps(t: Template, stmts: Statement[]): string[] {
+// Owner-accepted account-wide reads of that list, keyed "Sid/action" and named exactly (a wildcard
+// that covers one is still a gap). Deploy policies only: the boundary gets none.
+const ACCEPTED_SECRET_READS: Record<string, string> = {
+  "ActionsWithoutResourceScope/ecs:DescribeTaskDefinition":
+    "IAM supports only Resource * for it, and CloudFormation reads every task definition it manages with the caller's rights (accepted risk, Franck 2026-11-23)",
+};
+function secretReadGaps(t: Template, stmts: Statement[], accepted: Record<string, string> = {}): string[] {
   const covers = (s: Statement, a: string) => list(s.Action).some((p) => matches(p, a));
   return SECRET_READS.filter((a) => {
     const wide = stmts.some((s) => {
       if (s.Effect !== "Allow" || !covers(s, a)) return false;
+      if (list(s.Action).includes(a) && `${s.Sid}/${a}` in accepted) return false;
       const sc = scopeOf(s, t);
       return !(sc.names || sc.resourceTag || sc.functionArn);
     });
@@ -483,9 +491,9 @@ const denyWith = (stmts: Statement[], action: string, op: string, key: string) =
 
 // ECS: a workshop task definition may run only on ssd-workshop-* clusters (ecs:cluster), for
 // every principal that has ecs:* on task definitions. Services are scoped by their ARN, which
-// holds the cluster name (service/ssd-workshop-*/*).
+// holds the cluster name (service/ssd-workshop-*/*). StartTask is denied outright (ecsPlacement).
 function ecsClusterGaps(stmts: Statement[]): string[] {
-  return ["ecs:RunTask", "ecs:StartTask"].filter(
+  return ["ecs:RunTask"].filter(
     (a) => !denyWith(stmts, a, "ArnNotLike", "ecs:cluster").some((s) =>
       condValues(s.Condition, "ArnNotLike", "ecs:cluster").map(subText).every(isScopedArn)),
   );
@@ -556,6 +564,62 @@ const workflowFiles = (): Record<string, string> =>
     readdirSync(workflowsDir).filter((f) => /\.ya?ml$/.test(f)).map((f) => [f, readFileSync(new URL(f, workflowsDir), "utf8")]),
   );
 
+// A small IAM evaluator for the ECS placement checks (ticket 2.2): an action on one resource with
+// the given condition keys is allowed when an Allow statement matches and no Deny statement does.
+// Sub values are filled in with the workshop's real account and region. Operators it does not
+// know make it throw, so a new condition is never silently read as true or false.
+type Ctx = Record<string, string | string[]>;
+const LIVE: Record<string, string> = { "AWS::AccountId": ACCOUNT, "AWS::Region": REGION };
+const live = (v: unknown): string =>
+  typeof v === "string" ? v : text(v as Value).replace(/\$\{([^}]+)\}/g, (_, k: string) => LIVE[k] ?? k);
+function conditionHolds(c: Cond | undefined, ctx: Ctx): boolean {
+  return Object.entries(c ?? {}).every(([op, keys]) =>
+    Object.entries(keys).every(([key, raw]) => {
+      const want = list(raw as unknown).map(live);
+      const got = key in ctx ? list(ctx[key]) : undefined;
+      const base = op.replace(/^ForAnyValue:|^ForAllValues:/, "");
+      const one = (v: string): boolean => {
+        switch (base) {
+          case "StringEquals": case "ArnEquals": return want.includes(v);
+          case "StringLike": case "ArnLike": return want.some((w) => matches(w, v));
+          case "StringNotEquals": case "ArnNotEquals": return !want.includes(v);
+          case "StringNotLike": case "ArnNotLike": return !want.some((w) => matches(w, v));
+          default: throw new Error(`operator ${op} not known to the test evaluator`);
+        }
+      };
+      if (op === "Null") return want[0] === "true" ? got === undefined : got !== undefined;
+      if (op.startsWith("ForAnyValue:")) return got !== undefined && got.some(one);
+      if (op.startsWith("ForAllValues:")) return got === undefined || got.every(one);
+      // Single-valued: a missing key fails a positive operator and passes a negated one.
+      if (got === undefined) return /Not/.test(base);
+      return got.length === 1 && one(got[0] as string);
+    }),
+  );
+}
+function statementApplies(s: Statement, action: string, resource: string, ctx: Ctx): boolean {
+  const acts = s.Action !== undefined ? list(s.Action).some((p) => matches(p, action)) : !list(s.NotAction).some((p) => matches(p, action));
+  return acts && list(s.Resource).map(live).some((r) => matches(r, resource)) && conditionHolds(s.Condition, ctx);
+}
+function allowedBy(stmts: Statement[], action: string, resource: string, ctx: Ctx = {}): boolean {
+  const hits = stmts.filter((s) => statementApplies(s, action, resource, ctx));
+  return hits.some((s) => s.Effect === "Allow") && !hits.some((s) => s.Effect === "Deny");
+}
+const ECS_ARN = `arn:aws:ecs:${REGION}:${ACCOUNT}`;
+const WORKSHOP_CLUSTER = `${ECS_ARN}:cluster/ssd-workshop-builds`;
+const OTHER_CLUSTER = `${ECS_ARN}:cluster/letters`;
+const BUILDER_TASK_DEFINITION = `${ECS_ARN}:task-definition/ssd-workshop-builder:3`;
+const WORKSHOP_SERVICE = `${ECS_ARN}:service/ssd-workshop-builds/ssd-workshop-app`;
+const OTHER_SUBNET = "subnet-0aaaaaaaaaaaaaaaa";
+const WORKLOAD_ROLE = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-builder-task`;
+const SERVICE_DENY_SUBNET_LIST = "[subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]";
+// Every ECS action that carries ecs:subnet, per servicereference ecs.json
+// (servicereference.us-east-1.amazonaws.com/v1/ecs/ecs.json), read 2026-11-24. RunTask and
+// StartTask carry none. A new action with the key must be added here and to both denies.
+const ECS_SUBNET_ACTIONS = [
+  "ecs:CreateService", "ecs:UpdateService",
+  "ecs:CreateExpressGatewayService", "ecs:UpdateExpressGatewayService",
+];
+
 const template = loadTemplate();
 
 describe("access stack: deploy policies (criterion 2)", () => {
@@ -568,6 +632,7 @@ describe("access stack: deploy policies (criterion 2)", () => {
     expect(Object.keys(DEPLOY_EXCEPTIONS).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
     expect(Object.keys(BOUNDARY_ALLOW_LIST).filter((k) => !used(boundaryStatements(template)).includes(k))).toEqual([]);
     expect(Object.keys(REQUEST_TAG_ON_ANY).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
+    expect(Object.keys(ACCEPTED_SECRET_READS).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
   });
 
   it("fails when a write is loosened to Resource *", () => {
@@ -738,32 +803,35 @@ describe("access stack: deploy policies (criterion 2)", () => {
 
 describe("access stack: reads (H1)", () => {
   it("allows no read that returns secrets or full configuration on every resource", () => {
-    expect(secretReadGaps(template, deployStatements(template))).toEqual([]);
+    expect(secretReadGaps(template, deployStatements(template), ACCEPTED_SECRET_READS)).toEqual([]);
     expect(secretReadGaps(template, boundaryStatements(template))).toEqual([]);
+    // Without the owner's acceptance, the DescribeTaskDefinition grant is a gap.
+    expect(secretReadGaps(template, deployStatements(template))).toEqual(["ecs:DescribeTaskDefinition"]);
   });
 
   it("fails on the old account-wide reads", () => {
     const lambda = withText("              - ecs:List*\n", "              - ecs:List*\n              - lambda:List*\n");
-    expect(secretReadGaps(lambda, deployStatements(lambda))).toEqual(["lambda:ListFunctions"]);
+    expect(secretReadGaps(lambda, deployStatements(lambda), ACCEPTED_SECRET_READS)).toEqual(["lambda:ListFunctions"]);
+    // The acceptance names one statement and the exact action: a wildcard elsewhere is still a gap.
     const ecs = withText("              - ecs:List*\n", "              - ecs:Describe*\n");
-    expect(secretReadGaps(ecs, deployStatements(ecs))).toContain("ecs:DescribeTaskDefinition");
+    expect(secretReadGaps(ecs, deployStatements(ecs), ACCEPTED_SECRET_READS)).toContain("ecs:DescribeTaskDefinition");
     const old = withText(
       "              - cloudformation:ListStacks\n",
       "              - cloudformation:Describe*\n              - cloudformation:List*\n              - apigateway:GET\n              - iam:Get*\n              - cloudfront:Get*\n              - ses:List*\n",
     );
-    expect(secretReadGaps(old, deployStatements(old))).toEqual([
+    expect(secretReadGaps(old, deployStatements(old), ACCEPTED_SECRET_READS)).toEqual([
       "apigateway:GET", "cloudformation:DescribeStacks", "cloudformation:ListExports",
       "iam:GetAccountAuthorizationDetails", "iam:GetRole", "iam:GetRolePolicy", "iam:GetPolicyVersion",
       "cloudfront:GetDistributionConfig", "ses:ListContacts",
     ]);
     // ec2:Describe* stays account-wide only because user data is denied outside the project tag.
     const noDeny = withText("          - Sid: NoUserDataReads\n            Effect: Deny\n", "          - Sid: NoUserDataReads\n            Effect: Allow\n");
-    expect(secretReadGaps(noDeny, deployStatements(noDeny))).toEqual(["ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions"]);
+    expect(secretReadGaps(noDeny, deployStatements(noDeny), ACCEPTED_SECRET_READS)).toEqual(["ec2:DescribeInstanceAttribute", "ec2:DescribeLaunchTemplateVersions"]);
     // VPN connections carry pre-shared keys; the SES account carries contact addresses.
     const vpn = withText("          - Sid: NoVpnKeyReads\n            Effect: Deny\n", "          - Sid: NoVpnKeyReads\n            Effect: Allow\n");
-    expect(secretReadGaps(vpn, deployStatements(vpn))).toEqual(["ec2:DescribeVpnConnections"]);
+    expect(secretReadGaps(vpn, deployStatements(vpn), ACCEPTED_SECRET_READS)).toEqual(["ec2:DescribeVpnConnections"]);
     const account = withText("              - ses:GetSendQuota\n", "              - ses:GetAccount\n              - ses:GetSendQuota\n");
-    expect(secretReadGaps(account, deployStatements(account))).toEqual(["ses:GetAccount"]);
+    expect(secretReadGaps(account, deployStatements(account), ACCEPTED_SECRET_READS)).toEqual(["ses:GetAccount"]);
   });
 
   it("explicitly denies reading API keys", () => {
@@ -852,9 +920,9 @@ describe("access stack: EC2 parents (try 4)", () => {
 describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
   it("runs workshop task definitions only on ssd-workshop-* clusters", () => {
     expect(ecsClusterGaps(deployStatements(template))).toEqual([]);
-    expect(ecsClusterGaps(deployStatements(template).filter((s) => s.Sid !== "TasksOnWorkshopClustersOnly"))).toEqual(["ecs:RunTask", "ecs:StartTask"]);
+    expect(ecsClusterGaps(deployStatements(template).filter((s) => s.Sid !== "TasksOnWorkshopClustersOnly"))).toEqual(["ecs:RunTask"]);
     const anyCluster = withText('ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-*"}', 'ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/*"}');
-    expect(ecsClusterGaps(deployStatements(anyCluster))).toEqual(["ecs:RunTask", "ecs:StartTask"]);
+    expect(ecsClusterGaps(deployStatements(anyCluster))).toEqual(["ecs:RunTask"]);
     // Services: the ARN holds the cluster name.
     const named = deployStatements(template).find((s) => s.Sid === "NamedWorkshopResources");
     expect(list(named?.Resource).map(text)).toContain("arn:aws:ecs:*:${AWS::AccountId}:service/ssd-workshop-*/*");
@@ -913,6 +981,113 @@ describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
     );
     expect(sesScopeGaps(deployStatements(otherSet))).toEqual(["SesForTesting"]);
     expect(sesScopeGaps(boundaryStatements(otherSet))).toEqual(["SendCodes"]);
+  });
+});
+
+describe("access stack: ECS network placement (ticket 2.2)", () => {
+  const deploy = deployStatements(template);
+  const boundary = boundaryStatements(template);
+  const [subnetA, subnetB] = BUILDS_SUBNET_IDS;
+
+  it("denies StartTask in the deploy policies and the boundary, also on a workshop cluster", () => {
+    for (const [name, stmts] of [["deploy", deploy], ["boundary", boundary]] as const) {
+      expect(denied(stmts, "*", "ecs:StartTask"), name).toBe(true);
+      expect(allowedBy(stmts, "ecs:StartTask", BUILDER_TASK_DEFINITION, { "ecs:cluster": WORKSHOP_CLUSTER, "aws:PrincipalArn": BUILD_LAUNCHER_ROLE_ARN }), name).toBe(false);
+    }
+    // Old pattern: StartTask only under the cluster deny, so a deploy principal could start one.
+    const old = deploy.filter((s) => s.Sid !== "NoStartTask");
+    expect(allowedBy(old, "ecs:StartTask", BUILDER_TASK_DEFINITION, { "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
+  });
+
+  it("denies every action carrying ecs:subnet with a subnet outside the two workshop subnets", () => {
+    for (const [name, stmts] of [["deploy", deploy], ["boundary", boundary]] as const) {
+      const deny = stmts.find((s) => s.Sid === "ServicesInWorkshopSubnetsOnly");
+      expect(deny?.Effect, name).toBe("Deny");
+      // Exactly the actions that carry the key: no more (a key an action lacks is never
+      // there, so the deny would be dead), no less (an action left out runs anywhere).
+      expect([...list(deny?.Action)].sort(), name).toEqual([...ECS_SUBNET_ACTIONS].sort());
+      for (const action of ECS_SUBNET_ACTIONS) {
+        expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] }), `${name} ${action}`).toBe(true);
+        expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, { "ecs:subnet": [subnetA as string, OTHER_SUBNET] }), `${name} ${action} mixed`).toBe(true);
+        expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, { "ecs:subnet": [...BUILDS_SUBNET_IDS] }), `${name} ${action} workshop`).toBe(false);
+        // ForAnyValue: an update that does not touch the network carries no subnet.
+        expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, {}), `${name} ${action} no key`).toBe(false);
+      }
+    }
+    // End to end for the deploy principals, who hold ecs:* on workshop services.
+    for (const action of ECS_SUBNET_ACTIONS) {
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, { "ecs:subnet": [subnetA as string, subnetB as string] }), action).toBe(true);
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] }), action).toBe(false);
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, { "ecs:subnet": [subnetB as string, OTHER_SUBNET] }), action).toBe(false);
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, {}), action).toBe(true);
+    }
+    // Old pattern: without the deny, a service could run in another project's subnet.
+    const old = deploy.filter((s) => s.Sid !== "ServicesInWorkshopSubnetsOnly");
+    expect(allowedBy(old, "ecs:CreateService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(true);
+    // Try 1's pattern: only CreateService/UpdateService, so an Express Gateway service ran anywhere.
+    const tryOne = withAll(
+      "Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateExpressGatewayService, ecs:UpdateExpressGatewayService]",
+      "Action: [ecs:CreateService, ecs:UpdateService]",
+    );
+    expect(allowedBy(deployStatements(tryOne), "ecs:CreateExpressGatewayService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(true);
+    expect(allowedBy(deployStatements(tryOne), "ecs:UpdateExpressGatewayService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(true);
+  });
+
+  it("writes no deny on a subnet key for RunTask or StartTask (they carry no ecs:subnet key)", () => {
+    // ecs:subnet exists on CreateService/UpdateService and CreateExpressGatewayService/
+    // UpdateExpressGatewayService; never on RunTask/StartTask. A negated operator on the missing
+    // key would deny every RunTask; a ForAnyValue one would deny none.
+    expect(ECS_SUBNET_ACTIONS).not.toContain("ecs:RunTask");
+    expect(ECS_SUBNET_ACTIONS).not.toContain("ecs:StartTask");
+    for (const s of [...deploy, ...boundary]) {
+      if (!JSON.stringify(s.Condition ?? {}).includes("ecs:subnet")) continue;
+      expect([...list(s.Action)].sort(), s.Sid).toEqual([...ECS_SUBNET_ACTIONS].sort());
+    }
+  });
+
+  it("lets only the build launcher role start tasks under the boundary, on workshop clusters", () => {
+    const launcher = { "ecs:cluster": WORKSHOP_CLUSTER, "aws:PrincipalArn": BUILD_LAUNCHER_ROLE_ARN };
+    expect(allowedBy(boundary, "ecs:RunTask", BUILDER_TASK_DEFINITION, launcher)).toBe(true);
+    expect(allowedBy(boundary, "ecs:RunTask", BUILDER_TASK_DEFINITION, { ...launcher, "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(false);
+    expect(allowedBy(boundary, "ecs:RunTask", BUILDER_TASK_DEFINITION, { ...launcher, "ecs:cluster": OTHER_CLUSTER })).toBe(false);
+    expect(allowedBy(boundary, "ecs:RunTask", `${ECS_ARN}:task-definition/letters:1`, launcher)).toBe(false);
+    // Tagging the new task: only the launcher, only as part of RunTask.
+    const task = `${ECS_ARN}:task/ssd-workshop-builds/0123456789abcdef`;
+    expect(allowedBy(boundary, "ecs:TagResource", task, { "ecs:CreateAction": "RunTask", "aws:PrincipalArn": BUILD_LAUNCHER_ROLE_ARN })).toBe(true);
+    expect(allowedBy(boundary, "ecs:TagResource", task, { "aws:PrincipalArn": BUILD_LAUNCHER_ROLE_ARN })).toBe(false);
+    expect(allowedBy(boundary, "ecs:TagResource", task, { "ecs:CreateAction": "RunTask", "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(false);
+    // Old pattern: without the principal pin, every workload role (participant code) could start tasks.
+    const oldRun = boundary.map((s) => (s.Sid === "RunBuilds" ? { ...s, Condition: { ArnLike: s.Condition?.ArnLike ?? {} } } : s));
+    expect(allowedBy(oldRun, "ecs:RunTask", BUILDER_TASK_DEFINITION, { ...launcher, "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
+  });
+
+  it("lets the deploy principals run tasks only on workshop clusters", () => {
+    expect(allowedBy(deploy, "ecs:RunTask", BUILDER_TASK_DEFINITION, { "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
+    expect(allowedBy(deploy, "ecs:RunTask", BUILDER_TASK_DEFINITION, { "ecs:cluster": OTHER_CLUSTER })).toBe(false);
+  });
+
+  it("allows DescribeTaskDefinition (Resource * only) to the deploy principals, never in the boundary", () => {
+    expect(allowedBy(deploy, "ecs:DescribeTaskDefinition", "*")).toBe(true);
+    // AWS authorizes it only on Resource "*", so only a grant on "*" counts.
+    const grants = deploy.filter((s) => s.Effect === "Allow" && list(s.Resource).map(text).includes("*") && list(s.Action).some((p) => matches(p, "ecs:DescribeTaskDefinition")));
+    expect(grants.map((s) => s.Sid)).toEqual(["ActionsWithoutResourceScope"]);
+    expect(boundary.filter((s) => s.Effect === "Allow" && list(s.Action).some((p) => matches(p, "ecs:DescribeTaskDefinition")))).toEqual([]);
+    expect(allowedBy(boundary, "ecs:DescribeTaskDefinition", "*")).toBe(false);
+  });
+
+  it("uses exactly the subnet ids and launcher role of infra/lib/config.ts", () => {
+    expect([...new Set(templateText.match(/subnet-[0-9a-f]+/g))].sort()).toEqual([...BUILDS_SUBNET_IDS].sort());
+    // The README's CloudTrail check names them too.
+    const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
+    expect([...new Set(readme.match(/subnet-[0-9a-f]{17}/g))].sort()).toEqual([...BUILDS_SUBNET_IDS].sort());
+    for (const stmts of [deploy, boundary]) {
+      const deny = stmts.find((s) => s.Sid === "ServicesInWorkshopSubnetsOnly");
+      expect(condValues(deny?.Condition, "ForAnyValue:StringNotEquals", "ecs:subnet")).toEqual([...BUILDS_SUBNET_IDS]);
+    }
+    expect(templateText.split(SERVICE_DENY_SUBNET_LIST)).toHaveLength(3);
+    const pinned = boundary.filter((s) => s.Condition?.ArnEquals?.["aws:PrincipalArn"] !== undefined);
+    expect(pinned.map((s) => s.Sid)).toEqual(["RunBuilds", "TagBuildsOnStart"]);
+    for (const s of pinned) expect(condValues(s.Condition, "ArnEquals", "aws:PrincipalArn").map(live), s.Sid).toEqual([BUILD_LAUNCHER_ROLE_ARN]);
   });
 });
 

@@ -83,13 +83,16 @@ flowchart LR
 | `WorkshopBuckets` | `ssd-workshop-*` buckets, only in this account (`aws:ResourceAccount`: bucket names are global, so someone else could own a bucket with a matching name). |
 | `Bedrock` | The platform calls Claude on Bedrock (Anthropic models and `eu.anthropic.*` inference profiles only). |
 | `SendCodes` | Sign-in codes go out by SES, only through the identities `ssd-workshop@rankly.games` and `rankly.games` (SES authorizes the domain identity when the address itself is not verified) and only from `ssd-workshop@rankly.games` (`ses:FromAddress`), naming the configuration set `ssd-workshop-email` (created by this stack) so SES never falls back to the domain's default set `rankly-dev`. |
-| `RunBuilds` | Start build tasks only from `ssd-workshop-*` task definitions on `ssd-workshop-*` clusters (`ecs:cluster`). |
+| `RunBuilds` | Start build tasks only from `ssd-workshop-*` task definitions on `ssd-workshop-*` clusters (`ecs:cluster`), and only as the build launcher role `role/ssd-workshop/ssd-workshop-builds-launcher` (`aws:PrincipalArn`, ticket 2.9): a task role (participant code) or any other workload role cannot start tasks, even if a CDK policy grants it. |
+| `TagBuildsOnStart` | `ecs:TagResource` on `task/ssd-workshop-*/*`, which ECS also checks when `RunTask` passes tags or `propagateTags`; only as part of `RunTask` (`ecs:CreateAction`) and only for the launcher role. |
 | `WatchBuilds` | Stop and describe tasks on `ssd-workshop-*` clusters. |
 | `PullImages` | Pull images only from `ssd-workshop-*` repositories. |
 | `InvalidateWorkshopSite` | Invalidate only distributions tagged `project=ssd-workshop`. |
 | `AccountWideServiceCalls` | ECR login token and X-Ray traces; neither has a resource scope. |
 | `WorkshopMetrics` | Metrics only in the CloudWatch namespace `ssd-workshop`. |
 | `PassWorkshopRoles` | A role may hand only `/ssd-workshop/` roles, and only to ECS tasks. |
+| `ServicesInWorkshopSubnetsOnly` | Deny, as in the deploy policies: ECS services (Express Gateway services included) only in the two workshop subnets. The boundary grants no service rights today; the deny keeps it so if it ever does. |
+| `NoStartTask` | Deny `ecs:StartTask` (tasks on EC2 container instances), as in the deploy policies. |
 | `K3sNodeHeartbeat` | Advanced-track k3s nodes report to Systems Manager, only for instances tagged with the project. |
 | `K3sNodeChannels` | Session Manager and Run Command channels of the calling instance, and reading instance tags. |
 | `NoExternalSharing` | Deny, for workload roles too: the same sharing and egress actions as the deploy policies' `NoExternalSharing`, except `s3:PutBucketNotification`, which CDK's bucket notifications handler (a workshop role) needs (accepted risk 12). |
@@ -103,7 +106,7 @@ flowchart LR
 | `ProtectThisStack` | Deny: every non-read CloudFormation action on `ssd-workshop-access` (update, delete, change sets, cancel, rollback, stack policy), so the deploy rights cannot raise themselves. |
 | `NamedWorkshopResources` | Full control of the workshop's own DynamoDB, Lambda, logs (`ssd-workshop-*`, `/aws/lambda/ssd-workshop-*`, `/ecs/ssd-workshop-*`), SQS, ECR, Secrets Manager, SSM, EventBridge, Scheduler, Step Functions, SNS and ECS resources, by `ssd-workshop-*` name. ECS service and task ARNs hold the cluster name, so they are limited to `ssd-workshop-*` clusters. |
 | `WorkshopBuckets` | Full control of `ssd-workshop-*` buckets in this account only (`aws:ResourceAccount`). |
-| `ActionsWithoutResourceScope` | Actions AWS cannot limit by name or tag: ECR login token, task definition deregistration, vended log deliveries. Each one is listed with its reason in the test. |
+| `ActionsWithoutResourceScope` | Actions AWS cannot limit by name or tag: ECR login token, task definition deregistration and reads (`DescribeTaskDefinition`, which CloudFormation calls with the caller's rights for every task definition it manages; accepted risk 15), vended log deliveries. Each one is listed with its reason in the test. |
 | `WorkshopEventSourceMappings` | Create, change and delete event source mappings only for `ssd-workshop-*` functions (`lambda:FunctionArn`). |
 | `TagEventSourceMappings` | CloudFormation tags the mappings it creates; mapping ids are generated, and a tag on a mapping grants nothing. |
 | `WorkshopRolesWithBoundaryOnly` | Create roles on the path `/ssd-workshop/` and change their policies only when the role carries `ssd-workshop-boundary`. |
@@ -113,7 +116,9 @@ flowchart LR
 | `WorkshopServiceLinkedRoles` | Let ECS create its AWS-defined service-linked role the first time it is used (`iam:AWSServiceName` `ecs.amazonaws.com` only). |
 | `NoBoundaryEscape` | Deny removing or replacing a boundary, creating users or access keys, and rewriting managed policies. |
 | `NoSelfAssume` | Deny `sts:AssumeRole`, `TagSession` and `SetSourceIdentity`: a role elsewhere in the account whose trust policy names the account or these principals cannot be assumed. |
-| `TasksOnWorkshopClustersOnly` | Deny `ecs:RunTask` and `ecs:StartTask` unless `ecs:cluster` is an `ssd-workshop-*` cluster: a workshop task definition on another project's cluster could read that cluster's container-instance role. |
+| `TasksOnWorkshopClustersOnly` | Deny `ecs:RunTask` unless `ecs:cluster` is an `ssd-workshop-*` cluster: a workshop task definition on another project's cluster could read that cluster's container-instance role. |
+| `ServicesInWorkshopSubnetsOnly` | Deny every action that carries `ecs:subnet` (`CreateService`/`UpdateService` and `CreateExpressGatewayService`/`UpdateExpressGatewayService`; never `RunTask`/`StartTask`) when any subnet is not one of the two workshop subnets (`BUILDS_SUBNET_IDS` in `infra/lib/config.ts`; a test keeps them in step, and checks it against the list copied from the Service Authorization Reference on 2026-11-24 (`ECS_SUBNET_ACTIONS`)). `ForAnyValue`: an update that leaves the network alone carries no subnet and passes. |
+| `NoStartTask` | Deny `ecs:StartTask` everywhere: it places tasks on EC2 container instances, which the workshop never uses, and like `RunTask` it has no subnet key. |
 | `RulesOnWorkshopSourcesOnly` | Deny `events:PutRule` when the event pattern names a source other than `ssd-workshop.*` (`events:source`): a rule on the default bus could otherwise match other projects' events (ECS task state changes carry environment variables). |
 | `RulesNeedASource` | Deny `events:PutRule` without a source (`Null` `events:source`): a pattern that filters only on `detail` or `account` matches every project's events. Schedules use EventBridge Scheduler, not schedule rules. |
 
@@ -181,7 +186,7 @@ flowchart LR
 
 | Sid | Why |
 | --- | --- |
-| `ReadsWithoutSecrets` | Account-wide reads that CDK or Claude need and whose answers hold no secrets: stack list, template validation, EC2 and ECS listings, certificates, hosted zone list, Bedrock models and inference profiles, service quotas, the SES send quota and identities, bucket names, log group names, costs. |
+| `ReadsWithoutSecrets` | Account-wide reads that CDK or Claude need and whose answers hold no secrets: stack list, template validation, EC2 and ECS listings, certificates, hosted zone list, Bedrock models and inference profiles, service quotas, the SES send quota and identities, bucket names, a random password (`secretsmanager:GetRandomPassword`, which CloudFormation calls to fill a new secret such as `ssd-workshop-github`; no resource scope, and it reads nothing), log group names, costs. |
 | `WorkshopZoneReads` | The rankly.games zone and its records. |
 | `WorkshopIamReads` | Read roles and instance profiles on `/ssd-workshop/` and `ssd-workshop-*` policies (not `GetAccountAuthorizationDetails` or other projects' roles). |
 | `WorkshopApiReads` | Read APIs tagged with the project (other APIs' stage variables and configuration stay hidden). |
@@ -192,8 +197,7 @@ flowchart LR
 | `NoVpnKeyReads` | Deny `ec2:DescribeVpnConnections` everywhere: it returns the VPN pre-shared keys. |
 
 Not granted on purpose: `lambda:List*` (returns every function's environment variables),
-`ecs:DescribeTaskDefinition` (AWS allows only `Resource *`, and it returns every task definition's
-environment variables), `cloudformation:Describe*`, `GetTemplate` and `ListExports` on other
+`cloudformation:Describe*`, `GetTemplate` and `ListExports` on other
 stacks (outputs and parameters), `iam:Get*`/`List*` account-wide, `cloudfront:List*`
 (distribution summaries carry origin headers), `ses:List*` (contact lists hold e-mail addresses),
 `ses:GetAccount` (returns the account's contact addresses), `ssm:DescribeParameters`,
@@ -205,11 +209,57 @@ The workshop shares the rankly.games account with other projects. These are the 
 close (or that this spec needs open); Franck accepts each one by merging. Each has a check or a
 follow-up.
 
-1. **ECS network placement.** For `awsvpc` tasks and services, IAM has no tag key for the subnets
-   and security groups named in `RunTask`, `CreateService` or `UpdateService` (only `ecs:subnet`,
-   by id; the workshop subnets do not exist yet). Impact: a workshop task could run inside another
-   project's subnet and reach its private endpoints. Follow-up: pin the workshop subnet ids with
-   `ecs:subnet` once the VPC exists.
+1. **ECS network placement (narrowed in ticket 2.2, still open).** For `awsvpc` tasks and
+   services, IAM has no tag key for the subnets and security groups a call names, only `ecs:subnet`
+   by id, and per the AWS Service Authorization Reference
+   (`servicereference.us-east-1.amazonaws.com/v1/ecs/ecs.json`, read 2026-11-24) `ecs:subnet` exists
+   on CreateService/UpdateService and CreateExpressGatewayService/UpdateExpressGatewayService; never
+   on RunTask/StartTask. `RunTask` and `StartTask` carry no subnet key, so no policy
+   can pin them to subnets (a negated condition on the missing key would deny every `RunTask`; a
+   `ForAnyValue` one would deny none).
+
+   ```mermaid
+   flowchart LR
+     subgraph Closed["closed by IAM"]
+       S[Create/UpdateService and<br/>Create/UpdateExpressGatewayService<br/>only the two workshop subnets<br/>ecs:subnet]
+       ST[StartTask<br/>denied everywhere]
+       RB[RunTask by a workload role<br/>only the launcher role<br/>boundary RunBuilds]
+       RC[RunTask on another cluster<br/>denied, ecs:cluster]
+     end
+     subgraph Open["still open: no subnet key on RunTask"]
+       L[launcher role] -->|RunTask, any subnet| T[workshop task]
+       D[deploy role, Claude user] -->|RunTask, any subnet| T
+     end
+     T -.->|could sit in| O[another project's subnet<br/>and reach its private endpoints]
+   ```
+
+   Closed: services, Express Gateway services included, only in the two workshop subnets
+   (`ServicesInWorkshopSubnetsOnly`, deploy policies and boundary); `StartTask` denied for both principals and in the boundary
+   (`NoStartTask`); under the boundary only the build launcher role starts tasks, and only from
+   `ssd-workshop-*` task definitions on `ssd-workshop-*` clusters (`RunBuilds`), so participant code
+   running under a task role cannot start any. Open: the launcher role and the two deploy principals
+   can still start a workshop task in another project's subnet with `RunTask`. Impact: that task
+   could reach the other project's private endpoints. Mitigation: the launcher names the two subnets
+   from `BUILDS_SUBNET_IDS` (tested in ticket 2.9). For ticket 2.9: the launcher-only `RunTask`
+   rule does not stop a confused deputy, so task roles get no write access to the launcher's
+   trigger, the launcher validates what it runs, and the launcher role trusts only
+   `lambda.amazonaws.com`. Check (run by Franck as admin; event history keeps 90 days), in every
+   enabled region, since nothing limits the deploy principals to eu-central-1 (they can create
+   `ssd-workshop-*` clusters anywhere), every `RunTask` whose subnets are not the workshop's two,
+   or that names none:
+
+   ```sh
+   for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+   aws cloudtrail lookup-events --region "$r" \
+     --lookup-attributes AttributeKey=EventName,AttributeValue=RunTask --output json \
+   | jq -r '.Events[].CloudTrailEvent | fromjson
+       | select((.requestParameters.networkConfiguration.awsvpcConfiguration.subnets // ["none"])
+           | map(select(. != "subnet-05229d71b1e0b41ff" and . != "subnet-0965bcee41d455dba")) | length > 0)
+       | [.eventTime, .userIdentity.arn, .requestParameters.cluster, .errorCode // "ok",
+          ((.requestParameters.networkConfiguration.awsvpcConfiguration.subnets // ["none"]) | join(","))] | @tsv'
+   done
+   # expect: no output (a line with an errorCode is an attempt IAM refused)
+   ```
 2. **Trust and resource policies that name outside principals.** IAM cannot inspect the content of
    a role trust policy, a bucket policy (`s3:PutBucketPolicy`, needed by CDK for the CloudFront
    origin access control) or an SQS/SNS policy set as an attribute (`SetQueueAttributes`,
@@ -284,11 +334,29 @@ follow-up.
     them, another account's API, rule, topic or bucket could invoke a workshop function. Check:
     CDK always sets `sourceArn` or `sourceAccount` (rule in `.claude/rules/infra.md`); IAM Access
     Analyzer reports function policies open to other accounts.
+15. **`ecs:DescribeTaskDefinition` on every resource** (Franck, 2026-11-23). AWS offers it only on
+    `Resource *`, and CloudFormation calls it with the caller's rights for every task definition a
+    workshop stack manages (ticket 2.9). Impact: the two deploy principals can read every task
+    definition in the account, other projects' included, with their container environment
+    variables (secrets passed as plain environment values would show). The boundary does not grant
+    it, so no workload role can. Check (run by Franck as admin), in every enabled region, since
+    the grant has no region limit, every call by a workshop principal on a task definition that is
+    not the workshop's:
 
-Not granted, so a later ticket brings it to Franck before it is needed: `ecs:DescribeTaskDefinition`
-(CloudFormation reads ECS task definitions with the caller's rights; options are granting it on
-`Resource *`, which shows every project's task definition environment, or a CloudFormation service
-role), `ec2:DescribeLaunchTemplateVersions` (no resource scope; needed for k3s launch templates).
+    ```sh
+    for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+    aws cloudtrail lookup-events --region "$r" \
+      --lookup-attributes AttributeKey=EventName,AttributeValue=DescribeTaskDefinition --output json \
+    | jq -r '.Events[].CloudTrailEvent | fromjson
+        | select(.userIdentity.arn | test("ssd-workshop"))
+        | select((.requestParameters.taskDefinition // "") | test("(^|/)ssd-workshop-") | not)
+        | [.eventTime, .userIdentity.arn, .requestParameters.taskDefinition] | @tsv'
+    done
+    # expect: no output
+    ```
+
+Not granted, so a later ticket brings it to Franck before it is needed:
+`ec2:DescribeLaunchTemplateVersions` (no resource scope; needed for k3s launch templates).
 
 ## What the tests prove, and what only AWS can
 
@@ -305,7 +373,10 @@ Authorization Reference). Further checks: no read that returns secrets or full c
 values, origin headers, contact addresses, VPN keys) is allowed on every resource unless an
 explicit deny keeps it to the project tag; CloudFront parts without tags are create-only;
 `RunInstances` takes only Amazon images and project-tagged network interfaces; volumes from
-snapshots are denied; tasks run only on `ssd-workshop-*` clusters; EventBridge rules need an
+snapshots are denied; tasks run only on `ssd-workshop-*` clusters, `StartTask` is denied,
+services only in the two workshop subnets (the same ids as `infra/lib/config.ts`), and under the
+boundary only the launcher role starts tasks (a small evaluator checks these per request);
+`ecs:DescribeTaskDefinition` is granted only on its own, to the deploy principals; EventBridge rules need an
 `ssd-workshop.*` source; certificates only for workshop names; SES only through the workshop
 sender's identities; every bucket grant needs this account; the sharing and egress denies,
 `NoSelfAssume` and the identity denies cover both principals, and the sharing denies also the
@@ -325,5 +396,7 @@ that `lambda:FunctionArn` matches when CloudFormation passes a function name, th
 `RunInstances` from an Amazon AMI needs no `snapshot` resource, that `RunInstances` works with a
 pre-created network interface (a new interface created by `RunInstances` has no resource tag, so
 the k3s ticket creates the interface first), that SES authorizes the identities listed (and no
-configuration set), and that `events:source` holds the plain source strings of a pattern (a
-pattern with `prefix` matching is untested).
+configuration set), that `events:source` holds the plain source strings of a pattern (a
+pattern with `prefix` matching is untested), that `aws:PrincipalArn` of the launcher's session is
+the role ARN with its path `/ssd-workshop/` (ticket 2.9's first build), and that `ecs:subnet` holds
+subnet ids (no workshop stack creates an ECS service yet).
