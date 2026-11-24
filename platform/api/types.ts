@@ -317,12 +317,17 @@ export interface AppDataUsageItem extends Keyed {
   /** ISO 8601. */
   updatedAt: string;
   /**
-   * The UTC day (YYYY-MM-DD) that `writtenBytes` counts: the daily write budget (20 MB per app and
-   * day, each PUT counting its value's bytes and at least 1 KB, each DELETE 1 KB), kept within it by
-   * the same transaction's condition. The first write of a new day starts the count again.
+   * The UTC day (YYYY-MM-DD) that `writtenBytes` counts: the daily write budget (5 MB per app and
+   * day, each write counting what DynamoDB bills it, `writeCost` in app-data/data.ts), kept within it
+   * by the same transaction's condition. The first write of a later day starts the count again.
    */
   writeDay: string;
   writtenBytes: number;
+  /**
+   * Each stored value's `bytes`, by data key, changed in the same transaction as the value: a write
+   * reads only this item, never the value item (DynamoDB bills a read on the whole item's size).
+   */
+  sizes: Record<string, number>;
 }
 
 export type TableItem =

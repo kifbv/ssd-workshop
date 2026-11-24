@@ -5,6 +5,7 @@ import {
   CachePolicy,
   Distribution,
   HeadersFrameOption,
+  type BehaviorOptions,
   HeadersReferrerPolicy,
   HttpVersion,
   OriginProtocolPolicy,
@@ -21,6 +22,8 @@ import { Bucket } from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 import {
   API_ORIGIN_DOMAIN,
+  APP_DATA_HEADERS_POLICY_NAME,
+  APP_DATA_HEADERS_POLICY_VERSION,
   DOMAIN,
   HOSTED_ZONE_ID,
   HOSTED_ZONE_NAME,
@@ -91,6 +94,51 @@ export class EdgeStack extends Stack {
     });
     pagesHeaders.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
+    // Ticket 2.4: the data API answers sandboxed apps (opaque origin), which can read an answer only
+    // with `Access-Control-Allow-Origin`. The function sets it on its own answers, but API Gateway's
+    // throttle (429) and other answers made before the function carry none, and the app would see
+    // "could not be reached". This policy keeps the managed SecurityHeadersPolicy's headers and adds
+    // CORS for every answer of `/api/apps/*`: any origin, never credentials, the same methods,
+    // headers and max age as the function's preflight; `originOverride` replaces the function's own
+    // header, so an answer never carries it twice. Retained and versioned like the pages' policy.
+    const appDataHeaders = new ResponseHeadersPolicy(this, `AppDataHeadersV${APP_DATA_HEADERS_POLICY_VERSION}`, {
+      responseHeadersPolicyName: APP_DATA_HEADERS_POLICY_NAME,
+      comment: `${PREFIX} data API for apps: security headers and CORS for any origin`,
+      corsBehavior: {
+        accessControlAllowOrigins: ["*"],
+        accessControlAllowCredentials: false,
+        accessControlAllowMethods: ["GET", "PUT", "DELETE"],
+        accessControlAllowHeaders: ["content-type", "accept"],
+        accessControlMaxAge: Duration.seconds(600),
+        originOverride: true,
+      },
+      // The managed SecurityHeadersPolicy's headers and settings, as on /api/*.
+      securityHeadersBehavior: {
+        strictTransportSecurity: { accessControlMaxAge: Duration.days(365), includeSubdomains: false, preload: false, override: false },
+        contentTypeOptions: { override: false },
+        frameOptions: { frameOption: HeadersFrameOption.SAMEORIGIN, override: false },
+        xssProtection: { protection: true, modeBlock: true, override: false },
+        referrerPolicy: { referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN, override: false },
+      },
+    });
+    appDataHeaders.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    // Ticket 1.2: pages and API share one origin (no CORS, no new DNS record).
+    const api: BehaviorOptions = {
+      origin: new HttpOrigin(API_ORIGIN_DOMAIN, {
+        protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
+      }),
+      allowedMethods: AllowedMethods.ALLOW_ALL,
+      // Never cache API answers; pass cookies, query strings and every
+      // header except Host (API Gateway needs its own Host) to the API.
+      cachePolicy: CachePolicy.CACHING_DISABLED,
+      originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+      // HTTPS only, not a redirect: a redirect would turn a POST into a GET.
+      viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
+      // JSON answers: the managed SecurityHeadersPolicy as before (no CSP needed).
+      responseHeadersPolicy: ResponseHeadersPolicy.SECURITY_HEADERS,
+    };
+
     this.distribution = new Distribution(this, "Distribution", {
       comment: `${PREFIX} site`,
       domainNames: [DOMAIN],
@@ -106,23 +154,11 @@ export class EdgeStack extends Stack {
         cachePolicy: CachePolicy.CACHING_OPTIMIZED,
         responseHeadersPolicy: pagesHeaders,
       },
-      // Ticket 1.2: pages and API share one origin (no CORS, no new DNS record).
-      // Managed policies only, so no new untaggable resource.
+      // CloudFront takes the first matching pattern: the data API's comes before /api/*. Both use
+      // the same origin and settings; only the headers policy differs.
       additionalBehaviors: {
-        "/api/*": {
-          origin: new HttpOrigin(API_ORIGIN_DOMAIN, {
-            protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
-          }),
-          allowedMethods: AllowedMethods.ALLOW_ALL,
-          // Never cache API answers; pass cookies, query strings and every
-          // header except Host (API Gateway needs its own Host) to the API.
-          cachePolicy: CachePolicy.CACHING_DISABLED,
-          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-          // HTTPS only, not a redirect: a redirect would turn a POST into a GET.
-          viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
-          // JSON answers: the managed SecurityHeadersPolicy as before (no CSP needed).
-          responseHeadersPolicy: ResponseHeadersPolicy.SECURITY_HEADERS,
-        },
+        "/api/apps/*": { ...api, responseHeadersPolicy: appDataHeaders },
+        "/api/*": api,
       },
     });
     // CDK cannot add to an imported bucket's policy; the site stack does it.

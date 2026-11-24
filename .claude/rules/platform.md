@@ -40,7 +40,16 @@ paths:
   Writes that all update one item (an app's `DATA_USAGE`) cancel each other with `TransactionConflict` on DynamoDB,
   which the in-memory fakes do not reproduce: pause 20 to 80 ms at random before another try.
 - A public write path whose limits a loop can stay under (replacing one value) needs a cost cap of its own: a daily
-  byte budget per app in the same transaction (ticket 2.4: 20 MB per UTC day, 429) and route throttles.
+  byte budget per app in the same transaction (ticket 2.4: 5 MB per UTC day, 429) and route throttles. Count what
+  DynamoDB bills: every item the transaction writes, in whole KB, at the larger of its old and new size (replacing
+  100 KB with 1 byte still costs 100 KB), and the totals item too (it grows with the keys).
+- DynamoDB bills a `GetItem` on the whole item's size, whatever the `ProjectionExpression`: a request path that may
+  be refused (429, 413) reads only small items. Keep what a write needs (each key's size) in the small totals item
+  (a map attribute, `sizes.#k` through `ExpressionAttributeNames`; IAM's `dynamodb:Attributes` sees only the
+  top-level `sizes`; create the map with the item, as a nested `SET` on a missing map fails) and never read the
+  value item on a write (ticket 2.4).
+- A date condition on a day counter only moves forward: `attribute_not_exists(#day) OR #day < :today` (ISO dates
+  compare as text), never `<>`, or an instance whose clock is behind resets the count.
 - Pages (`platform/web`): no inline `<script>`, `<style>`, `style=` or `on*=` attributes (the CSP has `script-src 'self'`
   and `style-src 'self'`); set text with `textContent`. Browser code gets DOM types from `platform/web/tsconfig.json`
   only. In Playwright, a `hidden` element is not in the accessibility tree: `getByRole` waits forever for it, so read

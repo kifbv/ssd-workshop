@@ -435,16 +435,29 @@ round-trip a JSON value. The log group `ssd-workshop-api-app-data` has one line 
 status and size only; a refusal from DynamoDB shows as `"outcome":"failed"` with the error name
 (`AccessDeniedException` for a missing right).
 
-The stage throttles `PUT` and `DELETE` on the route at 10 requests/s (burst 20) and `GET` at 20/s (burst 40), read-only:
+Every answer under `/api/apps/*`, also those API Gateway makes itself (a throttle's 429, a 403 or 5xx before the
+function), gets `access-control-allow-origin: *` from CloudFront's `ssd-workshop-app-data-v1` headers policy, once:
+
+```sh
+curl -sS -D - -o /dev/null -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here/data/score \
+  | grep -i -E '^(access-control-|strict-transport-security|x-content-type-options|x-frame-options|referrer-policy)'
+# expect: exactly one "access-control-allow-origin: *", no access-control-allow-credentials, and the four security headers
+curl -sS -D - -o /dev/null -X POST -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here/data/score \
+  | grep -i -E '^(HTTP/|access-control-allow-origin)'
+# expect: an answer API Gateway makes itself (404 Not Found, no route for POST) that still carries access-control-allow-origin: *
+```
+
+The stage throttles `PUT` and `DELETE` on the route at 30 requests/s (burst 60) and `GET` at 20/s (burst 40), read-only:
 
 ```sh
 aws apigatewayv2 get-stage --region eu-central-1 --api-id <API id from infra/lib/config.ts> --stage-name '$default' \
   --query 'RouteSettings'
-# expect: the two sign-in routes at 5/10, "PUT /api/apps/{nickname}/data/{key}" and "DELETE ..." at 10/20,
+# expect: the two sign-in routes at 5/10, "PUT /api/apps/{nickname}/data/{key}" and "DELETE ..." at 30/60,
 #         "GET ..." at 20/40
 ```
 
-Each app may also write 20 MB per UTC day (`writeDay`, `writtenBytes` in its `DATA_USAGE` item); past that,
+Each app may also write 5 MB per UTC day, counted as DynamoDB bills its writes (`writeDay`, `writtenBytes` in its
+`DATA_USAGE` item, which also holds each key's size in `sizes`); past that,
 `PUT` and `DELETE` answer 429 "This app has saved a lot of data today. Saving starts again tomorrow." until
 midnight UTC.
 

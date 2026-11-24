@@ -62,11 +62,13 @@ export const SIGN_IN_VERIFY_ROUTE_KEY = "POST /api/sign-in/verify";
 export const SIGN_IN_VERIFY_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 
 /**
- * Route throttles for the data API (ticket 2.4): reachable by anyone with an app's address. Writes
- * cost DynamoDB write units by size, so PUT and DELETE get 10 requests/s (burst 20) on top of each
- * app's daily write budget; reads cost far less, GET gets 20/s (burst 40). OPTIONS keeps the stage's.
+ * Route throttles for the data API (ticket 2.4), for all apps together: reachable by anyone with an
+ * app's address. Each app's daily write budget caps what writes cost; the throttles cap the requests
+ * (and their reads of the small totals item). PUT and DELETE get 30 requests/s (burst 60), enough for a
+ * workshop room pressing shared counters (a throttled request answers 429), GET 20/s (burst 40).
+ * OPTIONS keeps the stage's.
  */
-export const APP_DATA_WRITE_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
+export const APP_DATA_WRITE_THROTTLE = { rateLimit: 30, burstLimit: 60 } as const;
 export const APP_DATA_READ_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
 
 /** The protected participant routes (ticket 1.5), all served by one function behind one session check. */

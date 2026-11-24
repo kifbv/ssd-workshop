@@ -182,3 +182,7 @@ paths:
   `StringLike` patterns cannot overlap (`APP#*` never matches `APPDATA#...`, since the `#` comes right after `APP`).
 - An HTTP API route that must answer a CORS preflight itself (the data API, ticket 2.4) gets an explicit `OPTIONS`
   route to the function, and the API keeps no `corsPreflight`: with one, API Gateway answers `OPTIONS` itself.
+- API Gateway's own answers (a route throttle's 429) carry no CORS headers, so a sandboxed app cannot read them: the
+  data API's CloudFront behaviour `/api/apps/*` (before `/api/*`) adds `Access-Control-Allow-Origin: *` with a custom
+  response headers policy (`ssd-workshop-app-data-v1`, CORS `originOverride: true` so the function's own header is
+  replaced, not doubled), which keeps the managed SecurityHeadersPolicy's headers (ticket 2.4).
