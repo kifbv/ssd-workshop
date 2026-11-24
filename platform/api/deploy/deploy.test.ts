@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ALLOWED_EXTENSIONS } from "../build/check.js";
-import { appArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
+import { appMainArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
 import {
   CACHE_CONTROL,
   contentTypeOf,
@@ -9,6 +9,8 @@ import {
   DownloadProblem,
   MAX_REASON_CHARS,
   MAX_REASONS_CHARS,
+  MAIN_MOVED_REASON,
+  NO_COMMIT_REASON,
   SERVICE_PROBLEM_REASON,
   TIME_UP_REASON,
   parseDeployJob,
@@ -19,7 +21,7 @@ import {
   type DeployLogEntry,
 } from "./deploy.js";
 import { FakeAppObjects, FakeCdn, FakeDeployRecords } from "./fakes.js";
-import { COMMIT, TOP, githubTar, gzip } from "./tar-fixtures.js";
+import { COMMIT, TOP, githubTar, githubTarAt, gzip, paxRecord } from "./tar-fixtures.js";
 
 const NOW = new Date("2026-11-24T10:00:00.000Z");
 const EARLIER = "2026-11-20T08:00:00.000Z";
@@ -31,7 +33,7 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
   const objects = new FakeAppObjects();
   const cdn = new FakeCdn();
   const records = new FakeDeployRecords();
-  records.builds.set(BUILD, { nickname: "Ada", status: "building" });
+  records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status: "building" });
   const downloads: string[] = [];
   const downloadTimeouts: number[] = [];
   const logs: DeployLogEntry[] = [];
@@ -66,11 +68,11 @@ function seed(objects: FakeAppObjects): void {
 }
 
 describe("criterion 1: a commit that passes the check is published under apps/<nickname>/ only, and the build is live", () => {
-  it("downloads the commit's tarball from the app's public repository", async () => {
+  it("downloads the tarball of the app's public repository's own main (refs/heads/main), once", async () => {
     const t = setup(passing());
     await processDeploy(job(), 1, t.deps);
-    expect(t.downloads).toEqual([appArchiveUrl("Ada", COMMIT)]);
-    expect(t.downloads[0]).toBe(`https://codeload.github.com/ssd-workshop-apps/ssd-ada/tar.gz/${COMMIT}`);
+    expect(t.downloads).toEqual([appMainArchiveUrl("Ada")]);
+    expect(t.downloads[0]).toBe("https://codeload.github.com/ssd-workshop-apps/ssd-ada/tar.gz/refs/heads/main");
   });
 
   it("puts every file under apps/<lower-cased nickname>/ and nothing else, removes what the new version no longer has, and leaves other apps alone", async () => {
@@ -276,7 +278,21 @@ describe("deploy messages", () => {
       expect(t.downloads, nickname).toEqual([]);
       expect(t.objects.puts).toEqual([]);
       expect(t.records.live.size).toBe(0);
-      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status: "building" });
+      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", pushedCommit: COMMIT, status: "building" });
+      expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
+    }
+  });
+
+  it("drops a message whose commit is not the one the builder pushed (pushedCommit), or whose build has none, without downloading or publishing (ticket 2.8)", async () => {
+    const other = "fedcba9876543210fedcba9876543210fedcba98";
+    for (const stored of [{ pushedCommit: other }, {}]) {
+      const t = setup(passing());
+      t.records.builds.set(BUILD, { nickname: "Ada", status: "building", ...stored });
+      await processDeploy(job(), 1, t.deps);
+      expect(t.downloads).toEqual([]);
+      expect(t.objects.puts).toEqual([]);
+      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status: "building", ...stored });
+      expect(t.records.live.size).toBe(0);
       expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
     }
   });
@@ -284,11 +300,11 @@ describe("deploy messages", () => {
   it("drops a message whose build is already live or failed, without downloading or publishing", async () => {
     for (const status of ["live", "failed"] as const) {
       const t = setup(passing());
-      t.records.builds.set(BUILD, { nickname: "Ada", status, finishedAt: EARLIER });
+      t.records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status, finishedAt: EARLIER });
       await processDeploy(job(), 1, t.deps);
       expect(t.downloads, status).toEqual([]);
       expect(t.objects.puts).toEqual([]);
-      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status, finishedAt: EARLIER });
+      expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", pushedCommit: COMMIT, status, finishedAt: EARLIER });
       expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
     }
   });
@@ -296,7 +312,7 @@ describe("deploy messages", () => {
   it("deploys a build that is queued, building, or deploying (a redelivery after a crash)", async () => {
     for (const status of ["queued", "building", "deploying"] as const) {
       const t = setup(passing());
-      t.records.builds.set(BUILD, { nickname: "Ada", status });
+      t.records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status });
       await processDeploy(job(), 1, t.deps);
       expect(t.records.builds.get(BUILD)?.status, status).toBe("live");
     }
@@ -309,6 +325,90 @@ describe("deploy messages", () => {
     });
     await processDeploy(job(), 1, t.deps);
     expect(t.records.builds.get(BUILD)?.status).toBe("live");
+  });
+});
+
+describe("only the pushed commit, as the app repository's own main, is published (ticket 2.8, try 3: the fork-network route)", () => {
+  const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
+  const FILES = { "index.html": PAGE, "app.js": "console.log(1);\n", "css/style.css": "p { color: red; }\n" };
+
+  it("publishes exactly the bytes it checked when main's archive names the message's commit (no second download)", async () => {
+    const t = setup(gzip(githubTarAt(COMMIT, FILES)));
+    await processDeploy(job(), 1, t.deps);
+    expect(t.downloads).toEqual([appMainArchiveUrl("Ada")]);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "live", deployedCommit: COMMIT });
+    expect(new TextDecoder().decode(t.objects.objects.get("apps/ada/index.html")?.bytes)).toBe(PAGE);
+    expect(new TextDecoder().decode(t.objects.objects.get("apps/ada/app.js")?.bytes)).toBe("console.log(1);\n");
+  });
+
+  it("publishes nothing while codeload serves another commit for main (main moved on, or a stale copy): retried, then failed with a plain reason", async () => {
+    const t = setup(gzip(githubTarAt(OTHER, FILES)));
+    t.records.live.set("ada", { nickname: "Ada", liveAt: EARLIER });
+    for (let receive = 1; receive < DEPLOY_MAX_RECEIVES; receive += 1) {
+      await expect(processDeploy(job(), receive, t.deps)).rejects.toThrow(/^deploy failed$/);
+      expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
+    }
+    expect(t.logs.at(-1)).toEqual({ event: "deployer", outcome: "retry", error: "DownloadProblem", durationMs: expect.any(Number) });
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.objects.removed).toEqual([]);
+    expect(t.cdn.invalidations).toEqual([]);
+    expect(t.records.live.get("ada")).toEqual({ nickname: "Ada", liveAt: EARLIER });
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [MAIN_MOVED_REASON] });
+    expect(MAIN_MOVED_REASON).toBe("The app's main branch on GitHub is not at the commit the builder pushed, so nothing was published.");
+    expect(t.logs.at(-1)).toEqual({ event: "deployer", outcome: "gave-up", error: "DownloadProblem", durationMs: expect.any(Number) });
+  });
+
+  it("goes by the first entry only: a comment in a later global header or a per-file header is ignored", async () => {
+    // main names the pushed commit first; later headers naming another do not stop it.
+    const later = [
+      { path: "pax_global_header", type: "g", data: paxRecord("comment", OTHER) },
+      { path: "PaxHeaders/x", type: "x", data: paxRecord("comment", OTHER) },
+      { path: `${TOP}/later.txt`, data: "later\n" },
+    ];
+    const ok = setup(gzip(githubTar(FILES, later)));
+    await processDeploy(job(), 1, ok.deps);
+    expect(ok.records.builds.get(BUILD)?.status).toBe("live");
+    // main names another commit first; later headers naming the pushed one do not make it publishable.
+    const pushedLater = [
+      { path: "pax_global_header", type: "g", data: paxRecord("comment", COMMIT) },
+      { path: "PaxHeaders/x", type: "x", data: paxRecord("comment", COMMIT) },
+      { path: `${TOP}/later.txt`, data: "later\n" },
+    ];
+    const moved = setup(gzip(githubTar(FILES, pushedLater, paxRecord("comment", OTHER))));
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, moved.deps);
+    expect(moved.objects.puts).toEqual([]);
+    expect(moved.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [MAIN_MOVED_REASON] });
+  });
+
+  it("fails closed, at once and publishing nothing, when the archive names no commit or a malformed one", async () => {
+    for (const records of [null, paxRecord("mtime", "1700000000"), paxRecord("comment", COMMIT.toUpperCase()), paxRecord("comment", COMMIT.slice(1)), paxRecord("comment", COMMIT) + paxRecord("comment", COMMIT)]) {
+      const t = setup(gzip(githubTar(FILES, [], records)));
+      await processDeploy(job(), 1, t.deps);
+      expect(t.objects.puts, String(records)).toEqual([]);
+      expect(t.cdn.invalidations).toEqual([]);
+      expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [NO_COMMIT_REASON] });
+      expect(t.logs).toEqual([{ event: "deployer", outcome: "failed", problems: 1, durationMs: expect.any(Number) }]);
+    }
+    expect(NO_COMMIT_REASON).toBe("GitHub's download of the app's main branch does not name its commit, so nothing was published.");
+  });
+
+  it("a 404 for main (GitHub's short-lived one right after a push) is retried, then the build failed on the last delivery; nothing published", async () => {
+    const t = setup(async () => {
+      throw new DownloadProblem("GitHub answered 404 to the download of the commit; check that the repository and the commit exist.", true);
+    });
+    await expect(processDeploy(job(), 1, t.deps)).rejects.toThrow(/^deploy failed$/);
+    expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [expect.stringMatching(/^GitHub answered 404/)] });
+  });
+
+  it("never downloads for a message the build does not expect (no claim, nothing recorded)", async () => {
+    const t = setup(passing());
+    await processDeploy(job({ commit: "f".repeat(40) }), 1, t.deps);
+    expect(t.downloads).toEqual([]);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
   });
 });
 
@@ -372,7 +472,7 @@ describe("passing problems: retried by SQS, the build marked failed on the last 
       throw Object.assign(new Error("table is down"), { name: "InternalServerError" });
     };
     await expect(processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps)).rejects.toThrow(/^deploy failed$/);
-    expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", status: "building" });
+    expect(t.records.builds.get(BUILD)).toEqual({ nickname: "Ada", pushedCommit: COMMIT, status: "building" });
     expect(t.logs).toEqual([{ event: "deployer", outcome: "dead-letter", error: "InternalServerError", durationMs: expect.any(Number) }]);
   });
 
@@ -401,7 +501,7 @@ describe("content types", () => {
 describe("build updates remove what no longer holds (like the real REMOVE clauses)", () => {
   it("marking a build live removes the failure reasons of an earlier try", async () => {
     const t = setup(passing());
-    t.records.builds.set(BUILD, { nickname: "Ada", status: "building", failureReasons: ["old reason"] });
+    t.records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status: "building", failureReasons: ["old reason"] });
     await processDeploy(job(), 1, t.deps);
     expect(t.records.builds.get(BUILD)?.status).toBe("live");
     expect(t.records.builds.get(BUILD)).not.toHaveProperty("failureReasons");
@@ -409,7 +509,7 @@ describe("build updates remove what no longer holds (like the real REMOVE clause
 
   it("marking a build failed removes a deployed commit of an earlier try", async () => {
     const t = setup(gzip(githubTar({ "index.html": "x", "shell.php": "<?php ?>" })));
-    t.records.builds.set(BUILD, { nickname: "Ada", status: "building", deployedCommit: COMMIT });
+    t.records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status: "building", deployedCommit: COMMIT });
     await processDeploy(job(), 1, t.deps);
     expect(t.records.builds.get(BUILD)?.status).toBe("failed");
     expect(t.records.builds.get(BUILD)).not.toHaveProperty("deployedCommit");
@@ -596,15 +696,15 @@ describe("a phase cut off by the deadline is aborted, and a late write never cha
 
   it("a late live mark after the build was marked failed fails its condition and changes nothing", async () => {
     const records = new FakeDeployRecords();
-    records.builds.set(BUILD, { nickname: "Ada", status: "deploying" });
+    records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status: "deploying" });
     expect(await records.markFailed(BUILD, [TIME_UP_REASON], NOW.toISOString())).toBe(true);
     const failed = structuredClone(records.builds.get(BUILD));
     expect(await records.markLive(BUILD, COMMIT, "2026-11-24T10:05:00.000Z")).toBe(false);
     expect(records.builds.get(BUILD)).toEqual(failed);
     // And the other way round: a late failure never turns a live build failed.
-    records.builds.set("build-2", { nickname: "Ada", status: "live", deployedCommit: COMMIT });
+    records.builds.set("build-2", { nickname: "Ada", pushedCommit: COMMIT, status: "live", deployedCommit: COMMIT });
     expect(await records.markFailed("build-2", ["late"], NOW.toISOString())).toBe(false);
-    expect(records.builds.get("build-2")).toEqual({ nickname: "Ada", status: "live", deployedCommit: COMMIT });
+    expect(records.builds.get("build-2")).toEqual({ nickname: "Ada", pushedCommit: COMMIT, status: "live", deployedCommit: COMMIT });
   });
 
   it("a live mark that ignores its signal and lands after the build was marked failed changes nothing", async () => {

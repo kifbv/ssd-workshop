@@ -220,7 +220,7 @@ const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTim
  * is final) until the waits run out or the caller's signal aborts; then returns the last answer for the caller to
  * check.
  */
-async function withRetry(deps: GitHubDeps, call: () => Promise<GitHubAnswer>): Promise<GitHubAnswer> {
+export async function withRetry(deps: GitHubDeps, call: () => Promise<GitHubAnswer>): Promise<GitHubAnswer> {
   const aborted = (): boolean => deps.signal?.aborted === true;
   let answer = await call();
   for (const wait of RETRY_WAITS_MS) {

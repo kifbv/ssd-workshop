@@ -1,6 +1,6 @@
-// `npm run eval -- guardrails | clarify | spec | readiness` (tickets 1.7, 1.8, 1.9 and 2.7): the real guardrail
-// check, the real step 1 or step 2 answer call, or the real readiness check, against Claude on Bedrock with your
-// own AWS credentials.
+// `npm run eval -- guardrails | clarify | spec | readiness | build` (tickets 1.7, 1.8, 1.9, 2.7 and 2.8): the real
+// guardrail check, the real step 1 or step 2 answer call, the real readiness check, or the real builder (./build.ts),
+// against Claude on Bedrock with your own AWS credentials.
 // The scoring lives in ./logic.ts; spec diagrams are parsed and drawn by Mermaid in Chromium (./diagram.ts).
 import { readFileSync } from "node:fs";
 import { Agent, type AgentOptions } from "node:https";
@@ -11,11 +11,16 @@ import { extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import { checkGuardrail } from "../../api/conversation/guardrail.js";
 import { checkReadiness } from "../../api/conversation/readiness.js";
 import { BedrockModel, usageOf } from "../../api/conversation/model.js";
-import { MODEL_ID, REGION } from "../../api/settings.js";
+import { MODEL_ID, MODELS, REGION, type ModelSetting } from "../../api/settings.js";
 import { proxyFromEnv, redactError } from "../smoke/logic.js";
+import { evalBuild, launchBrowser } from "./build.js";
 import { openDiagramChecker } from "./diagram.js";
 import {
+  type BuildEvalResult,
   exitCode,
+  formatBuildResult,
+  formatBuildSummary,
+  scoreBuild,
   formatClarifyResult,
   formatClarifySummary,
   formatResult,
@@ -38,12 +43,49 @@ import {
 
 const examplesFile = (suite: string): URL => new URL(`../../api/eval/${suite}.json`, import.meta.url);
 
+/** The build suite: the readiness file's workshop example specs, one at a time, through the real builder. */
+async function runBuildSuite(modelId: string | undefined, only: number | undefined): Promise<number> {
+  const all = parseReadinessExamples(readFileSync(examplesFile("readiness"), "utf8"));
+  if ("error" in all) {
+    console.error(all.error);
+    return 1;
+  }
+  const examples = all.filter((example) => example.category === "example");
+  if (only !== undefined && only > examples.length) {
+    console.error(`there are ${examples.length} example specs`);
+    return 1;
+  }
+  const chosen = only === undefined ? examples : examples.slice(only - 1, only);
+  const model: ModelSetting = modelId === undefined ? MODELS.build : { modelId, price: MODELS.build.price };
+  console.log(`Model: ${model.modelId} (${REGION}), ${chosen.length} example spec(s)`);
+  const browser = await launchBrowser();
+  try {
+    const results: BuildEvalResult[] = [];
+    for (const [i, example] of chosen.entries()) {
+      let result: BuildEvalResult;
+      try {
+        const outcome = await evalBuild(example.spec, model, browser, (entry) => console.log(`     . ${JSON.stringify(entry)}`));
+        result = { example, outcome, ...scoreBuild(outcome) };
+      } catch (error) {
+        result = { example, pass: false, detail: `eval failed: ${redactError(error instanceof Error ? `${error.name}: ${error.message}` : String(error))}` };
+      }
+      results.push(result);
+      console.log(formatBuildResult(result, i));
+    }
+    for (const line of formatBuildSummary(results)) console.log(line);
+    return exitCode(results);
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main(): Promise<number> {
   const parsed = parseEvalArgs(process.argv.slice(2));
   if ("error" in parsed) {
     console.error(`${parsed.error}\n\n${USAGE}`);
     return 1;
   }
+  if (parsed.suite === "build") return runBuildSuite(parsed.model, parsed.example);
   // Bedrock runtime defaults to HTTP/2, which ignores a plain httpsAgent option: an explicit
   // HTTP/1.1 handler carries the session proxy where one is set (see .claude/rules/platform.md).
   const client = new BedrockRuntimeClient({

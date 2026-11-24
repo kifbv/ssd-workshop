@@ -11,6 +11,7 @@
     "conversation": "tsx src/conversation/main.ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.331",
     "@aws-sdk/client-bedrock-runtime": "^3.1175.0",
     "@aws-sdk/client-cloudfront": "^3.1176.0",
     "@aws-sdk/client-dynamodb": "^3.1175.0",
@@ -19,7 +20,9 @@
     "@aws-sdk/client-service-quotas": "^3.1175.0",
     "@aws-sdk/client-sesv2": "^3.1175.0",
     "@aws-sdk/client-sqs": "^3.1175.0",
-    "@smithy/node-http-handler": "^4.14.2"
+    "@aws-sdk/credential-provider-node": "^3.972.98",
+    "@smithy/node-http-handler": "^4.14.2",
+    "@smithy/signature-v4": "^5.7.5"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

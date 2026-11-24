@@ -7,6 +7,7 @@ import {
   CloudFrontCdn,
   DynamoDeployRecords,
   FINISH_CONDITION,
+  START_CONDITION,
   S3AppObjects,
   type CloudFrontSender,
   type DeployTableSender,
@@ -98,7 +99,7 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
   it("updates only an existing build, naming only the build attributes the deployer's role may write", async () => {
     const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
     const records = new DynamoDeployRecords(client, TABLE);
-    expect(await records.startDeploy("build-1", "Ada", NOW)).toBe(true);
+    expect(await records.startDeploy("build-1", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(true);
     expect(await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(true);
     expect(await records.markFailed("build-1", ["index.html: no", "x"], NOW)).toBe(true);
     for (const command of sent) {
@@ -123,33 +124,37 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
     expect(failed?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" }, ":reasons": { L: [{ S: "index.html: no" }, { S: "x" }] } });
   });
 
-  it("starts a deploy only for an existing build of the message's app (nickname exactly as typed) that is queued, building or deploying", async () => {
+  it("starts a deploy only for an existing build of the message's app (nickname exactly as typed) whose builder pushed the message's commit and that is queued, building or deploying", async () => {
     const { client, sent } = stub<DeployTableSender>([{}]);
-    await new DynamoDeployRecords(client, TABLE).startDeploy("build-1", "Ada", NOW);
+    await new DynamoDeployRecords(client, TABLE).startDeploy("build-1", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW);
     const input = sent[0]?.input as UpdateItemCommandInput;
-    expect(input.ConditionExpression).toBe("attribute_exists(pk) AND #nickname = :nickname AND #status IN (:queued, :building, :deploying)");
-    expect(input.ExpressionAttributeNames).toMatchObject({ "#nickname": "nickname", "#status": "status" });
+    expect(input.ConditionExpression).toBe(
+      "attribute_exists(pk) AND #nickname = :nickname AND #pushedCommit = :commit AND #status IN (:queued, :building, :deploying)",
+    );
+    expect(START_CONDITION).toBe(input.ConditionExpression);
+    expect(input.ExpressionAttributeNames).toMatchObject({ "#nickname": "nickname", "#status": "status", "#pushedCommit": "pushedCommit" });
     expect(input.ExpressionAttributeValues).toMatchObject({
       ":nickname": { S: "Ada" },
+      ":commit": { S: "0123456789abcdef0123456789abcdef01234567" },
       ":queued": { S: "queued" },
       ":building": { S: "building" },
       ":deploying": { S: "deploying" },
     });
     // The condition's names count for IAM's dynamodb:Attributes too.
-    for (const name of ["nickname", "status"]) expect(DEPLOYER_BUILD_UPDATE_ATTRIBUTES).toContain(name);
+    for (const name of ["nickname", "status", "pushedCommit"]) expect(DEPLOYER_BUILD_UPDATE_ATTRIBUTES).toContain(name);
   });
 
   it("answers false for a build that does not exist, and passes other errors on", async () => {
     const { client } = stub<DeployTableSender>([conditionFailed(), Object.assign(new Error("x"), { name: "ProvisionedThroughputExceededException" })]);
     const records = new DynamoDeployRecords(client, TABLE);
-    expect(await records.startDeploy("nope", "Ada", NOW)).toBe(false);
+    expect(await records.startDeploy("nope", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(false);
     await expect(records.markFailed("nope", [], NOW)).rejects.toThrow("x");
   });
 
-  it("never sets or removes a build's nickname (the role could: IAM cannot tell a compared name from a set one), and sets status only to deploying, live or failed", async () => {
+  it("never sets or removes a build's nickname or pushedCommit (the role could: IAM cannot tell a compared name from a set one), and sets status only to deploying, live or failed", async () => {
     const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
     const records = new DynamoDeployRecords(client, TABLE);
-    await records.startDeploy("build-1", "Ada", NOW);
+    await records.startDeploy("build-1", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW);
     await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW);
     await records.markFailed("build-1", ["x"], NOW);
     const statuses = sent.map((command) => {
@@ -160,6 +165,7 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
       const written = [...sets.map(([target]) => target ?? ""), ...removePart.split(",").map((name) => name.trim()).filter((name) => name !== "")];
       const attributes = written.map((placeholder) => names[placeholder] ?? placeholder);
       expect(attributes, input.UpdateExpression).not.toContain("nickname");
+      expect(attributes, input.UpdateExpression).not.toContain("pushedCommit");
       const statusClause = sets.find(([target]) => names[target ?? ""] === "status");
       expect(removePart).not.toContain("#status");
       return input.ExpressionAttributeValues?.[statusClause?.[1] ?? ""]?.S;

@@ -2,6 +2,10 @@
  * Downloads an app's tarball from GitHub (ticket 2.5). The repositories are public, so the download is
  * anonymous (ticket 2.6 may add a token). The body is read as a stream and dropped past
  * MAX_DOWNLOAD_BYTES; the whole download has a time limit.
+ *
+ * The deployer downloads the app repository's own `main` (`appMainArchiveUrl`, ticket 2.8 try 3) with redirects
+ * refused (downloadForDeployer), and publishes it only when the archive's commit is the pushed one: GitHub serves a
+ * commit of any fork in the repository's network through the parent's address by commit id, never by branch.
  */
 import { DOWNLOAD_TIMEOUT_MS, DownloadProblem } from "./deploy.js";
 
@@ -20,6 +24,8 @@ export interface DownloadOptions {
   timeoutMs?: number;
   /** Stops the download when aborted (the deployer's phase deadline), like the time limit. */
   signal?: AbortSignal;
+  /** Default "follow" (the builder's clone by commit id); the deployer passes "error" (downloadForDeployer). */
+  redirect?: "follow" | "error";
 }
 
 export async function downloadArchive(url: string, options: DownloadOptions = {}): Promise<Uint8Array> {
@@ -28,7 +34,7 @@ export async function downloadArchive(url: string, options: DownloadOptions = {}
   const signal = options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]);
   let response: Response;
   try {
-    response = await fetchFn(url, { signal, redirect: "follow" });
+    response = await fetchFn(url, { signal, redirect: options.redirect ?? "follow" });
   } catch {
     throw new DownloadProblem(UNREACHABLE, true);
   }
@@ -66,4 +72,12 @@ export async function downloadArchive(url: string, options: DownloadOptions = {}
     at += chunk.length;
   }
   return bytes;
+}
+
+/**
+ * The deployer's download (ticket 2.8, try 3): downloadArchive with redirects refused, so a renamed or transferred
+ * repository (GitHub answers those with a redirect) never answers for the app.
+ */
+export function downloadForDeployer(url: string, options: Omit<DownloadOptions, "redirect"> = {}): Promise<Uint8Array> {
+  return downloadArchive(url, { ...options, redirect: "error" });
 }

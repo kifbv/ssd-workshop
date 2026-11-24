@@ -210,3 +210,6 @@ paths:
   allowed sender (none until ticket 2.9 adds the builder).
 - CloudFront Function code lives in a plain `.js` file (`FunctionCode.fromFile`, inlined in the template, no asset) that
   a test evaluates (`new Function(code + "return handler;")`); `AWS::CloudFront::Function` takes `Tags`.
+- A role whose `GetItem` is limited by `dynamodb:Attributes` also needs `StringEquals` `dynamodb:Select` =
+  `SPECIFIC_ATTRIBUTES`: a GetItem without a `ProjectionExpression` returns the whole item, and the attribute list alone
+  may let it through (ticket 2.8, for 2.9's builder role).

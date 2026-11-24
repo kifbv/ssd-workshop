@@ -5,7 +5,7 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { clientSettings } from "../aws.js";
 import { CloudFrontCdn, DynamoDeployRecords, S3AppObjects } from "../deploy/aws.js";
 import { processDeploy, type DeployDeps, type DeployLogEntry } from "../deploy/deploy.js";
-import { downloadArchive } from "../deploy/github.js";
+import { downloadForDeployer } from "../deploy/github.js";
 import { APPS_BUCKET_NAME, DISTRIBUTION_ID, REGION, TABLE_NAME } from "../settings.js";
 
 /**
@@ -48,7 +48,7 @@ let live: ((event: DeployEvent, context?: DeployContext) => Promise<void>) | und
 /** The clients are created once per Lambda instance, on first use; the region is explicit. */
 export async function handler(event: DeployEvent, context?: DeployContext): Promise<void> {
   live ??= createHandler({
-    download: (url, timeoutMs, signal) => downloadArchive(url, { timeoutMs, ...(signal === undefined ? {} : { signal }) }),
+    download: (url, timeoutMs, signal) => downloadForDeployer(url, { timeoutMs, ...(signal === undefined ? {} : { signal }) }),
     objects: new S3AppObjects(new S3Client({
         region: REGION,
         maxAttempts: 3,

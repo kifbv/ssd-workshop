@@ -117,19 +117,29 @@ export function makeTar(entries: readonly TarEntry[]): Uint8Array {
   return out;
 }
 
+/** A GitHub-style tarball at another commit (its global header names `commit`). */
+export const githubTarAt = (commit: string, files: Record<string, string | Uint8Array>): Uint8Array => githubTar(files, [], paxRecord("comment", commit));
+
 /** The top folder of a GitHub tarball. */
 export const TOP = "ssd-workshop-apps-ssd-ada-0123456";
 export const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
-/** A GitHub-style tarball of the files (path to content): pax global header, top folder, then the files. */
-export function githubTar(files: Record<string, string | Uint8Array>, extra: readonly TarEntry[] = []): Uint8Array {
+/**
+ * A GitHub-style tarball of the files (path to content): pax global header, top folder, then the files. `globalRecords`
+ * is the global header's pax records (default: `comment=<COMMIT>`, as GitHub writes it); null leaves the header out.
+ */
+export function githubTar(
+  files: Record<string, string | Uint8Array>,
+  extra: readonly TarEntry[] = [],
+  globalRecords: string | null = paxRecord("comment", COMMIT),
+): Uint8Array {
   const folders = new Set<string>();
   for (const path of Object.keys(files)) {
     const parts = path.split("/");
     for (let i = 1; i < parts.length; i += 1) folders.add(parts.slice(0, i).join("/"));
   }
   return makeTar([
-    { path: "pax_global_header", type: "g", data: paxRecord("comment", COMMIT) },
+    ...(globalRecords === null ? [] : [{ path: "pax_global_header", type: "g", data: globalRecords }]),
     { path: `${TOP}/`, type: "5" },
     ...[...folders].map((folder): TarEntry => ({ path: `${TOP}/${folder}/`, type: "5" })),
     ...Object.entries(files).map(([path, data]): TarEntry => ({ path: `${TOP}/${path}`, data })),

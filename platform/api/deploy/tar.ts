@@ -3,7 +3,8 @@
  * unpacked in memory (nothing is written to disk) into the deploy check's `AppFile` list.
  *
  * Handles ustar headers (with the 155-byte prefix), GNU long names (`L`), pax extended headers (`x`:
- * `path` and `size`) and skips pax global headers (`g`: GitHub's `pax_global_header` holds the commit).
+ * `path` and `size`) and pax global headers (`g`): the first entry's, GitHub's `pax_global_header`, names the
+ * archive's commit in its `comment` record (readTarArchive, ticket 2.8 try 3); any other is skipped.
  * The single top folder (`<owner>-<repo>-<sha>/`) is stripped. Hard links and symlinks become `symlink`,
  * folders `dir`, plain and contiguous files `file`, anything else `other`, so the check refuses what is
  * not a plain file or folder (decision "(2.3) For 2.5"). A path that leaves the folder (absolute or with
@@ -62,9 +63,9 @@ function checksumOk(block: Uint8Array): boolean {
   return sum === octalField(block, 148, 8);
 }
 
-/** Pax records: `<length> <key>=<value>\n`, the length in bytes counting the whole record. */
-function paxRecords(data: Uint8Array): Map<string, string> {
-  const records = new Map<string, string>();
+/** Pax records in order (a key may repeat): `<length> <key>=<value>\n`, the length in bytes counting the whole record. */
+function paxRecords(data: Uint8Array): [string, string][] {
+  const records: [string, string][] = [];
   let at = 0;
   while (at < data.length) {
     const space = data.indexOf(0x20, at);
@@ -76,7 +77,7 @@ function paxRecords(data: Uint8Array): Map<string, string> {
     const record = decoder.decode(data.subarray(space + 1, end - 1));
     const equals = record.indexOf("=");
     if (equals < 1) throw new ArchiveProblem(INVALID);
-    records.set(record.slice(0, equals), record.slice(equals + 1));
+    records.push([record.slice(0, equals), record.slice(equals + 1)]);
     at = end;
   }
   return records;
@@ -92,11 +93,40 @@ function kindOf(type: string): FileKind {
 /** An absolute path or one with a `..` part would leave the app's folder. */
 const leavesFolder = (path: string): boolean => path.startsWith("/") || path.split("/").includes("..");
 
+const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+
+/**
+ * The commit a pax global header names: its one `comment` record, when that is 40 lower-case hex digits; otherwise
+ * (no comment, two, or another form) undefined.
+ */
+function commitOf(records: readonly [string, string][]): string | undefined {
+  const comments = records.filter(([key]) => key === "comment");
+  const value = comments.length === 1 ? comments[0]?.[1] : undefined;
+  return value !== undefined && COMMIT_PATTERN.test(value) ? value : undefined;
+}
+
+/** An archive's files and the commit its first entry names (GitHub's pax global header), if any. */
+export interface TarArchive {
+  files: AppFile[];
+  /**
+   * From the FIRST entry only, when it is a pax global header (`g`) with exactly one `comment` record of 40 hex digits.
+   * A comment in a per-file header (`x`) or in a later global header never counts. Undefined otherwise.
+   */
+  commit: string | undefined;
+}
+
 /** Reads an uncompressed tar archive into the app's files (top folder stripped; the last entry for a path wins). */
 export function readTar(tar: Uint8Array): AppFile[] {
+  return readTarArchive(tar).files;
+}
+
+/** As readTar, with the commit the archive's first entry names (TarArchive). */
+export function readTarArchive(tar: Uint8Array): TarArchive {
   const entries: { path: string; kind: FileKind; bytes: Uint8Array }[] = [];
   let nextPath: string | undefined;
   let nextSize: number | undefined;
+  let commit: string | undefined;
+  let first = true;
   let at = 0;
   for (;;) {
     if (at + BLOCK > tar.length) throw new ArchiveProblem(INVALID);
@@ -110,10 +140,14 @@ export function readTar(tar: Uint8Array): AppFile[] {
     if (dataEnd > tar.length) throw new ArchiveProblem(INVALID);
     const data = tar.subarray(dataStart, dataEnd);
     at = dataStart + Math.ceil(size / BLOCK) * BLOCK;
+    const isFirst = first;
+    first = false;
 
     if (type === "x" || type === "g") {
-      const records = paxRecords(data);
+      const list = paxRecords(data);
+      if (type === "g" && isFirst) commit = commitOf(list);
       if (type === "x") {
+        const records = new Map(list);
         const path = records.get("path");
         if (path !== undefined) nextPath = path;
         const paxSize = records.get("size");
@@ -156,11 +190,16 @@ export function readTar(tar: Uint8Array): AppFile[] {
     files.delete(path);
     files.set(path, { path, kind: entry.kind, bytes: entry.bytes });
   }
-  return [...files.values()];
+  return { files: [...files.values()], commit };
 }
 
 /** Unpacks a gzip'd tar archive, stopping past `maxUnpacked` bytes. */
 export function readTarGz(gz: Uint8Array, maxUnpacked: number = MAX_UNPACKED_BYTES): AppFile[] {
+  return readTarGzArchive(gz, maxUnpacked).files;
+}
+
+/** As readTarGz, with the commit the archive's first entry names (TarArchive). */
+export function readTarGzArchive(gz: Uint8Array, maxUnpacked: number = MAX_UNPACKED_BYTES): TarArchive {
   let tar: Buffer;
   try {
     tar = gunzipSync(gz, { maxOutputLength: maxUnpacked });
@@ -169,5 +208,5 @@ export function readTarGz(gz: Uint8Array, maxUnpacked: number = MAX_UNPACKED_BYT
     if (error instanceof RangeError || code === "ERR_BUFFER_TOO_LARGE") throw new ArchiveProblem(tooBigReason(maxUnpacked));
     throw new ArchiveProblem(INVALID);
   }
-  return readTar(new Uint8Array(tar.buffer, tar.byteOffset, tar.length));
+  return readTarArchive(new Uint8Array(tar.buffer, tar.byteOffset, tar.length));
 }

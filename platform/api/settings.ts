@@ -30,6 +30,29 @@ export const MODEL_ID = "eu.anthropic.claude-sonnet-4-6";
  */
 export const PRICE_PER_MILLION_TOKENS = { input: 3.3, output: 16.5 } as const;
 
+/** US dollars per million tokens of each kind a call is billed for (prompt-cache reads and writes included). */
+export interface ModelPrice {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** One AI role's model: an EU inference profile and its prices (decision "Models per role"). */
+export interface ModelSetting {
+  modelId: string;
+  price: ModelPrice;
+}
+
+/**
+ * The model of each AI role that has moved to this table (ticket 2.8 starts it with `build`, the coding agent); the
+ * other roles still use MODEL_ID and PRICE_PER_MILLION_TOKENS until a later ticket moves them. Sonnet 4.6 through the
+ * EU profile: list prices ($3 in, $15 out, cache reads $0.30, 5-minute cache writes $3.75) plus Bedrock's 10%.
+ */
+export const MODELS = {
+  build: { modelId: MODEL_ID, price: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 } },
+} as const satisfies Record<string, ModelSetting>;
+
 /** The queue that hands a stored message to the AI worker (ticket 1.7); it carries ids only. */
 export const AI_QUEUE_NAME = "ssd-workshop-ai-messages";
 export const AI_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${AI_QUEUE_NAME}`;
@@ -50,6 +73,12 @@ export const appRepositoryName = (nickname: string): string => `ssd-${nickname.t
 /** GitHub's tarball of a repository at one commit (public repositories, downloaded without a token). */
 export const appArchiveUrl = (nickname: string, commit: string): string =>
   `https://codeload.github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/tar.gz/${commit}`;
+/**
+ * GitHub's tarball of the app repository's `main` branch, named in full (`refs/heads/main`: a bare `main` would pick a
+ * tag of that name first). The deployer downloads this one (ticket 2.8, try 3).
+ */
+export const appMainArchiveUrl = (nickname: string): string =>
+  `https://codeload.github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/tar.gz/refs/heads/main`;
 /** The deploy queue (FIFO, one message group per app) from the builder (ticket 2.8) to the deployer. */
 export const DEPLOY_QUEUE_NAME = "ssd-workshop-deploys.fifo";
 export const DEPLOY_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${DEPLOY_QUEUE_NAME}`;
@@ -87,3 +116,9 @@ export const BUILDER_COMMIT_EMAIL = "noreply@workshop.rankly.games";
  */
 export const BUILD_QUEUE_NAME = "ssd-workshop-builds.fifo";
 export const BUILD_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${BUILD_QUEUE_NAME}`;
+
+/**
+ * The builder (ticket 2.8): the coding agent stops after this long (from its start) and the build fails with
+ * "The build took too long.".
+ */
+export const BUILD_AGENT_TIMEOUT_MS = 12 * 60 * 1000;

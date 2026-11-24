@@ -343,11 +343,12 @@ export interface AppDataUsageItem extends Keyed {
 export type BuildStatus = "queued" | "building" | "deploying" | "live" | "failed";
 
 /**
- * One build of an app (ticket 2.5 defines it; ticket 2.7 creates it). The deployer only updates an existing
+ * One build of an app (ticket 2.5 defines it; ticket 2.7 creates it; the builder, ticket 2.8, claims it, writes its feed
+ * and `pushedCommit`, or marks it failed, naming only BUILDER_BUILD_UPDATE_ATTRIBUTES). The deployer only updates an existing
  * build, and only `status`, `updatedAt`, `deployedCommit`, `failureReasons` and `finishedAt`
- * (`DEPLOYER_BUILD_UPDATE_ATTRIBUTES` in infra/lib/config.ts, which also lists the compared `nickname`). It starts
- * a deploy only when the build's `nickname` equals the message's and its status is `queued`, `building` or
- * `deploying`.
+ * (`DEPLOYER_BUILD_UPDATE_ATTRIBUTES` in infra/lib/config.ts, which also lists the compared `nickname` and `pushedCommit`). It starts
+ * a deploy only when the build's `nickname` equals the message's, its `pushedCommit` the message's commit, and its status
+ * is `queued`, `building` or `deploying`.
  */
 export interface BuildItem extends Keyed {
   type: "build";
@@ -364,6 +365,21 @@ export interface BuildItem extends Keyed {
   createdAt: string;
   /** ISO 8601: the last status change. */
   updatedAt: string;
+  /**
+   * The commit the builder pushed to the app's repository (ticket 2.8), from GitHub's own answer: the deployer starts a
+   * deploy only for a message naming exactly this commit (decision "(2.5) Deploy message", commit binding).
+   */
+  pushedCommit?: string;
+  /**
+   * The build's live feed (ticket 2.8, shown by ticket 2.10): the steps (`preparing`, `writing`, `checking`,
+   * `committing`, `deploying`), each file the agent wrote and each commit (id and fixed message), oldest first, each
+   * with its ISO time. File names are the agent's (anyone's text: pages render them with `textContent` only).
+   */
+  feed?: (
+    | { kind: "step"; step: "preparing" | "writing" | "checking" | "committing" | "deploying"; at: string }
+    | { kind: "file"; path: string; at: string }
+    | { kind: "commit"; sha: string; message: string; at: string }
+  )[];
   /** The commit the deployer published (status `live`). */
   deployedCommit?: string;
   /**

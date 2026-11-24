@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ArchiveProblem, MAX_UNPACKED_BYTES, readTar, readTarGz } from "./tar.js";
+import { ArchiveProblem, MAX_UNPACKED_BYTES, readTar, readTarArchive, readTarGz, readTarGzArchive } from "./tar.js";
 import { COMMIT, TOP, githubTar, gzip, makeTar, paxRecord } from "./tar-fixtures.js";
 
 const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
@@ -117,5 +117,66 @@ describe("readTarGz (ticket 2.5)", () => {
 
   it("refuses data that is not gzip", () => {
     expect(problemOf(() => readTarGz(new TextEncoder().encode("<html>not found</html>")))).toMatch(/not a valid tar\.gz archive/);
+  });
+});
+
+describe("the archive's commit (ticket 2.8, try 3): only from the first entry, a pax global header with one comment", () => {
+  const files = { "index.html": "<p>hi</p>" };
+  const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
+
+  it("returns the 40-hex comment of the first entry's pax global header (GitHub's pax_global_header), with the files", () => {
+    const archive = readTarGzArchive(gzip(githubTar(files)));
+    expect(archive.commit).toBe(COMMIT);
+    expect(summary(archive.files)).toEqual(["file index.html <p>hi</p>"]);
+    expect(readTarArchive(githubTar(files)).commit).toBe(COMMIT);
+  });
+
+  it("has no commit when the first entry is not a pax global header, or there is none", () => {
+    expect(readTarArchive(githubTar(files, [], null)).commit).toBeUndefined();
+    // A global header that is not first (after the top folder) does not count.
+    const late = makeTar([
+      { path: `${TOP}/`, type: "5" },
+      { path: "pax_global_header", type: "g", data: paxRecord("comment", COMMIT) },
+      { path: `${TOP}/index.html`, data: "x" },
+    ]);
+    expect(readTarArchive(late).commit).toBeUndefined();
+    // A per-file pax header first, with a comment, does not count either.
+    const perFile = makeTar([
+      { path: "PaxHeaders/x", type: "x", data: paxRecord("comment", COMMIT) },
+      { path: `${TOP}/`, type: "5" },
+      { path: `${TOP}/index.html`, data: "x" },
+    ]);
+    expect(readTarArchive(perFile).commit).toBeUndefined();
+  });
+
+  it("has no commit when the header's comment is malformed, missing or given twice", () => {
+    for (const records of [
+      paxRecord("comment", COMMIT.toUpperCase()),
+      paxRecord("comment", COMMIT.slice(0, 39)),
+      paxRecord("comment", `${COMMIT}0`),
+      paxRecord("comment", ` ${COMMIT}`),
+      paxRecord("comment", ""),
+      paxRecord("mtime", "1700000000"),
+      paxRecord("comment", COMMIT) + paxRecord("comment", COMMIT),
+      paxRecord("comment", COMMIT) + paxRecord("comment", OTHER),
+    ]) {
+      expect(readTarArchive(githubTar(files, [], records)).commit, records).toBeUndefined();
+    }
+  });
+
+  it("ignores a comment in a later pax global header or in a per-file pax header", () => {
+    const extra = [
+      { path: "pax_global_header", type: "g", data: paxRecord("comment", OTHER) },
+      { path: "PaxHeaders/y", type: "x", data: paxRecord("comment", OTHER) },
+      { path: `${TOP}/y.html`, data: "y" },
+    ];
+    expect(readTarArchive(githubTar(files, extra)).commit).toBe(COMMIT);
+    // And they never stand in for a missing first one.
+    expect(readTarArchive(githubTar(files, extra, null)).commit).toBeUndefined();
+  });
+
+  it("readTar and readTarGz still return the files only", () => {
+    expect(summary(readTar(githubTar(files)))).toEqual(["file index.html <p>hi</p>"]);
+    expect(summary(readTarGz(gzip(githubTar(files))))).toEqual(["file index.html <p>hi</p>"]);
   });
 });

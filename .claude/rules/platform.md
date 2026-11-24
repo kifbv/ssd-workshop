@@ -132,3 +132,19 @@ paths:
   redelivery finds the stored outcome and sends the same id again instead of acting twice; the consumer acts only on a
   record still in the state that expects it. A platform request that gets a different worker path (`READINESS_REQUEST`)
   is recognised by its exact text at a step where participants cannot send (`approved`), never by its text alone.
+- Claude Agent SDK (the builder's coding agent, ticket 2.8): `options.env` REPLACES the child's whole environment,
+  so build it from an allow-list (never spread `process.env`: a GitHub token would reach the agent) and give it a
+  fresh temporary `HOME`/`CLAUDE_CONFIG_DIR` plus `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION` and every model alias
+  set to the one EU profile. Restrict with `tools` + `disallowedTools`, `permissionMode: "dontAsk"`,
+  `settingSources: []`, `strictMcpConfig`, and a deny-by-default PreToolUse hook (`onFailure: "block"`) that
+  resolves real paths (symlinks, dangling links) against the workspace's real path; test the check on real temp
+  folders with symlinks (`platform/builder/permissions.test.ts`).
+- The coding agent never holds AWS credentials: Claude Code reaches Bedrock only through the runner's 127.0.0.1 signing proxy (`platform/builder/bedrock-proxy.ts`, `ANTHROPIC_BEDROCK_BASE_URL` + `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`), which forwards only `POST /<run's random prefix>/model/<build model>/invoke[-with-response-stream]` with `Host` exactly `127.0.0.1:<port>`, no `Origin`, `content-type` exactly `application/json` (a browser page can POST `text/plain` to localhost without a preflight) and replaces non-2xx bodies (they name ARNs); Claude Code keeps the base URL's path and also sends `GET /inference-profiles` at start (a 403 is fine); Node's `fetch` sends `accept: */*` unless told. Glob patterns with `{}`/`[]` (`.{.,}/*`) or a segment of only dots and wildcards (`.?`) can climb out: refuse them outright.
+- `npm install <pkg> -w platform` can leave root dev dependencies (vitest) missing from `node_modules`: run `npm ci`
+  after changing dependencies, before the checks.
+- The in-memory GitHub (`platform/api/github/fakes.ts`) accepts a non-forced ref update when the new commit descends
+  from the branch's commit through any number of parents, like GitHub; a test pushing several commits at once relies on it.
+- Never trust a commit id to say which repository it came from (GitHub serves a fork's commit through the parent's
+  address): the deployer downloads `codeload.github.com/<o>/<r>/tar.gz/refs/heads/main` (full ref: `tar.gz/main` picks a
+  tag `main` first) with `redirect: "error"` and reads the commit from the first entry only (pax global header, one
+  `comment=<40 hex>`), then publishes those same bytes when it equals the pushed one (ticket 2.8, `readTarGzArchive`).

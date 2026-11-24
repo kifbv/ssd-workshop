@@ -2,13 +2,17 @@
  * The deployer (ticket 2.5): publishes one build of an app at `/apps/<nickname>/`. For one message
  * `{ buildId, nickname, commit }` from the deploy queue it:
  *
- * 1. marks the build `deploying`: only a build that exists, belongs to the message's app (same nickname) and
- *    waits for its deploy (`queued`, `building`, or `deploying` on a redelivery); any other message is dropped;
- * 2. downloads the app's public repository at the commit from GitHub (tar.gz, size-capped) and unpacks
- *    it in memory (./tar.ts);
- * 3. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
+ * 1. marks the build `deploying`: only a build that exists, belongs to the message's app (same nickname), whose
+ *    builder pushed the message's commit (`pushedCommit`, ticket 2.8) and waits for its deploy (`queued`, `building`, or `deploying` on a redelivery); any other message is dropped;
+ * 2. downloads the app's public repository's own `main` from GitHub (`refs/heads/main`, tar.gz, size-capped, redirects
+ *    refused) and unpacks it in memory (./tar.ts). Ticket 2.8 try 3: GitHub serves a fork's commit through the
+ *    parent's address by commit id, so the deployer never downloads by commit id. It goes on only when the archive's
+ *    own commit (its first entry, GitHub's pax global header) is the message's commit: another commit (main moved on,
+ *    or a stale copy right after the push) is a passing problem, retried and then failed; no commit named fails at once;
+ * 3. keeps those bytes: what is checked and published below is exactly them (no second download);
+ * 4. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
  *    marker is left alone and the build is marked `failed` with the check's reasons;
- * 4. otherwise puts every file under `apps/<lower-cased nickname>/` (pages last), removes the keys the
+ * 5. otherwise puts every file under `apps/<lower-cased nickname>/` (pages last), removes the keys the
  *    new version no longer has, invalidates `/apps/<nickname>/*` on CloudFront, writes the app's live
  *    marker (keeping the first `liveAt`) and marks the build `live` with the commit.
  *
@@ -22,9 +26,9 @@
 import { checkApp, type AppFile, type Problem } from "../build/check.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
 import { NICKNAME_PATTERN } from "../participant/participant.js";
-import { APPS_KEY_PREFIX, DEPLOY_MAX_RECEIVES, appArchiveUrl } from "../settings.js";
+import { APPS_KEY_PREFIX, DEPLOY_MAX_RECEIVES, appMainArchiveUrl } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
-import { ArchiveProblem, readTarGz } from "./tar.js";
+import { ArchiveProblem, readTarGzArchive } from "./tar.js";
 
 export interface DeployJob {
   buildId: string;
@@ -79,8 +83,11 @@ export interface Cdn {
  * condition fails (the build is missing, or not in the state the update needs).
  */
 export interface DeployRecords {
-  /** Marks the build `deploying` only when it exists, its nickname equals `nickname` exactly and it is queued, building or deploying. */
-  startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean>;
+  /**
+   * Marks the build `deploying` only when it exists, its nickname equals `nickname` exactly, its `pushedCommit` (what
+   * the builder pushed, ticket 2.8) equals `commit`, and it is queued, building or deploying.
+   */
+  startDeploy(buildId: string, nickname: string, commit: string, nowIso: string): Promise<boolean>;
   /** Only while the build is `deploying`: a late write never changes a finished (live or failed) build. */
   markLive(buildId: string, commit: string, nowIso: string, signal?: AbortSignal): Promise<boolean>;
   /** Only while the build is `deploying`, as markLive. */
@@ -109,8 +116,8 @@ export interface DeployLogEntry {
 
 export interface DeployDeps {
   /**
-   * Downloads the tarball at the address (GitHub) within `timeoutMs`, stopping when `signal` is aborted. Throws
-   * DownloadProblem for what it can name.
+   * Downloads the tarball at the address (GitHub) within `timeoutMs`, stopping when `signal` is aborted, with redirects
+   * refused (`downloadForDeployer` in ./github.ts). Throws DownloadProblem for what it can name.
    */
   download: (url: string, timeoutMs: number, signal?: AbortSignal) => Promise<Uint8Array>;
   objects: AppObjects;
@@ -133,6 +140,15 @@ export class DownloadProblem extends Error {
     this.name = "DownloadProblem";
   }
 }
+
+/**
+ * Stored on the last delivery when main's archive names another commit than the message (main moved on, or codeload
+ * still served the copy from before the push).
+ */
+export const MAIN_MOVED_REASON = "The app's main branch on GitHub is not at the commit the builder pushed, so nothing was published.";
+
+/** Stored at once when main's archive does not name its commit (no pax global header first, or a malformed one). */
+export const NO_COMMIT_REASON = "GitHub's download of the app's main branch does not name its commit, so nothing was published.";
 
 /** Stored when a passing problem outlasts every delivery and has no reason of its own (an AWS error). */
 export const SERVICE_PROBLEM_REASON = "The workshop could not publish the app because of a problem on its side. Please try again.";
@@ -313,7 +329,7 @@ export async function processDeploy(
   let claimed = false;
   try {
     // Not bounded: a short table call (the client's own timeouts), and nothing may be recorded before it.
-    if (!(await deps.records.startDeploy(job.buildId, job.nickname, nowIso()))) {
+    if (!(await deps.records.startDeploy(job.buildId, job.nickname, job.commit, nowIso()))) {
       log({ outcome: "no-build" });
       return;
     }
@@ -322,10 +338,12 @@ export async function processDeploy(
     let files: AppFile[];
     try {
       // The download's own time limit ends a second after the phase's, so a cut-off reads as the deploy's time running out.
-      const archive = await bounded((ms, signal) =>
-        deps.download(appArchiveUrl(job.nickname, job.commit), Math.min(DOWNLOAD_TIMEOUT_MS, ms + 1000), signal),
-      );
-      files = readTarGz(archive);
+      const archive = await bounded((ms, signal) => deps.download(appMainArchiveUrl(job.nickname), Math.min(DOWNLOAD_TIMEOUT_MS, ms + 1000), signal));
+      const unpacked = readTarGzArchive(archive);
+      if (unpacked.commit === undefined) throw new DownloadProblem(NO_COMMIT_REASON, false);
+      // Another commit: main moved on, or codeload served its copy from before the push. Retried, never published.
+      if (unpacked.commit !== job.commit) throw new DownloadProblem(MAIN_MOVED_REASON, true);
+      files = unpacked.files;
     } catch (error) {
       const reason = error instanceof ArchiveProblem || (error instanceof DownloadProblem && !error.passing) ? error.reason : undefined;
       if (reason === undefined) throw error;

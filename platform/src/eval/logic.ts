@@ -1,5 +1,6 @@
 // `npm run eval -- <suite>` (ticket 1.7): runs a suite of examples against the real model and
-// scores the answers. `guardrails` (ticket 1.7), `clarify` (ticket 1.8), `spec` (ticket 1.9) and `readiness` (ticket 2.7).
+// scores the answers. `guardrails` (ticket 1.7), `clarify` (ticket 1.8), `spec` (ticket 1.9), `readiness` (ticket 2.7)
+// and `build` (ticket 2.8: the coding agent and the runner, with GitHub, the table and the queue in memory).
 // The scoring is pure and unit tested; ./main.ts calls Bedrock.
 import type { Exchange } from "../../api/conversation/answer.js";
 import { addUsage } from "../../api/conversation/model.js";
@@ -7,10 +8,11 @@ import type { ReadinessVerdict } from "../../api/conversation/readiness.js";
 import { checkSpec, extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import type { GuardrailVerdict, TokenUsage } from "../../api/types.js";
 
-export const SUITES = ["guardrails", "clarify", "spec", "readiness"] as const;
+export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build"] as const;
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
+       npm run eval -- build [--model <eu.anthropic.* profile>] [--example <1-3>]
 
 Suites:
   guardrails   every example in platform/api/eval/guardrails.json through the real guardrail check:
@@ -25,15 +27,39 @@ Suites:
   readiness    every approved spec in platform/api/eval/readiness.json through the real readiness check:
                the workshop's three example specs pass, and specs needing a login, a payment, an outside
                service or a server, or leaving a question open, fail with a reason that names it
+  build        the readiness file's three workshop example specs through the real runner and coding agent
+               (GitHub, the table and the deploy queue in memory): each result must pass the deploy check,
+               load at 375 px under the apps' sandbox CSP in Chromium with no console error and nothing
+               scrolling sideways, and show its title and every screen its spec names; prints the duration,
+               tokens and cost of each. --model tries another EU profile (priced at the build role's prices),
+               --example runs one spec only
 
-Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example).`;
+Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example; build about $1 per spec).`;
 
-export function parseEvalArgs(args: readonly string[]): { suite: Suite } | { error: string } {
+export interface EvalArgs {
+  suite: Suite;
+  /** build only: the model to try instead of the build role's. */
+  model?: string;
+  /** build only: run this example only (1-based). */
+  example?: number;
+}
+
+export function parseEvalArgs(args: readonly string[]): EvalArgs | { error: string } {
   const [suite, ...rest] = args;
   if (suite === undefined) return { error: "no suite given" };
   if (!(SUITES as readonly string[]).includes(suite)) return { error: "unknown suite" };
-  if (rest.length > 0) return { error: `${suite} takes no arguments` };
-  return { suite: suite as Suite };
+  if (suite !== "build") {
+    if (rest.length > 0) return { error: `${suite} takes no arguments` };
+    return { suite: suite as Suite };
+  }
+  const parsed: EvalArgs = { suite: "build" };
+  for (let i = 0; i < rest.length; i += 2) {
+    const [flag, value] = [rest[i], rest[i + 1]];
+    if (flag === "--model" && value !== undefined && /^eu\.anthropic\.[a-z0-9.:-]+$/.test(value) && parsed.model === undefined) parsed.model = value;
+    else if (flag === "--example" && value !== undefined && /^[1-9][0-9]?$/.test(value) && parsed.example === undefined) parsed.example = Number(value);
+    else return { error: "build takes --model <eu.anthropic.* profile> and --example <number>" };
+  }
+  return parsed;
 }
 
 export interface GuardrailExample {
@@ -524,4 +550,99 @@ export function formatReadinessSummary(results: readonly ReadinessResult[]): str
     lines.push(`  expected ${expected}: ${group.filter((r) => r.pass).length}/${group.length}`);
   }
   return lines;
+}
+
+// ---- build (ticket 2.8) ----
+
+/** The app's name: the spec's title line (`# Name`). */
+export function specTitle(spec: string): string | undefined {
+  return /^# (.+)$/m.exec(spec)?.[1]?.trim();
+}
+
+/** The screens the spec names: each item of its "## Screens" list, the text before the first colon. */
+export function screenNames(spec: string): string[] {
+  const start = spec.search(/^## Screens\s*$/m);
+  if (start === -1) return [];
+  const rest = spec.slice(start).split("\n").slice(1);
+  const end = rest.findIndex((line) => line.startsWith("## "));
+  return (end === -1 ? rest : rest.slice(0, end))
+    .map((line) => /^\s*[-*]\s+(?:\*\*)?([^:*]+?)(?:\*\*)?\s*:/.exec(line)?.[1]?.trim())
+    .filter((name): name is string => name !== undefined && name !== "");
+}
+
+const normalized = (text: string): string => text.replace(/\s+/g, " ").trim().toLowerCase();
+
+/**
+ * The title check: the page's `<title>` holds the app's name, and every screen the spec names appears in the text of a
+ * heading, button, tab, link, label or legend, or an `aria-label`, anywhere in the page (a screen may be hidden until
+ * chosen). Case and spacing are ignored. Returns what was not found.
+ */
+export function missingScreens(title: string | undefined, screens: readonly string[], page: { title: string; labels: readonly string[] }): string[] {
+  const labels = page.labels.map(normalized);
+  const missing: string[] = [];
+  if (title !== undefined && !normalized(page.title).includes(normalized(title))) missing.push(`title "${title}"`);
+  for (const screen of screens) if (!labels.some((label) => label.includes(normalized(screen)))) missing.push(screen);
+  return missing;
+}
+
+export interface BuildEvalOutcome {
+  /** The runner's outcome. */
+  outcome: string;
+  /** Why the build failed, when it did. */
+  failureReasons: string[];
+  steps: string[];
+  files: number;
+  commits: number;
+  /** The deploy check on the pushed commit, as the deployer runs it. */
+  checkPassed: boolean;
+  consoleErrors: string[];
+  /** Pixels the page is wider than 375 px (0 when nothing scrolls sideways). */
+  overflow: number;
+  missing: string[];
+  durationMs: number;
+  usage: TokenUsage;
+}
+
+export interface BuildEvalResult extends ClarifyScore {
+  example: ReadinessExample;
+  outcome?: BuildEvalOutcome;
+}
+
+const STEPS_IN_ORDER = ["preparing", "writing", "checking", "committing", "deploying"];
+
+/** Scores one build: handed over, steps in order, at least one commit, check passed, no console error, no overflow, every screen found. */
+export function scoreBuild(outcome: BuildEvalOutcome): ClarifyScore {
+  const problems: string[] = [];
+  if (outcome.outcome !== "handed-over") {
+    problems.push(`build ${outcome.outcome}${outcome.failureReasons.length > 0 ? `: ${outcome.failureReasons.join(" | ")}` : ""}`);
+  } else {
+    if (outcome.steps.join(",") !== STEPS_IN_ORDER.join(",")) problems.push(`steps ${outcome.steps.join(",")}`);
+    if (outcome.commits < 1) problems.push("no commit");
+    if (!outcome.checkPassed) problems.push("deploy check failed");
+    if (outcome.consoleErrors.length > 0) problems.push(`${outcome.consoleErrors.length} console error(s): ${outcome.consoleErrors.join(" | ").slice(0, 300)}`);
+    if (outcome.overflow > 0) problems.push(`scrolls sideways by ${outcome.overflow} px`);
+    if (outcome.missing.length > 0) problems.push(`missing ${outcome.missing.join(", ")}`);
+  }
+  return problems.length === 0
+    ? { pass: true, detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown` }
+    : { pass: false, detail: problems.join("; ") };
+}
+
+const minutes = (ms: number): string => `${Math.floor(ms / 60_000)}m${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}s`;
+
+export function formatBuildResult(result: BuildEvalResult, index: number): string {
+  const head = `${result.pass ? "PASS" : "FAIL"} ${String(index + 1).padStart(2)} ${result.example.name}: ${result.detail}`;
+  const o = result.outcome;
+  if (o === undefined) return head;
+  return `${head}\n     | ${minutes(o.durationMs)}, ${o.usage.inputTokens} tokens in, ${o.usage.outputTokens} out, cost $${o.usage.costUsd.toFixed(4)}`;
+}
+
+export function formatBuildSummary(results: readonly BuildEvalResult[]): string[] {
+  const passed = results.filter((r) => r.pass).length;
+  const total = addUsage(...results.map((r) => r.outcome?.usage));
+  const duration = results.reduce((sum, r) => sum + (r.outcome?.durationMs ?? 0), 0);
+  return [
+    `Build: ${passed}/${results.length} passed`,
+    `Duration: ${minutes(duration)} in all; tokens: ${total.inputTokens} in, ${total.outputTokens} out, cost $${total.costUsd.toFixed(4)}`,
+  ];
 }

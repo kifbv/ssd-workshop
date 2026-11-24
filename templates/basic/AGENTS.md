@@ -25,7 +25,9 @@ network and no package manager. You cannot run or preview the app, so check your
 1. Plain HTML, CSS and JavaScript only. No frameworks, no libraries, no build step, no TypeScript,
    no JavaScript modules (`type="module"`, `import`, `export`).
 2. One page: `index.html`. Show different screens by hiding and showing sections, not with more
-   HTML files.
+   HTML files. Give each screen a heading, or a tab or button that opens it, carrying the screen's
+   name exactly as `SPEC.md` lists it under "Screens" (a screen called "Home" has a "Home" heading
+   or tab), so participants find what their spec describes.
 3. No outside addresses anywhere, in any file, comments, Markdown and `placeholder` texts included.
    No fonts, images, scripts, styles or APIs from other websites. Draw icons and images as inline
    SVG or CSS, or as `.svg`/`.png` files in this folder, referenced by relative paths such as

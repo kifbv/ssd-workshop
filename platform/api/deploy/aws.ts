@@ -115,6 +115,12 @@ const str = (value: string): AttributeValue => ({ S: value });
 
 /** A build's last writes (live, failed) land only while it is `deploying`: never on a build already finished. */
 export const FINISH_CONDITION = "attribute_exists(pk) AND #status = :deploying";
+/**
+ * A deploy starts only for an existing build of the message's app whose builder pushed the message's commit
+ * (decision "(2.5) Deploy message", the commit binding) and that waits for its deploy.
+ */
+export const START_CONDITION =
+  "attribute_exists(pk) AND #nickname = :nickname AND #pushedCommit = :commit AND #status IN (:queued, :building, :deploying)";
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
 
 export class DynamoDeployRecords implements DeployRecords {
@@ -154,16 +160,25 @@ export class DynamoDeployRecords implements DeployRecords {
 
   /**
    * Only a build that exists, belongs to the message's app (its `nickname` equals the message's exactly, as
-   * typed: DynamoDB cannot compare without case) and is still waiting to be deployed (`queued`, `building`,
-   * or `deploying` on a redelivery) is marked `deploying`.
+   * typed: DynamoDB cannot compare without case), whose builder pushed exactly the message's commit
+   * (`pushedCommit`, ticket 2.8: a commit id alone does not prove it is the app's repository's) and that is
+   * still waiting to be deployed (`queued`, `building`, or `deploying` on a redelivery) is marked `deploying`.
    */
-  startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean> {
+  startDeploy(buildId: string, nickname: string, commit: string, nowIso: string): Promise<boolean> {
     return this.updateBuild(
       buildId,
       "SET #status = :status, #updatedAt = :now",
-      { "#status": "status", "#updatedAt": "updatedAt", "#nickname": "nickname" },
-      { ":status": str("deploying"), ":now": str(nowIso), ":nickname": str(nickname), ":queued": str("queued"), ":building": str("building"), ":deploying": str("deploying") },
-      "attribute_exists(pk) AND #nickname = :nickname AND #status IN (:queued, :building, :deploying)",
+      { "#status": "status", "#updatedAt": "updatedAt", "#nickname": "nickname", "#pushedCommit": "pushedCommit" },
+      {
+        ":status": str("deploying"),
+        ":now": str(nowIso),
+        ":nickname": str(nickname),
+        ":commit": str(commit),
+        ":queued": str("queued"),
+        ":building": str("building"),
+        ":deploying": str("deploying"),
+      },
+      START_CONDITION,
     );
   }
 
