@@ -95,12 +95,35 @@ describe("removeEmailAddresses", () => {
       ["decomposed jose\u0301@exa\u0308mple.de here", "decomposed [email removed] here"],
       ["राम@उदाहरण.भारत", "[email removed]"],
       ["ada@example.xn--p1ai end", "[email removed] end"],
+      // Hidden from the eye or from a plain pattern, but rendered by GitHub as an address.
+      ["zero\u200Bwidth ada\u200B@example.com", "zero\u200Bwidth [email removed]"],
+      ["joiner ada@exam\u200Dple.com", "joiner [email removed]"],
+      ["entity ada&#64;example.com and bob&#x40;example&#46;org and cy&commat;example.org", "entity [email removed] and [email removed] and [email removed]"],
+      ["small at ada﹫example.com", "small at [email removed]"],
       // Also caught, by design: file names shaped like an address.
       ["logo@2x.png", "[email removed]"],
     ];
     for (const [input, output] of cases) expect(removeEmailAddresses(input)).toBe(output);
     const plain = "# Movie tracker\n\n- A list of films @ home, rated 1-5.\n- Price: 3.50 @ the cinema\n";
     expect(removeEmailAddresses(plain)).toBe(plain);
+  });
+
+  it("takes linear time on long hostile lines (100,000 characters each under 200 ms)", () => {
+    const n = 100_000;
+    const hostile = [
+      "x".repeat(n / 2) + "@" + "a.".repeat(n / 4),
+      "a".repeat(n),
+      ".".repeat(n),
+      "a@".repeat(n / 2),
+      "a@b.".repeat(n / 4),
+      "&#64;".repeat(n / 5),
+      "\u200B".repeat(n),
+    ];
+    for (const text of hostile) {
+      const start = performance.now();
+      removeEmailAddresses(text);
+      expect(performance.now() - start, text.slice(0, 12)).toBeLessThan(200);
+    }
   });
 
   it("withSpec writes the spec with its addresses removed", () => {

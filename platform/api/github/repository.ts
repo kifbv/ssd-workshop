@@ -61,19 +61,33 @@ export function repositoryNameFor(nickname: string): string {
 }
 
 /**
- * Email-shaped text: a local part, `@` (or the full-width `＠`), and a domain with at least one dot (`.`, `．` or `。`)
- * ending in a label of two letters or more (or a punycode `xn--` label). Letters and marks of any script count, and
- * the text is first put in Unicode's composed form (NFC), so `josé@exämple.de` (either form), full-width and
- * Devanagari addresses match. Addresses written with spaces or words ("ada at example dot org") are not caught; file
- * names shaped like an address (`logo@2x.png`) are. Quadratic at worst, on specs of at most 8,000 characters.
+ * Email-shaped text: a local part, an at sign (`@`, full-width `＠` or small `﹫`), and a domain with at least one dot
+ * (`.`, `．` or `。`) ending in a label of two letters or more (or a punycode `xn--` label). Letters and marks of any
+ * script count, the text is first put in Unicode's composed form (NFC), invisible format characters (`\p{Cf}`: zero
+ * width space, joiners, bidirectional marks) may sit anywhere inside, and the HTML entities GitHub renders as `@` or
+ * `.` (`&#64;`, `&#x40;`, `&commat;`, `&#46;`, `&#x2e;`, `&period;`) are read as those characters. Not caught:
+ * addresses written with spaces or words ("ada at example dot org"). Also caught: file names shaped like an address
+ * (`logo@2x.png`). The lookbehind lets a local part start only where none could start one character earlier, which
+ * keeps the scan linear (tested on 100,000-character lines).
  */
-const EMAIL_SHAPED =
-  /[\p{L}\p{M}\p{N}._%+'-]+[@＠][\p{L}\p{M}\p{N}-]+(?:[.．。][\p{L}\p{M}\p{N}-]+)*[.．。](?:xn--[\p{L}\p{N}-]+|\p{L}[\p{L}\p{M}]+)/gu;
+const LOCAL = "[\\p{L}\\p{M}\\p{N}\\p{Cf}._%+'-]";
+const LABEL = "[\\p{L}\\p{M}\\p{N}\\p{Cf}-]";
+const DOT = "[.．。]";
+const EMAIL_SHAPED = new RegExp(
+  `(?<!${LOCAL})${LOCAL}+[@＠﹫]${LABEL}+(?:${DOT}${LABEL}+)*${DOT}\\p{Cf}*(?:xn--[\\p{L}\\p{N}-]+|\\p{L}[\\p{L}\\p{M}\\p{Cf}]+)`,
+  "gu",
+);
+const AT_ENTITY = /&(?:#0*64|#x0*40|commat);?/giu;
+const DOT_ENTITY = /&(?:#0*46|#x0*2e|period);?/giu;
 export const EMAIL_REMOVED = "[email removed]";
 
 /** The spec as published: every email-shaped text replaced (decision "(2.6) Email addresses removed from SPEC.md"). */
 export function removeEmailAddresses(text: string): string {
-  return text.normalize("NFC").replace(EMAIL_SHAPED, EMAIL_REMOVED);
+  return text
+    .normalize("NFC")
+    .replace(AT_ENTITY, "@")
+    .replace(DOT_ENTITY, ".")
+    .replace(EMAIL_SHAPED, EMAIL_REMOVED);
 }
 
 /**
