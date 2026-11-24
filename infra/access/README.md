@@ -117,7 +117,7 @@ flowchart LR
 | `NoBoundaryEscape` | Deny removing or replacing a boundary, creating users or access keys, and rewriting managed policies. |
 | `NoSelfAssume` | Deny `sts:AssumeRole`, `TagSession` and `SetSourceIdentity`: a role elsewhere in the account whose trust policy names the account or these principals cannot be assumed. |
 | `TasksOnWorkshopClustersOnly` | Deny `ecs:RunTask` unless `ecs:cluster` is an `ssd-workshop-*` cluster: a workshop task definition on another project's cluster could read that cluster's container-instance role. |
-| `ServicesInWorkshopSubnetsOnly` | Deny every action that carries `ecs:subnet` (`CreateService`/`UpdateService` and `CreateExpressGatewayService`/`UpdateExpressGatewayService`; never `RunTask`/`StartTask`) when any subnet is not one of the two workshop subnets (`BUILDS_SUBNET_IDS` in `infra/lib/config.ts`; a test keeps them in step, and checks the action list against the Service Authorization Reference as read on 2026-11-24). `ForAnyValue`: an update that leaves the network alone carries no subnet and passes. |
+| `ServicesInWorkshopSubnetsOnly` | Deny every action that carries `ecs:subnet` (`CreateService`/`UpdateService` and `CreateExpressGatewayService`/`UpdateExpressGatewayService`; never `RunTask`/`StartTask`) when any subnet is not one of the two workshop subnets (`BUILDS_SUBNET_IDS` in `infra/lib/config.ts`; a test keeps them in step, and checks it against the list copied from the Service Authorization Reference on 2026-11-24 (`ECS_SUBNET_ACTIONS`)). `ForAnyValue`: an update that leaves the network alone carries no subnet and passes. |
 | `NoStartTask` | Deny `ecs:StartTask` everywhere: it places tasks on EC2 container instances, which the workshop never uses, and like `RunTask` it has no subnet key. |
 | `RulesOnWorkshopSourcesOnly` | Deny `events:PutRule` when the event pattern names a source other than `ssd-workshop.*` (`events:source`): a rule on the default bus could otherwise match other projects' events (ECS task state changes carry environment variables). |
 | `RulesNeedASource` | Deny `events:PutRule` without a source (`Null` `events:source`): a pattern that filters only on `detail` or `account` matches every project's events. Schedules use EventBridge Scheduler, not schedule rules. |
@@ -243,17 +243,21 @@ follow-up.
    from `BUILDS_SUBNET_IDS` (tested in ticket 2.9). For ticket 2.9: the launcher-only `RunTask`
    rule does not stop a confused deputy, so task roles get no write access to the launcher's
    trigger, the launcher validates what it runs, and the launcher role trusts only
-   `lambda.amazonaws.com`. Check (as admin; event history keeps 90 days),
-   every `RunTask` whose subnets are not the workshop's two, or that names none:
+   `lambda.amazonaws.com`. Check (run by Franck as admin; event history keeps 90 days), in every
+   enabled region, since nothing limits the deploy principals to eu-central-1 (they can create
+   `ssd-workshop-*` clusters anywhere), every `RunTask` whose subnets are not the workshop's two,
+   or that names none:
 
    ```sh
-   aws cloudtrail lookup-events --region eu-central-1 \
+   for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+   aws cloudtrail lookup-events --region "$r" \
      --lookup-attributes AttributeKey=EventName,AttributeValue=RunTask --output json \
    | jq -r '.Events[].CloudTrailEvent | fromjson
        | select((.requestParameters.networkConfiguration.awsvpcConfiguration.subnets // ["none"])
            | map(select(. != "subnet-05229d71b1e0b41ff" and . != "subnet-0965bcee41d455dba")) | length > 0)
        | [.eventTime, .userIdentity.arn, .requestParameters.cluster, .errorCode // "ok",
           ((.requestParameters.networkConfiguration.awsvpcConfiguration.subnets // ["none"]) | join(","))] | @tsv'
+   done
    # expect: no output (a line with an errorCode is an attempt IAM refused)
    ```
 2. **Trust and resource policies that name outside principals.** IAM cannot inspect the content of
@@ -335,16 +339,19 @@ follow-up.
     workshop stack manages (ticket 2.9). Impact: the two deploy principals can read every task
     definition in the account, other projects' included, with their container environment
     variables (secrets passed as plain environment values would show). The boundary does not grant
-    it, so no workload role can. Check (as admin), every call by a workshop principal on a task
-    definition that is not the workshop's:
+    it, so no workload role can. Check (run by Franck as admin), in every enabled region, since
+    the grant has no region limit, every call by a workshop principal on a task definition that is
+    not the workshop's:
 
     ```sh
-    aws cloudtrail lookup-events --region eu-central-1 \
+    for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+    aws cloudtrail lookup-events --region "$r" \
       --lookup-attributes AttributeKey=EventName,AttributeValue=DescribeTaskDefinition --output json \
     | jq -r '.Events[].CloudTrailEvent | fromjson
         | select(.userIdentity.arn | test("ssd-workshop"))
         | select((.requestParameters.taskDefinition // "") | test("(^|/)ssd-workshop-") | not)
         | [.eventTime, .userIdentity.arn, .requestParameters.taskDefinition] | @tsv'
+    done
     # expect: no output
     ```
 
