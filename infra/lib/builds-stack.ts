@@ -1,7 +1,8 @@
-import { Stack, type StackProps, Tags } from "aws-cdk-lib";
+import { RemovalPolicy, Stack, type StackProps, Tags } from "aws-cdk-lib";
 import { IpAddresses, type IVpc, Peer, Port, SecurityGroup, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository, TagStatus } from "aws-cdk-lib/aws-ecr";
 import { Cluster, ContainerInsights } from "aws-cdk-lib/aws-ecs";
+import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
 import {
   BUILDER_IMAGES_KEPT,
@@ -11,18 +12,21 @@ import {
   BUILDS_SECURITY_GROUP_NAME,
   BUILDS_VPC_CIDR,
   BUILDS_VPC_NAME,
+  GITHUB_SECRET_NAME,
 } from "./config.js";
 
 /**
  * Where build tasks run (ticket 2.1): a VPC with two public subnets and no NAT gateway
  * (tasks get a public IP), a security group that only lets HTTPS out, the ECS cluster
- * and the builder's image repository. No Lambda and no custom resource.
+ * and the builder's image repository. No Lambda and no custom resource. Since ticket 2.6 also the GitHub App's
+ * secret, which build launches need.
  */
 export class BuildsStack extends Stack {
   readonly vpc: Vpc;
   readonly securityGroup: SecurityGroup;
   readonly cluster: Cluster;
   readonly repository: Repository;
+  readonly githubSecret: Secret;
 
   /**
    * The zones are fixed (config.ts). Without this override, `Vpc` checks its zones against
@@ -84,6 +88,15 @@ export class BuildsStack extends Stack {
         },
       ],
       // Default removal policy: RETAIN. No emptyOnDelete (it adds a custom-resource Lambda).
+    });
+
+    // Ticket 2.6. No value given: CloudFormation stores a random placeholder (secretsmanager:GetRandomPassword,
+    // decision "(2.2)") until Franck loads the app's id and key. Retained, so a stack change never loses the key;
+    // no resource policy (denied by the access stack) and no rotation (GitHub keys are rotated by hand).
+    this.githubSecret = new Secret(this, "GitHubSecret", {
+      secretName: GITHUB_SECRET_NAME,
+      description: "SSD Workshop GitHub App credentials {appId, privateKey}; Franck loads the value (infra/README.md)",
+      removalPolicy: RemovalPolicy.RETAIN,
     });
   }
 }

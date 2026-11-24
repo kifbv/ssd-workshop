@@ -69,6 +69,13 @@ export const BUILDS_SUBNET_IDS = ["subnet-05229d71b1e0b41ff", "subnet-0965bcee41
 export const BUILD_LAUNCHER_ROLE_NAME = `${PREFIX}-builds-launcher`;
 export const BUILD_LAUNCHER_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${BUILD_LAUNCHER_ROLE_NAME}`;
 
+/**
+ * The platform's GitHub App credentials (ticket 2.6), in the builds stack: `{"appId": "<id>", "privateKey": "<PEM>"}`,
+ * loaded by Franck (infra/README.md). CDK creates it with a random placeholder (CloudFormation cannot create a secret
+ * without a value). No role may read it yet; the build launcher (ticket 2.9) will be the one reader.
+ */
+export const GITHUB_SECRET_NAME = `${PREFIX}-github`;
+
 /** The single DynamoDB table (key scheme in platform/api/types.ts). */
 export const TABLE_NAME = `${PREFIX}-data`;
 /** The HTTP API; its routes all start with /api/ (CloudFront sends /api/* to it from ticket 1.2). */

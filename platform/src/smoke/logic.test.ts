@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { appJwt, findInstallation, getApp, parseGitHubSecret, type GitHubDeps } from "../../api/github/app.js";
+import { FAKE_TOKEN_PREFIX, FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../../api/github/fakes.js";
 import {
   CONFIGURATION_SET,
   DEFAULT_MODEL_ID,
@@ -7,6 +9,7 @@ import {
   buildSignInRequest,
   buildTestEmail,
   findModelQuotas,
+  formatGitHubReport,
   formatLatency,
   formatQuotaLine,
   formatSignInResult,
@@ -327,5 +330,37 @@ describe("signin (ticket 1.4 criterion 6)", () => {
 
   it("is listed in the usage text", () => {
     expect(USAGE).toContain("signin <address>");
+  });
+});
+
+describe("smoke github (ticket 2.6 criterion 6)", () => {
+  it("parses github with no arguments", () => {
+    expect(parseArgs(["github"])).toEqual({ command: "github" });
+    expect(parseArgs(["github", "extra"])).toHaveProperty("error");
+    expect(USAGE).toContain("github");
+  });
+
+  it("reports the app, the account the secret reaches and its rights, and prints no token, JWT or key", async () => {
+    const now = new Date("2026-11-24T10:00:00Z");
+    const github = new FakeGitHub(() => now);
+    const deps: GitHubDeps = { fetch: github.fetch, now: () => now, log: () => undefined };
+    const jwt = appJwt(parseGitHubSecret(TEST_SECRET_TEXT), now);
+    const report = formatGitHubReport(await getApp(deps, jwt), await findInstallation(deps, jwt));
+    expect(report).toBe(
+      [
+        "Secret:        ssd-workshop-github (eu-central-1)",
+        "GitHub App:    SSD Workshop GH App (ssd-workshop-gh-app), owned by ssd-workshop-apps",
+        "Installed on:  ssd-workshop-apps (Organization), installation 9001",
+        "Repositories:  all repositories of the account",
+        "Rights:        administration: write, contents: write, metadata: read",
+      ].join("\n"),
+    );
+    // The check signs a JWT but mints no installation token.
+    expect(github.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /app", "GET /orgs/ssd-workshop-apps/installation"]);
+    expect(report).not.toContain(jwt);
+    expect(report).not.toContain("eyJ");
+    expect(report).not.toContain(FAKE_TOKEN_PREFIX);
+    expect(report).not.toContain("PRIVATE KEY");
+    expect(report).not.toContain(TEST_PRIVATE_KEY_PEM.split("\n")[1] ?? "?");
   });
 });

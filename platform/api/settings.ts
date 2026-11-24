@@ -58,3 +58,23 @@ export const DEPLOY_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/
  * delivery the build is marked failed instead (only a failure to record that reaches the dead-letter queue).
  */
 export const DEPLOY_MAX_RECEIVES = 3;
+
+/**
+ * GitHub access (ticket 2.6). The secret holds `{"appId": "<id>", "privateKey": "<PEM>"}` of the GitHub App
+ * `ssd-workshop-gh-app`, installed only on APPS_GITHUB_OWNER; Franck loads it (CDK creates it with a random
+ * placeholder). The installation is looked up with the app's own key, so the secret needs nothing else.
+ */
+export const GITHUB_SECRET_NAME = "ssd-workshop-github";
+export const GITHUB_API_URL = "https://api.github.com";
+/** The REST API version every call asks for. */
+export const GITHUB_API_VERSION = "2022-11-28";
+/** GitHub refuses calls without a User-Agent. */
+export const GITHUB_USER_AGENT = "ssd-workshop-platform";
+/** The branch every app's repository builds and deploys from. */
+export const APPS_DEFAULT_BRANCH = "main";
+/**
+ * Author and committer of every commit the platform and the builder make: a fixed name and an address on the
+ * workshop's own domain that has no mailbox. No participant's email address ever reaches GitHub.
+ */
+export const BUILDER_COMMIT_NAME = "SSD Workshop builder";
+export const BUILDER_COMMIT_EMAIL = "noreply@workshop.rankly.games";

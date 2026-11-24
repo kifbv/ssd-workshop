@@ -115,3 +115,8 @@ paths:
 - An SQS-fed worker whose last delivery must record a failure (the deployer) takes its deadline from the Lambda
   context (`getRemainingTimeInMillis()`), starts no phase with less than a reserve left (15 s) and cuts each phase off
   at the reserve (race plus a network time limit bounded by the time left), so the failure write still fits.
+- GitHub's Git Data API (blobs, trees, commits, refs) answers 409 "Git Repository is empty" for a repository without a
+  commit: open it with one Contents API `PUT /repos/<o>/<r>/contents/<path>` (author and committer set), then write the
+  real first commit with no parent and force `main` to it (ticket 2.6, `platform/api/github/repository.ts`). GitHub App
+  tokens: check the answer of `access_tokens` (selection `selected`, the one repository, only the asked rights plus
+  `metadata: read`, `expires_at` within an hour) before using it, and never log a token, the JWT or a repository name.
