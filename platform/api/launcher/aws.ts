@@ -219,6 +219,16 @@ export class DynamoLaunchRecords implements LaunchRecords {
     return failed;
   }
 
+  failUnrecorded(buildId: string, claimedAt: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+    return this.update(
+      buildKey(buildId),
+      FAILED_SET,
+      "#status = :building AND attribute_not_exists(#taskArn) AND #launchedAt = :claimedAt",
+      { ...failedNames, "#taskArn": "taskArn", "#launchedAt": "launchedAt" },
+      { ...failedValues(reasons, nowIso), ":building": str("building"), ":claimedAt": str(claimedAt) },
+    );
+  }
+
   failStopped(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
     return this.update(
       buildKey(buildId),

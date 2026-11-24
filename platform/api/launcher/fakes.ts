@@ -83,6 +83,8 @@ export class FakeBuildTable implements LaunchRecords {
     const entry = this.launches.get(buildId);
     if (!entry || entry.taskArn !== undefined) throw Object.assign(new Error("launch entry gone"), { name: "LaunchEntryGone" });
     entry.taskArn = taskArn;
+    // The build's write is a second call (DynamoLaunchRecords.recordTask): it can fail after the entry's.
+    this.maybeFail("recordTaskBuild");
     const build = this.builds.get(buildId);
     if (build) {
       build.taskArn = taskArn;
@@ -104,6 +106,13 @@ export class FakeBuildTable implements LaunchRecords {
     if (ok) this.fail(build, reasons, nowIso);
     await this.removeLaunch(buildId, undefined);
     return ok;
+  }
+
+  async failUnrecorded(buildId: string, claimedAt: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+    const build = this.builds.get(buildId);
+    if (!build || build.status !== "building" || build.taskArn !== undefined || build.launchedAt !== claimedAt) return false;
+    this.fail(build, reasons, nowIso);
+    return true;
   }
 
   async failStopped(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean> {

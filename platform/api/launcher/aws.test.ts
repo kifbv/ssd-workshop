@@ -95,6 +95,7 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).toBe(true);
     await records.recordTask("b-1", ARN, NOW);
     expect(await records.failUnstarted("b-1", ["x"], NOW)).toBe(true);
+    expect(await records.failUnrecorded("b-1", NOW, ["x"], NOW)).toBe(true);
     expect(await records.failStopped("b-1", ARN, ["x"], NOW)).toBe(true);
     expect(await records.failHandedOver("b-1", ARN, ["x"], NOW)).toBe(true);
     expect(await records.failQueued("b-1", ["x"], NOW)).toBe(true);
@@ -172,15 +173,18 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     await records.failQueued("b-1", ["x"], NOW);
     await records.failDeploy("b-1", "Ada", COMMIT, ["x"], NOW);
     await records.failHandedOver("b-1", ARN, ["x"], NOW);
-    const [stopped, queued, deploy, handedOver] = sent.map((command) => command.input as UpdateItemCommandInput);
+    await records.failUnrecorded("b-1", NOW, ["x"], NOW);
+    const [stopped, queued, deploy, handedOver, unrecorded] = sent.map((command) => command.input as UpdateItemCommandInput);
+    expect(unrecorded?.ConditionExpression).toBe("#status = :building AND attribute_not_exists(#taskArn) AND #launchedAt = :claimedAt");
+    expect(unrecorded?.ExpressionAttributeValues?.[":claimedAt"]).toEqual({ S: NOW });
     expect(stopped?.ConditionExpression).toBe("#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)");
     expect(handedOver?.ConditionExpression).toBe("#status = :building AND #taskArn = :taskArn AND attribute_exists(#pushedCommit)");
     expect(queued?.ConditionExpression).toBe("#status = :queued");
     expect(deploy?.ConditionExpression).toBe("#status IN (:building, :deploying) AND #nickname = :nickname AND #pushedCommit = :commit");
-    for (const input of [stopped, queued, deploy, handedOver]) {
+    for (const input of [stopped, queued, deploy, handedOver, unrecorded]) {
       expect(input?.UpdateExpression).toBe("SET #status = :failed, #failureReasons = :reasons, #finishedAt = :now, #updatedAt = :now");
       // Compared only, never set.
-      expect(input?.UpdateExpression).not.toMatch(/#nickname|#pushedCommit|#participantId/);
+      expect(input?.UpdateExpression).not.toMatch(/#nickname|#pushedCommit|#participantId|#launchedAt/);
     }
   });
 

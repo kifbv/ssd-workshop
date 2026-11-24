@@ -2188,7 +2188,7 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(JSON.stringify(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties?.AssumeRolePolicyDocument)).toContain("scheduler.amazonaws.com");
   });
 
-  it("trusts the scheduler only for its own schedule, and the builder's roles only for tasks on the builds cluster (ticket 2.9 try 2)", () => {
+  it("trusts the scheduler only for its own schedule, the builder's task role only for tasks on the builds cluster (ticket 2.9 try 2) and its execution role for ECS in this account (try 3)", () => {
     const trust = (name: string) => (roleEntry(name)[1].Properties?.AssumeRolePolicyDocument as { Statement: { Principal: unknown; Condition: unknown }[] }).Statement;
     expect(trust(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([
       expect.objectContaining({
@@ -2196,11 +2196,16 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
         Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` } },
       }),
     ]);
-    for (const name of [BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME]) {
+    const sources: [string, string][] = [
+      [BUILDER_TASK_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`],
+      // The form AWS documents for task execution roles (the confused-deputy condition): ECS in this account only.
+      [BUILDER_EXECUTION_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:*`],
+    ];
+    for (const [name, sourceArn] of sources) {
       expect(trust(name), name).toEqual([
         expect.objectContaining({
           Principal: { Service: "ecs-tasks.amazonaws.com" },
-          Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT }, ArnLike: { "aws:SourceArn": `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*` } },
+          Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT }, ArnLike: { "aws:SourceArn": sourceArn } },
         }),
       ]);
     }

@@ -9,6 +9,7 @@ import {
   AI_WORKER_FUNCTION_NAME,
   ASSETS_BUCKET_NAME,
   BUILD_CHECK_QUEUE_NAME,
+  BUILD_CHECK_SCHEDULE_NAME,
   BUILD_CHECK_SCHEDULER_ROLE_NAME,
   BUILD_DLQ_NAME,
   BUILD_LAUNCHER_FUNCTION_NAME,
@@ -21,6 +22,7 @@ import {
   BUILDS_SUBNET_IDS,
   DEPLOY_DLQ_NAME,
   DEPLOY_QUEUE_NAME,
+  DEPLOYER_FUNCTION_NAME,
   IAM_PATH,
   REGION,
 } from "../lib/config.js";
@@ -1497,18 +1499,110 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       }
     });
 
-    it("denies the Claude user adding, changing or removing the launcher's event sources (lambda:FunctionArn)", () => {
+    // Ticket 2.9 try 3 (access review LOW 2 and 3): no condition key names a mapping's queue (Service Authorization
+    // Reference, lambda.json, read 2026-11-24: CreateEventSourceMapping carries only tags and lambda:FunctionArn), and
+    // a call by mapping UUID may carry no function ARN: sessions get no mapping writes at all.
+    it("denies the Claude user adding, changing or removing any event source mapping, with or without a function ARN", () => {
       const mapping = `arn:aws:lambda:${REGION}:${ACCOUNT}:event-source-mapping:0123-4567`;
+      const own = `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-session-own`;
       for (const action of ["lambda:CreateEventSourceMapping", "lambda:UpdateEventSourceMapping", "lambda:DeleteEventSourceMapping"]) {
         const resource = action === "lambda:CreateEventSourceMapping" ? "*" : mapping;
-        for (const fn of FUNCTIONS) {
+        for (const fn of [...FUNCTIONS, own, `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-apps-deployer`]) {
           expect(allowedBy(deploy, action, resource, { ...CLAUDE, "lambda:FunctionArn": fn }), `${action} ${fn}`).toBe(false);
+          // Deploys from main still manage mappings.
           expect(allowedBy(deploy, action, resource, { ...DEPLOY, "lambda:FunctionArn": fn }), `${action} ${fn}`).toBe(true);
+          // Without the deny a session could (WorkshopEventSourceMappings).
+          expect(allowedBy(deploy.filter((s) => s.Sid !== "NoEventSourcesForSessions"), action, resource, { ...CLAUDE, "lambda:FunctionArn": fn }), `${action} ${fn}`).toBe(true);
         }
-        const other = `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-apps-deployer`;
-        expect(allowedBy(deploy, action, resource, { ...CLAUDE, "lambda:FunctionArn": other }), action).toBe(true);
+        // A deny that needed lambda:FunctionArn would not apply to a call without it; this one does not need it.
+        expect(statementApplies(deploy.find((s) => s.Sid === "NoEventSourcesForSessions") as Statement, action, resource, CLAUDE), action).toBe(true);
       }
       expect(allowedBy(deploy, "lambda:GetEventSourceMapping", mapping, { ...CLAUDE, "lambda:FunctionArn": FUNCTIONS[0] ?? "" })).toBe(true);
+    });
+
+    // Ticket 2.9 try 3 (access review HIGH): roles the boundary's denies let through by name, and the apps deployer
+    // (the apps bucket's only writer), cannot be borrowed by a session: no PassRole to its own task or function, no
+    // change to their policies or trust, and no change to the code that runs as them.
+    const role = (name: string, withPath = true) => `arn:aws:iam::${ACCOUNT}:role${withPath ? IAM_PATH : "/"}${name}`;
+    const EXCEPTION_ROLES = [BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME, AI_WORKER_FUNCTION_NAME, BUILD_CHECK_SCHEDULER_ROLE_NAME, DEPLOYER_FUNCTION_NAME];
+    const PASSES = ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com", "scheduler.amazonaws.com"];
+
+    it("denies the Claude user passing, changing or deleting the exception roles (both ARN forms), but not reading them", () => {
+      for (const name of EXCEPTION_ROLES) {
+        for (const arn of [role(name), role(name, false)]) {
+          for (const action of ROLE_WRITES) expect(allowedBy(deploy, action, arn, CLAUDE), `${action} ${arn}`).toBe(false);
+          for (const service of PASSES) {
+            expect(allowedBy(deploy, "iam:PassRole", arn, { ...CLAUDE, "iam:PassedToService": service }), `PassRole ${arn} ${service}`).toBe(false);
+          }
+          expect(allowedBy(deploy, "iam:GetRole", arn, CLAUDE), arn).toBe(true);
+        }
+        // Reads of the real role (with its path) stay allowed.
+        for (const action of ["iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"]) {
+          expect(allowedBy(deploy, action, role(name), CLAUDE), `${action} ${name}`).toBe(true);
+        }
+        // Deploys from main still create, pass and change them.
+        for (const action of ["iam:CreateRole", "iam:PassRole", "iam:PutRolePolicy", "iam:UpdateAssumeRolePolicy"]) {
+          expect(allowedBy(deploy, action, role(name), DEPLOY), `${action} ${name}`).toBe(true);
+        }
+        // Without the new resources a session could pass them.
+        const old = deploy.map((s) => (s.Sid === "NoLauncherForSessions" ? { ...s, Resource: list(s.Resource).filter((r) => !live(r).endsWith(`role*/${name}`)) } : s));
+        expect(allowedBy(old, "iam:PassRole", role(name), CLAUDE), name).toBe(true);
+      }
+      // Other workshop roles (one a session creates for its own function) stay passable.
+      for (const other of [role("ssd-workshop-session-own"), role(`x-${BUILDER_TASK_ROLE_NAME}`), role(`${BUILDER_TASK_ROLE_NAME}-task`)]) {
+        expect(allowedBy(deploy, "iam:PassRole", other, CLAUDE), other).toBe(true);
+      }
+    });
+
+    it("denies the Claude user changing or invoking the AI worker's and the deployer's code, but not reading it", () => {
+      for (const name of [AI_WORKER_FUNCTION_NAME, DEPLOYER_FUNCTION_NAME]) {
+        const fns = [`arn:aws:lambda:${REGION}:${ACCOUNT}:function:${name}`, `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${name}:live`];
+        for (const fn of fns) {
+          for (const action of [...FUNCTION_WRITES, "lambda:InvokeFunction", "lambda:AddPermission", "lambda:PutFunctionConcurrency"]) {
+            expect(allowedBy(deploy, action, fn, CLAUDE), `${action} ${fn}`).toBe(false);
+          }
+          for (const action of ["lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:ListVersionsByFunction"]) {
+            expect(allowedBy(deploy, action, fn, CLAUDE), `${action} ${fn}`).toBe(true);
+          }
+        }
+        for (const action of ["lambda:CreateFunction", "lambda:UpdateFunctionCode"]) expect(allowedBy(deploy, action, fns[0] ?? "", DEPLOY), `${action} ${name}`).toBe(true);
+      }
+      // A session's own workshop function is untouched.
+      expect(allowedBy(deploy, "lambda:UpdateFunctionCode", `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-session-own`, CLAUDE)).toBe(true);
+    });
+
+    it("names the exception roles and functions of infra/lib/config.ts", () => {
+      const resources = list(deploy.find((s) => s.Sid === "NoLauncherForSessions")?.Resource).map(live);
+      for (const name of EXCEPTION_ROLES) expect(resources).toContain(`arn:aws:iam::${ACCOUNT}:role*/${name}`);
+      for (const name of [AI_WORKER_FUNCTION_NAME, DEPLOYER_FUNCTION_NAME]) {
+        expect(resources).toContain(`arn:aws:lambda:*:${ACCOUNT}:function:${name}`);
+        expect(resources).toContain(`arn:aws:lambda:*:${ACCOUNT}:function:${name}:*`);
+      }
+      // The builder's roles and the scheduler role of config.ts are the ones the builds stack creates (app.test.ts).
+      expect([BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME, BUILD_CHECK_SCHEDULER_ROLE_NAME, DEPLOYER_FUNCTION_NAME]).toEqual([
+        "ssd-workshop-builder", "ssd-workshop-builder-execution", "ssd-workshop-builds-check-scheduler", "ssd-workshop-apps-deployer",
+      ]);
+    });
+
+    it("denies the Claude user creating, changing or deleting the stuck-build check's schedule (any group)", () => {
+      const schedule = (group: string, name = BUILD_CHECK_SCHEDULE_NAME) => `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/${group}/${name}`;
+      for (const action of ["scheduler:CreateSchedule", "scheduler:UpdateSchedule", "scheduler:DeleteSchedule"]) {
+        for (const target of [schedule("default"), schedule("ssd-workshop-x")]) {
+          expect(allowedBy(deploy, action, target, CLAUDE), `${action} ${target}`).toBe(false);
+          expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildCheckScheduleForSessions"), action, target, CLAUDE), `${action} ${target}`).toBe(true);
+        }
+        expect(allowedBy(deploy, action, schedule("default"), DEPLOY), action).toBe(true);
+        expect(allowedBy(deploy, action, schedule("default", "ssd-workshop-other"), CLAUDE), action).toBe(true);
+      }
+      expect(allowedBy(deploy, "scheduler:GetSchedule", schedule("default"), CLAUDE)).toBe(true);
+    });
+
+    it("denies the Claude user running any task on the builds cluster, whatever its task definition", () => {
+      const own = `${ECS_ARN}:task-definition/ssd-workshop-session-own:1`;
+      expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(false);
+      expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildsClusterTasksForSessions"), "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
+      expect(allowedBy(deploy, "ecs:RunTask", own, { ...DEPLOY, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
+      expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": `${ECS_ARN}:cluster/ssd-workshop-other` })).toBe(true);
     });
 
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {

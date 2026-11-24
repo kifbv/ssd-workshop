@@ -22,6 +22,7 @@ import {
   type CheckDeps,
   type LauncherDeps,
   type LauncherLogEntry,
+  type LaunchEntry,
 } from "./launcher.js";
 
 const BUILD = "2026-11-24T10-00-00-000Z-0101010101010101";
@@ -392,6 +393,71 @@ describe("the stuck-build check (ticket 2.9)", () => {
     await runCheck(s.check);
     expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [DEPLOY_DEAD_REASON] });
     expect(s.deployDeadLetters.messages).toEqual([]);
+  });
+
+  it("WHEN the launch recorded the task on its entry but neither on the build nor as failed THEN the check fails the build once the task stopped (try 3, checker 5)", async () => {
+    const s = setup();
+    s.table.failOnce.add("recordTaskBuild");
+    s.table.failOnce.add("failUnstarted");
+    expect(await processLaunch(message(), s.deps)).toBe("failed");
+    const taskArn = s.tasks.started[0]?.taskArn ?? "";
+    // The launcher stopped the task; the build is building without a task, its entry names the task.
+    expect(s.tasks.stopCalls).toEqual([taskArn]);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.table.builds.get(BUILD)?.taskArn).toBeUndefined();
+    expect(s.table.launches.get(BUILD)?.taskArn).toBe(taskArn);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [LAUNCH_SERVICE_REASON] });
+    expect(s.table.launches.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", failed: 1 });
+  });
+
+  it("does the same when ECS no longer knows that task, and leaves such a build alone while its task runs", async () => {
+    const s = setup();
+    s.table.failOnce.add("recordTaskBuild");
+    s.table.failOnce.add("failUnstarted");
+    s.tasks.stop = async () => undefined; // The launcher's stop did not reach ECS.
+    await processLaunch(message(), s.deps);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.table.launches.size).toBe(1);
+    s.tasks.states.clear();
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [LAUNCH_SERVICE_REASON] });
+    expect(s.table.launches.size).toBe(0);
+  });
+
+  it("never fails a retry's new launch from the earlier launch's entry (another launchedAt)", async () => {
+    const s = setup();
+    s.table.failOnce.add("recordTaskBuild");
+    s.table.failOnce.add("failUnstarted");
+    await processLaunch(message(), s.deps);
+    const entry = s.table.launches.get(BUILD);
+    // A retry and a new claim happened after the check read the old entry: the build is building, no task yet.
+    const build = s.table.builds.get(BUILD);
+    if (build) Object.assign(build, { status: "building", launchedAt: "2026-11-24T10:05:00.000Z" });
+    s.table.listLaunches = async () => [{ ...(entry as LaunchEntry) }];
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+  });
+
+  it("WHEN a watch entry names a task outside the builds cluster THEN the check removes it without asking ECS, and still checks the other builds (try 3, access review LOW 4)", async () => {
+    const s = await launched();
+    s.tasks.exit(s.taskArn);
+    const bad = ["not-an-arn", "arn:aws:ecs:eu-central-1:360206963848:task/other-cluster/0123", "arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/../x"];
+    bad.forEach((taskArn, i) => s.table.launches.set(`bad-${String(i)}`, { buildId: `bad-${String(i)}`, claimedAt: "2026-11-24T10:00:00.000Z", taskArn }));
+    const asked: string[][] = [];
+    const describe = s.tasks.describe.bind(s.tasks);
+    s.tasks.describe = async (arns) => {
+      asked.push([...arns]);
+      for (const arn of arns) if (!/^arn:aws:ecs:[a-z0-9-]+:\d{12}:task\/ssd-workshop-builds\/[0-9a-f]+$/.test(arn)) throw Object.assign(new Error("bad arn"), { name: "InvalidParameterException" });
+      return describe(arns);
+    };
+    await runCheck(s.check);
+    expect(asked).toEqual([[s.taskArn]]);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+    expect(s.table.launches.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", failed: 1 });
   });
 
   it("throws a bare error when the table fails, after logging only its name", async () => {

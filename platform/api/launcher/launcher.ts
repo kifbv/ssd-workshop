@@ -36,7 +36,7 @@ import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/a
 import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
-import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
+import { BUILD_TASK_MAX_MS, BUILDS_CLUSTER_NAME, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { BuildStatus } from "../types.js";
 
@@ -74,6 +74,11 @@ export interface LaunchRecords {
   recordTask(buildId: string, taskArn: string, nowIso: string): Promise<void>;
   /** Marks a claimed build that has no task failed (only while `building` without a task); removes its entry. */
   failUnstarted(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  /**
+   * Marks failed a build still `building` without a task under the launch that wrote this watch entry (`launchedAt`
+   * equal to the entry's `claimedAt`): its launch recorded the task on the entry only, then stopped it.
+   */
+  failUnrecorded(buildId: string, claimedAt: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Marks failed a build still `building` with this task and no pushed commit. */
   failStopped(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /**
@@ -301,6 +306,12 @@ async function drain(queue: DeadLetters, handle: (body: string | undefined) => P
   return count;
 }
 
+/**
+ * A task of the builds cluster (long ARN form, 32 hexadecimal digits). The watch list is in the shared table, so the check
+ * asks ECS only about such ARNs: one malformed entry would otherwise make DescribeTasks fail for every build.
+ */
+const BUILD_TASK_ARN = new RegExp(`^arn:aws:ecs:[a-z0-9-]+:\\d{12}:task/${BUILDS_CLUSTER_NAME}/[0-9a-f]{32}$`);
+
 /** The stuck-build check. Every write is conditional, so two checks at once (or a check racing a launch) are harmless. */
 export async function runCheck(deps: CheckDeps): Promise<void> {
   const started = deps.now().getTime();
@@ -309,7 +320,11 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
   let stopped = 0;
   let deadLetters = 0;
   try {
-    const launches = await deps.records.listLaunches();
+    const launches: LaunchEntry[] = [];
+    for (const entry of await deps.records.listLaunches()) {
+      if (entry.taskArn === undefined || BUILD_TASK_ARN.test(entry.taskArn)) launches.push(entry);
+      else await deps.records.removeLaunch(entry.buildId, entry.taskArn);
+    }
     const withTask = launches.filter((entry): entry is LaunchEntry & { taskArn: string } => entry.taskArn !== undefined);
     const states = withTask.length === 0 ? new Map<string, TaskState>() : await deps.tasks.describe(withTask.map((entry) => entry.taskArn));
     for (const entry of launches) {
@@ -329,6 +344,14 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
         // Handed over (a pushed commit) and still `building`: the deploy message may not have started the deployer yet.
         // Watched until HANDED_OVER_GRACE_MS after the task stopped (longer than the deploy queue's deliveries), then
         // failed: no deploy will come, and `retry` recovers it. A task ECS forgot (no stop time) stopped long ago.
+        // A launch that recorded its task on the entry but neither on the build nor as failed (two writes lost): the
+        // launcher stopped that task, so the build fails (only while `building` without a task, under this launch: a
+        // retry's new launch has another `launchedAt`).
+        if (await deps.records.failUnrecorded(entry.buildId, entry.claimedAt, [LAUNCH_SERVICE_REASON], nowIso())) {
+          failed += 1;
+          await deps.records.removeLaunch(entry.buildId, entry.taskArn);
+          continue;
+        }
         const build = await deps.records.readBuild(entry.buildId);
         if (build?.status === "building") {
           const stoppedAt = state.stoppedAt?.getTime();

@@ -699,19 +699,23 @@ deploy dead-letter queues are marked failed. Task logs: `/ecs/ssd-workshop-build
 `ssd-workshop-builds-launcher`.
 
 Before the first deploy, Franck applies the access stack (`NoBuildQueueForSessions`, ticket 2.9; and,
-once he agreed, try 2's `NoBuildTasksForSessions`, `NoLauncherSourcesForSessions` and the boundary's
-`WatchBuildsLauncherOnly`, `DeploysFromTheBuilderOnly` and `BuildsFromTheirSendersOnly`) and the GitHub
+once he agreed, try 2's `NoBuildTasksForSessions` and the boundary's `WatchBuildsLauncherOnly`,
+`DeploysFromTheBuilderOnly` and `BuildsFromTheirSendersOnly`, and try 3's wider `NoLauncherForSessions`,
+`NoEventSourcesForSessions`, `NoBuildCheckScheduleForSessions` and `NoBuildsClusterTasksForSessions`) and the GitHub
 App secret must be loaded (section above).
 
 Also checked by the first live build (ticket 2.9 try 2), since only AWS can prove them: the builder's
-task and execution roles trust only `aws:SourceArn` `task/ssd-workshop-builds/*` (if the task fails
-with "ECS was unable to assume the role", widen it back to `arn:aws:ecs:eu-central-1:<account>:*` in
-`infra/lib/builds-stack.ts`); the check's scheduler role trusts only its schedule's ARN (if the launcher
+task role trusts only `aws:SourceArn` `task/ssd-workshop-builds/*` (if the task fails with "ECS was
+unable to assume the role", widen it to `arn:aws:ecs:eu-central-1:<account>:*` in
+`infra/lib/builds-stack.ts`; the execution role already uses that AWS-documented form, try 3); the check's scheduler role trusts only its schedule's ARN (if the launcher
 logs no `build-check` line each minute, look at the schedule's target errors); `role*/<name>` in the
 boundary's `ArnNotLike` matches the launcher's, builder's, AI worker's and scheduler's sessions (a
 launch, a hand-over and a check all work); RunTask accepts `startedBy` = the build id, and
 `AWS_PROFILE=franck aws ecs list-tasks --region eu-central-1 --cluster ssd-workshop-builds --started-by <build id>`
-lists the running task.
+lists the running task. After applying try 3's access stack, `role*/<name>` in `NoLauncherForSessions`'s
+`Resource` should refuse the Claude user both role forms:
+`AWS_PROFILE=franck aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::<account>:user/ssd-workshop-claude --action-names iam:PassRole --resource-arns arn:aws:iam::<account>:role/ssd-workshop/ssd-workshop-builder arn:aws:iam::<account>:role/ssd-workshop-builder`
+(expect `explicitDeny` for both).
 
 ### List and retry builds (Franck's machine)
 

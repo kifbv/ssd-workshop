@@ -672,14 +672,28 @@ Resources:
           # user may not create, pass, change or invoke its role or function, nor write deploy assets
           # or the assets bucket's settings (a planted asset would become its code). Deploys from main
           # stay trusted (Franck reviews what merges).
+          # Ticket 2.9 try 3 (pending Franck's yes): the same for every role the boundary's denies let
+          # through by name (the builder's two roles, the AI worker, the check's scheduler) and the
+          # apps deployer (the apps bucket's only writer, 2.5), and the two functions that run as
+          # them: a session could otherwise pass such a role to its own task or function, or rewrite
+          # that code. role*/<name> is the role with or without its path (a role name is unique).
           - Sid: NoLauncherForSessions
             Effect: Deny
             NotAction: [iam:GetRole, iam:GetRolePolicy, iam:ListRolePolicies, iam:ListAttachedRolePolicies, iam:ListRoleTags, "lambda:Get*", "lambda:List*", "s3:Get*", "s3:List*"]
             Resource:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-builds-launcher
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder-execution
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-api-ai-worker
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-check-scheduler
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-apps-deployer
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher:*
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-api-ai-worker
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-api-ai-worker:*
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-apps-deployer
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-apps-deployer:*
               - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}
               - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}/*
             Condition:
@@ -707,12 +721,28 @@ Resources:
               - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop-builder:*
             Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
-          - Sid: NoLauncherSourcesForSessions
+          # Ticket 2.9 try 3 (pending Franck's yes): no event source mappings at all for sessions (no
+          # condition key names a mapping's queue, and a call by mapping UUID may carry no function
+          # ARN): a session could otherwise feed the launch or deploy queue to its own function. Nor
+          # change or remove the stuck-build check's schedule, nor run any task on the builds cluster.
+          - Sid: NoEventSourcesForSessions
             Effect: Deny
             Action: [lambda:CreateEventSourceMapping, lambda:UpdateEventSourceMapping, lambda:DeleteEventSourceMapping]
             Resource: "*"
             Condition:
-              ArnLike: {lambda:FunctionArn: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher*"}
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoBuildCheckScheduleForSessions
+            Effect: Deny
+            Action: ["scheduler:Create*", "scheduler:Update*", "scheduler:Delete*"]
+            Resource: !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule/*/ssd-workshop-builds-check
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoBuildsClusterTasksForSessions
+            Effect: Deny
+            Action: ecs:RunTask
+            Resource: "*"
+            Condition:
+              ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-builds"}
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey
             Effect: Deny

@@ -234,7 +234,13 @@ paths:
 - A deny "for every role but X" in the boundary (ticket 2.9 try 2): `ArnNotLike` `aws:PrincipalArn`
   `arn:aws:iam::<account>:role*/<name>` covers X with and without its path in one value (a role name is unique in
   an account), half the size of listing both forms; test look-alikes (`x-<name>`, `<name>x`, `<name>-execution`). The
-  boundary is close to 6,144 characters (5,918 after 2.9): check the size test before adding to it.
+  boundary is close to 6,144 characters (5,918 after 2.9): check the size test before adding to it. Every role such a
+  deny lets through by name is then a target to borrow: deny the Claude user everything but reads on it (and on the
+  functions that run as it) in `NoLauncherForSessions` (ticket 2.9 try 3; `role*/<name>` works in `Resource` too), or a
+  session passes it to its own task or function.
+- Lambda has no condition key for an event source mapping's queue, and calls by mapping UUID may carry no
+  `lambda:FunctionArn`: keep sessions off a queue's consumers with an unconditional deny of
+  `lambda:Create/Update/DeleteEventSourceMapping` for the Claude user (`NoEventSourcesForSessions`, ticket 2.9 try 3).
 - An ECS task's container overrides are readable by anyone with `ecs:DescribeTasks` on it (and in CloudTrail's RunTask
   `requestParameters`): a secret passed there (2.9's builder token) needs `DescribeTasks` denied to sessions and, in the
   boundary, to every role but the one that must watch the task; and the action that would turn the secret into an

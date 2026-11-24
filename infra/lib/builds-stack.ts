@@ -187,15 +187,13 @@ export class BuildsStack extends Stack {
     // Ticket 2.9: the builder's task. Its image is the deploy workflow's push, named by digest.
     const digest = String(this.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT) ?? BUILDER_IMAGE_DIGEST_UNSET);
     if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${BUILDER_IMAGE_DIGEST_CONTEXT} must be sha256:<64 hex digits>`);
-    // Only tasks on the builds cluster may assume the builder's roles (ticket 2.9 try 2). Unverified until the first live
-    // build: that ECS names the task's ARN as aws:SourceArn for both roles (the execution role too); if a task fails with
-    // "ECS was unable to assume the role", widen this back to `arn:aws:ecs:<region>:<account>:*` (infra/README.md).
-    const taskPrincipal = () =>
+    // Only tasks on the builds cluster may assume the builder's task role (ticket 2.9 try 2). Unverified until the first
+    // live build: that ECS names the task's ARN as aws:SourceArn there; if a task fails with "ECS was unable to assume the
+    // role", widen it to `arn:aws:ecs:<region>:<account>:*` (infra/README.md). The execution role keeps the account-wide
+    // form AWS documents for it (ticket 2.9 try 3, checker 6): ECS may name another ARN when it pulls the image.
+    const taskPrincipal = (sourceArn: string) =>
       new ServicePrincipal("ecs-tasks.amazonaws.com", {
-        conditions: {
-          StringEquals: { "aws:SourceAccount": ACCOUNT },
-          ArnLike: { "aws:SourceArn": `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*` },
-        },
+        conditions: { StringEquals: { "aws:SourceAccount": ACCOUNT }, ArnLike: { "aws:SourceArn": sourceArn } },
       });
     const builderLogs = new LogGroup(this, "BuilderLogs", {
       logGroupName: BUILDER_LOG_GROUP_NAME,
@@ -206,12 +204,12 @@ export class BuildsStack extends Stack {
     // the deploy queue. Nothing else: no secret, no other table partition, no other queue.
     const taskRole = new Role(this, "BuilderTaskRole", {
       roleName: BUILDER_TASK_ROLE_NAME,
-      assumedBy: taskPrincipal(),
+      assumedBy: taskPrincipal(`arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`),
       description: "The builder task's runner: the build model, its build record, usage counters, the deploy queue",
     });
     const executionRole = new Role(this, "BuilderExecutionRole", {
       roleName: BUILDER_EXECUTION_ROLE_NAME,
-      assumedBy: taskPrincipal(),
+      assumedBy: taskPrincipal(`arn:aws:ecs:${REGION}:${ACCOUNT}:*`),
       description: "Starts the builder task: pulls its image and writes its logs",
     });
     const tableArn = Table.fromTableName(this, "Data", TABLE_NAME).tableArn;
