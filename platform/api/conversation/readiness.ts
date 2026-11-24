@@ -108,7 +108,9 @@ export interface ReadinessCheck extends ReadinessResult {
 
 /** The request the worker (and `npm run eval -- readiness`) sends: the spec alone, no history. */
 export function readinessRequest(specText: string): { system: string; messages: { role: "user"; text: string }[]; maxTokens: number; temperature: number } {
-  const spec = specText.replaceAll("</spec>", "").replaceAll("<spec>", "").slice(0, MAX_SPEC_TEXT);
+  // Any spec tag, in any letter case and with attributes or spaces (`</SPEC >`), is removed so the text cannot
+  // close the block early. Linear: `[^<>]*` stops at the next `<`.
+  const spec = specText.slice(0, MAX_SPEC_TEXT).replace(/<\/?spec\b[^<>]*>/gi, "");
   return {
     system: READINESS_SYSTEM_PROMPT,
     messages: [{ role: "user", text: `<spec>\n${spec}\n</spec>` }],

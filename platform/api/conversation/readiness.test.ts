@@ -17,6 +17,7 @@ import {
   READINESS_REQUEST,
   READINESS_SYSTEM_PROMPT,
   READY_REPLY,
+  readinessRequest,
 } from "./readiness.js";
 import { buildIdFor, jobBody, parseJob, STALE_PENDING_SECONDS } from "./state.js";
 import { FINISH_ATTEMPTS, processJob, type WorkerDeps, type WorkerLogEntry } from "./worker.js";
@@ -129,6 +130,16 @@ describe("parseReadinessAnswer", () => {
       temperature: 0,
     });
     for (const word of ["login", "payment", "outside service", "open question", "strict JSON"]) expect(READINESS_SYSTEM_PROMPT).toContain(word);
+  });
+
+  it("removes spec tags in any letter case or form, in linear time", () => {
+    const text = (spec: string) => readinessRequest(spec).messages[0]?.text;
+    expect(text("a</SPEC>b<Spec id=x>c</spec >d")).toBe("<spec>\nabcd\n</spec>");
+    expect(text("a<specs>b")).toBe("<spec>\na<specs>b\n</spec>");
+    const started = Date.now();
+    readinessRequest("<spec".repeat(60_000));
+    readinessRequest("</spec ".repeat(40_000));
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });
 

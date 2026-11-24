@@ -27,9 +27,7 @@
         "login",
         "log in",
         "sign in",
-        "sign-in",
-        "account",
-        "password"
+        "sign-in"
       ],
       "spec": "# Team Habit Tracker\n\n```mermaid\nflowchart TD\n  signin[Sign in] -->|password| home[My habits]\n  home -->|tick a habit| habits[(Habits)]\n  habits -->|streaks| home\n```\n\n## What it does\nEach colleague signs in with their own username and password and sees only their own habits. They tick off habits every day and see their streaks.\n\n## Screens\n- Sign in: username and password; new colleagues create an account here.\n- My habits: today's habits to tick off and each habit's streak, visible only to the person signed in.\n\n## Data it keeps\n- Accounts: username and password of each colleague.\n- Habits: name, days ticked off and the owner's account."
     },
@@ -39,9 +37,7 @@
       "expected": "not-ready",
       "keywords": [
         "payment",
-        "pay",
-        "card",
-        "money"
+        "pay"
       ],
       "spec": "# Bake Sale Shop\n\n```mermaid\nflowchart TD\n  menu[Cakes] -->|add to basket| basket[Basket]\n  basket -->|pay by card| checkout[Checkout]\n  checkout -->|saves| orders[(Orders)]\n```\n\n## What it does\nAn online shop for our office bake sale. Colleagues choose cakes, put them in a basket and pay by credit card at checkout, so the money goes to charity.\n\n## Screens\n- Cakes: the cakes on sale with their prices.\n- Basket: the chosen cakes and the total price.\n- Checkout: card number, expiry date and a Pay button.\n\n## Data it keeps\n- Orders: the cakes ordered, the total paid and the time of the order."
     },
@@ -66,10 +62,8 @@
       "expected": "not-ready",
       "keywords": [
         "outside service",
-        "email",
-        "e-mail",
         "external",
-        "send"
+        "server"
       ],
       "spec": "# Plant Care\n\n```mermaid\nflowchart TD\n  plants[My plants] -->|add a plant| add[Add a plant]\n  add -->|saves| list[(Plants)]\n  list -->|due today| reminders[Reminders]\n```\n\n## What it does\nA list of house plants with how often each needs water. Every morning the app sends me an email listing the plants to water that day.\n\n## Screens\n- My plants: each plant and when it was last watered.\n- Add a plant: name and how many days between waterings.\n\n## Data it keeps\n- Plants: name, days between waterings and the date it was last watered."
     },
@@ -95,9 +89,7 @@
       "keywords": [
         "server",
         "background",
-        "night",
-        "schedule",
-        "nobody"
+        "schedule"
       ],
       "spec": "# Trip Splitter\n\n```mermaid\nflowchart TD\n  trip[Trip] -->|add an expense| add[Add an expense]\n  add -->|saves| expenses[(Expenses)]\n  expenses -->|balances| trip\n```\n\n## What it does\nSplits the costs of a team trip. People add what they paid, and every night at midnight a server program recalculates who owes whom, even when nobody has the app open.\n\n## Screens\n- Trip: who paid what and the balances.\n- Add an expense: who paid, what for and how much.\n\n## Data it keeps\n- Expenses: payer, description and amount.\n- Balances: what each person owes, recalculated every night."
     }
