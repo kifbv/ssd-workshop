@@ -18,11 +18,14 @@ const UNREACHABLE = "GitHub could not be reached to download the commit.";
 export interface DownloadOptions {
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   timeoutMs?: number;
+  /** Stops the download when aborted (the deployer's phase deadline), like the time limit. */
+  signal?: AbortSignal;
 }
 
 export async function downloadArchive(url: string, options: DownloadOptions = {}): Promise<Uint8Array> {
   const fetchFn = options.fetch ?? fetch;
-  const signal = AbortSignal.timeout(options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS);
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS);
+  const signal = options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]);
   let response: Response;
   try {
     response = await fetchFn(url, { signal, redirect: "follow" });

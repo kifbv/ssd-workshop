@@ -48,7 +48,7 @@ let live: ((event: DeployEvent, context?: DeployContext) => Promise<void>) | und
 /** The clients are created once per Lambda instance, on first use; the region is explicit. */
 export async function handler(event: DeployEvent, context?: DeployContext): Promise<void> {
   live ??= createHandler({
-    download: (url, timeoutMs) => downloadArchive(url, { timeoutMs }),
+    download: (url, timeoutMs, signal) => downloadArchive(url, { timeoutMs, ...(signal === undefined ? {} : { signal }) }),
     objects: new S3AppObjects(new S3Client({
         region: REGION,
         maxAttempts: 3,

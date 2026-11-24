@@ -99,8 +99,15 @@ paths:
   tied to that record by the write's condition: the build must exist, belong to the message's app (`nickname` equal
   exactly, as 2.7 stores it) and be in a state that expects the work; a failed condition drops the message, and a
   failure is recorded on the record only after that condition passed. The commit in a deploy message must come only
-  from the platform's own push result, never from participant input; ticket 2.8 stores it on the build so the
-  deployer can condition on it later.
+  from the platform's own push result, never from participant input. MANDATORY for 2.8/2.9: the builder stores the
+  commit it pushed on the build (`pushedCommit`) and the deployer's start condition then requires
+  `#pushedCommit = :commit` (added in that ticket, with the name in the IAM attribute list): a commit SHA alone does
+  not prove it came from the participant's repository (GitHub serves fork-network commits through the parent's URL).
+  Builds left `deploying` after a dead-letter are moved to `failed` by the launcher's stuck-build check (2.9).
+- A worker phase cut off by a deadline is aborted, not just abandoned: one `AbortController` per phase, its signal
+  passed to every call (`client.send(command, { abortSignal })`, `fetch`). The record's terminal writes are
+  conditional on the working state (`#status = :deploying`), so a late write can never flip a finished record
+  (ticket 2.5). When two items must both change, write first the one whose failure a retry repairs.
 - Text that quotes participants' files (the deployer's `failureReasons`) is stored with control and other
   non-printable characters replaced by `?` (`storedReason`), and pages (2.7, 2.10) render it with `textContent` only.
 - The API never answers 403: the distribution turns every 403 into the plain 404 page (ticket 2.5). Use 401 or 404;

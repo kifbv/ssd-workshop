@@ -241,6 +241,39 @@ function actionCovers(granted: string, action: string): boolean {
   return new RegExp(`^${pattern}$`, "i").test(action);
 }
 
+/**
+ * An IAM resource as a pattern: a string as is, an `Fn::Join` with its pseudo parameters filled in (partition,
+ * region, account); any other reference (a logical id, `Fn::GetAtt`) becomes a character no ARN holds, so only
+ * the literal parts and their wildcards can match.
+ */
+function resourcePattern(resource: unknown): string {
+  if (typeof resource === "string") return resource;
+  if (resource !== null && typeof resource === "object") {
+    const join = (resource as { "Fn::Join"?: [string, unknown[]] })["Fn::Join"];
+    if (join !== undefined) return join[1].map(resourcePattern).join(join[0]);
+    const ref = (resource as { Ref?: unknown }).Ref;
+    if (ref === "AWS::Partition") return "aws";
+    if (ref === "AWS::AccountId") return ACCOUNT;
+    if (ref === "AWS::Region") return REGION;
+  }
+  return "\u0000";
+}
+
+/** The apps bucket and one of its app keys, as IAM sees them. */
+const APPS_BUCKET_ARNS = [`arn:aws:s3:::${APPS_BUCKET_NAME}`, `arn:aws:s3:::${APPS_BUCKET_NAME}/apps/x`];
+
+/**
+ * Whether an IAM resource (string, `Fn::Join`, `Ref`, `Fn::GetAtt`) can name one of `arns`: its pattern matched with
+ * the same `*`/`?` glob as actionCovers (any letter case, to err on the safe side), or a reference to one of
+ * `logicalIds`, or one of `names` anywhere in it.
+ */
+function resourceReaches(resource: unknown, arns: readonly string[], logicalIds: readonly string[], names: readonly string[]): boolean {
+  const pattern = resourcePattern(resource);
+  if (arns.some((arn) => actionCovers(pattern, arn))) return true;
+  const text = JSON.stringify(resource);
+  return logicalIds.some((id) => text.includes(`"${id}"`)) || names.some((name) => text.includes(name));
+}
+
 function tagsOf(r: Resource): Record<string, unknown> {
   const tags = r.Properties?.Tags as { Key: string; Value: unknown }[] | Record<string, unknown> | undefined;
   if (tags === undefined) return {};
@@ -1779,18 +1812,8 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
 
   it("criterion 4: no IAM policy in any stack, other than the deployer's, may write to the apps bucket", () => {
     const writes = (action: string): boolean => action === "*" || /^s3:(\*|Put|Delete|Restore|Replicate|Abort|Object)/i.test(action) || /^s3:.*\*/.test(action);
-    const reachesApps = (resource: unknown): boolean => {
-      const text = JSON.stringify(resource);
-      const appsBucketIds = appsResources().filter(([, r]) => r.Type === "AWS::S3::Bucket").map(([id]) => id);
-      return (
-        text === '"*"' ||
-        text.includes("arn:aws:s3:::*") ||
-        text.includes("arn:aws:s3:::ssd-workshop-*") ||
-        text.includes(APPS_BUCKET_NAME) ||
-        text.includes("ssd-workshop-apps") ||
-        appsBucketIds.some((id) => text.includes(`"${id}"`))
-      );
-    };
+    const appsBucketIds = appsResources().filter(([, r]) => r.Type === "AWS::S3::Bucket").map(([id]) => id);
+    const reachesApps = (resource: unknown): boolean => resourceReaches(resource, APPS_BUCKET_ARNS, appsBucketIds, [APPS_BUCKET_NAME, "ssd-workshop-apps"]);
     const deployerRole = roleEntry()?.[0];
     let checked = 0;
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
@@ -1821,16 +1844,13 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     // boundary allows s3:* on ssd-workshop-*: the deny holds only while no workload role is granted these (decision "(2.5) Bucket-level actions").
     const bucketActions = ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutLifecycleConfiguration", "s3:PutBucketWebsite", "s3:PutBucketCORS", "s3:DeleteBucket"];
     const appsBucketIds = appsResources().filter(([, r]) => r.Type === "AWS::S3::Bucket").map(([id]) => id);
-    const reachesAppsBucket = (resource: unknown): boolean => {
-      const text = JSON.stringify(resource);
-      return (
-        text === '"*"' ||
-        text.includes("arn:aws:s3:::*") ||
-        text.includes("arn:aws:s3:::ssd-workshop-*") ||
-        text.includes("ssd-workshop-apps") ||
-        appsBucketIds.some((id) => text.includes(`"${id}"`))
-      );
-    };
+    const reachesAppsBucket = (resource: unknown): boolean => resourceReaches(resource, APPS_BUCKET_ARNS, appsBucketIds, ["ssd-workshop-apps"]);
+    // Any wildcard that can name the bucket or an app's key counts, whatever its form.
+    for (const pattern of ["*", "arn:aws:s3:::*", "arn:aws:s3:::ssd-*", "arn:*:s3:::ssd-workshop-a?ps-*", "arn:aws:s3:::*/apps/*"]) {
+      expect(reachesAppsBucket(pattern), pattern).toBe(true);
+    }
+    expect(reachesAppsBucket({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":s3:::ssd-*"]] })).toBe(true);
+    expect(reachesAppsBucket("arn:aws:s3:::ssd-workshop-site-*")).toBe(false);
     expect(actionCovers("s3:Put*", "s3:PutBucketPolicy")).toBe(true);
     expect(actionCovers("s3:*Bucket*", "s3:DeleteBucket")).toBe(true);
     expect(actionCovers("s3:PutObject", "s3:PutBucketPolicy")).toBe(false);
@@ -1850,17 +1870,13 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
 
   it("no IAM policy in any stack may send to the deploy queue yet (ticket 2.9 adds the builder as the one sender)", () => {
     const queueIds = appsResources().filter(([, r]) => r.Type === "AWS::SQS::Queue").map(([id]) => id);
-    const reachesDeployQueue = (resource: unknown): boolean => {
-      const text = JSON.stringify(resource);
-      return (
-        text === '"*"' ||
-        /arn:aws:sqs:[^"]*:\*/.test(text) ||
-        /arn:aws:sqs:[^"]*:ssd-workshop-\*/.test(text) ||
-        /:sqs:[^"]*\*"/.test(text) ||
-        text.includes("ssd-workshop-deploys") ||
-        queueIds.some((id) => text.includes(`"${id}"`))
-      );
-    };
+    const queueArn = `arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}`;
+    const reachesDeployQueue = (resource: unknown): boolean => resourceReaches(resource, [queueArn], queueIds, ["ssd-workshop-deploys"]);
+    for (const pattern of ["*", "arn:aws:sqs:*", "arn:aws:sqs:*:*:ssd-*", "arn:aws:sqs:eu-central-1:*:*.fifo", "arn:aws:sqs:?u-*:*:ssd-workshop-deploy?.fifo"]) {
+      expect(reachesDeployQueue(pattern), pattern).toBe(true);
+    }
+    expect(reachesDeployQueue({ "Fn::Join": [":", ["arn", { Ref: "AWS::Partition" }, "sqs", { Ref: "AWS::Region" }, { Ref: "AWS::AccountId" }, "ssd-*"]] })).toBe(true);
+    expect(reachesDeployQueue(`arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}`)).toBe(false);
     expect(actionCovers("sqs:Send*", "sqs:SendMessage")).toBe(true);
     expect(actionCovers("*", "sqs:SendMessage")).toBe(true);
     let sends = 0;

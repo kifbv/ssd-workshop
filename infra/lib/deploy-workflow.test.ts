@@ -207,3 +207,27 @@ describe("CI workflow", () => {
     expect(ci.permissions).toEqual({ contents: "read" });
   });
 });
+
+describe("infra/README.md code fences (ticket 2.5 try 3)", () => {
+  it("pairs every ``` fence: an opening one with an optional language word, a closing one alone on its line", () => {
+    const lines = repoFile("infra/README.md").split("\n");
+    // A fence inside a list item is indented; its closing fence has the same indent.
+    let openIndent: string | undefined;
+    let fences = 0;
+    for (const [index, line] of lines.entries()) {
+      if (!line.includes("```")) continue;
+      fences += 1;
+      const where = `infra/README.md line ${index + 1}: ${line}`;
+      if (openIndent !== undefined) {
+        expect(line, where).toBe(`${openIndent}\`\`\``);
+        openIndent = undefined;
+      } else {
+        expect(line, where).toMatch(/^ {0,3}```[a-z]*$/);
+        openIndent = /^ */.exec(line)?.[0] ?? "";
+      }
+    }
+    expect(openIndent, "an unclosed fence").toBeUndefined();
+    expect(fences % 2).toBe(0);
+    expect(fences).toBeGreaterThan(10);
+  });
+});

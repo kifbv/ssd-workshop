@@ -551,7 +551,9 @@ aws cloudfront list-invalidations --distribution-id E2TOZV0ERAXKZ9 --max-items 1
   --query 'InvalidationList.Items[0].[Status, CreateTime]'
 # expect: ["Completed" (or "InProgress"), <time of the deploy>]; the deployer's log line says outcome "live", not
 #         "retry" with error "AccessDenied" (which would mean the boundary refused CreateInvalidation)
-``` A failing commit (add `shell.php` or a `https://` address to the repository and send a new
+```
+
+A failing commit (add `shell.php` or a `https://` address to the repository and send a new
 message with a new build id) leaves the live files as they were and gives the build `"failed"` with its
 `failureReasons`.
 

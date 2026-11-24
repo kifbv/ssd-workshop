@@ -232,10 +232,10 @@ export class EdgeStack extends Stack {
         { httpStatus: 403, responseHttpStatus: 404, responsePagePath: "/404.html", ttl: Duration.seconds(NOT_FOUND_CACHE_SECONDS) },
       ],
     });
-    // CDK cannot add to an imported bucket's policy; the site stack does it.
+    // CDK cannot add to an imported bucket's policy; the site and apps stacks do it.
     Annotations.of(this.distribution).acknowledgeWarning(
       "@aws-cdk/aws-cloudfront-origins:updateImportedBucketPolicyOac",
-      "The site and apps stacks' bucket policies grant this account's distributions read access",
+      "The site stack's bucket policy grants this account's distributions read access; the apps stack's grants this distribution only (DISTRIBUTION_ARN)",
     );
 
     const target = RecordTarget.fromAlias(new CloudFrontTarget(this.distribution));

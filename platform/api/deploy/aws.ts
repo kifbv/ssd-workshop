@@ -5,7 +5,8 @@
 // bucket under that prefix; invalidate the one distribution; in the table, only UpdateItem: in `APP#*`
 // naming only DEPLOYER_LIVE_UPDATE_ATTRIBUTES and in `BUILD#*` only DEPLOYER_BUILD_UPDATE_ATTRIBUTES
 // (infra/lib/config.ts), condition names included. No call returns attributes (ReturnValues NONE; the role
-// allows only NONE, UPDATED_OLD and UPDATED_NEW).
+// allows only NONE, UPDATED_OLD and UPDATED_NEW). A call given a signal passes it to the SDK (`abortSignal`), so a
+// phase cut off by the deployer's deadline stops its request.
 import { CreateInvalidationCommand, type CreateInvalidationCommandOutput } from "@aws-sdk/client-cloudfront";
 import {
   ConditionalCheckFailedException,
@@ -24,11 +25,18 @@ import {
 import { appLiveKey, buildKey, type ItemKey } from "../keys.js";
 import type { AppObjects, Cdn, DeployRecords } from "./deploy.js";
 
+/** What every `send` takes besides the command: the signal that stops the request. */
+export interface SendOptions {
+  abortSignal?: AbortSignal;
+}
+
+const optionsOf = (signal: AbortSignal | undefined): SendOptions => (signal === undefined ? {} : { abortSignal: signal });
+
 /** The methods of S3Client this store uses, so tests can stub it. */
 export interface S3Sender {
-  send(command: PutObjectCommand): Promise<PutObjectCommandOutput>;
-  send(command: ListObjectsV2Command): Promise<ListObjectsV2CommandOutput>;
-  send(command: DeleteObjectsCommand): Promise<DeleteObjectsCommandOutput>;
+  send(command: PutObjectCommand, options: SendOptions): Promise<PutObjectCommandOutput>;
+  send(command: ListObjectsV2Command, options: SendOptions): Promise<ListObjectsV2CommandOutput>;
+  send(command: DeleteObjectsCommand, options: SendOptions): Promise<DeleteObjectsCommandOutput>;
 }
 
 /** S3 deletes at most this many keys per DeleteObjects call. */
@@ -40,16 +48,20 @@ export class S3AppObjects implements AppObjects {
     private readonly bucket: string,
   ) {}
 
-  async put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string): Promise<void> {
-    await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: bytes, ContentType: contentType, CacheControl: cacheControl }));
+  async put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string, signal?: AbortSignal): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: bytes, ContentType: contentType, CacheControl: cacheControl }),
+      optionsOf(signal),
+    );
   }
 
-  async list(prefix: string): Promise<string[]> {
+  async list(prefix: string, signal?: AbortSignal): Promise<string[]> {
     const keys: string[] = [];
     let token: string | undefined;
     do {
       const page = await this.client.send(
         new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ...(token === undefined ? {} : { ContinuationToken: token }) }),
+        optionsOf(signal),
       );
       for (const object of page.Contents ?? []) if (object.Key !== undefined) keys.push(object.Key);
       token = page.IsTruncated ? page.NextContinuationToken : undefined;
@@ -57,11 +69,12 @@ export class S3AppObjects implements AppObjects {
     return keys;
   }
 
-  async remove(keys: readonly string[]): Promise<void> {
+  async remove(keys: readonly string[], signal?: AbortSignal): Promise<void> {
     for (let at = 0; at < keys.length; at += DELETE_BATCH) {
       const batch = keys.slice(at, at + DELETE_BATCH);
       const answer = await this.client.send(
         new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects: batch.map((Key) => ({ Key })), Quiet: true } }),
+        optionsOf(signal),
       );
       // A key S3 could not delete is reported here, not thrown.
       if ((answer.Errors ?? []).length > 0) {
@@ -73,7 +86,7 @@ export class S3AppObjects implements AppObjects {
 
 /** The methods of CloudFrontClient this store uses. */
 export interface CloudFrontSender {
-  send(command: CreateInvalidationCommand): Promise<CreateInvalidationCommandOutput>;
+  send(command: CreateInvalidationCommand, options: SendOptions): Promise<CreateInvalidationCommandOutput>;
 }
 
 export class CloudFrontCdn implements Cdn {
@@ -82,22 +95,26 @@ export class CloudFrontCdn implements Cdn {
     private readonly distributionId: string,
   ) {}
 
-  async invalidate(paths: readonly string[], reference: string): Promise<void> {
+  async invalidate(paths: readonly string[], reference: string, signal?: AbortSignal): Promise<void> {
     await this.client.send(
       new CreateInvalidationCommand({
         DistributionId: this.distributionId,
         InvalidationBatch: { CallerReference: reference, Paths: { Quantity: paths.length, Items: [...paths] } },
       }),
+      optionsOf(signal),
     );
   }
 }
 
 /** The methods of DynamoDBClient this store uses. */
 export interface DeployTableSender {
-  send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
+  send(command: UpdateItemCommand, options: SendOptions): Promise<UpdateItemCommandOutput>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
+
+/** A build's last writes (live, failed) land only while it is `deploying`: never on a build already finished. */
+export const FINISH_CONDITION = "attribute_exists(pk) AND #status = :deploying";
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
 
 export class DynamoDeployRecords implements DeployRecords {
@@ -112,7 +129,8 @@ export class DynamoDeployRecords implements DeployRecords {
     expression: string,
     names: Record<string, string>,
     values: Record<string, AttributeValue>,
-    condition = "attribute_exists(pk)",
+    condition: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     try {
       await this.client.send(
@@ -125,6 +143,7 @@ export class DynamoDeployRecords implements DeployRecords {
           ExpressionAttributeValues: values,
           ReturnValues: "NONE",
         }),
+        optionsOf(signal),
       );
       return true;
     } catch (error) {
@@ -148,25 +167,30 @@ export class DynamoDeployRecords implements DeployRecords {
     );
   }
 
-  markLive(buildId: string, commit: string, nowIso: string): Promise<boolean> {
+  /** Only while the build is `deploying` (FINISH_CONDITION): a late write never changes a finished build. */
+  markLive(buildId: string, commit: string, nowIso: string, signal?: AbortSignal): Promise<boolean> {
     return this.updateBuild(
       buildId,
       "SET #status = :status, #updatedAt = :now, #finishedAt = :now, #deployedCommit = :commit REMOVE #failureReasons",
       { "#status": "status", "#updatedAt": "updatedAt", "#finishedAt": "finishedAt", "#deployedCommit": "deployedCommit", "#failureReasons": "failureReasons" },
-      { ":status": str("live"), ":now": str(nowIso), ":commit": str(commit) },
+      { ":status": str("live"), ":now": str(nowIso), ":commit": str(commit), ":deploying": str("deploying") },
+      FINISH_CONDITION,
+      signal,
     );
   }
 
+  /** Only while the build is `deploying`, as markLive. */
   markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
     return this.updateBuild(
       buildId,
       "SET #status = :status, #updatedAt = :now, #finishedAt = :now, #failureReasons = :reasons REMOVE #deployedCommit",
       { "#status": "status", "#updatedAt": "updatedAt", "#finishedAt": "finishedAt", "#failureReasons": "failureReasons", "#deployedCommit": "deployedCommit" },
-      { ":status": str("failed"), ":now": str(nowIso), ":reasons": { L: reasons.map(str) } },
+      { ":status": str("failed"), ":now": str(nowIso), ":reasons": { L: reasons.map(str) }, ":deploying": str("deploying") },
+      FINISH_CONDITION,
     );
   }
 
-  async markAppLive(nickname: string, nowIso: string): Promise<void> {
+  async markAppLive(nickname: string, nowIso: string, signal?: AbortSignal): Promise<void> {
     await this.client.send(
       new UpdateItemCommand({
         TableName: this.table,
@@ -176,6 +200,7 @@ export class DynamoDeployRecords implements DeployRecords {
         ExpressionAttributeValues: { ":type": str("app-live"), ":nickname": str(nickname), ":now": str(nowIso) },
         ReturnValues: "NONE",
       }),
+      optionsOf(signal),
     );
   }
 }

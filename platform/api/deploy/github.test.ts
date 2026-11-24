@@ -44,6 +44,23 @@ describe("downloadArchive (ticket 2.5)", () => {
     expect(calls[0]?.init?.redirect).toBe("follow");
   });
 
+  it("stops when the deployer's signal is aborted (its phase's time is up), as a passing problem", async () => {
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const work = downloadArchive(URL_, {
+      signal: controller.signal,
+      fetch: (_url, init) => {
+        seen = init?.signal ?? undefined;
+        return new Promise<Response>((_, reject) => seen?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+      },
+    });
+    expect(seen?.aborted).toBe(false);
+    controller.abort();
+    const problem = await problemOf(work);
+    expect(seen?.aborted).toBe(true);
+    expect(problem.passing).toBe(true);
+  });
+
   it("is a passing problem when GitHub answers with an error or cannot be reached", async () => {
     const answered = await problemOf(downloadArchive(URL_, { fetch: async () => new Response("nope", { status: 404 }) }));
     expect(answered.passing).toBe(true);

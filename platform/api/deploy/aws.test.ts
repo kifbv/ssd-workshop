@@ -3,20 +3,31 @@ import { UpdateItemCommand, type UpdateItemCommandInput } from "@aws-sdk/client-
 import { DeleteObjectsCommand, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
 import { DEPLOYER_BUILD_UPDATE_ATTRIBUTES, DEPLOYER_LIVE_UPDATE_ATTRIBUTES } from "../../../infra/lib/config.js";
-import { CloudFrontCdn, DynamoDeployRecords, S3AppObjects, type CloudFrontSender, type DeployTableSender, type S3Sender } from "./aws.js";
+import {
+  CloudFrontCdn,
+  DynamoDeployRecords,
+  FINISH_CONDITION,
+  S3AppObjects,
+  type CloudFrontSender,
+  type DeployTableSender,
+  type S3Sender,
+  type SendOptions,
+} from "./aws.js";
 
-function stub<T>(answers: (Record<string, unknown> | Error)[]): { client: T; sent: { input: unknown; constructor: unknown }[] } {
+function stub<T>(answers: (Record<string, unknown> | Error)[]): { client: T; sent: { input: unknown; constructor: unknown }[]; options: SendOptions[] } {
   const sent: { input: unknown; constructor: unknown }[] = [];
+  const options: SendOptions[] = [];
   const client = {
-    send: async (command: { input: unknown }) => {
+    send: async (command: { input: unknown }, sendOptions: SendOptions) => {
       sent.push(command as { input: unknown; constructor: unknown });
+      options.push(sendOptions);
       const answer = answers.shift();
       if (answer === undefined) throw new Error("unexpected call");
       if (answer instanceof Error) throw answer;
       return { $metadata: {}, ...answer };
     },
   } as unknown as T;
-  return { client, sent };
+  return { client, sent, options };
 }
 
 const BUCKET = "ssd-workshop-apps-360206963848";
@@ -99,11 +110,14 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
     const [start, live, failed] = sent.map((command) => command.input as UpdateItemCommandInput);
     expect(start?.UpdateExpression).toBe("SET #status = :status, #updatedAt = :now");
     expect(start?.ExpressionAttributeValues?.[":status"]).toEqual({ S: "deploying" });
-    expect(live).toMatchObject({ ConditionExpression: "attribute_exists(pk)" });
+    expect(live).toMatchObject({ ConditionExpression: "attribute_exists(pk) AND #status = :deploying" });
+    expect(live?.ExpressionAttributeValues?.[":deploying"]).toEqual({ S: "deploying" });
     expect(live?.UpdateExpression).toMatch(/ REMOVE #failureReasons$/);
     expect(live?.ExpressionAttributeNames?.["#failureReasons"]).toBe("failureReasons");
     expect(live?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "live" }, ":commit": { S: "0123456789abcdef0123456789abcdef01234567" } });
-    expect(failed).toMatchObject({ ConditionExpression: "attribute_exists(pk)" });
+    expect(failed).toMatchObject({ ConditionExpression: "attribute_exists(pk) AND #status = :deploying" });
+    expect(failed?.ExpressionAttributeValues?.[":deploying"]).toEqual({ S: "deploying" });
+    expect(FINISH_CONDITION).toBe("attribute_exists(pk) AND #status = :deploying");
     expect(failed?.UpdateExpression).toMatch(/ REMOVE #deployedCommit$/);
     expect(failed?.ExpressionAttributeNames?.["#deployedCommit"]).toBe("deployedCommit");
     expect(failed?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" }, ":reasons": { L: [{ S: "index.html: no" }, { S: "x" }] } });
@@ -130,6 +144,44 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
     const records = new DynamoDeployRecords(client, TABLE);
     expect(await records.startDeploy("nope", "Ada", NOW)).toBe(false);
     await expect(records.markFailed("nope", [], NOW)).rejects.toThrow("x");
+  });
+
+  it("never sets or removes a build's nickname (the role could: IAM cannot tell a compared name from a set one), and sets status only to deploying, live or failed", async () => {
+    const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
+    const records = new DynamoDeployRecords(client, TABLE);
+    await records.startDeploy("build-1", "Ada", NOW);
+    await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW);
+    await records.markFailed("build-1", ["x"], NOW);
+    const statuses = sent.map((command) => {
+      const input = command.input as UpdateItemCommandInput;
+      const names = input.ExpressionAttributeNames ?? {};
+      const [setPart = "", removePart = ""] = (input.UpdateExpression ?? "").replace(/^SET /, "").split(" REMOVE ");
+      const sets = setPart.split(",").map((clause) => clause.trim().split(/\s*=\s*/));
+      const written = [...sets.map(([target]) => target ?? ""), ...removePart.split(",").map((name) => name.trim()).filter((name) => name !== "")];
+      const attributes = written.map((placeholder) => names[placeholder] ?? placeholder);
+      expect(attributes, input.UpdateExpression).not.toContain("nickname");
+      const statusClause = sets.find(([target]) => names[target ?? ""] === "status");
+      expect(removePart).not.toContain("#status");
+      return input.ExpressionAttributeValues?.[statusClause?.[1] ?? ""]?.S;
+    });
+    expect(statuses).toEqual(["deploying", "live", "failed"]);
+  });
+
+  it("passes the phase's signal to every call that takes one, so a cut-off request stops", async () => {
+    const signal = new AbortController().signal;
+    const s3 = stub<S3Sender>([{}, { Contents: [], IsTruncated: false }, {}]);
+    const objects = new S3AppObjects(s3.client, BUCKET);
+    await objects.put("apps/ada/a", new Uint8Array(), "text/plain", "x", signal);
+    await objects.list("apps/ada/", signal);
+    await objects.remove(["apps/ada/a"], signal);
+    const cf = stub<CloudFrontSender>([{}]);
+    await new CloudFrontCdn(cf.client, "E2TOZV0ERAXKZ9").invalidate(["/apps/ada/*"], "r", signal);
+    const table = stub<DeployTableSender>([{}, {}]);
+    const records = new DynamoDeployRecords(table.client, TABLE);
+    await records.markAppLive("Ada", NOW, signal);
+    await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW, signal);
+    for (const options of [...s3.options, ...cf.options, ...table.options]) expect(options.abortSignal).toBe(signal);
+    expect(s3.options.length + cf.options.length + table.options.length).toBe(6);
   });
 
   it("writes the live marker under APP#<lower-cased nickname>, keeping the first liveAt, naming only the marker's attributes", async () => {

@@ -506,3 +506,123 @@ describe("the Lambda's deadline: the last delivery still marks the build failed 
     expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
   });
 });
+
+describe("a phase cut off by the deadline is aborted, and a late write never changes a finished build (try 3)", () => {
+  /** A call that never answers by itself; like the AWS SDK, it rejects once its signal is aborted. */
+  const hangUntilAborted = (signal: AbortSignal | undefined): Promise<never> =>
+    new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+
+  it("aborts a put that hangs when the time is up, then marks the build failed", async () => {
+    const t = setup(passing());
+    const signals: (AbortSignal | undefined)[] = [];
+    t.objects.put = (_key, _bytes, _type, _cache, signal) => {
+      signals.push(signal);
+      return hangUntilAborted(signal);
+    };
+    const started = Date.now();
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + DEPLOY_RESERVE_MS + 120);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(signals.length).toBeGreaterThan(0);
+    for (const signal of signals) {
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal?.aborted).toBe(true);
+    }
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
+  });
+
+  it("aborts a download that hangs when the time is up", async () => {
+    const t = setup(passing());
+    let seen: AbortSignal | undefined;
+    t.deps.download = (_url, _timeoutMs, signal) => {
+      seen = signal;
+      return hangUntilAborted(signal);
+    };
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + DEPLOY_RESERVE_MS + 70);
+    expect(seen?.aborted).toBe(true);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
+  });
+
+  it("gives the phase's signal to the clean-up, the invalidation and the live writes, unaborted when they finish in time", async () => {
+    const t = setup(passing());
+    seed(t.objects);
+    const signals: (AbortSignal | undefined)[] = [];
+    const list = t.objects.list.bind(t.objects);
+    t.objects.list = (prefix, signal) => (signals.push(signal), list(prefix));
+    const remove = t.objects.remove.bind(t.objects);
+    t.objects.remove = (keys, signal) => (signals.push(signal), remove(keys));
+    const invalidate = t.cdn.invalidate.bind(t.cdn);
+    t.cdn.invalidate = (paths, reference, signal) => (signals.push(signal), invalidate(paths, reference));
+    const markAppLive = t.records.markAppLive.bind(t.records);
+    t.records.markAppLive = (nickname, nowIso, signal) => (signals.push(signal), markAppLive(nickname, nowIso));
+    const markLive = t.records.markLive.bind(t.records);
+    t.records.markLive = (buildId, commit, nowIso, signal) => (signals.push(signal), markLive(buildId, commit, nowIso));
+    await processDeploy(job(), 1, t.deps, t.now() + 120_000);
+    expect(signals).toHaveLength(5);
+    for (const signal of signals) expect(signal?.aborted).toBe(false);
+    expect(t.records.builds.get(BUILD)?.status).toBe("live");
+  });
+
+  it("a late live mark after the build was marked failed fails its condition and changes nothing", async () => {
+    const records = new FakeDeployRecords();
+    records.builds.set(BUILD, { nickname: "Ada", status: "deploying" });
+    expect(await records.markFailed(BUILD, [TIME_UP_REASON], NOW.toISOString())).toBe(true);
+    const failed = structuredClone(records.builds.get(BUILD));
+    expect(await records.markLive(BUILD, COMMIT, "2026-11-24T10:05:00.000Z")).toBe(false);
+    expect(records.builds.get(BUILD)).toEqual(failed);
+    // And the other way round: a late failure never turns a live build failed.
+    records.builds.set("build-2", { nickname: "Ada", status: "live", deployedCommit: COMMIT });
+    expect(await records.markFailed("build-2", ["late"], NOW.toISOString())).toBe(false);
+    expect(records.builds.get("build-2")).toEqual({ nickname: "Ada", status: "live", deployedCommit: COMMIT });
+  });
+
+  it("a live mark that ignores its signal and lands after the build was marked failed changes nothing", async () => {
+    const t = setup(passing());
+    const markLive = t.records.markLive.bind(t.records);
+    let late: (() => Promise<boolean>) | undefined;
+    t.records.markLive = (buildId, commit, nowIso) => {
+      late = () => markLive(buildId, commit, nowIso);
+      return new Promise<boolean>(() => undefined);
+    };
+    // Room for every phase but the live mark, which hangs until the time is up.
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + DEPLOY_RESERVE_MS + 150);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
+    const failed = structuredClone(t.records.builds.get(BUILD));
+    expect(await late?.()).toBe(false);
+    expect(t.records.builds.get(BUILD)).toEqual(failed);
+  });
+});
+
+describe("order of the live writes: the marker, then the build (try 3)", () => {
+  it("when the build's live mark fails after the marker was written, the build stays deploying and a redelivery finishes it, keeping the first liveAt", async () => {
+    const t = setup(passing());
+    t.records.failMarkLive = true;
+    await expect(processDeploy(job(), 1, t.deps)).rejects.toThrow(/^deploy failed$/);
+    const marker = t.records.live.get("ada");
+    expect(marker).toBeDefined();
+    expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
+    t.records.failMarkLive = false;
+    await processDeploy(job(), 2, t.deps);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "live", deployedCommit: COMMIT });
+    expect(t.records.live.get("ada")).toEqual(marker);
+  });
+
+  it("on the last delivery the build is marked failed while the marker (the app's files are served) stays", async () => {
+    const t = setup(passing());
+    t.records.failMarkLive = true;
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [SERVICE_PROBLEM_REASON] });
+    expect(t.records.live.get("ada")?.nickname).toBe("Ada");
+    expect(t.objects.objects.has("apps/ada/index.html")).toBe(true);
+  });
+
+  it("writes the marker before the build", async () => {
+    const t = setup(passing());
+    const order: string[] = [];
+    const markAppLive = t.records.markAppLive.bind(t.records);
+    t.records.markAppLive = (nickname, nowIso) => (order.push("marker"), markAppLive(nickname, nowIso));
+    const markLive = t.records.markLive.bind(t.records);
+    t.records.markLive = (buildId, commit, nowIso) => (order.push("build"), markLive(buildId, commit, nowIso));
+    await processDeploy(job(), 1, t.deps);
+    expect(order).toEqual(["marker", "build"]);
+  });
+});

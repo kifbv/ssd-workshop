@@ -161,6 +161,8 @@ Acceptance criteria (each starts as FAIL):
 - WHEN `npm run builds -- retry <nickname>` runs on a failed build THEN a new task starts on the same repository
 - WHEN Franck approves a spec on the live site THEN the app is live at `/apps/<nickname>/` within 10 minutes (live check in `infra/README.md`)
 
+From 2.5 (note, see decision "(2.5) Deploy message"): the builder stores the commit it pushed on the build (`pushedCommit`) and the deployer's start condition adds `#pushedCommit = :commit` (a commit SHA alone does not prove it came from the participant's repository); and the launcher's stuck-build check also moves a build left in `deploying` (after its deploy message reached the dead-letter queue) to `failed`.
+
 ### 2.10 Step 3: live build feed
 
 The step 3 screen polls `GET /api/build` every 2 seconds and shows the build's steps as a row of stages (the current one highlighted), the files as they appear, and each commit with a link to it on GitHub, plus a "Behind the scenes" box with the same flow as the diagram above. A failed build shows "Something went wrong with your build. Your facilitator can restart it."

@@ -17,17 +17,21 @@ export class FakeAppObjects implements AppObjects {
   /** When set, the put of this key fails. */
   failPutOf: string | undefined;
 
-  async put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string): Promise<void> {
+  // Like the AWS SDK, each call refuses to start once its signal is aborted.
+  async put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (key === this.failPutOf) throw Object.assign(new Error("S3 is down"), { name: "ServiceUnavailable" });
     this.puts.push(key);
     this.objects.set(key, { bytes, contentType, cacheControl });
   }
 
-  async list(prefix: string): Promise<string[]> {
+  async list(prefix: string, signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     return [...this.objects.keys()].filter((key) => key.startsWith(prefix));
   }
 
-  async remove(keys: readonly string[]): Promise<void> {
+  async remove(keys: readonly string[], signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     for (const key of keys) {
       this.removed.push(key);
       this.objects.delete(key);
@@ -38,7 +42,8 @@ export class FakeAppObjects implements AppObjects {
 export class FakeCdn implements Cdn {
   readonly invalidations: { paths: string[]; reference: string }[] = [];
 
-  async invalidate(paths: readonly string[], reference: string): Promise<void> {
+  async invalidate(paths: readonly string[], reference: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.invalidations.push({ paths: [...paths], reference });
   }
 }
@@ -53,6 +58,8 @@ export interface FakeBuild {
   finishedAt?: string;
 }
 
+const deploying = (build: FakeBuild): boolean => build.status === "deploying";
+
 export class FakeDeployRecords implements DeployRecords {
   /** Builds by id. */
   readonly builds = new Map<string, FakeBuild>();
@@ -61,6 +68,8 @@ export class FakeDeployRecords implements DeployRecords {
 
   /** When set, markFailed fails (a table problem). */
   failMarkFailed = false;
+  /** When set, markLive fails (a table problem). */
+  failMarkLive = false;
 
   /** Like the real UpdateItem: SET the change, REMOVE the listed attributes; false when the build is missing or the condition fails. */
   private update(buildId: string, change: Partial<FakeBuild>, remove: ("failureReasons" | "deployedCommit")[] = [], condition: (build: FakeBuild) => boolean = () => true): boolean {
@@ -79,16 +88,21 @@ export class FakeDeployRecords implements DeployRecords {
     );
   }
 
-  async markLive(buildId: string, commit: string, nowIso: string): Promise<boolean> {
-    return this.update(buildId, { status: "live", updatedAt: nowIso, deployedCommit: commit, finishedAt: nowIso }, ["failureReasons"]);
+  /** Like FINISH_CONDITION: only while the build is `deploying`. */
+  async markLive(buildId: string, commit: string, nowIso: string, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
+    if (this.failMarkLive) throw Object.assign(new Error("table is down"), { name: "InternalServerError" });
+    return this.update(buildId, { status: "live", updatedAt: nowIso, deployedCommit: commit, finishedAt: nowIso }, ["failureReasons"], deploying);
   }
 
+  /** Like FINISH_CONDITION: only while the build is `deploying`. */
   async markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
     if (this.failMarkFailed) throw Object.assign(new Error("table is down"), { name: "InternalServerError" });
-    return this.update(buildId, { status: "failed", updatedAt: nowIso, failureReasons: [...reasons], finishedAt: nowIso }, ["deployedCommit"]);
+    return this.update(buildId, { status: "failed", updatedAt: nowIso, failureReasons: [...reasons], finishedAt: nowIso }, ["deployedCommit"], deploying);
   }
 
-  async markAppLive(nickname: string, nowIso: string): Promise<void> {
+  async markAppLive(nickname: string, nowIso: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const key = nickname.toLowerCase();
     this.live.set(key, { nickname, liveAt: this.live.get(key)?.liveAt ?? nowIso });
   }

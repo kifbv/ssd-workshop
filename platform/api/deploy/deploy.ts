@@ -15,8 +15,9 @@
  * SQS delivers at least once and every step can run again: the same commit gives the same files. A
  * passing problem (GitHub or AWS) throws, so SQS delivers the message again; on the last delivery the
  * build is marked failed instead. Every phase runs within the Lambda's remaining time less DEPLOY_RESERVE_MS, so
- * the last delivery still has time to mark the build failed ("The deploy took too long."). Logs hold counts only: never a nickname, commit, file name, reason or
- * error message.
+ * the last delivery still has time to mark the build failed ("The deploy took too long."); a phase cut off is aborted
+ * (its AbortSignal), and the build's last writes are conditional on it still being `deploying`, so a late write can
+ * never change a finished build. Logs hold counts only: never a nickname, commit, file name, reason or error message.
  */
 import { checkApp, type AppFile, type Problem } from "../build/check.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
@@ -57,27 +58,35 @@ export function parseDeployJob(body: string | undefined): DeployJob | undefined 
   return { buildId, nickname, commit };
 }
 
-/** The apps bucket, as the deployer uses it. */
+/**
+ * The apps bucket, as the deployer uses it. `signal` is aborted when the phase's time is up: the call must stop
+ * (the AWS SDK's `abortSignal`), so nothing it does lands after the deploy gave up.
+ */
 export interface AppObjects {
-  put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string): Promise<void>;
+  put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string, signal?: AbortSignal): Promise<void>;
   /** Every key under the prefix. */
-  list(prefix: string): Promise<string[]>;
-  remove(keys: readonly string[]): Promise<void>;
+  list(prefix: string, signal?: AbortSignal): Promise<string[]>;
+  remove(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
-/** CloudFront, as the deployer uses it. */
+/** CloudFront, as the deployer uses it (`signal` as for AppObjects). */
 export interface Cdn {
-  invalidate(paths: readonly string[], reference: string): Promise<void>;
+  invalidate(paths: readonly string[], reference: string, signal?: AbortSignal): Promise<void>;
 }
 
-/** The table's build items and live markers, as the deployer uses them. Build updates return false when the build does not exist. */
+/**
+ * The table's build items and live markers, as the deployer uses them. Build updates return false when their
+ * condition fails (the build is missing, or not in the state the update needs).
+ */
 export interface DeployRecords {
   /** Marks the build `deploying` only when it exists, its nickname equals `nickname` exactly and it is queued, building or deploying. */
   startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean>;
-  markLive(buildId: string, commit: string, nowIso: string): Promise<boolean>;
+  /** Only while the build is `deploying`: a late write never changes a finished (live or failed) build. */
+  markLive(buildId: string, commit: string, nowIso: string, signal?: AbortSignal): Promise<boolean>;
+  /** Only while the build is `deploying`, as markLive. */
   markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Writes the live marker, keeping `liveAt` when it exists. */
-  markAppLive(nickname: string, nowIso: string): Promise<void>;
+  markAppLive(nickname: string, nowIso: string, signal?: AbortSignal): Promise<void>;
 }
 
 /**
@@ -99,8 +108,11 @@ export interface DeployLogEntry {
 }
 
 export interface DeployDeps {
-  /** Downloads the tarball at the address (GitHub) within `timeoutMs`. Throws DownloadProblem for what it can name. */
-  download: (url: string, timeoutMs: number) => Promise<Uint8Array>;
+  /**
+   * Downloads the tarball at the address (GitHub) within `timeoutMs`, stopping when `signal` is aborted. Throws
+   * DownloadProblem for what it can name.
+   */
+  download: (url: string, timeoutMs: number, signal?: AbortSignal) => Promise<Uint8Array>;
   objects: AppObjects;
   cdn: Cdn;
   records: DeployRecords;
@@ -148,15 +160,22 @@ export class DeployTimeUp extends Error {
 /** setTimeout's longest delay; a longer (or infinite) one fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
-/** `work`, or DeployTimeUp after `ms` (the work itself may go on in the background; nothing waits for it). */
-async function within<T>(work: Promise<T>, ms: number): Promise<T> {
-  if (!(ms < MAX_TIMER_MS)) return work;
+/**
+ * `work`, or DeployTimeUp after `ms`. The work gets a signal of its own, aborted when the time is up, and passes it
+ * to every call it makes (S3, CloudFront, DynamoDB, the download), so a cut-off call stops instead of landing later.
+ */
+async function within<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
+  if (!(ms < MAX_TIMER_MS)) return work(controller.signal);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeUp = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new DeployTimeUp()), ms);
+    timer = setTimeout(() => {
+      reject(new DeployTimeUp());
+      controller.abort(new DeployTimeUp());
+    }, ms);
   });
   try {
-    return await Promise.race([work, timeUp]);
+    return await Promise.race([work(controller.signal), timeUp]);
   } finally {
     clearTimeout(timer);
   }
@@ -239,17 +258,20 @@ const isPage = (path: string): boolean => path.toLowerCase().endsWith(".html");
 /** At most this many puts at once. */
 const PUT_CONCURRENCY = 8;
 
-/** Runs one phase within the time left (throws DeployTimeUp when too little is left to start it). */
-type Bounded = <T>(work: (ms: number) => Promise<T>) => Promise<T>;
+/**
+ * Runs one phase within the time left (throws DeployTimeUp when too little is left to start it), giving it the
+ * time left and a signal aborted when that time is up.
+ */
+type Bounded = <T>(work: (ms: number, signal: AbortSignal) => Promise<T>) => Promise<T>;
 
 async function putAll(files: readonly AppFile[], prefix: string, objects: AppObjects, bounded: Bounded): Promise<void> {
   // Pages last: a new page only ever names files that are already there.
-  const putOne = (file: AppFile) => objects.put(`${prefix}${file.path}`, file.bytes, contentTypeOf(file.path), CACHE_CONTROL);
+  const putOne = (file: AppFile, signal: AbortSignal) => objects.put(`${prefix}${file.path}`, file.bytes, contentTypeOf(file.path), CACHE_CONTROL, signal);
   const others = files.filter((f) => !isPage(f.path));
   const pages = files.filter((f) => isPage(f.path));
   for (const group of [others, pages]) {
     for (let at = 0; at < group.length; at += PUT_CONCURRENCY) {
-      await bounded(() => Promise.all(group.slice(at, at + PUT_CONCURRENCY).map(putOne)));
+      await bounded((_, signal) => Promise.all(group.slice(at, at + PUT_CONCURRENCY).map((file) => putOne(file, signal))));
     }
   }
 }
@@ -269,7 +291,7 @@ export async function processDeploy(
   const bounded: Bounded = (work) => {
     const left = deadlineMs - deps.now().getTime() - DEPLOY_RESERVE_MS;
     if (!(left > 0)) return Promise.reject(new DeployTimeUp());
-    return within(work(left), left);
+    return within((signal) => work(left, signal), left);
   };
   const log = (entry: Omit<DeployLogEntry, "event" | "durationMs">): void =>
     deps.log({ event: "deployer", ...entry, durationMs: Math.max(0, deps.now().getTime() - started) });
@@ -296,7 +318,9 @@ export async function processDeploy(
     let files: AppFile[];
     try {
       // The download's own time limit ends a second after the phase's, so a cut-off reads as the deploy's time running out.
-      const archive = await bounded((ms) => deps.download(appArchiveUrl(job.nickname, job.commit), Math.min(DOWNLOAD_TIMEOUT_MS, ms + 1000)));
+      const archive = await bounded((ms, signal) =>
+        deps.download(appArchiveUrl(job.nickname, job.commit), Math.min(DOWNLOAD_TIMEOUT_MS, ms + 1000), signal),
+      );
       files = readTarGz(archive);
     } catch (error) {
       const reason = error instanceof ArchiveProblem || (error instanceof DownloadProblem && !error.passing) ? error.reason : undefined;
@@ -316,12 +340,17 @@ export async function processDeploy(
 
     await putAll(published, prefix, deps.objects, bounded);
     const keep = new Set(published.map((file) => `${prefix}${file.path}`));
-    const stale = (await bounded(() => deps.objects.list(prefix))).filter((key) => key.startsWith(prefix) && !keep.has(key));
-    if (stale.length > 0) await bounded(() => deps.objects.remove(stale));
-    await bounded(() => deps.cdn.invalidate([`/${prefix}*`], `${job.buildId}-${deps.now().getTime()}`));
-    await bounded(() => deps.records.markAppLive(job.nickname, nowIso()));
-    await bounded(() => deps.records.markLive(job.buildId, job.commit, nowIso()));
-    log({ outcome: "live", files: published.length, bytes: result.totalBytes, removed: stale.length });
+    const stale = (await bounded((_, signal) => deps.objects.list(prefix, signal))).filter((key) => key.startsWith(prefix) && !keep.has(key));
+    if (stale.length > 0) await bounded((_, signal) => deps.objects.remove(stale, signal));
+    await bounded((_, signal) => deps.cdn.invalidate([`/${prefix}*`], `${job.buildId}-${deps.now().getTime()}`, signal));
+    // The marker before the build: when the build's write then fails, the build stays `deploying`, so a redelivery
+    // does it all again (and the last one marks it failed) while the marker truly says the app's files are served.
+    // The other order could leave a live build with no marker, which no redelivery repairs (the build is no longer
+    // deploying) and which keeps the app's data API answering 404.
+    await bounded((_, signal) => deps.records.markAppLive(job.nickname, nowIso(), signal));
+    const marked = await bounded((_, signal) => deps.records.markLive(job.buildId, job.commit, nowIso(), signal));
+    // Not marked: the build stopped being `deploying` meanwhile (another writer finished it); it is left as it is.
+    log({ outcome: marked ? "live" : "no-build", files: published.length, bytes: result.totalBytes, removed: stale.length });
   } catch (error) {
     const name = errorName(error);
     if (receiveCount < DEPLOY_MAX_RECEIVES) {
