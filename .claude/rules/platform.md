@@ -68,4 +68,5 @@ paths:
 - A scanner regex that runs on untrusted text (the deploy check, `platform/api/build/check.ts`) must be linear:
   start a variable run only where it begins (a lookbehind such as `(?<![a-z0-9+.-])` before a scheme), never put
   two optional runs of the same characters side by side (`=\s*["']?\s*` is quadratic on spaces), and test it with
-  lines of several MB against a time limit. Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters.
+  long lines against a time limit with a margin over 10x (256 KB lines, 1 s: CI runners are slower and run test
+  files in parallel with Chromium). Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters.

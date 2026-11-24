@@ -105,14 +105,21 @@ const SCHEME_ADDRESS = new RegExp(String.raw`(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[
 const BARE_SCHEME = new RegExp(String.raw`(?<![a-z0-9+.-])(?:https?|wss?|ftp):(?![\\/]{2})[^\s\x00-\x20"'\`<>()]+`, "gi");
 
 /**
+ * A meta refresh's delay and its separator, where the address may follow without `url=`
+ * (`content="0; //host"`, `content="0 //host"`): the browser opens it.
+ */
+const META_REFRESH = String.raw`content${GAP}=${GAP}(?:["']${GAP})?\d+(?:\.\d*)?[;,\s]`;
+
+/**
  * A protocol-relative address (`//host`, which the browser opens on another server) where code or
  * markup uses an address: after a quote or backtick, inside `url(`, after `=` (any attribute, a meta
- * refresh's `url=`), or after a comma (later `srcset` entries); spaces may come between.
+ * refresh's `url=`), after a comma (later `srcset` entries), or after a meta refresh's delay; spaces may
+ * come between.
  * `//` followed by a space or `*`, as in a comment, is never a host.
  */
 const RELATIVE_ADDRESS = new RegExp(
   // Never two GAPs side by side: splitting one run of spaces between them would be quadratic.
-  String.raw`(?:["'\`]|url\(|url\(${GAP}["']|=|=${GAP}["']|,)${GAP}(${SLASHES}${HOST_START}${REST})`,
+  String.raw`(?:["'\`]|url\(|url\(${GAP}["']|=|=${GAP}["']|,|${META_REFRESH})${GAP}(${SLASHES}${HOST_START}${REST})`,
   "gi",
 );
 
@@ -141,21 +148,33 @@ const fromCodePoint = (hex: string, radix: number): string => {
   return Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : "";
 };
 
-/** HTML and SVG character references: `&#47;`, `&#x2f;`, `&sol;`, `&colon;` (the semicolon is optional in browsers). */
+/**
+ * HTML and SVG character references: `&#47;`, `&#x2f;`, `&#00047;`, `&sol;`, `&colon;` (leading zeros
+ * and the semicolon are optional in browsers).
+ */
 const decodeEntities = (line: string): string =>
-  line.replace(/&#x([0-9a-f]{1,8});?|&#([0-9]{1,8});?|&([a-z]{2,8});/gi, (all, hex?: string, dec?: string, name?: string) => {
+  line.replace(/&#x0*([0-9a-f]{1,8});?|&#0*([0-9]{1,8});?|&([a-z]{2,8});/gi, (all, hex?: string, dec?: string, name?: string) => {
     if (hex !== undefined) return fromCodePoint(hex, 16);
     if (dec !== undefined) return fromCodePoint(dec, 10);
     return NAMED_ENTITIES[(name ?? "").toLowerCase()] ?? all;
   });
 
-/** JavaScript and JSON escapes: `/`, `\u{2f}`, `\x2f`, `\/`. */
+/** The control characters JavaScript writes as `\t`, `\n`, `\r`, `\v`, `\f`, `\b`. */
+const CONTROL_ESCAPES: Record<string, string> = { t: "\t", n: "\n", r: "\r", v: "\v", f: "\f", b: "\b" };
+
+/**
+ * JavaScript and JSON escapes, in one pass: `\u002f`, `\u{2f}` (leading zeros allowed), `\x2f`, legacy
+ * octal `\57`, the control escapes (`\t` is a tab, which browsers drop from addresses) and `\/`.
+ */
 const decodeScriptEscapes = (line: string): string =>
-  line
-    .replace(/\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/gi, (_all, braced?: string, four?: string, two?: string) =>
-      fromCodePoint(braced ?? four ?? two ?? "", 16),
-    )
-    .replace(/\\([^ux])/gi, "$1");
+  line.replace(
+    /\\u\{0*([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})|\\([0-3][0-7]{0,2}|[4-7][0-7]?)|\\([^ux])/gi,
+    (_all, braced?: string, four?: string, two?: string, octal?: string, other?: string) => {
+      if (octal !== undefined) return fromCodePoint(octal, 8);
+      if (other !== undefined) return CONTROL_ESCAPES[other] ?? other;
+      return fromCodePoint(braced ?? four ?? two ?? "", 16);
+    },
+  );
 
 /** CSS escapes: `\2f ` (one to six hex digits and an optional space), `\/`. */
 const decodeCssEscapes = (line: string): string =>
@@ -262,30 +281,43 @@ function formatSize(bytes: number): string {
 
 const isGitFolder = (path: string): boolean => path === ".git" || path.startsWith(".git/");
 
+/** At most this many problems are listed; the rest are counted in one closing line. */
+export const MAX_PROBLEMS = 50;
+
+const moreProblemsReason = (count: number): string => `…and ${count} more ${count === 1 ? "problem" : "problems"}.`;
+
 /**
- * Runs every rule on the app's files and lists all the problems found. Every path given is checked
- * and counted, `.git` included: only `readAppFolder` leaves out a working copy's top-level `.git`.
+ * Runs every rule on the app's files and lists the problems found: the first `MAX_PROBLEMS` problems
+ * with files, then the app's own (no index.html, its size), then one line counting the ones left out.
+ * Every path given is checked and counted, `.git` included: only `readAppFolder` leaves out a working
+ * copy's top-level `.git`. An app over the size limit is not scanned for addresses (its names and
+ * types still are): it fails anyway, and the scan's time grows with the size.
  */
 export function checkApp(files: readonly AppFile[]): CheckResult {
   const problems: Problem[] = [];
-  let totalBytes = 0;
+  let leftOut = 0;
+  const report = (problem: Problem): void => {
+    if (problems.length < MAX_PROBLEMS) problems.push(problem);
+    else leftOut += 1;
+  };
+  const totalBytes = files.reduce((sum, file) => sum + file.bytes.length, 0);
+  const tooBig = totalBytes > MAX_APP_BYTES;
 
   for (const file of files) {
-    totalBytes += file.bytes.length;
     const reason = pathProblem(file);
     if (reason) {
-      problems.push({ file: file.path, reason });
+      report({ file: file.path, reason });
       continue;
     }
-    if (file.kind !== "file" || !(TEXT_EXTENSIONS as readonly string[]).includes(extensionOf(file.path))) continue;
+    if (tooBig || file.kind !== "file" || !(TEXT_EXTENSIONS as readonly string[]).includes(extensionOf(file.path))) continue;
     const lines = textLines(file.bytes);
     if (!lines) {
-      problems.push({ file: file.path, reason: NOT_TEXT_REASON });
+      report({ file: file.path, reason: NOT_TEXT_REASON });
       continue;
     }
     lines.forEach((line, index) => {
       for (const address of outsideAddresses(line)) {
-        problems.push({ file: file.path, line: index + 1, reason: outsideAddressReason(address) });
+        report({ file: file.path, line: index + 1, reason: outsideAddressReason(address) });
       }
     });
   }
@@ -293,9 +325,10 @@ export function checkApp(files: readonly AppFile[]): CheckResult {
   if (!files.some((file) => file.path === "index.html" && file.kind === "file")) {
     problems.push({ file: "index.html", reason: "The app has no index.html at its top level, so it has no page to open." });
   }
-  if (totalBytes > MAX_APP_BYTES) {
+  if (tooBig) {
     problems.push({ reason: `The app is ${formatSize(totalBytes)}; the limit is ${MAX_APP_BYTES / MB} MB.` });
   }
+  if (leftOut > 0) problems.push({ reason: moreProblemsReason(leftOut) });
   return { ok: problems.length === 0, problems, totalBytes };
 }
 

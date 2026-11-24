@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, checkApp, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
+import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, MAX_PROBLEMS, checkApp, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
 
 const TEMPLATE_DIR = fileURLToPath(new URL("../../../templates/basic/", import.meta.url));
 
@@ -135,6 +135,21 @@ describe("outside addresses (criterion 3)", () => {
     ['fetch("\\u{2f}/example.com/x")', "app.js"],
     ['{ "source": "https:\\/\\/example.com" }', "data.json"],
     ["fetch('\\x68ttps://example.com')", "app.js"],
+    // Leading zeros in entities and in \u{...}.
+    ['<img src="&#0000000047;&#0000000047;example.com/a.png">', "index.html"],
+    ['<img src="&#x00000002f;&#x00000002f;example.com/a.png">', "index.html"],
+    ['<a href="https&#00000000058;//example.com">x</a>', "index.html"],
+    ['fetch("\\u{00000002f}/example.com")', "app.js"],
+    // JavaScript control escapes (a tab or line break inside an address is dropped) and legacy octal escapes.
+    ['fetch("ht\\ttp:example.com")', "app.js"],
+    ['fetch("ht\\rtp:example.com")', "app.js"],
+    ['fetch("\\57\\57example.com")', "app.js"],
+    ['fetch("https\\72//example.com")', "app.js"],
+    // A meta refresh without url=.
+    ['<meta http-equiv="refresh" content="0; //example.com">', "index.html"],
+    ['<meta http-equiv="refresh" content="0 //example.com">', "index.html"],
+    ['<meta http-equiv="refresh" content="0,//example.com">', "index.html"],
+    ['<meta http-equiv="refresh" content="2.5;//example.com">', "index.html"],
   ])("fails %s and names the file and line", (line, file) => {
     const result = check(text(file, `first line\n\n${line}\nlast line`));
     expect(result.ok).toBe(false);
@@ -229,10 +244,16 @@ describe("outside addresses (criterion 3)", () => {
     ["entities", "&#"],
     ["CSS escapes", "\\2f"],
     ["commas and slashes", ",/"],
-  ])("scans a line of 3 MB of %s within a second (no backtracking blow-up)", (_name, unit) => {
-    // The patterns are linear: a quadratic one took 72 s on 400 KB of letters.
-    const line = unit.repeat(Math.ceil((3 * 1024 * 1024) / unit.length));
-    for (const variant of [line, `=${line}`, `"${line}`]) {
+    ["zero-padded entities", "&#x0"],
+    ["zeros after an entity start", "0"],
+    ["octal escapes", "\\5"],
+    ["braced escapes with zeros", "\\u{0"],
+    ["meta refresh starts", 'content="0 '],
+    ["spaces after content=", "content= "],
+  ])("scans a line of 256 KB of %s within a second (no backtracking blow-up)", (_name, unit) => {
+    // The patterns are linear (a few ms here): a quadratic one took 72 s on 400 KB of letters.
+    const line = unit.repeat(Math.ceil((256 * 1024) / unit.length));
+    for (const variant of [line, `=${line}`, `"${line}`, `&#x${line}`, `content="${line}`]) {
       const started = performance.now();
       outsideAddresses(variant);
       expect(performance.now() - started).toBeLessThan(1000);
@@ -241,6 +262,29 @@ describe("outside addresses (criterion 3)", () => {
 
   it("does not scan binary files", () => {
     expect(check(text("photo.png", "https://example.com")).ok).toBe(true);
+  });
+
+  it("lists the first 50 problems and counts the rest in one line", () => {
+    // 100,000 outside addresses on one line plus a file type: 100,001 problems, 50 listed.
+    const result = check(text("app.js", '"//a" '.repeat(100_000)), text("run.sh", "x"));
+    expect(result.ok).toBe(false);
+    expect(result.problems).toHaveLength(MAX_PROBLEMS + 1);
+    expect(result.problems.slice(0, MAX_PROBLEMS).every((problem) => problem.file === "app.js" && problem.line === 1)).toBe(true);
+    expect(result.problems[MAX_PROBLEMS]).toEqual({ reason: "…and 99951 more problems." });
+  });
+
+  it("keeps the app's own problems after the first 50", () => {
+    const files = Array.from({ length: 52 }, (_, index) => text(`tool${index}.exe`, "x"));
+    const result = checkApp(files);
+    expect(result.problems.map((problem) => problem.reason).slice(MAX_PROBLEMS)).toEqual([
+      expect.stringMatching(/no index\.html/),
+      "…and 2 more problems.",
+    ]);
+  });
+
+  it("lists every problem when there are 50 or fewer", () => {
+    const files = Array.from({ length: MAX_PROBLEMS }, (_, index) => text(`tool${index}.exe`, "x"));
+    expect(check(...files).problems).toHaveLength(MAX_PROBLEMS);
   });
 });
 
@@ -261,6 +305,21 @@ describe("size (criterion 4)", () => {
 
   it("passes exactly 5 MB", () => {
     expect(check(big("a.png", MAX_APP_BYTES - INDEX.bytes.length)).ok).toBe(true);
+  });
+
+  it("does not scan an app over the limit for addresses, but still checks names and types", () => {
+    const result = check(text("app.js", 'fetch("https://example.com")'), text("run.sh", "x"), big("a.png", MAX_APP_BYTES));
+    expect(result.problems).toEqual([
+      { file: "run.sh", reason: expect.stringMatching(/not an allowed file type/) },
+      { reason: "The app is 5.1 MB; the limit is 5 MB." },
+    ]);
+  });
+
+  it("answers quickly on an oversized app full of text", () => {
+    const started = performance.now();
+    const result = check(text("app.js", '"//a" '.repeat(1_000_000)));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(result.problems).toEqual([{ reason: "The app is 5.7 MB; the limit is 5 MB." }]);
   });
 
 });

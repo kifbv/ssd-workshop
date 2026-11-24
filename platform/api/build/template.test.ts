@@ -106,13 +106,25 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
 
   afterEach(async () => {
     await context.close();
-    expect(errors).toEqual([]);
   });
 
-  it("loads at 375 px with no console error and nothing scrolling sideways", async () => {
+  /** The stored count the mock starts with, so a page that shows it has really read it. */
+  const STORED = 41;
+
+  /** Opens the app and waits until it has read the counter: the GET answered and the page shows it. */
+  const openApp = async (shown: string): Promise<void> => {
+    const read = page.waitForResponse((response) => response.url().endsWith(`${DATA_PREFIX}presses`) && response.request().method() === "GET");
     const response = await page.goto(`${origin}${APP_PATH}`);
     expect(response?.headers()["content-security-policy"]).toBe(APPS_CONTENT_SECURITY_POLICY);
-    await expect.poll(() => calls.length).toBeGreaterThan(0);
+    expect((await read).status()).toBe(200);
+    await expect.poll(() => page.locator("#count").textContent()).toBe(shown);
+    // load() shows the count and clears the status in the same step: the page has settled.
+    expect(await page.locator("#status").textContent()).toBe("");
+  };
+
+  it("loads at 375 px with no console error and nothing scrolling sideways", async () => {
+    store.set("presses", String(STORED));
+    await openApp(String(STORED));
     await page.getByRole("heading", { level: 1 }).waitFor();
     // Under the sandbox the page has an opaque origin: no storage, no cookies.
     // (Browser code is passed as strings: the root tsconfig has no DOM types, see platform/web/tsconfig.json.)
@@ -128,18 +140,19 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(widths.client).toBe(PHONE.width);
     expect(widths.scroll).toBeLessThanOrEqual(widths.client);
     expect(widths.body).toBeLessThanOrEqual(widths.client);
+    expect(errors).toEqual([]);
   });
 
   it("stores and reads data through workshop-data.js, without cookies, from the opaque origin", async () => {
     await context.addCookies([{ name: "session", value: "platform-session", url: origin }]);
-    await page.goto(`${origin}${APP_PATH}`);
-    await expect.poll(() => page.locator("#count").textContent()).toBe("0");
+    store.set("presses", String(STORED));
+    await openApp(String(STORED));
 
     await page.getByRole("button", { name: "Press" }).click();
     await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
-    expect(store.get("presses")).toBe("1");
-    await page.reload();
-    await expect.poll(() => page.locator("#count").textContent()).toBe("1");
+    expect(await page.locator("#count").textContent()).toBe(String(STORED + 1));
+    expect(store.get("presses")).toBe(String(STORED + 1));
+    await openApp(String(STORED + 1));
 
     const roundTrip = await page.evaluate<{ read: unknown; gone: unknown; badKey: unknown }>(`(async () => {
       const value = { name: "Ada's list", items: [1, 2, 3], done: false };
@@ -161,11 +174,12 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(calls.filter((call) => call.method !== "OPTIONS").map((call) => call.origin)).toEqual(
       calls.filter((call) => call.method !== "OPTIONS").map(() => "null"),
     );
+    expect(errors).toEqual([]);
   });
 
   it("blocks an outside fetch and an outside image under the CSP, while its own files and data load", async () => {
-    await page.goto(`${origin}${APP_PATH}`);
-    await expect.poll(() => page.locator("#count").textContent()).toBe("0");
+    store.set("presses", String(STORED));
+    await openApp(String(STORED));
     // The CSP's refusals are console errors here, and only they are expected.
     page.removeAllListeners("console");
     const refused: string[] = [];
@@ -195,11 +209,12 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
       expect.stringContaining(`Loading the image '${outsideOrigin}/pixel.svg' violates`),
     ]);
     expect(outsideHits).toEqual([]);
+    expect(errors).toEqual([]);
   });
 
   it("refuses an inline script under the CSP", async () => {
-    await page.goto(`${origin}${APP_PATH}`);
-    await expect.poll(() => page.locator("#count").textContent()).toBe("0");
+    store.set("presses", String(STORED));
+    await openApp(String(STORED));
     page.removeAllListeners("console");
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Executing inline script violates")) errors.push(message.text());
@@ -212,6 +227,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
       return window.inlineRan === true;
     })()`);
     expect(ran).toBe(false);
+    expect(errors).toEqual([]);
   });
 
   it("shows a plain message when the app is not live (the data API answers 404)", async () => {
@@ -224,8 +240,12 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 404")) errors.push(message.text());
     });
+    const read = page.waitForResponse((response) => response.url().endsWith(`${DATA_PREFIX}presses`));
     await page.goto(`${origin}${APP_PATH}`);
+    expect((await read).status()).toBe(404);
     await expect.poll(() => page.locator("#status").textContent()).toBe("This app is not live on the workshop yet, so it cannot load or save data.");
+    expect(await page.locator("#count").textContent()).toBe("0");
+    expect(errors).toEqual([]);
   });
 
   it("shows a plain message, not a console error, when the data service cannot be reached", async () => {
@@ -236,8 +256,12 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource: net::ERR_CONNECTION_REFUSED")) errors.push(message.text());
     });
+    const failed = page.waitForEvent("requestfailed", (request) => request.url().endsWith(`${DATA_PREFIX}presses`));
     await page.goto(`${origin}${APP_PATH}`);
+    await failed;
     await expect.poll(() => page.locator("#status").textContent()).toBe("The data service could not be reached. Check the connection and try again.");
+    expect(await page.locator("#count").textContent()).toBe("0");
+    expect(errors).toEqual([]);
   });
 });
 
