@@ -31,6 +31,13 @@ Parameters:
   MonthlyBudgetUsd:
     Type: Number
     Default: 100
+  SessionTestRecipients:
+    Type: CommaDelimitedList
+    Default: success@simulator.amazonses.com
+    Description: >
+      The only addresses Claude sessions may send test emails to (npm run smoke -- ses <address>), comma-separated.
+      Enter your own test addresses here when you apply the stack; sessions can read them (in this policy and the
+      stack's parameters), so use only addresses meant for test emails. The default is the SES mailbox simulator.
 
 Conditions:
   MakeOidc: !Equals [!Ref CreateGitHubOidcProvider, "yes"]
@@ -855,15 +862,19 @@ Resources:
             Resource:
               - arn:aws:bedrock:eu-*::foundation-model/anthropic.*
               - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
+          # Try 3: SendEmail only (the smoke test and the mailer use SESv2 SendEmail with Simple content), and only
+          # to the addresses Franck enters in SessionTestRecipients at apply time (never written in the repository).
           - Sid: SesForTesting
             Effect: Allow
-            Action: [ses:SendEmail, ses:SendRawEmail]
+            Action: ses:SendEmail
             Resource:
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
               - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
+              ForAllValues:StringLike: {ses:Recipients: !Ref SessionTestRecipients}
+              "Null": {ses:Recipients: "false"}
           - Sid: WorkshopStackReads
             Effect: Allow
             Action: ["cloudformation:Describe*", "cloudformation:Get*", "cloudformation:List*"]
@@ -942,6 +953,40 @@ Resources:
           - Sid: NoUserDataForSessions
             Effect: Deny
             Action: [ec2:DescribeInstanceAttribute, ec2:DescribeLaunchTemplateVersions, ec2:DescribeSpotFleetRequests, ec2:DescribeSpotInstanceRequests]
+            Resource: "*"
+          # Try 3: everything but the reads and exceptions above is denied, whatever grants it: a resource policy
+          # left from the sessions that had deploy rights (a bucket, queue, topic, function or role policy naming
+          # the user) needs no identity Allow in this account. Each entry is a read pattern (its fixed part starts
+          # with Describe, Get, List, View or Validate) or one of the session exceptions (tested). Left out, so
+          # denied: budgets (the budget's subscribers hold Franck's address), SES identity reads (other projects'
+          # identities, unused by the smoke test) and everything that changes, sends or invokes.
+          - Sid: OnlyReadsForSessions
+            Effect: Deny
+            NotAction: ["cloudformation:Describe*", "cloudformation:Get*", "cloudformation:List*", cloudformation:ValidateTemplate,
+              "ec2:Describe*", "ecs:Describe*", "ecs:List*", "acm:Describe*", "acm:List*", "route53:Get*", "route53:List*",
+              bedrock:GetFoundationModel, bedrock:GetInferenceProfile, bedrock:ListFoundationModels, bedrock:ListInferenceProfiles,
+              bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream,
+              "servicequotas:Get*", "servicequotas:List*", ses:GetSendQuota, ses:SendEmail,
+              "s3:GetObject*", "s3:GetBucket*", "s3:Get*Configuration", "s3:List*",
+              "secretsmanager:Describe*", "secretsmanager:List*", secretsmanager:GetRandomPassword,
+              "logs:Describe*", "logs:Get*", "logs:List*", logs:FilterLogEvents, logs:StartQuery, logs:StartLiveTail,
+              "ce:GetCost*", "iam:Get*", "iam:List*", apigateway:GET, "cloudfront:Get*", "cloudfront:List*",
+              "lambda:Get*", "lambda:List*", "sqs:Get*", "sqs:List*", "ecr:Describe*", "ecr:List*",
+              "dynamodb:Describe*", "dynamodb:List*", "scheduler:Get*", "scheduler:List*"]
+            Resource: "*"
+          # Old events and drift results of the access stack may show the budget address (try 3); change set
+          # ARNs do not name their stack, so change set events are denied on every change set.
+          - Sid: NoAccessStackEventsForSessions
+            Effect: Deny
+            Action: [cloudformation:DescribeStackEvents, cloudformation:DescribeEvents, cloudformation:DescribeStackResourceDrifts]
+            Resource:
+              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/ssd-workshop-access/*
+              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:changeSet/*
+          # ec2:Describe* (deploy-read) also covers Verified Access, whose trust providers may hold OIDC client
+          # secrets of other projects (try 3).
+          - Sid: NoVerifiedAccessForSessions
+            Effect: Deny
+            Action: "ec2:DescribeVerifiedAccess*"
             Resource: "*"
 
   DeployRole:

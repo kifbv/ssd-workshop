@@ -788,7 +788,8 @@ table items. Only deploys from `main` change live apps; Franck's commands (`buil
 flowchart LR
   S([Claude session]) -->|smoke bedrock, evals| B[Bedrock]
   S -->|describe-stacks, logs tail,<br/>describe-table| R[workshop resources: read]
-  S -.->|update-function, s3 cp,<br/>scan, put-item| X[refused:<br/>no identity-based policy allows]
+  S -->|smoke ses, only to<br/>SessionTestRecipients| E[SES]
+  S -.->|update-function, s3 cp,<br/>scan, put-item| X[refused:<br/>explicit deny OnlyReadsForSessions]
   M([merge to main]) -->|deploy role| L[live apps]
 ```
 
@@ -802,16 +803,24 @@ aws cloudformation describe-stacks --region eu-central-1 --stack-name ssd-worksh
 aws logs tail ssd-workshop-api-health --region eu-central-1 --since 1h
 # expect: log lines (or nothing if the function was not called), no AccessDenied
 aws lambda update-function-configuration --region eu-central-1 --function-name ssd-workshop-api-health --description x
-# expect: AccessDeniedException ... because no identity-based policy allows the lambda:UpdateFunctionConfiguration action
+# expect: AccessDeniedException ... with an explicit deny in an identity-based policy (OnlyReadsForSessions, ticket 2.12 try 3)
 echo x > /tmp/x.txt
 aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
-# expect: AccessDenied ... because no identity-based policy allows the s3:PutObject action
+# expect: AccessDenied ... with an explicit deny in an identity-based policy
 aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
-# expect: AccessDeniedException ... because no identity-based policy allows the dynamodb:Scan action
+# expect: AccessDeniedException ... with an explicit deny in an identity-based policy
+npm run -s smoke -- ses success@simulator.amazonses.com
+# expect: "Sent from ssd-workshop@rankly.games to ..." and a MessageId (the SES mailbox simulator)
 ```
 
+Test emails go only to the addresses in the access stack's parameter `SessionTestRecipients` (default: the SES
+mailbox simulator `success@simulator.amazonses.com`; ticket 2.12 try 3). To test with a real inbox, Franck adds
+that address to the parameter (CloudFormation, `ssd-workshop-access`, Update, Use current template, change only
+`SessionTestRecipients`; see `infra/access/README.md`); any other recipient gets `AccessDenied` on `ses:SendEmail`.
+Sessions can read the parameter's addresses (in the policy), so put only test addresses there.
+
 The log group `ssd-workshop-api-health` (named like its function) is an example: any `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` or
-`/ecs/ssd-workshop-*` group works. Franck can also check the user's rights without a session (expect `implicitDeny`
+`/ecs/ssd-workshop-*` group works. Franck can also check the user's rights without a session (expect `explicitDeny`
 for the three writes and `allowed` for the read):
 
 ```sh
@@ -822,7 +831,8 @@ AWS_PROFILE=franck aws iam simulate-principal-policy \
     arn:aws:s3:::ssd-workshop-apps-<account>/apps/x.txt arn:aws:dynamodb:eu-central-1:<account>:table/ssd-workshop-data \
     'arn:aws:cloudformation:eu-central-1:<account>:stack/ssd-workshop-api/*' \
   --query 'EvaluationResults[].[EvalActionName,EvalResourceName,EvalDecision]' --output text
-# expect: implicitDeny for each write on every resource; allowed for cloudformation:DescribeStacks on the stack only
+# expect: explicitDeny for each write on every resource (OnlyReadsForSessions); implicitDeny for the read on the
+# other resources; allowed for cloudformation:DescribeStacks on the stack
 ```
 
 `cdk diff` from a session cannot create a change set (a write): it falls back to a template diff, or run it with
@@ -831,37 +841,50 @@ AWS_PROFILE=franck aws iam simulate-principal-policy \
 ### One-time audit: what sessions with deploy rights may have left (Franck)
 
 Before ticket 2.12 the user held deploy rights, so a session could have written a resource policy or a role trust
-naming `ssd-workshop-claude`, or left a function no stack owns. The new template cannot undo that. Run once after
-applying, from Franck's machine; every command only reads:
+naming `ssd-workshop-claude` (by name, by its unique id `AIDA...`, or as any principal `"*"` / `{"AWS": "*"}`), or
+left a resource no stack owns. Since try 3 the user's `OnlyReadsForSessions` denies every write such a policy could
+grant, but a leftover should still go. Run once after applying, from Franck's machine; every command only reads:
 
 ```sh
 export AWS_PROFILE=franck
 U=ssd-workshop-claude
+ID=$(aws iam get-user --user-name $U --query User.UserId --output text)   # AIDA...
+P="$U|$ID|\"(Principal|AWS)\" *: *(\[[^]]*)?\"\*\""   # the user, its id, or any principal
+owned() { for r in eu-central-1 us-east-1; do
+  aws cloudformation describe-stack-resources --region $r --physical-resource-id "$1" >/dev/null 2>&1 && return; done
+  echo "no stack owns: $1"; }
 aws iam list-groups-for-user --user-name $U --query 'Groups[].GroupName'
 # expect: []
 aws iam list-user-policies --user-name $U --query PolicyNames
 # expect: []
 aws iam list-attached-user-policies --user-name $U --query 'AttachedPolicies[].PolicyName'
 # expect: ["ssd-workshop-deploy-read", "ssd-workshop-session"] (in any order)
-aws iam list-roles --query "Roles[?contains(to_string(AssumeRolePolicyDocument), '$U')].Arn"
-# expect: [] (every role in the account, also /ssd-workshop/ and ssd-workshop-* ones, whose trust names the user)
-for b in $(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'ssd-workshop-')].Name" --output text); do
-  aws s3api get-bucket-policy --bucket "$b" --query Policy --output text 2>/dev/null | grep -q "$U" && echo "policy names the user: $b"
+aws iam list-roles --query 'Roles[].[Arn, to_string(AssumeRolePolicyDocument)]' --output text | grep -E "$P" | cut -f1
+# expect: no output (no role in the account trusts the user, its id or any principal)
+for b in $(aws s3api list-buckets --query 'Buckets[].Name' --output text); do
+  aws s3api get-bucket-policy --bucket "$b" --query Policy --output text 2>/dev/null | grep -Eq "$P" && echo "bucket: $b"
 done
-# expect: no output
-for q in $(aws sqs list-queues --region eu-central-1 --queue-name-prefix ssd-workshop- --query QueueUrls --output text); do
-  aws sqs get-queue-attributes --region eu-central-1 --queue-url "$q" --attribute-names Policy --query Attributes.Policy \
-    --output text | grep -q "$U" && echo "policy names the user: $q"
+for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do   # every enabled region
+  for q in $(aws sqs list-queues --region $r --query 'QueueUrls[]' --output text); do
+    aws sqs get-queue-attributes --region $r --queue-url "$q" --attribute-names Policy --query Attributes.Policy \
+      --output text 2>/dev/null | grep -Eq "$P" && echo "queue: $q"
+  done
 done
-# expect: no output
+# expect: no output (a public website bucket of another project would show here: not a session's, but tell Claude)
 aws sns list-topics --region eu-central-1 --output text | grep ssd-workshop-
 aws events list-event-buses --region eu-central-1 --name-prefix ssd-workshop- --query 'EventBuses[].Name'
 # expect: no output, then [] (no workshop stack uses SNS topics or custom event buses; any found is a leftover)
 for r in eu-central-1 us-east-1; do
-  for f in $(aws lambda list-functions --region $r --query "Functions[?starts_with(FunctionName, 'ssd-workshop-')].FunctionName" --output text); do
-    aws cloudformation describe-stack-resources --region $r --physical-resource-id "$f" >/dev/null 2>&1 || echo "no stack owns: $r $f"
-  done
+  for f in $(aws lambda list-functions --region $r --query "Functions[?starts_with(FunctionName, 'ssd-workshop-')].FunctionName" --output text); do owned "$f"; done
 done
+for c in $(aws ecs list-clusters --region eu-central-1 --query 'clusterArns[?contains(@, `/ssd-workshop-`)]' --output text); do
+  for x in $(aws ecs list-services --region eu-central-1 --cluster "$c" --query 'serviceArns[]' --output text); do owned "$x"; done
+done
+for i in $(aws ec2 describe-instances --region eu-central-1 --filters Name=tag:project,Values=ssd-workshop \
+  --query 'Reservations[].Instances[?State.Name!=`terminated`].InstanceId[]' --output text); do owned "$i"; done
+for n in $(aws scheduler list-schedules --region eu-central-1 --name-prefix ssd-workshop- --query 'Schedules[].Name' --output text); do owned "$n"; done
+for n in $(aws events list-rules --region eu-central-1 --name-prefix ssd-workshop- --query 'Rules[].Name' --output text); do owned "$n"; done
+for n in $(aws iam list-roles --path-prefix /ssd-workshop/ --query 'Roles[].RoleName' --output text); do owned "$n"; done
 # expect: no output
 ```
 

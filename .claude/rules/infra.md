@@ -108,12 +108,28 @@ paths:
   on `-deploy-read` or `ssd-workshop-session` (the Claude user carries only these two). The Claude
   user gets no writes (ticket 2.12).
 - Every Allow on the Claude user is a read (the test's `isRead`) or one of `SESSION_EXCEPTIONS` (Bedrock
-  invoke, SES send from the workshop sender, log reads and queries on workshop log groups): never a table
+  invoke, SES `SendEmail` from the workshop sender to `SessionTestRecipients`, log reads and queries on workshop log groups): never a table
   item read, queue receive, secret value or parameter (participants' email addresses live in the table).
   A live check that writes or reads items runs as `AWS_PROFILE=franck`, never from a session.
   `isRead` also passes "Get" actions that return credentials (`ecr:GetAuthorizationToken`, `sts:GetFederationToken`,
   `s3:GetDataAccess`, `ec2:GetPasswordData`, ...): keep them in the test's `SESSION_FORBIDDEN`, never grant `s3:Get*`
   (or another service-wide `Get*`) to the user, and list `GetBucket*`/`GetObject*` instead (ticket 2.12 try 2).
+- The Claude user's catch-all `OnlyReadsForSessions` (ticket 2.12 try 3) denies every action outside its `NotAction`
+  list, because a resource policy naming the user needs no identity Allow in the same account. A new read or exception
+  for sessions needs an Allow AND an entry there: a wildcard whose fixed part starts with a read verb
+  (`Describe`/`Get`/`List`/`View`/`Validate`, never a bare `svc:*` or `svc:G*`), or the exception by exact name, checked
+  against `servicereference.us-east-1.amazonaws.com/v1/<service>/<service>.json` (it must name a real action) and
+  never matching `SESSION_FORBIDDEN`. A new wildcard Allow on the user also goes into the test's `SESSION_WILDCARDS`
+  after a look at its expansion. A read that `-deploy-read` grants but sessions must not have (the budget: its
+  subscribers hold Franck's address; SES identities) is simply left out of the `NotAction`. A wildcard read that is
+  mostly fine but holds one bad action (`ec2:DescribeVerifiedAccess*` under `ec2:Describe*`) needs its own Deny.
+- The Claude user gets IAM rights only through `ManagedPolicyArns` on `ClaudeUser` (tested: no inline `Policies`,
+  `Groups`, no `Users`/`Groups`/`Roles` on a managed policy, and no IAM resource types beyond the six policies, the
+  deploy role, the user and the OIDC provider).
+- Session test emails: `ses:SendEmail` only (no `SendRawEmail`), to the addresses of the stack parameter
+  `SessionTestRecipients` only (`ForAllValues:StringLike` `ses:Recipients` plus `Null` `ses:Recipients` `false`: without
+  the `Null` guard a request without the key passes `ForAllValues`). Franck enters real test addresses at apply time;
+  never write an address in the repository (the default is the SES simulator).
 - A deny that sits on the deploy policies (`NoSelfAssume`, the sharing denies) does not reach the Claude user, which
   carries only `-deploy-read` and `ssd-workshop-session`: a deny the user needs goes on one of those two. Same-account
   role trust that names the user needs no identity Allow, so the user's own `NoAssumeForSessions` is what blocks it.

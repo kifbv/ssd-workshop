@@ -53,6 +53,7 @@ flowchart LR
    | `GitHubRepo` | keep `kifbv@7999713/ssd-workshop@1467373954` (the ID form GitHub sends for this repository) |
    | `BudgetEmail` | the address that should get budget alerts |
    | `MonthlyBudgetUsd` | keep `100` |
+   | `SessionTestRecipients` | the only addresses Claude sessions may send test emails to, comma-separated: keep `success@simulator.amazonses.com` (the SES mailbox simulator) and add your own test inbox if you want real test mails. Sessions can read these addresses (in `ssd-workshop-session`), so enter only test addresses, never a participant's |
 
 5. Tick "I acknowledge that AWS CloudFormation might create IAM resources with custom names",
    then Submit and wait for `CREATE_COMPLETE`.
@@ -83,7 +84,8 @@ flowchart LR
 4. Franck opens the `ssd-workshop-access` stack in the console, Update, Replace existing template,
    uploads the merged `access-stack.yaml`, keeps the parameters, and submits. `BudgetEmail` is hidden
    (`NoEcho`, since ticket 2.12) and shows as `****`: leave it as it is (the existing value is kept);
-   type the address again only to change it.
+   type the address again only to change it. `SessionTestRecipients` keeps its current value; to let sessions send
+   a test email to another inbox, Update, Use current template, and change only that parameter (ticket 2.12 try 3).
 
 ## Why each statement exists
 
@@ -220,10 +222,11 @@ flowchart LR
 | `NoVpnKeyReads` | Deny `ec2:DescribeVpnConnections` everywhere: it returns the VPN pre-shared keys. |
 
 **`ssd-workshop-session`** (ticket 2.12, the Claude user only: reads of the workshop's own resources, Bedrock and
-test emails; no deploy rights). Every Allow is a read except Bedrock invoke, SES send and the log reads
-`FilterLogEvents`, `StartQuery` and `StartLiveTail` (tested, with a mutation). Its two denies need no principal
-condition (only the Claude user carries it). Reads name `${AWS::Region}`
-(eu-central-1), except stacks (the edge stack is in us-east-1).
+test emails; no deploy rights). Every Allow is a read except Bedrock invoke, SES `SendEmail` and the log reads
+`FilterLogEvents`, `StartQuery` and `StartLiveTail` (tested, with a mutation). Its denies need no principal
+condition (only the Claude user carries it). Since try 3 the catch-all `OnlyReadsForSessions` denies the user every
+action but those reads and exceptions, so a resource policy left from the sessions that had deploy rights cannot
+grant a write either. Reads name `${AWS::Region}` (eu-central-1), except stacks (the edge stack is in us-east-1).
 
 ```mermaid
 flowchart LR
@@ -232,26 +235,32 @@ flowchart LR
   U --> P[ssd-workshop-session]
   P -->|read| W[ssd-workshop-* stacks, logs, functions,<br/>queues, cluster, repositories,<br/>table settings, buckets, secret metadata]
   P -->|invoke| B[Bedrock: Anthropic models,<br/>eu.anthropic.* profiles]
-  P -->|send| E[SES from ssd-workshop@rankly.games]
-  U -.->|refused: no Allow, or denied| X[deploys, function or bucket writes,<br/>table items, queue messages, secret values,<br/>credentials, role assumption, user data]
+  P -->|send| E[SES from ssd-workshop@rankly.games<br/>to SessionTestRecipients only]
+  RP[resource policy left<br/>by an earlier session] -.->|grant| U
+  U -.->|refused: denied by OnlyReadsForSessions<br/>whatever grants it| X[deploys, function or bucket writes,<br/>table items, queue messages, secret values,<br/>credentials, role assumption, user data,<br/>budget, access stack events]
 ```
 
 | Sid | Why |
 | --- | --- |
 | `Bedrock` | Sessions test the platform's Bedrock calls (`npm run smoke -- bedrock`, the evals): Anthropic models in EU regions (`foundation-model` in `eu-*`, where the EU inference profiles route, as the API stack's worker) and `eu.anthropic.*` inference profiles only. |
-| `SesForTesting` | Sessions test code emails (`npm run smoke -- ses <address>`), only through the identities `ssd-workshop@rankly.games` and `rankly.games`, only from `ssd-workshop@rankly.games` (`ses:FromAddress`), with the configuration set `ssd-workshop-email`. |
+| `SesForTesting` | Sessions test code emails (`npm run -s smoke -- ses <address>`), only `ses:SendEmail` (SESv2 `SendEmail` with simple content, as the smoke test and the mailer send; no `SendRawEmail`, whose `From:` header is free), only through the identities `ssd-workshop@rankly.games` and `rankly.games`, only from `ssd-workshop@rankly.games` (`ses:FromAddress`), with the configuration set `ssd-workshop-email`, and only to the addresses of the parameter `SessionTestRecipients` (`ForAllValues:StringLike` on `ses:Recipients`, which holds To, Cc and Bcc, plus a `Null` guard so a send without the key is refused; try 3). |
 | `WorkshopStackReads` | `cloudformation:Describe*`, `Get*`, `List*` on `stack/ssd-workshop-*/*` (outputs, events, templates; `cdk diff` falls back to a template diff, since creating a change set is a write). |
 | `WorkshopLogReads` | Read the log groups `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` and `/ecs/ssd-workshop-*`: streams, events, filters, Logs Insights queries (`StartQuery`, `GetQueryResults`) and live tails (`StartLiveTail`). `StopQuery` (Resource `*` only) is not granted. |
 | `WorkshopResourceReads` | Settings, never data: Lambda function configuration, policy, aliases, versions and tags (no `lambda:List*`, no invoke); SQS attributes, URL, tags and dead-letter sources (never `ReceiveMessage`); ECS clusters, services and tasks (build tasks stay denied by `NoBuildTasksForSessions`); ECR repositories and image lists (no pulls); DynamoDB table description, backups, TTL and tags (never an item: the table holds participants' email addresses); Secrets Manager description and version ids (never a value); Scheduler schedules and groups. All on `ssd-workshop-*` names. |
 | `WorkshopEventSourceMappingReads` | `lambda:GetEventSourceMapping` for `ssd-workshop-*` functions (`lambda:FunctionArn`; mapping ids are generated). |
 | `WorkshopBucketReads` | `s3:GetObject*`, `GetBucket*`, `Get*Configuration` and `List*` on `ssd-workshop-*` buckets and their objects, in this account only (`aws:ResourceAccount`). The site and apps files are public anyway; the assets bucket holds deploy code. Not `s3:Get*`, which would also name `s3:GetDataAccess` (S3 Access Grants credentials; tested). |
 | `NoAssumeForSessions` | Deny `sts:AssumeRole`, `TagSession`, `SetSourceIdentity` and `GetFederationToken` on every resource. The user no longer carries `ssd-workshop-deploy`'s `NoSelfAssume`, and in the same account a role whose trust policy names `user/ssd-workshop-claude` needs no identity-based Allow: a role an earlier session (with deploy rights) left behind could otherwise still be assumed. |
+| `OnlyReadsForSessions` | Deny every action not in its `NotAction` list, on every resource (try 3). The list holds the user's reads as wildcard groups per service (`cloudformation:Describe*`, `logs:Get*`, `s3:GetObject*`, ...: each fixed part starts with `Describe`, `Get`, `List`, `View` or `Validate`, so no write fits; each checked against the Service Authorization Reference, 2026-11-24) and the exceptions by name (`bedrock:InvokeModel`, `InvokeModelWithResponseStream`, `ses:SendEmail`, `logs:FilterLogEvents`, `StartQuery`, `StartLiveTail`). In the same account a resource policy (bucket, queue, topic, function, role trust) naming the user needs no identity Allow; this deny wins over it. Left out on purpose, so denied although `-deploy-read` allows them: `budgets:ViewBudget` (its subscribers hold the budget address) and `ses:GetEmailIdentity`/`ListEmailIdentities` (other projects' identities; no session code uses them). No credential-returning read fits a pattern (tested). |
+| `NoAccessStackEventsForSessions` | Deny `cloudformation:DescribeStackEvents`, `DescribeEvents` and `DescribeStackResourceDrifts` on `stack/ssd-workshop-access/*` (old events and drift results may show the budget address) and on every `changeSet/*` (a change set's ARN does not name its stack). `DescribeStacks` stays (the address parameter is `NoEcho`). |
+| `NoVerifiedAccessForSessions` | Deny `ec2:DescribeVerifiedAccess*`: `ec2:Describe*` (on `-deploy-read`) also covers Verified Access trust providers, which may hold other projects' OIDC client secrets. |
 | `NoUserDataForSessions` | Deny `ec2:DescribeInstanceAttribute`, `DescribeLaunchTemplateVersions`, `DescribeSpotFleetRequests` and `DescribeSpotInstanceRequests` on every resource: `ec2:Describe*` (on `-deploy-read`) would return the project's own instances' user data and launch template versions (`NoUserDataReads` there denies them only outside the project tag). Sessions do not need them; the deploy role keeps them on project-tagged resources. |
 
 Not granted to sessions on purpose (ticket 2.12): every deploy right, `ecs:DescribeTaskDefinition`,
 `ecr:GetAuthorizationToken` and the other credential-returning reads (`sts:GetFederationToken`/`GetSessionToken`,
-`sso:GetRoleCredentials`, `s3:GetDataAccess`, `ec2:GetPasswordData`/`GetConsoleOutput`/`GetConsoleScreenshot`,
-package login tokens; tested, wildcards expanded), `dynamodb:GetItem`/`BatchGetItem`/`Query`/`Scan`/`PartiQLSelect`/exports/stream
+`sso:GetRoleCredentials`, `s3:GetDataAccess`, `ec2:GetPasswordData`/`GetConsoleOutput`/`GetConsoleScreenshot`/`GetLaunchTemplateData`,
+`lightsail:GetInstanceAccessDetails`, `redshift:GetClusterCredentials`/`GetClusterCredentialsWithIAM`,
+`cognito-identity:GetCredentialsForIdentity`/`GetOpenIdToken`, package login tokens; tested, wildcards expanded,
+and a new wildcard Allow on the user fails the tests until it is pinned in `SESSION_WILDCARDS`), `dynamodb:GetItem`/`BatchGetItem`/`Query`/`Scan`/`PartiQLSelect`/exports/stream
 records, `sqs:ReceiveMessage`, `secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `lambda:InvokeFunction`.
 
 Not granted on purpose: `lambda:List*` (returns every function's environment variables),
@@ -342,20 +351,25 @@ follow-up.
    rights until it is deactivated: since ticket 2.12 reads (with the account-wide reads of risk 6),
    Bedrock calls (cost), Logs Insights queries and live tails on workshop log groups (cost per GB
    scanned and per minute) and emails from the workshop sender (risk 5); no deploy rights, no role
-   assumption or federation token (`NoAssumeForSessions`). What IAM cannot undo: resource policies or
-   roles an earlier session (with deploy rights) may have left naming the user; `infra/README.md`
+   assumption or federation token (`NoAssumeForSessions`), and since try 3 no write through a resource policy
+   (`OnlyReadsForSessions`). What IAM cannot undo: resources an earlier session (with deploy rights) may have
+   left, and resource policies naming the user (reads they grant are still possible); `infra/README.md`
    ("After applying ticket 2.12's access stack") has Franck's one-time audit. Mitigation: it lives only as a network secret of the cloud
    environment; rotate it every 90 days and after any suspected leak (IAM, Users, Security
    credentials).
-5. **SES sends from `ssd-workshop@rankly.games` to any recipient.** Participants' addresses are not
+5. **SES sends from `ssd-workshop@rankly.games` to any recipient (workload roles).** Participants' addresses are not
    known to IAM, and `ses:FromAddress` checks the envelope sender: with `SendRawEmail` the
-   message's `From:` header can show another name or address. Impact: misuse could send mail in
+   message's `From:` header can show another name or address. Since ticket 2.12 try 3 the Claude user
+   may send only `SendEmail` and only to `SessionTestRecipients`; the sign-in code role (boundary `SendCodes`)
+   still sends to anyone, as it must. Impact: misuse could send mail in
    rankly.games' name and hurt the sending reputation that the other rankly.games projects share.
    Check: SES sending statistics and bounce/complaint rates; follow-up: a workshop configuration
    set with event publishing when the platform sends real codes.
 6. **Account-wide reads without secrets.** EC2 and ECS listings (network layout, instance and
    cluster names of other projects), stack names, certificates, the hosted zone, service quotas
-   and costs are readable account-wide.
+   and costs are readable account-wide. Since ticket 2.12 they are readable by Claude sessions too (through
+   `-deploy-read`); accepted in try 3: costs, the rankly.games zone and the other EC2 describes. Not for sessions:
+   Verified Access (`NoVerifiedAccessForSessions`), SES identities and the budget (`OnlyReadsForSessions`).
 7. **CloudFront parts without tags.** The deploy rights can create origin access controls and cache,
    origin-request and response-headers policies without limit (account quotas are shared with the
    other distributions), and cannot change or delete them: a stack update that would change one
@@ -515,9 +529,14 @@ Not granted, so a later ticket brings it to Franck before it is needed:
 
 `access-stack.test.ts` (run by `npm test`) parses the template and checks the four deploy
 policies and the boundary with the same rules (and, since ticket 2.12, that the Claude user carries
-only `ssd-workshop-deploy-read` and `ssd-workshop-session`, every Allow of it a read or one of seven
-listed exceptions (Bedrock invoke, SES send, three log reads), no table item, queue message, secret value,
-parameter or credential read, no role assumption, and the session reads named `ssd-workshop-*`): every write is scoped by a resource name that
+only `ssd-workshop-deploy-read` and `ssd-workshop-session` and no other IAM resource could give it rights (no
+inline policy, group, `Users`/`Groups`/`Roles` on a managed policy, and no IAM resource types besides the six
+policies, the deploy role, the user and the OIDC provider), every Allow of it a read or one of six
+listed exceptions (Bedrock invoke, SES `SendEmail`, three log reads), no table item, queue message, secret value,
+parameter or credential read, no new wildcard Allow, no role assumption, the session reads named `ssd-workshop-*`,
+the catch-all deny sparing only reads and those exceptions (checked per `NotAction` entry, and per request with a
+loose `Allow *` standing for a resource policy), test emails only to `SessionTestRecipients`, and no budget or
+access stack events): every write is scoped by a resource name that
 starts with `ssd-workshop-` (with the dash), the project resource tag, the workshop DNS names
 (with record types and a `Null` guard) or an `ssd-workshop-*` function, or is on a commented
 exception list. A request tag alone counts only for creates: never for a tag-adding action, never
