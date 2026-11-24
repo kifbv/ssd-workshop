@@ -80,7 +80,7 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `WorkshopData` | Lambda, ECS and EC2 roles read and write only `ssd-workshop-*` tables, queues, secrets and parameters, and the log groups `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` and `/ecs/ssd-workshop-*`. |
-| `NoDeployAssetWrites` | Deny every workload role writing objects of the CDK assets bucket (Lambda code and templates, written only by deploys): a role a session creates could otherwise plant the launcher's next code (ticket 2.6). |
+| `NoDeployAssetWrites` | Deny every workload role everything but reads on the CDK assets bucket and its objects (Lambda code and templates, written only by deploys): a role a session creates could otherwise plant the launcher's next code, or open the bucket to anyone with a bucket policy (ticket 2.6). |
 | `GitHubKeyForTheLauncherOnly` | Deny `GetSecretValue` on the GitHub App's key (`secret:ssd-workshop-github-*`, ticket 2.6) to every workload role but `ssd-workshop-builds-launcher` (with and without its path), whatever the role's own policy says: no other role, created by a session or a deploy, can read the key. |
 | `WorkshopBuckets` | `ssd-workshop-*` buckets, only in this account (`aws:ResourceAccount`: bucket names are global, so someone else could own a bucket with a matching name). |
 | `Bedrock` | The platform calls Claude on Bedrock (Anthropic models and `eu.anthropic.*` inference profiles only). |

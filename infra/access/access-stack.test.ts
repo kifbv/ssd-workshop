@@ -1417,6 +1417,12 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       const role = { ...REQUEST, "aws:PrincipalArn": WORKLOAD_ROLE };
       for (const action of ["s3:PutObject", "s3:DeleteObject", "s3:PutObjectAcl"]) expect(allowedBy(boundary, action, ASSET, role), action).toBe(false);
       expect(allowedBy(boundary, "s3:GetObject", ASSET, role)).toBe(true);
+      // Nor its settings (a bucket policy could open object writes to anyone).
+      const bucket = `arn:aws:s3:::${ASSETS_BUCKET_NAME}`;
+      for (const action of ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "s3:PutBucketVersioning", "s3:PutLifecycleConfiguration", "s3:DeleteBucket"]) {
+        expect(allowedBy(boundary, action, bucket, role), action).toBe(false);
+      }
+      for (const action of ["s3:GetBucketLocation", "s3:ListBucket"]) expect(allowedBy(boundary, action, bucket, role), action).toBe(true);
       expect(allowedBy(boundary, "s3:PutObject", `arn:aws:s3:::ssd-workshop-apps-${ACCOUNT}/apps/x/index.html`, role)).toBe(true);
     });
 

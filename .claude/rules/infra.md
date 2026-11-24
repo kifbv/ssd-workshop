@@ -109,7 +109,7 @@ paths:
   everything on it but create/describe/tag with a `NotAction` list (`NoGitHubKey`, new AWS actions denied too), AND
   deny its read in the boundary to every role but that one (`GitHubKeyForTheLauncherOnly`), and deny the Claude user
   every write to (and invoke of) that role, its function and the CDK assets bucket (`NoLauncherForSessions`), and deny
-  every workload role writing asset objects (`NoDeployAssetWrites`): otherwise a session creates or borrows the reader
+  every workload role everything but reads on the assets bucket and its objects (`NoDeployAssetWrites`): otherwise a session creates or borrows the reader
   role, or plants its code directly or through a role it creates. Deploys from `main` stay trusted. Load the value only
   after Franck applied all four.
   `ssd-workshop-deploy` is too close to the 6,144-character limit: new denies go in another deploy policy both

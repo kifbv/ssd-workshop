@@ -91,12 +91,15 @@ Resources:
             Condition:
               ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/ssd-workshop-*"}
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher"}
-          # Deploy assets (Lambda code, templates) are written only by deploys: a workload role a
-          # session creates could otherwise plant the launcher's next code (ticket 2.6).
+          # Deploy assets (Lambda code, templates) and their bucket's settings are changed only by
+          # deploys: a workload role a session creates could otherwise plant the launcher's next
+          # code, or open the bucket to anyone with a bucket policy (ticket 2.6).
           - Sid: NoDeployAssetWrites
             Effect: Deny
             NotAction: ["s3:Get*", "s3:List*"]
-            Resource: !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}/*
+            Resource:
+              - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}
+              - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}/*
           # The GitHub App's private key (ticket 2.6): no workload role but the build launcher may
           # read it, whatever its own policy says (both forms of the ARN: decision "(2.2)").
           - Sid: GitHubKeyForTheLauncherOnly

@@ -623,8 +623,8 @@ The deploy creates the secret `ssd-workshop-github` with a random placeholder; n
 keeps the deploy role and the Claude user from doing anything with `secret:ssd-workshop-github-*` but creating,
 describing and tagging it, and the boundary's `GitHubKeyForTheLauncherOnly` lets no workload role but the build
 launcher read it, `NoLauncherForSessions` keeps Claude sessions from creating, passing, changing or invoking that
-launcher's role and function or touching deploy assets, and `NoDeployAssetWrites` keeps workload roles from planting
-deploy assets; without them they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
+launcher's role and function or touching deploy assets, and the boundary's `NoDeployAssetWrites` keeps workload roles from
+changing the assets bucket or its objects; without them they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
 after these steps, in this order:
 
 1. The pull request is merged and the builds stack is deployed (the secret exists, holding CDK's placeholder).
