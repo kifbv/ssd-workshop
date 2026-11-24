@@ -52,6 +52,8 @@ export interface FakeBuild {
   /** As stored by ticket 2.7 (as the participant typed it). */
   nickname: string;
   status: BuildStatus;
+  /** The commit the builder pushed (ticket 2.8); a deploy starts only for this commit. */
+  pushedCommit?: string;
   updatedAt?: string;
   deployedCommit?: string;
   failureReasons?: string[];
@@ -82,9 +84,9 @@ export class FakeDeployRecords implements DeployRecords {
     return true;
   }
 
-  async startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean> {
+  async startDeploy(buildId: string, nickname: string, commit: string, nowIso: string): Promise<boolean> {
     return this.update(buildId, { status: "deploying", updatedAt: nowIso }, [], (build) =>
-      build.nickname === nickname && ["queued", "building", "deploying"].includes(build.status),
+      build.nickname === nickname && build.pushedCommit === commit && ["queued", "building", "deploying"].includes(build.status),
     );
   }
 

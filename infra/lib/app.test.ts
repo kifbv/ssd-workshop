@@ -2083,7 +2083,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
         Resource: expect.anything(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status", "nickname", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status", "nickname", "pushedCommit", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },

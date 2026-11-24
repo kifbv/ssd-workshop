@@ -233,10 +233,10 @@ export const DISTRIBUTION_ID = "E2TOZV0ERAXKZ9";
 export const DISTRIBUTION_ARN = `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}`;
 /**
  * The attribute names the deployer may name in `BUILD#*` (UpdateItem only, on existing builds). IAM's
- * `dynamodb:Attributes` counts the names a condition uses too: `nickname` is only compared (the deploy must be
- * for the build's own app), never written.
+ * `dynamodb:Attributes` counts the names a condition uses too: `nickname` and `pushedCommit` (ticket 2.8: the commit
+ * the builder pushed must equal the message's) are only compared, never written.
  */
-export const DEPLOYER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] as const;
+export const DEPLOYER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "pushedCommit", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] as const;
 /** What an UpdateItem under a `dynamodb:Attributes` list may return (`ALL_NEW`/`ALL_OLD` could return other attributes). */
 export const ATTRIBUTE_LIMITED_RETURN_VALUES = ["NONE", "UPDATED_OLD", "UPDATED_NEW"] as const;
 /** The live marker's attribute names, which the deployer may update in `APP#*` (UpdateItem only). */
@@ -339,6 +339,26 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
  * deployer's) or `pushedCommit` (the builder's, ticket 2.8).
  */
 export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt"] as const;
+/**
+ * The attribute names the builder (ticket 2.8, its task role from ticket 2.9) may name in `BUILD#*`: GetItem (its
+ * projection: `nickname`, `participantId`, `status`) and UpdateItem (claim, feed, hand-over, failure). `nickname` is only
+ * read and compared, never written. Never `deployedCommit` or `liveAt` (the deployer's), `type`, `buildId`,
+ * `participantId` writes or `createdAt` (the AI worker's).
+ */
+export const BUILDER_BUILD_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "status",
+  "nickname",
+  "participantId",
+  "pushedCommit",
+  "feed",
+  "updatedAt",
+  "finishedAt",
+  "failureReasons",
+] as const;
+/** The attribute names the builder may name in `PARTICIPANT#*` (UpdateItem of the `USAGE` item only): the build's tokens and cost. */
+export const BUILDER_USAGE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "participantId", "updatedAt", "inputTokens", "outputTokens", "costUsd"] as const;
 /**
  * The launch queue from the AI worker (after a passed readiness check, ticket 2.7) to the build launcher (ticket 2.9),
  * and its dead-letter queue, in the builds stack. FIFO: deduplication id the build id, message group the participant id.

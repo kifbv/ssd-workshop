@@ -11,7 +11,7 @@ afterEach(() => {
 
 function deps(download: () => Promise<Uint8Array>) {
   const records = new FakeDeployRecords();
-  records.builds.set("b1", { nickname: "Ada", status: "building" });
+  records.builds.set("b1", { nickname: "Ada", pushedCommit: COMMIT, status: "building" });
   return { records, deps: { download, objects: new FakeAppObjects(), cdn: new FakeCdn(), records, now: () => new Date(), log: logEntry } };
 }
 

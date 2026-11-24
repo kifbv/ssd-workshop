@@ -2,8 +2,8 @@
  * The deployer (ticket 2.5): publishes one build of an app at `/apps/<nickname>/`. For one message
  * `{ buildId, nickname, commit }` from the deploy queue it:
  *
- * 1. marks the build `deploying`: only a build that exists, belongs to the message's app (same nickname) and
- *    waits for its deploy (`queued`, `building`, or `deploying` on a redelivery); any other message is dropped;
+ * 1. marks the build `deploying`: only a build that exists, belongs to the message's app (same nickname), whose
+ *    builder pushed the message's commit (`pushedCommit`, ticket 2.8) and waits for its deploy (`queued`, `building`, or `deploying` on a redelivery); any other message is dropped;
  * 2. downloads the app's public repository at the commit from GitHub (tar.gz, size-capped) and unpacks
  *    it in memory (./tar.ts);
  * 3. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
@@ -79,8 +79,11 @@ export interface Cdn {
  * condition fails (the build is missing, or not in the state the update needs).
  */
 export interface DeployRecords {
-  /** Marks the build `deploying` only when it exists, its nickname equals `nickname` exactly and it is queued, building or deploying. */
-  startDeploy(buildId: string, nickname: string, nowIso: string): Promise<boolean>;
+  /**
+   * Marks the build `deploying` only when it exists, its nickname equals `nickname` exactly, its `pushedCommit` (what
+   * the builder pushed, ticket 2.8) equals `commit`, and it is queued, building or deploying.
+   */
+  startDeploy(buildId: string, nickname: string, commit: string, nowIso: string): Promise<boolean>;
   /** Only while the build is `deploying`: a late write never changes a finished (live or failed) build. */
   markLive(buildId: string, commit: string, nowIso: string, signal?: AbortSignal): Promise<boolean>;
   /** Only while the build is `deploying`, as markLive. */
@@ -313,7 +316,7 @@ export async function processDeploy(
   let claimed = false;
   try {
     // Not bounded: a short table call (the client's own timeouts), and nothing may be recorded before it.
-    if (!(await deps.records.startDeploy(job.buildId, job.nickname, nowIso()))) {
+    if (!(await deps.records.startDeploy(job.buildId, job.nickname, job.commit, nowIso()))) {
       log({ outcome: "no-build" });
       return;
     }
