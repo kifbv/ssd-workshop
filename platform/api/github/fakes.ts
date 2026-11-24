@@ -2,6 +2,7 @@
 // REST calls the module makes the way GitHub documents them, checks the app's JWT against the test key and every
 // installation token's rights, and keeps repositories with their blobs, trees, commits and `main`.
 import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
+import { githubTar, gzip } from "../deploy/tar-fixtures.js";
 import { APPS_GITHUB_OWNER } from "../settings.js";
 
 const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -81,10 +82,25 @@ export class FakeGitHub {
     const method = init.method ?? "GET";
     this.calls.push({ method, path: parsed.pathname, authorization, body });
     if (authorization?.startsWith("Bearer ")) this.bearers.add(authorization.slice("Bearer ".length));
+    if (parsed.origin === "https://codeload.github.com") return this.tarball(parsed.pathname);
     if (parsed.origin !== "https://api.github.com") return json(404, { message: "Not Found" });
     if (headers.get("x-github-api-version") !== "2022-11-28" || !headers.get("user-agent")) return json(400, { message: "Bad headers" });
     return this.route(method, parsed.pathname, authorization ?? "", body ?? {});
   };
+
+  /**
+   * GitHub's anonymous tarball download (`codeload.github.com/<owner>/<name>/tar.gz/<commit>`) of a public repository:
+   * a gzip'd tar of the commit's files under one top folder, as the deployer and the builder (ticket 2.8) read it.
+   */
+  private tarball(path: string): Response {
+    const match = /^\/([^/]+)\/([^/]+)\/tar\.gz\/([0-9a-f]{40})$/.exec(path);
+    const repo = match && match[1] === APPS_GITHUB_OWNER ? this.repositories.get(match[2] ?? "") : undefined;
+    const commit = repo?.commits.get(match?.[3] ?? "");
+    if (!repo || repo.private || !commit) return json(404, { message: "Not Found" });
+    const tree = repo.trees.get(commit.tree) ?? new Map<string, string>();
+    const files = Object.fromEntries([...tree].map(([file, blob]) => [file, repo.blobs.get(blob) ?? new Uint8Array()]));
+    return new Response(gzip(githubTar(files)), { status: 200, headers: { "content-type": "application/x-gzip" } });
+  }
 
   /** The files at a commit, as text. */
   filesAt(name: string, commitSha: string): Record<string, string> {
@@ -295,11 +311,25 @@ export class FakeGitHub {
       const sha = String(body.sha);
       const commit = repo.commits.get(sha);
       if (!commit) return json(422, { message: "Object does not exist" });
-      if (body.force !== true && !commit.parents.includes(repo.main)) return json(422, { message: "Update is not a fast forward" });
+      // As GitHub does: without force, the new commit must have the current `main` among its ancestors.
+      if (body.force !== true && !this.descendsFrom(repo, sha, repo.main)) return json(422, { message: "Update is not a fast forward" });
       repo.main = sha;
       return json(200, { ref: "refs/heads/main", object: { sha } });
     }
     return json(404, { message: "Not Found" });
+  }
+
+  private descendsFrom(repo: FakeRepository, sha: string, ancestor: string): boolean {
+    const seen = new Set<string>();
+    const queue = [...(repo.commits.get(sha)?.parents ?? [])];
+    while (queue.length > 0) {
+      const at = queue.shift() ?? "";
+      if (at === ancestor) return true;
+      if (seen.has(at)) continue;
+      seen.add(at);
+      queue.push(...(repo.commits.get(at)?.parents ?? []));
+    }
+    return false;
   }
 
   private addCommit(repo: FakeRepository, commit: Omit<FakeCommit, "sha">): string {
