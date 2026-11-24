@@ -82,12 +82,23 @@ Resources:
               - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email
             Condition:
               StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
+          # Only the build launcher (ticket 2.9) starts tasks: no task role (participant code) or
+          # other workload role can, whatever its own policy says.
           - Sid: RunBuilds
             Effect: Allow
             Action: ecs:RunTask
             Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/ssd-workshop-*:*
             Condition:
               ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/ssd-workshop-*"}
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher"}
+          # RunTask with tags (or propagateTags) is also authorized as TagResource on the new task.
+          - Sid: TagBuildsOnStart
+            Effect: Allow
+            Action: ecs:TagResource
+            Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/ssd-workshop-*/*
+            Condition:
+              StringEquals: {ecs:CreateAction: RunTask}
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher"}
           - Sid: WatchBuilds
             Effect: Allow
             Action: [ecs:StopTask, ecs:DescribeTasks]
@@ -127,6 +138,19 @@ Resources:
           - Sid: K3sNodeChannels
             Effect: Allow
             Action: [ssmmessages:*, ec2messages:*, ec2:DescribeInstances, ec2:DescribeTags]
+            Resource: "*"
+          # ECS network placement (ticket 2.2): ecs:subnet exists only on CreateService and
+          # UpdateService. ForAnyValue: an UpdateService that leaves the network alone carries no
+          # subnet and is not denied. RunTask has no subnet key; StartTask is never needed.
+          - Sid: ServicesInWorkshopSubnetsOnly
+            Effect: Deny
+            Action: [ecs:CreateService, ecs:UpdateService]
+            Resource: "*"
+            Condition:
+              ForAnyValue:StringNotEquals: {ecs:subnet: [subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]}
+          - Sid: NoStartTask
+            Effect: Deny
+            Action: ecs:StartTask
             Resource: "*"
           # Same sharing and egress denies as the deploy policies, except s3:PutBucketNotification,
           # which CDK's bucket notifications handler (a workshop role) needs.
@@ -208,7 +232,7 @@ Resources:
               StringEquals: {aws:ResourceAccount: !Ref AWS::AccountId}
           - Sid: ActionsWithoutResourceScope
             Effect: Allow
-            Action: [ecr:GetAuthorizationToken, ecs:DeregisterTaskDefinition, logs:CreateLogDelivery, logs:DeleteLogDelivery]
+            Action: [ecr:GetAuthorizationToken, ecs:DeregisterTaskDefinition, ecs:DescribeTaskDefinition, logs:CreateLogDelivery, logs:DeleteLogDelivery]
             Resource: "*"
           - Sid: WorkshopEventSourceMappings
             Effect: Allow
@@ -266,10 +290,21 @@ Resources:
             Resource: "*"
           - Sid: TasksOnWorkshopClustersOnly
             Effect: Deny
-            Action: [ecs:RunTask, ecs:StartTask]
+            Action: ecs:RunTask
             Resource: "*"
             Condition:
               ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-*"}
+          # ecs:subnet exists only on CreateService and UpdateService (see the boundary).
+          - Sid: ServicesInWorkshopSubnetsOnly
+            Effect: Deny
+            Action: [ecs:CreateService, ecs:UpdateService]
+            Resource: "*"
+            Condition:
+              ForAnyValue:StringNotEquals: {ecs:subnet: [subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]}
+          - Sid: NoStartTask
+            Effect: Deny
+            Action: ecs:StartTask
+            Resource: "*"
           - Sid: RulesOnWorkshopSourcesOnly
             Effect: Deny
             Action: events:PutRule
@@ -606,6 +641,7 @@ Resources:
               - ses:GetEmailIdentity
               - ses:ListEmailIdentities
               - s3:ListAllMyBuckets
+              - secretsmanager:GetRandomPassword
               - logs:DescribeLogGroups
               - ce:GetCostAndUsage
               - ce:GetCostForecast

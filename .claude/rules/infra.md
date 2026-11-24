@@ -68,7 +68,13 @@ paths:
   from snapshots are denied. k3s nodes use IMDSv2 with hop limit 1, so pods cannot reach the node
   role.
 - ECS tasks run only on `ssd-workshop-*` clusters (`ecs:cluster` deny); service ARNs hold the
-  cluster name, so services are limited the same way.
+  cluster name, so services are limited the same way. `ecs:subnet` exists only on `CreateService` and
+  `UpdateService` (services are pinned to `BUILDS_SUBNET_IDS`); `RunTask` and `StartTask` have no
+  subnet key, so IAM cannot pin a task to subnets: the launcher must name the two subnets itself.
+  `StartTask` is denied, and under the boundary only the role `ssd-workshop-builds-launcher` may
+  `RunTask` (`aws:PrincipalArn`). Before relying on a condition key, check that the action lists it in
+  `servicereference.us-east-1.amazonaws.com/v1/<service>/<service>.json`: a negated operator on a key the
+  action never carries denies every call, a `ForAnyValue` one denies none.
 - EventBridge rules must name an event source `ssd-workshop.*` (deny on `events:source`, and on
   a pattern without a source). Schedules use EventBridge Scheduler (`scheduler:*` on
   `ssd-workshop-*`), not schedule rules; AWS service events such as ECS task state changes are
@@ -96,14 +102,15 @@ paths:
   `ssd-workshop-deploy`, `-edge`, `-ec2`, `-read`), each at most 6,144 characters minified
   (tested). A new deploy policy must be attached to both the deploy role and the Claude user and
   listed in `ProtectAccessIdentities`.
-- `ecs:DescribeTaskDefinition` (Resource `*` only) and `ec2:DescribeLaunchTemplateVersions` are not
-  available: the first ticket that deploys an ECS task definition or an EC2 launch template brings
-  this to Franck before building.
+- `ec2:DescribeLaunchTemplateVersions` is not available: the first ticket that deploys an EC2 launch
+  template brings this to Franck before building. `ecs:DescribeTaskDefinition` (Resource `*` only) is
+  granted to the deploy principals since ticket 2.2 (accepted risk 15), never in the boundary.
 - EC2: only Amazon-owned AMIs (`ec2:Owner` `amazon`, e.g. Amazon Linux 2023); tag specifications
   cover the instance and its volumes.
 - Custom CloudWatch metrics use the namespace `ssd-workshop`.
-- Reads of other projects' configuration are not granted (Lambda environments, task definitions,
-  other stacks' outputs, other APIs and distributions): name the workshop resource when reading.
+- Reads of other projects' configuration are not granted (Lambda environments, other stacks' outputs,
+  other APIs and distributions; task definitions are the one accepted exception, risk 15): name the
+  workshop resource when reading.
 - CDK generates names for some resources that take no name by default (e.g. the Origin Access
   Control of `S3BucketOrigin.withOriginAccessControl`): pass an explicitly named construct. The
   names test checks every `*Name` key at any depth.
