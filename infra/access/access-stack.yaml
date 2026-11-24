@@ -91,6 +91,17 @@ Resources:
             Condition:
               ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/ssd-workshop-*"}
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher"}
+          # The GitHub App's private key (ticket 2.6): no workload role but the build launcher may
+          # read it, whatever its own policy says (both forms of the ARN: decision "(2.2)").
+          - Sid: GitHubKeyForTheLauncherOnly
+            Effect: Deny
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:ssd-workshop-github-*
+            Condition:
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-builds-launcher
           # RunTask with tags (or propagateTags) is also authorized as TagResource on the new task.
           - Sid: TagBuildsOnStart
             Effect: Allow
@@ -621,21 +632,18 @@ Resources:
         Version: "2012-10-17"
         Statement:
           # The GitHub App's private key (ticket 2.6): only Franck loads it and only the build
-          # launcher (2.9) reads it. CloudFormation can still create and describe the secret.
+          # launcher (2.9) reads it. Everything but creating, describing and tagging is denied, so
+          # actions AWS adds later are denied too.
           - Sid: NoGitHubKey
             Effect: Deny
-            Action:
-              - secretsmanager:GetSecretValue
-              - secretsmanager:PutSecretValue
-              - secretsmanager:UpdateSecret
-              - secretsmanager:DeleteSecret
-              - secretsmanager:RestoreSecret
-              - secretsmanager:RotateSecret
-              - secretsmanager:CancelRotateSecret
-              - secretsmanager:UpdateSecretVersionStage
-              - secretsmanager:ReplicateSecretToRegions
-              - secretsmanager:RemoveRegionsFromReplication
-              - secretsmanager:StopReplicationToReplica
+            NotAction:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:TagResource
+              - secretsmanager:UntagResource
+              - secretsmanager:GetResourcePolicy
+              - secretsmanager:ListSecretVersionIds
+              - secretsmanager:ValidateResourcePolicy
             Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:ssd-workshop-github-*
           - Sid: ReadsWithoutSecrets
             Effect: Allow

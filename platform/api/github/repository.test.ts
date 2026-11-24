@@ -92,6 +92,11 @@ describe("removeEmailAddresses", () => {
       ["two: a@b.cd, c-d@e.fg", "two: [email removed], [email removed]"],
       ["josé.garcía@exämple.de", "[email removed]"],
       ["full width ａｄａ＠ｅｘａｍｐｌｅ．ｏｒｇ", "full width [email removed]"],
+      ["decomposed jose\u0301@exa\u0308mple.de here", "decomposed [email removed] here"],
+      ["राम@उदाहरण.भारत", "[email removed]"],
+      ["ada@example.xn--p1ai end", "[email removed] end"],
+      // Also caught, by design: file names shaped like an address.
+      ["logo@2x.png", "[email removed]"],
     ];
     for (const [input, output] of cases) expect(removeEmailAddresses(input)).toBe(output);
     const plain = "# Movie tracker\n\n- A list of films @ home, rated 1-5.\n- Price: 3.50 @ the cinema\n";

@@ -60,20 +60,26 @@ export function repositoryNameFor(nickname: string): string {
   return appRepositoryName(nickname);
 }
 
-/** The template's files with SPEC.md replaced whole by the approved spec (decision "(2.3) Template app"). */
 /**
  * Email-shaped text: a local part, `@` (or the full-width `＠`), and a domain with at least one dot (`.`, `．` or `。`)
- * ending in a label of two letters or more. Letters of any script count, so `josé@exämple.de` and full-width forms
- * match. Addresses written with spaces or words ("ada at example dot org") are not caught.
+ * ending in a label of two letters or more (or a punycode `xn--` label). Letters and marks of any script count, and
+ * the text is first put in Unicode's composed form (NFC), so `josé@exämple.de` (either form), full-width and
+ * Devanagari addresses match. Addresses written with spaces or words ("ada at example dot org") are not caught; file
+ * names shaped like an address (`logo@2x.png`) are. Quadratic at worst, on specs of at most 8,000 characters.
  */
-const EMAIL_SHAPED = /[\p{L}\p{N}._%+'-]+[@＠][\p{L}\p{N}-]+(?:[.．。][\p{L}\p{N}-]+)*[.．。]\p{L}{2,}/gu;
+const EMAIL_SHAPED =
+  /[\p{L}\p{M}\p{N}._%+'-]+[@＠][\p{L}\p{M}\p{N}-]+(?:[.．。][\p{L}\p{M}\p{N}-]+)*[.．。](?:xn--[\p{L}\p{N}-]+|\p{L}[\p{L}\p{M}]+)/gu;
 export const EMAIL_REMOVED = "[email removed]";
 
 /** The spec as published: every email-shaped text replaced (decision "(2.6) Email addresses removed from SPEC.md"). */
 export function removeEmailAddresses(text: string): string {
-  return text.replace(EMAIL_SHAPED, EMAIL_REMOVED);
+  return text.normalize("NFC").replace(EMAIL_SHAPED, EMAIL_REMOVED);
 }
 
+/**
+ * The template's files with SPEC.md replaced whole by the approved spec (decision "(2.3) Template app"), its email
+ * addresses removed.
+ */
 export function withSpec(templateFiles: readonly RepositoryFile[], spec: string): RepositoryFile[] {
   return [
     ...templateFiles.filter((file) => file.path !== SPEC_FILE),

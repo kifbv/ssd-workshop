@@ -620,20 +620,22 @@ flowchart LR
 The deploy creates the secret `ssd-workshop-github` with a random placeholder; nothing reads it until 2.9.
 
 **Order: the key goes in last.** The access stack's `NoGitHubKey` deny (in `ssd-workshop-deploy-read`, ticket 2.6)
-keeps the deploy role and the Claude user from reading, replacing, rotating, replicating or deleting
-`secret:ssd-workshop-github-*`; without it they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
+keeps the deploy role and the Claude user from doing anything with `secret:ssd-workshop-github-*` but creating,
+describing and tagging it, and the boundary's `GitHubKeyForTheLauncherOnly` lets no workload role but the build
+launcher read it; without them they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
 after these steps, in this order:
 
 1. The pull request is merged and the builds stack is deployed (the secret exists, holding CDK's placeholder).
    The deploy creates the secret whether or not the deny is applied (creating and describing it stay allowed).
-2. Franck applies `infra/access/access-stack.yaml` from `main` (the `NoGitHubKey` deny).
+2. Franck applies `infra/access/access-stack.yaml` from `main` (the two denies).
 3. Franck loads the GitHub App's id and key with the command below, from his own machine.
 
 Until step 3 the secret holds only the placeholder: `smoke github` and the repository code fail with "The
 GitHub secret is not loaded yet", no repository is created and no token is minted, and nothing in GitHub can
 be reached through the platform. Build launches (2.9) need the key, so step 3 must be done before 2.9 goes live.
-Check after step 2 (from a session): `aws secretsmanager get-secret-value --region eu-central-1 --secret-id
-ssd-workshop-github` with the Claude user answers `AccessDenied` "with an explicit deny".
+Check after step 2 and before step 3 only (from a session, while the secret still holds the placeholder):
+`aws secretsmanager get-secret-value --region eu-central-1 --secret-id ssd-workshop-github` with the Claude user
+answers `AccessDenied` "with an explicit deny". Never run it once the key is loaded.
 
 Franck loads the GitHub App's id (on the app's settings page, "App ID", a number) and its private key (the
 `.pem` file GitHub downloaded), from his own machine:

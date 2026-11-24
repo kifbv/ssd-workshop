@@ -1315,33 +1315,56 @@ describe("policy sizes", () => {
 
 describe("access stack: the GitHub App's key (ticket 2.6)", () => {
   const deploy = deployStatements(template);
+  const boundary = boundaryStatements(template);
   const SECRET = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-github-AbCdEf`;
   const OTHER = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-other-AbCdEf`;
-  const KEY_ACTIONS = [
-    "secretsmanager:GetSecretValue",
-    "secretsmanager:PutSecretValue",
-    "secretsmanager:UpdateSecret",
-    "secretsmanager:DeleteSecret",
-    "secretsmanager:RestoreSecret",
-    "secretsmanager:RotateSecret",
-    "secretsmanager:CancelRotateSecret",
-    "secretsmanager:UpdateSecretVersionStage",
-    "secretsmanager:ReplicateSecretToRegions",
-    "secretsmanager:RemoveRegionsFromReplication",
-    "secretsmanager:StopReplicationToReplica",
-  ];
+  const LAUNCHER_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-builds-launcher`;
+  // Every Secrets Manager action, per servicereference secretsmanager.json v1.5
+  // (servicereference.us-east-1.amazonaws.com/v1/secretsmanager/secretsmanager.json), read 2026-11-24.
+  const SECRETSMANAGER_ACTIONS = [
+    "AcceptCrossAccountReplication", "AssociateCrossAccountReplica", "BatchGetSecretValue", "CancelRotateSecret",
+    "CreateSecret", "DeleteResourcePolicy", "DeleteSecret", "DescribeSecret", "DisassociateCrossAccountReplica",
+    "GetRandomPassword", "GetResourcePolicy", "GetSecretValue", "ListResourcePolicies", "ListSecretVersionIds",
+    "ListSecrets", "PutResourcePolicy", "PutSecretValue", "RemoveRegionsFromReplication", "ReplicateSecretToRegions",
+    "RestoreSecret", "RotateSecret", "StopReplicationToReplica", "TagResource", "UntagResource", "UpdateSecret",
+    "UpdateSecretVersionStage", "ValidateResourcePolicy",
+  ].map((a) => `secretsmanager:${a}`);
+  // What CloudFormation needs to create, describe and tag the secret, plus reads that hold no value.
+  // GetRandomPassword and ListSecrets name no secret, so a deny on the secret never reaches them.
+  const STILL_ALLOWED = [
+    "CreateSecret", "DescribeSecret", "TagResource", "UntagResource", "GetResourcePolicy", "ListSecretVersionIds",
+    "ValidateResourcePolicy",
+  ].map((a) => `secretsmanager:${a}`);
+  const NO_RESOURCE = ["secretsmanager:GetRandomPassword", "secretsmanager:ListSecrets"];
 
-  it("denies the deploy principals reading, replacing, rotating, replicating or deleting the key", () => {
-    for (const action of KEY_ACTIONS) expect(allowedBy(deploy, action, SECRET), action).toBe(false);
+  it("denies the deploy principals every other action on the key, new AWS actions included", () => {
+    const deny = deploy.find((s) => s.Sid === "NoGitHubKey");
+    expect(deny?.Effect).toBe("Deny");
+    expect(deny?.Action, "a NotAction list, so actions AWS adds later are denied too").toBeUndefined();
+    for (const action of SECRETSMANAGER_ACTIONS.filter((a) => !STILL_ALLOWED.includes(a) && !NO_RESOURCE.includes(a))) {
+      expect(statementApplies(deny as Statement, action, SECRET, {}), action).toBe(true);
+      expect(allowedBy(deploy, action, SECRET), action).toBe(false);
+    }
+    expect(statementApplies(deny as Statement, "secretsmanager:SomeFutureAction", SECRET, {})).toBe(true);
     // Without the deny they could (secretsmanager:* on ssd-workshop-*).
     const old = deploy.filter((s) => s.Sid !== "NoGitHubKey");
     expect(allowedBy(old, "secretsmanager:GetSecretValue", SECRET)).toBe(true);
   });
 
-  it("still lets CloudFormation create and describe it, and leaves other workshop secrets as they were", () => {
+  it("still lets CloudFormation create, describe and tag it, and leaves other workshop secrets as they were", () => {
     for (const action of ["secretsmanager:CreateSecret", "secretsmanager:DescribeSecret", "secretsmanager:TagResource"]) {
       expect(allowedBy(deploy, action, SECRET), action).toBe(true);
     }
     expect(allowedBy(deploy, "secretsmanager:GetSecretValue", OTHER)).toBe(true);
+  });
+
+  it("lets no workload role read the key but the build launcher (with or without its path)", () => {
+    const read = "secretsmanager:GetSecretValue";
+    expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(false);
+    expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": BUILD_LAUNCHER_ROLE_ARN })).toBe(true);
+    expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": LAUNCHER_WITHOUT_PATH })).toBe(true);
+    expect(allowedBy(boundary, read, OTHER, { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
+    const old = boundary.filter((s) => s.Sid !== "GitHubKeyForTheLauncherOnly");
+    expect(allowedBy(old, read, SECRET, { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
   });
 });
