@@ -1,12 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   SSD Workshop - least-privilege access. Creates a permissions boundary, four deploy
-  policies, a GitHub Actions deploy role (OIDC, kifbv/ssd-workshop main only) and an IAM
-  user for Claude's cloud sessions. Writes are limited to ssd-workshop-* names, the
-  project=ssd-workshop tag, the /ssd-workshop/ IAM path and DNS under workshop.rankly.games;
-  reads that return other projects' secrets or full configuration are not granted.
+  policies, a GitHub Actions deploy role (OIDC, kifbv/ssd-workshop main only), a session
+  policy and an IAM user for Claude's cloud sessions (reads, Bedrock and test emails only:
+  no deploys). Writes are limited to ssd-workshop-* names, the project=ssd-workshop tag, the
+  /ssd-workshop/ IAM path and DNS under workshop.rankly.games; reads that return other
+  projects' secrets or full configuration are not granted.
   Deploy in eu-central-1 as stack name "ssd-workshop-access". The deploy rights cannot
-  change this stack, the deploy role, the Claude user or the five managed policies.
+  change this stack, the deploy role, the Claude user or the six managed policies.
 
 Parameters:
   HostedZoneId:
@@ -325,6 +326,7 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-edge
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-ec2
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-read
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-session
           - Sid: WorkshopServiceLinkedRoles
             Effect: Allow
             Action: iam:CreateServiceLinkedRole
@@ -369,8 +371,9 @@ Resources:
             Condition:
               "Null": {events:source: "true"}
 
-  # Deploy rights, part 2: CloudFront, certificates, API Gateway, DNS, Bedrock, SES, and the
-  # denies that keep workshop data inside the account (sharing, exports, egress).
+  # Deploy rights, part 2: CloudFront, certificates, API Gateway, DNS, and the denies that
+  # keep workshop data inside the account (sharing, exports, egress). Bedrock and SES moved to
+  # ssd-workshop-session in ticket 2.12: no deploy step calls them.
   DeployPolicyEdge:
     Type: AWS::IAM::ManagedPolicy
     # W3037: cfn-lint's action list lacks apigateway:TagResource, which AWS checks when
@@ -497,22 +500,6 @@ Resources:
               "Null":
                 route53:ChangeResourceRecordSetsNormalizedRecordNames: "false"
                 route53:ChangeResourceRecordSetsRecordTypes: "false"
-          - Sid: Bedrock
-            Effect: Allow
-            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
-            Resource:
-              - arn:aws:bedrock:*::foundation-model/anthropic.*
-              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
-          - Sid: SesForTesting
-            Effect: Allow
-            Action: [ses:SendEmail, ses:SendRawEmail]
-            Resource:
-              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
-              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
-              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email
-            Condition:
-              StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
-
           - Sid: NoExternalSharing
             Effect: Deny
             Action:
@@ -847,6 +834,101 @@ Resources:
             Action: ec2:DescribeVpnConnections
             Resource: "*"
 
+  # Claude's cloud sessions (ticket 2.12, Franck's choice 2026-11-24): reads of the workshop's own
+  # resources, Bedrock and test emails, and no deploy rights, so only deploys from main change
+  # live apps. Every Allow here is a read except the short list the access-stack test names
+  # (Bedrock invoke, SES send from the workshop sender, starting a log query or live tail).
+  # Table items are never readable (participants' email addresses), nor queue messages, secret
+  # values or parameters. The user also keeps ssd-workshop-deploy-read and its session denies.
+  SessionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: ssd-workshop-session
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Bedrock
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - arn:aws:bedrock:*::foundation-model/anthropic.*
+              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
+          - Sid: SesForTesting
+            Effect: Allow
+            Action: [ses:SendEmail, ses:SendRawEmail]
+            Resource:
+              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
+              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
+              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email
+            Condition:
+              StringEquals: {ses:FromAddress: ssd-workshop@rankly.games}
+          - Sid: WorkshopStackReads
+            Effect: Allow
+            Action: ["cloudformation:Describe*", "cloudformation:Get*", "cloudformation:List*"]
+            Resource:
+              - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/ssd-workshop-*/*
+          - Sid: WorkshopLogReads
+            Effect: Allow
+            Action: [logs:DescribeLogStreams, logs:GetLogEvents, logs:FilterLogEvents, logs:GetLogGroupFields, logs:GetQueryResults, logs:ListTagsForResource, logs:StartQuery, logs:StartLiveTail]
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:ssd-workshop-*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ssd-workshop-*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/ssd-workshop-*
+          - Sid: WorkshopResourceReads
+            Effect: Allow
+            Action:
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:GetPolicy
+              - lambda:GetAlias
+              - lambda:ListAliases
+              - lambda:ListVersionsByFunction
+              - lambda:ListTags
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+              - sqs:ListDeadLetterSourceQueues
+              - ecs:DescribeClusters
+              - ecs:DescribeServices
+              - ecs:DescribeTasks
+              - ecr:DescribeRepositories
+              - ecr:DescribeImages
+              - ecr:ListImages
+              - ecr:ListTagsForResource
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:ListTagsOfResource
+              - secretsmanager:DescribeSecret
+              - secretsmanager:ListSecretVersionIds
+              - scheduler:GetSchedule
+              - scheduler:GetScheduleGroup
+              - scheduler:ListTagsForResource
+            Resource:
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ssd-workshop-*
+              - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:ssd-workshop-*
+              - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/ssd-workshop-*
+              - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/ssd-workshop-*/*
+              - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/ssd-workshop-*/*
+              - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/ssd-workshop-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ssd-workshop-*
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ssd-workshop-*
+              - !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/*/ssd-workshop-*
+              - !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/ssd-workshop-*
+          - Sid: WorkshopEventSourceMappingReads
+            Effect: Allow
+            Action: lambda:GetEventSourceMapping
+            Resource: "*"
+            Condition:
+              ArnLike:
+                lambda:FunctionArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ssd-workshop-*
+          - Sid: WorkshopBucketReads
+            Effect: Allow
+            Action: ["s3:Get*", "s3:List*"]
+            Resource: arn:aws:s3:::ssd-workshop-*
+            Condition:
+              StringEquals: {aws:ResourceAccount: !Ref AWS::AccountId}
+
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -866,12 +948,13 @@ Resources:
                 token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:ref:refs/heads/main
 
   # Claude's cloud sessions use access keys of this user (created by Franck in the console,
-  # stored as a network secret). Same rights as the deploy role, nothing more.
+  # stored as a network secret). Since ticket 2.12 no deploy rights: the deploy reads (with their
+  # session denies) and the session policy only, so only deploys from main change live apps.
   ClaudeUser:
     Type: AWS::IAM::User
     Properties:
       UserName: ssd-workshop-claude
-      ManagedPolicyArns: [!Ref DeployPolicy, !Ref DeployPolicyEdge, !Ref DeployPolicyEc2, !Ref DeployPolicyRead]
+      ManagedPolicyArns: [!Ref DeployPolicyRead, !Ref SessionPolicy]
       Tags: [{Key: project, Value: ssd-workshop}]
 
   # Workshop emails name this configuration set, so SES does not fall back to the rankly.games

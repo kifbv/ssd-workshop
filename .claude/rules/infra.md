@@ -44,7 +44,7 @@ paths:
   `ResponseHeadersPolicy.SECURITY_HEADERS`, ...). Origin access controls and custom policies have no
   tags, so the deploy rights can only create them: give them `RemovalPolicy.RETAIN`, and changing
   or deleting one needs Franck (or a replacement under a new name).
-- The access stack denies, for both principals: S3 ACLs (keep `BucketOwnerEnforced`, no legacy
+- The access stack denies, for the deploy role (the Claude user holds no writes since ticket 2.12): S3 ACLs (keep `BucketOwnerEnforced`, no legacy
   CloudFront logging bucket), S3 server access logging, inventory, analytics export, replication
   and (deploy principals only) bucket notifications, Lambda function URLs, resource policies on
   secrets, repositories, tables, parameters and log groups, DynamoDB exports, log subscription
@@ -101,10 +101,16 @@ paths:
   `workflow_run`, `issue_comment` and `schedule` jobs on `main`. Only `.github/workflows/deploy.yml`
   may request `id-token: write` (never `write-all`), and it runs only on `push` to `main`
   (tested). Follow-up: a custom OIDC subject with `job_workflow_ref`.
-- The access stack has five managed policies (the boundary and the deploy policies
-  `ssd-workshop-deploy`, `-edge`, `-ec2`, `-read`), each at most 6,144 characters minified
-  (tested). A new deploy policy must be attached to both the deploy role and the Claude user and
-  listed in `ProtectAccessIdentities`.
+- The access stack has six managed policies (the boundary, the deploy policies
+  `ssd-workshop-deploy`, `-edge`, `-ec2`, `-read`, and `ssd-workshop-session`), each at most 6,144
+  characters minified (tested), each listed in `ProtectAccessIdentities`. Deploy rights go on the
+  deploy policies, which only the deploy role carries; if sessions need to see something, a read goes
+  on `-deploy-read` or `ssd-workshop-session` (the Claude user carries only these two). The Claude
+  user gets no writes (ticket 2.12).
+- Every Allow on the Claude user is a read (the test's `isRead`) or one of `SESSION_EXCEPTIONS` (Bedrock
+  invoke, SES send from the workshop sender, log reads and queries on workshop log groups): never a table
+  item read, queue receive, secret value or parameter (participants' email addresses live in the table).
+  A live check that writes or reads items runs as `AWS_PROFILE=franck`, never from a session.
 - A secret only Franck and one workload role may read (the GitHub App's key, ticket 2.6): deny the deploy principals
   everything on it but create/describe/tag with a `NotAction` list (`NoGitHubKey`, new AWS actions denied too), AND
   deny its read in the boundary to every role but that one (`GitHubKeyForTheLauncherOnly`), and deny the Claude user
@@ -112,11 +118,11 @@ paths:
   every workload role everything but reads on the assets bucket and its objects (`NoDeployAssetWrites`): otherwise a session creates or borrows the reader
   role, or plants its code directly or through a role it creates. Deploys from `main` stay trusted. Load the value only
   after Franck applied all four.
-  `ssd-workshop-deploy` is too close to the 6,144-character limit: new denies go in another deploy policy both
-  principals carry.
+  `ssd-workshop-deploy` is too close to the 6,144-character limit: new denies go in another deploy policy
+  (a deny for sessions in `-deploy-read` or `ssd-workshop-session`, which the Claude user carries).
 - `ec2:DescribeLaunchTemplateVersions` is not available: the first ticket that deploys an EC2 launch
   template brings this to Franck before building. `ecs:DescribeTaskDefinition` (Resource `*` only) is
-  granted to the deploy principals since ticket 2.2 (accepted risk 15), never in the boundary.
+  granted to the deploy role since ticket 2.2 (accepted risk 15; the Claude user lost it in 2.12), never in the boundary.
 - EC2: only Amazon-owned AMIs (`ec2:Owner` `amazon`, e.g. Amazon Linux 2023); tag specifications
   cover the instance and its volumes.
 - Custom CloudWatch metrics use the namespace `ssd-workshop`.

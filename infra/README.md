@@ -197,14 +197,15 @@ curl -sS -w '\n%{http_code}\n' "$ENDPOINT/api/health"
 The table `ssd-workshop-data` is retained and has deletion protection, so a failed first deploy
 of `ssd-workshop-api` rolls back everything except the table, and the next deploy fails with
 "already exists". Only while the table is still empty (nothing has written to it yet), Franck
-removes it, then re-runs the deploy:
+removes it with his own credentials (Claude sessions may neither read items nor change the table
+since ticket 2.12), then re-runs the deploy:
 
 ```sh
-aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
+AWS_PROFILE=franck aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
 # expect: "Count": 0
-aws dynamodb update-table --region eu-central-1 --table-name ssd-workshop-data \
+AWS_PROFILE=franck aws dynamodb update-table --region eu-central-1 --table-name ssd-workshop-data \
   --no-deletion-protection-enabled
-aws dynamodb delete-table --region eu-central-1 --table-name ssd-workshop-data
+AWS_PROFILE=franck aws dynamodb delete-table --region eu-central-1 --table-name ssd-workshop-data
 ```
 
 Criteria 1, 2 and 4 (names, tags, role path and boundary, no account-wide CloudWatch role,
@@ -320,17 +321,18 @@ curl -sS -b "$JAR" -w '\n%{http_code}\n' "https://workshop.rankly.games/api/conv
 # expect: {"message":"Not found."} and 404
 ```
 
-Then, with Franck's own AWS credentials, the guardrail eval against the live model (about $0.05):
+Then the guardrail eval against the live model (about $0.05; Bedrock only, so a session may run it too), and,
+with Franck's own AWS credentials (it reads table items), the flags:
 
 ```sh
 npm run eval -- guardrails
 # expect: one PASS line per example, "Guardrails: 20/20 passed", exit code 0
-npm run flags -- list
+AWS_PROFILE=franck npm run flags -- list
 # expect: "Waiting for a decision: 0" (or each flagged participant's nickname, message and the guardrail's reason)
 ```
 
 A flagged message (e.g. "an app that tells people which medicine to take") shows `"status":"flagged"`;
-`npm run flags -- approve <nickname>` lets it through to the AI, `npm run flags -- reject <nickname>`
+`AWS_PROFILE=franck npm run flags -- approve <nickname>` lets it through to the AI, `AWS_PROFILE=franck npm run flags -- reject <nickname>`
 declines it politely; either way the participant can write again.
 
 On a failure, the log groups `ssd-workshop-api-conversation` and `ssd-workshop-api-ai-worker` have one
@@ -481,16 +483,17 @@ flowchart LR
 
 Nothing sends to the deploy queue until ticket 2.8. To publish an app by hand, create a public repository
 `ssd-workshop-apps/ssd-<nickname>` from `templates/basic/`, create a build item and send one message (FIFO: message
-group = lower-cased nickname, deduplication id = build id):
+group = lower-cased nickname, deduplication id = build id), with Franck's credentials (a session may neither write
+nor read table items, nor send to the deploy queue):
 
 ```sh
-aws dynamodb put-item --region eu-central-1 --table-name ssd-workshop-data \
+AWS_PROFILE=franck aws dynamodb put-item --region eu-central-1 --table-name ssd-workshop-data \
   --item '{"pk":{"S":"BUILD#manual-1"},"sk":{"S":"BUILD"},"type":{"S":"build"},"buildId":{"S":"manual-1"},"nickname":{"S":"<nickname>"},"status":{"S":"building"},"updatedAt":{"S":"2026-11-24T00:00:00Z"}}'
-aws sqs send-message --region eu-central-1 \
+AWS_PROFILE=franck aws sqs send-message --region eu-central-1 \
   --queue-url https://sqs.eu-central-1.amazonaws.com/<account>/ssd-workshop-deploys.fifo \
   --message-group-id <nickname, lower-cased> --message-deduplication-id manual-1 \
   --message-body '{"buildId":"manual-1","nickname":"<nickname>","commit":"<40-hex commit>"}'
-aws dynamodb get-item --region eu-central-1 --table-name ssd-workshop-data \
+AWS_PROFILE=franck aws dynamodb get-item --region eu-central-1 --table-name ssd-workshop-data \
   --key '{"pk":{"S":"BUILD#manual-1"},"sk":{"S":"BUILD"}}' --query 'Item.[status.S, deployedCommit.S, failureReasons]'
 # expect within a minute: ["live", "<commit>", null]; the log group ssd-workshop-apps-deployer has one line
 #         {"event":"deployer","outcome":"live","files":N,"bytes":N,"removed":0,"durationMs":N}
@@ -527,17 +530,18 @@ curl -sS -i https://workshop.rankly.games/apps/<nickname>/missing.js | sed -n '1
 # expect: HTTP/2 404
 ```
 
-Only the deployer writes app files (criterion 4, bucket policy `OnlyTheDeployerWritesApps`). With the Claude user's
-(or the deploy role's) credentials:
+Only the deployer writes app files (criterion 4, bucket policy `OnlyTheDeployerWritesApps`). With credentials that may
+otherwise write the bucket (Franck's, or the deploy role's):
 
 ```sh
 echo x > /tmp/x.txt
-aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
+AWS_PROFILE=franck aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
 # expect: An error occurred (AccessDenied) when calling the PutObject operation ... with an explicit deny in a resource-based policy
 ```
 
-The refusal names the deny `OnlyTheDeployerWritesApps`, so the `aws:PrincipalArn` form used by the deny is checked
-from both sides: the Claude user is refused, and the first successful deploy (the deployer's puts pass) proves that
+(From a Claude session the same command is refused earlier since ticket 2.12, "because no identity-based policy allows
+the s3:PutObject action": the user has no write at all.) The refusal names the deny `OnlyTheDeployerWritesApps`, so
+the `aws:PrincipalArn` form used by the deny is checked from both sides: other principals are refused, and the first successful deploy (the deployer's puts pass) proves that
 `aws:PrincipalArn` matches the deployer's role (the policy names it with and without its path). If the first deploy
 fails with `AccessDenied` on `PutObject` "with an explicit deny in a resource-based policy", the key carries a form
 that neither ARN matches: look up `userIdentity.sessionContext.sessionIssuer.arn` in CloudTrail and fix
@@ -671,12 +675,12 @@ pinned properties in CDK then needs Franck (the synth test pins them so that nev
 ## Start a participant's conversation over
 
 For tests and dry runs, with Franck's own AWS credentials (it reads and deletes items of one participant
-in `ssd-workshop-data`):
+in `ssd-workshop-data`, which Claude sessions may not):
 
 ```sh
-npm run conversation -- reset <nickname>
+AWS_PROFILE=franck npm run conversation -- reset <nickname>
 # expect: "<nickname> is at step ..., with N messages and replies and M spec versions." and "Nothing changed. ..."
-npm run conversation -- reset <nickname> --yes
+AWS_PROFILE=franck npm run conversation -- reset <nickname> --yes
 # expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify). AI usage totals kept."
 ```
 
@@ -772,3 +776,54 @@ on the same repository `ssd-<nickname>`.
      --query 'taskDefinition.containerDefinitions[0].[environment,secrets]'
    # expect: [null, null] (or [[], []])
    ```
+
+## After applying ticket 2.12's access stack: Claude sessions read-only
+
+Since ticket 2.12 the user `ssd-workshop-claude` carries only `ssd-workshop-deploy-read` and `ssd-workshop-session`
+(`infra/access/README.md`): reads of the workshop's own resources, Bedrock and test emails, no deploy rights and no
+table items. Only deploys from `main` change live apps; Franck's commands (`builds`, `conversation`, `flags`,
+`allowlist`, the GitHub secret) run as `AWS_PROFILE=franck` and are unaffected.
+
+```mermaid
+flowchart LR
+  S([Claude session]) -->|smoke bedrock, evals| B[Bedrock]
+  S -->|describe-stacks, logs tail,<br/>describe-table| R[workshop resources: read]
+  S -.->|update-function, s3 cp,<br/>scan, put-item| X[refused:<br/>no identity-based policy allows]
+  M([merge to main]) -->|deploy role| L[live apps]
+```
+
+From a Claude session, after Franck applied the stack:
+
+```sh
+npm run smoke -- bedrock
+# expect: the model's short answer, as before
+aws cloudformation describe-stacks --region eu-central-1 --stack-name ssd-workshop-api --query 'Stacks[0].StackStatus'
+# expect: "UPDATE_COMPLETE" (or another *_COMPLETE status)
+aws logs tail ssd-workshop-api-health --region eu-central-1 --since 1h
+# expect: log lines (or nothing if the function was not called), no AccessDenied
+aws lambda update-function-configuration --region eu-central-1 --function-name ssd-workshop-api-health --description x
+# expect: AccessDeniedException ... because no identity-based policy allows the lambda:UpdateFunctionConfiguration action
+echo x > /tmp/x.txt
+aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
+# expect: AccessDenied ... because no identity-based policy allows the s3:PutObject action
+aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
+# expect: AccessDeniedException ... because no identity-based policy allows the dynamodb:Scan action
+```
+
+The log group `ssd-workshop-api-health` (named like its function) is an example: any `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` or
+`/ecs/ssd-workshop-*` group works. Franck can also check the user's rights without a session (expect `implicitDeny`
+for the three writes and `allowed` for the read):
+
+```sh
+AWS_PROFILE=franck aws iam simulate-principal-policy \
+  --policy-source-arn arn:aws:iam::<account>:user/ssd-workshop-claude \
+  --action-names lambda:UpdateFunctionConfiguration s3:PutObject dynamodb:Scan cloudformation:DescribeStacks \
+  --resource-arns arn:aws:lambda:eu-central-1:<account>:function:ssd-workshop-api-health \
+    arn:aws:s3:::ssd-workshop-apps-<account>/apps/x.txt arn:aws:dynamodb:eu-central-1:<account>:table/ssd-workshop-data \
+    'arn:aws:cloudformation:eu-central-1:<account>:stack/ssd-workshop-api/*' \
+  --query 'EvaluationResults[].[EvalActionName,EvalResourceName,EvalDecision]' --output text
+# expect: implicitDeny for each write on every resource; allowed for cloudformation:DescribeStacks on the stack only
+```
+
+`cdk diff` from a session cannot create a change set (a write): it falls back to a template diff, or run it with
+`--method template`.

@@ -190,6 +190,21 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the page is shown at 375 px THEN nothing scrolls sideways and the QR code fits the screen
 - WHEN a participant reloads at step 4 THEN they land on step 4 again
 
+### 2.12 Access stack: Claude sessions read-only (Franck applies)
+
+Franck's follow-up to 2.9 (decision "(2.9) Sessions and live apps"): the Claude user `ssd-workshop-claude` loses the deploy policies and keeps `ssd-workshop-deploy-read` (its reads and the 2.6/2.9 session denies) plus a new policy `ssd-workshop-session` with reads of the workshop's own resources, Bedrock and test emails, so only deploys from `main` change live apps. Bedrock and SES move from `ssd-workshop-deploy-edge` to the session policy; the deploy role keeps its four policies. Live commands in `infra/README.md` that write or read table items run as `AWS_PROFILE=franck`.
+
+Depends on: 2.9 merged; Franck applies the access stack after the merge. Areas: infra (access), docs.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN the access template is read THEN the Claude user carries only `ssd-workshop-deploy-read` and `ssd-workshop-session`, and the deploy role exactly its four deploy policies (tests "attaches only ssd-workshop-deploy-read and ssd-workshop-session to the Claude user, never a deploy write policy" and "attaches exactly the four deploy policies to the deploy role (ticket 2.12)")
+- WHEN any Allow in the Claude user's policies is classified THEN it is a read, or Bedrock invoke, SES send from the workshop sender or a log read or query on workshop log groups, and adding `s3:PutObject` to the session policy fails the test (test "allows the Claude user only reads, Bedrock invoke, SES send from the workshop sender and log queries")
+- WHEN the Claude user's rights are listed THEN no DynamoDB item or stream read, SQS receive, secret value or SSM parameter read is among them, and the session reads name only workshop resources (tests "grants the Claude user no table item, stream record, queue message, secret value or parameter read" and "limits the session reads to workshop names")
+- WHEN the managed policies are sized THEN all six are under 6,144 characters, and `ProtectAccessIdentities` names all six (tests "keeps each managed policy under IAM's 6,144-character limit" and "names all six managed policies in ProtectAccessIdentities")
+- WHEN `cfn-lint --regions eu-central-1 -- infra/access/access-stack.yaml` runs THEN it reports nothing (command)
+- WHEN Franck has applied the stack THEN from a session `npm run smoke -- bedrock` answers and a write such as `aws s3 cp` to the apps bucket is refused with "no identity-based policy allows" (live check "After applying ticket 2.12's access stack" in `infra/README.md`; pending until Franck applies)
+
 ## Questions for Franck
 
 1. **(Answered: yes.) New paid services:** ECS Fargate (about $0.01 per 10-minute build), ECR (about $0.10 a month), Secrets Manager ($0.40 a month for one secret) and a public IPv4 address per running build task ($0.005 an hour). At rest under $1 a month more; Bedrock for builds about $0.50 to $2 each, so phase 2's tests and evals about $20 to $50. No NAT gateway. Suggested: yes.
