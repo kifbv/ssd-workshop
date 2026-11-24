@@ -671,10 +671,21 @@ function fakeSpecApi(step = "spec", specs: string[] = [SPEC_1]) {
       if (version !== spec.versions.length) return { status: 409, body: { reason: "stale", message: "There is a newer version of your spec. Please have a look at it, then approve it." } };
       spec.approved = version;
       base.state.step = "approved";
-      return { status: 200, body: { step: "approved", version } };
+      // Ticket 2.7: the readiness request becomes the message in flight.
+      const id = `m${base.state.nextId++}`;
+      base.state.messages.push({ id, author: "participant", text: "I approve my spec. Please check that it is ready to build.", status: "pending", step: "approved" });
+      base.state.pendingId = id;
+      return { status: 200, body: { step: "approved", version, id } };
     },
   };
-  return { ...base, spec, handlers, answer };
+  /** The readiness check's outcome (ticket 2.7): a pass moves to building, a fail back to step 2 with the reasons. */
+  const check = (reply: string, passed: boolean) => {
+    base.answer(reply);
+    must(base.state.messages.at(-1)).step = "approved";
+    base.state.step = passed ? "building" : "spec";
+    if (!passed) spec.approved = undefined;
+  };
+  return { ...base, spec, handlers, answer, check };
 }
 
 /** Each bubble's words, without the "See version n" button a reply that saved a version carries. */
@@ -859,18 +870,54 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
     await expect.poll(() => page.locator("#spec-approved").isVisible()).toBe(true);
     expect(calls.find((c) => c.path === "/api/conversation/spec/approve")).toMatchObject({ method: "POST", contentType: "application/json", body: { version: 2 } });
     expect(await page.locator("#spec-approved").textContent()).toContain("Next comes the build");
+    // Ticket 2.7: the readiness check runs, and the page says so.
+    expect(await page.locator("#spec-approved").textContent()).toContain("checks that your spec is ready to build");
+    expect(await page.locator("#spec-approved").textContent()).not.toContain("facilitator");
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    expect(await page.locator("#spec-typing-text").textContent()).toBe("The AI is checking your spec…");
     await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2 (approved)");
     expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
     expect(await page.locator("#spec-approve").isVisible()).toBe(false);
     expect(await page.locator("#spec-doc").isVisible()).toBe(true);
     await expectNoSideScroll();
 
-    // A reload (step approved) shows the same.
+    // A reload (step approved, the check still running) shows the same.
     await page.reload();
     await expect.poll(() => page.locator("#spec-approved").isVisible()).toBe(true);
     await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 2 (approved)");
     expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
-  }, 30_000);
+    expect(await page.locator("#spec-approve").isVisible()).toBe(false);
+
+    // The check passes: the page picks it up by its polling and says the build is starting.
+    api.check("Your spec is ready to build. The build is starting now: the AI turns your spec into your app.", true);
+    await expect.poll(() => page.locator("#spec-approved").textContent(), { timeout: 10_000 }).toBe(
+      "Your spec is ready and the build is starting: the AI now turns your spec into your app.",
+    );
+    expect(await specBubbles()).toContain("Your spec is ready to build. The build is starting now: the AI turns your spec into your app.");
+    expect(await page.locator("#spec-typing").isVisible()).toBe(false);
+    expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
+    expect(await page.locator("#spec-approve").isVisible()).toBe(false);
+    await expectNoSideScroll();
+  }, 40_000);
+
+  it("WHEN the readiness check fails THEN its reasons show in the conversation as text and Approve spec is offered again (ticket 2.7)", async () => {
+    const api = fakeSpecApi("spec", [SPEC_1]);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 1");
+    await page.getByRole("button", { name: "Approve spec" }).click();
+    await expect.poll(() => page.locator("#spec-typing").isVisible()).toBe(true);
+    const reasons = "Your spec is not ready to build yet:\n- Your spec needs a <b>login</b> for each runner.\nAsk me to change the spec (or answer the open question), then press Approve spec again.";
+    api.check(reasons, false);
+    await expect.poll(() => page.locator("#spec-approve").isVisible(), { timeout: 10_000 }).toBe(true);
+    // Shown as text: the markup-looking part is not markup.
+    expect(await page.locator("#spec-chat b").count()).toBe(0);
+    await expect.poll(async () => (await specBubbles()).some((b) => b.includes("needs a <b>login</b> for each runner"))).toBe(true);
+    expect(await page.locator("#spec-approved").isVisible()).toBe(false);
+    expect(await page.locator("#spec-chat-form").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#spec-version").textContent()).toBe("Version 1");
+    expect(await page.locator("#approve-spec-button").isDisabled()).toBe(false);
+  }, 40_000);
 
   it("WHEN a diagram cannot be drawn THEN the page says so and keeps it readable as text", async () => {
     const broken = SPEC_1.replace("home[Home] -->|add a run| add[Add a run]", "home[Home (main)] -->|add a run| add[Add a run");

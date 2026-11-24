@@ -10,7 +10,8 @@ export const USAGE = `Usage: npm run conversation -- reset <nickname> [--yes]
 
   reset <nickname>         show what a reset would delete; changes nothing
   reset <nickname> --yes   delete the participant's messages, the AI's replies and every spec version,
-                           and send them back to step 1 (Clarify); their AI usage totals are kept
+                           and send them back to step 1 (Clarify); their AI usage totals and any build
+                           record are kept
 
 Runs with your own AWS credentials (AWS_PROFILE).`;
 
@@ -44,7 +45,12 @@ export interface ConversationDeps {
   err: (line: string) => void;
 }
 
-const STEP_NAMES: Record<string, string> = { clarify: "step 1 (Clarify)", spec: "step 2 (Spec)", approved: "step 2 (Spec, approved)" };
+const STEP_NAMES: Record<string, string> = {
+  clarify: "step 1 (Clarify)",
+  spec: "step 2 (Spec)",
+  approved: "step 2 (Spec, approved)",
+  building: "step 3 (Build)",
+};
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 async function reset(command: ResetCommand, deps: ConversationDeps, store: ResetStore): Promise<number> {
@@ -81,6 +87,9 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
   }
   await store.deleteItems(participantId, [...items.messages, ...items.specs]);
   deps.out(`Reset ${nickname}: deleted ${found}; back at step 1 (Clarify). AI usage totals kept.`);
+  // Ticket 2.7: the build record is not the conversation's; it stays (the launcher acts on it only while it is
+  // queued). The next approved spec makes a new build, and the repository is reused (ticket 2.6).
+  if (step === "building") deps.out(`${nickname}'s earlier build stays on record; a new approved spec starts a new build.`);
   deps.out(`${nickname} sees an empty conversation after reloading the page.`);
   return 0;
 }
