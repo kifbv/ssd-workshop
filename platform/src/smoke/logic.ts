@@ -1,6 +1,7 @@
 // Pure logic of the smoke checks: no AWS calls here, so every rule is unit tested.
 import { isValidEmail } from "../../api/email.js";
-import { MODEL_ID } from "../../api/settings.js";
+import type { AppInfo, Installation } from "../../api/github/app.js";
+import { GITHUB_SECRET_NAME, MODEL_ID } from "../../api/settings.js";
 
 export const REGION = "eu-central-1";
 export const SENDER = "ssd-workshop@rankly.games";
@@ -20,16 +21,20 @@ Commands:
   quota            print the model's tokens-per-minute and requests-per-minute quotas in ${REGION}
   ses <address>    send a test email from ${SENDER} to <address>
   signin <address> ask the live site for a sign-in code for <address> (POST ${SIGN_IN_CODE_URL})
+  github           read the secret ${GITHUB_SECRET_NAME} and report the GitHub App, the account it is installed on
+                   and its rights (prints no token or key)
 
 Environment:
   SMOKE_MODEL_ID   inference profile to use (default ${DEFAULT_MODEL_ID}); must start with eu.anthropic.
 
 Keep the -s: without it npm echoes the command line, recipient address included.
-signin needs no AWS credentials; the code email arrives only if <address> is on the allow-list.`;
+signin needs no AWS credentials; the code email arrives only if <address> is on the allow-list.
+github needs AWS credentials that may read the secret (Franck's) and a direct connection to api.github.com.`;
 
 export type SmokeCommand =
   | { command: "bedrock" }
   | { command: "quota" }
+  | { command: "github" }
   | { command: "ses"; address: string }
   | { command: "signin"; address: string };
 
@@ -38,6 +43,7 @@ export function parseArgs(args: readonly string[]): SmokeCommand | { error: stri
   switch (command) {
     case "bedrock":
     case "quota":
+    case "github":
       return rest.length === 0 ? { command } : { error: `${command} takes no arguments` };
     case "ses": {
       const [address, ...extra] = rest;
@@ -227,5 +233,23 @@ export function formatSignInResult(address: string, status: number, body: string
     `Asked ${SIGN_IN_CODE_URL} for a code for ${maskEmail(address)}`,
     `Status: ${status}`,
     `Answer: ${redactError(answer.slice(0, 500)) || "(empty)"}`,
+  ].join("\n");
+}
+
+/**
+ * What `smoke github` prints (ticket 2.6): the app, the account its installation reaches, which repositories and
+ * which rights. Built only from these fields, so no token, JWT or key can reach the output.
+ */
+export function formatGitHubReport(app: AppInfo, installation: Installation): string {
+  const permissions = Object.entries(installation.permissions)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, level]) => `${name}: ${level}`)
+    .join(", ");
+  return [
+    `Secret:        ${GITHUB_SECRET_NAME} (${REGION})`,
+    `GitHub App:    ${app.name} (${app.slug}), owned by ${app.owner}`,
+    `Installed on:  ${installation.account} (${installation.accountType}), installation ${installation.id}`,
+    `Repositories:  ${installation.repositorySelection === "all" ? "all repositories of the account" : installation.repositorySelection}`,
+    `Rights:        ${permissions || "(none)"}`,
   ].join("\n");
 }

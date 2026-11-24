@@ -80,6 +80,8 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `WorkshopData` | Lambda, ECS and EC2 roles read and write only `ssd-workshop-*` tables, queues, secrets and parameters, and the log groups `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` and `/ecs/ssd-workshop-*`. |
+| `NoDeployAssetWrites` | Deny every workload role everything but reads on the CDK assets bucket and its objects (Lambda code and templates, written only by deploys): a role a session creates could otherwise plant the launcher's next code, or open the bucket to anyone with a bucket policy (ticket 2.6). |
+| `GitHubKeyForTheLauncherOnly` | Deny `GetSecretValue` on the GitHub App's key (`secret:ssd-workshop-github-*`, ticket 2.6) to every workload role but `ssd-workshop-builds-launcher` (with and without its path), whatever the role's own policy says: no other role, created by a session or a deploy, can read the key. |
 | `WorkshopBuckets` | `ssd-workshop-*` buckets, only in this account (`aws:ResourceAccount`: bucket names are global, so someone else could own a bucket with a matching name). |
 | `Bedrock` | The platform calls Claude on Bedrock (Anthropic models and `eu.anthropic.*` inference profiles only). |
 | `SendCodes` | Sign-in codes go out by SES, only through the identities `ssd-workshop@rankly.games` and `rankly.games` (SES authorizes the domain identity when the address itself is not verified) and only from `ssd-workshop@rankly.games` (`ses:FromAddress`), naming the configuration set `ssd-workshop-email` (created by this stack) so SES never falls back to the domain's default set `rankly-dev`. |
@@ -187,6 +189,8 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `ReadsWithoutSecrets` | Account-wide reads that CDK or Claude need and whose answers hold no secrets: stack list, template validation, EC2 and ECS listings, certificates, hosted zone list, Bedrock models and inference profiles, service quotas, the SES send quota and identities, bucket names, a random password (`secretsmanager:GetRandomPassword`, which CloudFormation calls to fill a new secret such as `ssd-workshop-github`; no resource scope, and it reads nothing), log group names, costs. |
+| `NoLauncherForSessions` | For the Claude user only (`aws:PrincipalArn`): deny everything but reads on the build launcher's role (`ssd-workshop-builds-launcher`, both ARN forms) and function (with versions and aliases; invoking included), and on the CDK assets bucket and its objects, so a session can never reach the GitHub App's key through the one role allowed to read it (ticket 2.6, Franck's choice: block sessions, trust deploys from `main`). |
+| `NoGitHubKey` | Deny every Secrets Manager action on the GitHub App's private key (`secret:ssd-workshop-github-*`, ticket 2.6) except creating, describing, tagging and reading its policy or version ids (a `NotAction` list, so new actions are denied too): only Franck loads it and only the build launcher (2.9) reads it. CloudFormation still creates the secret; any later change of it (settings or tags: CloudFormation's update handler reads the value) and drift detection on it go through Franck. In this policy because `ssd-workshop-deploy` is too close to its size limit. |
 | `WorkshopZoneReads` | The rankly.games zone and its records. |
 | `WorkshopIamReads` | Read roles and instance profiles on `/ssd-workshop/` and `ssd-workshop-*` policies (not `GetAccountAuthorizationDetails` or other projects' roles). |
 | `WorkshopApiReads` | Read APIs tagged with the project (other APIs' stage variables and configuration stay hidden). |

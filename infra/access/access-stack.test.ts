@@ -4,7 +4,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parse, type Scalar, type ScalarTag, type CollectionTag, type YAMLSeq } from "yaml";
-import { ACCOUNT, BUILD_LAUNCHER_ROLE_ARN, BUILDS_SUBNET_IDS, REGION } from "../lib/config.js";
+import { ACCOUNT, ASSETS_BUCKET_NAME, BUILD_LAUNCHER_ROLE_ARN, BUILDS_SUBNET_IDS, REGION } from "../lib/config.js";
 
 // CloudFormation short-form intrinsics, turned into their long form ({ "Fn::Sub": ... }).
 function scalarIntrinsic(tag: string, key: string, split = false): ScalarTag {
@@ -1310,5 +1310,133 @@ describe("policy sizes", () => {
     const sizes = Object.fromEntries(ALL_POLICIES.map((id) => [id, policySize(template, id)]));
     console.log(`policy sizes (limit 6144): ${JSON.stringify(sizes)}`);
     expect(Object.keys(sizes)).toHaveLength(5);
+  });
+});
+
+describe("access stack: the GitHub App's key (ticket 2.6)", () => {
+  const deploy = deployStatements(template);
+  const boundary = boundaryStatements(template);
+  const SECRET = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-github-AbCdEf`;
+  const OTHER = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-other-AbCdEf`;
+  const LAUNCHER_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-builds-launcher`;
+  // Every Secrets Manager action, per servicereference secretsmanager.json v1.5
+  // (servicereference.us-east-1.amazonaws.com/v1/secretsmanager/secretsmanager.json), read 2026-11-24.
+  const SECRETSMANAGER_ACTIONS = [
+    "AcceptCrossAccountReplication", "AssociateCrossAccountReplica", "BatchGetSecretValue", "CancelRotateSecret",
+    "CreateSecret", "DeleteResourcePolicy", "DeleteSecret", "DescribeSecret", "DisassociateCrossAccountReplica",
+    "GetRandomPassword", "GetResourcePolicy", "GetSecretValue", "ListResourcePolicies", "ListSecretVersionIds",
+    "ListSecrets", "PutResourcePolicy", "PutSecretValue", "RemoveRegionsFromReplication", "ReplicateSecretToRegions",
+    "RestoreSecret", "RotateSecret", "StopReplicationToReplica", "TagResource", "UntagResource", "UpdateSecret",
+    "UpdateSecretVersionStage", "ValidateResourcePolicy",
+  ].map((a) => `secretsmanager:${a}`);
+  // What CloudFormation needs to create, describe and tag the secret, plus reads that hold no value.
+  // GetRandomPassword and ListSecrets name no secret, so a deny on the secret never reaches them.
+  const STILL_ALLOWED = [
+    "CreateSecret", "DescribeSecret", "TagResource", "UntagResource", "GetResourcePolicy", "ListSecretVersionIds",
+    "ValidateResourcePolicy",
+  ].map((a) => `secretsmanager:${a}`);
+  const NO_RESOURCE = ["secretsmanager:GetRandomPassword", "secretsmanager:ListSecrets"];
+
+  it("denies the deploy principals every other action on the key, new AWS actions included", () => {
+    const deny = deploy.find((s) => s.Sid === "NoGitHubKey");
+    expect(deny?.Effect).toBe("Deny");
+    expect(deny?.Action, "a NotAction list, so actions AWS adds later are denied too").toBeUndefined();
+    for (const action of SECRETSMANAGER_ACTIONS.filter((a) => !STILL_ALLOWED.includes(a) && !NO_RESOURCE.includes(a))) {
+      expect(statementApplies(deny as Statement, action, SECRET, {}), action).toBe(true);
+      expect(allowedBy(deploy, action, SECRET), action).toBe(false);
+    }
+    expect(statementApplies(deny as Statement, "secretsmanager:SomeFutureAction", SECRET, {})).toBe(true);
+    // Without the deny they could (secretsmanager:* on ssd-workshop-*).
+    const old = deploy.filter((s) => s.Sid !== "NoGitHubKey");
+    expect(allowedBy(old, "secretsmanager:GetSecretValue", SECRET)).toBe(true);
+  });
+
+  it("still lets CloudFormation create, describe and tag it, and leaves other workshop secrets as they were", () => {
+    for (const action of ["secretsmanager:CreateSecret", "secretsmanager:DescribeSecret", "secretsmanager:TagResource"]) {
+      expect(allowedBy(deploy, action, SECRET), action).toBe(true);
+    }
+    expect(allowedBy(deploy, "secretsmanager:GetSecretValue", OTHER)).toBe(true);
+  });
+
+  it("lets no workload role read the key but the build launcher (with or without its path)", () => {
+    const read = "secretsmanager:GetSecretValue";
+    expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(false);
+    expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": BUILD_LAUNCHER_ROLE_ARN })).toBe(true);
+    expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": LAUNCHER_WITHOUT_PATH })).toBe(true);
+    expect(allowedBy(boundary, read, OTHER, { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
+    const old = boundary.filter((s) => s.Sid !== "GitHubKeyForTheLauncherOnly");
+    expect(allowedBy(old, read, SECRET, { "aws:PrincipalArn": WORKLOAD_ROLE })).toBe(true);
+  });
+
+  describe("Claude sessions cannot reach the key through the launcher (Franck, 2026-11-24)", () => {
+    // Request context the allows check (the test reads a `!Ref X` value as "Ref:X"): the account of the resource
+    // (S3), the boundary named on a role write and the service a role is passed to.
+    const REQUEST = { "aws:ResourceAccount": "Ref:AWS::AccountId", "iam:PermissionsBoundary": "Ref:BoundaryPolicy", "iam:PassedToService": "lambda.amazonaws.com" };
+    const CLAUDE = { ...REQUEST, "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:user/ssd-workshop-claude` };
+    const DEPLOY = { ...REQUEST, "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-deploy` };
+    const ROLES = [BUILD_LAUNCHER_ROLE_ARN, `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-builds-launcher`];
+    const FUNCTIONS = [
+      `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-builds-launcher`,
+      `arn:aws:lambda:${REGION}:${ACCOUNT}:function:ssd-workshop-builds-launcher:live`,
+    ];
+    const ASSET = `arn:aws:s3:::${ASSETS_BUCKET_NAME}/abc123.zip`;
+    const ROLE_WRITES = [
+      "iam:CreateRole", "iam:PassRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:AttachRolePolicy",
+      "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:UpdateRole", "iam:TagRole", "iam:DeleteRole",
+    ];
+    const FUNCTION_WRITES = [
+      "lambda:CreateFunction", "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration", "lambda:PublishVersion",
+      "lambda:CreateAlias", "lambda:UpdateAlias", "lambda:DeleteFunction",
+    ];
+
+    it("denies the Claude user creating, passing or changing the launcher's role (both ARN forms)", () => {
+      for (const role of ROLES) {
+        for (const action of ROLE_WRITES) expect(allowedBy(deploy, action, role, CLAUDE), `${action} ${role}`).toBe(false);
+        expect(allowedBy(deploy, "iam:GetRole", role, CLAUDE)).toBe(true);
+      }
+    });
+
+    it("denies the Claude user changing or invoking the launcher's function, but not reading it", () => {
+      for (const fn of FUNCTIONS) {
+        for (const action of FUNCTION_WRITES) expect(allowedBy(deploy, action, fn, CLAUDE), `${action} ${fn}`).toBe(false);
+      }
+      expect(allowedBy(deploy, "lambda:GetFunction", FUNCTIONS[0] ?? "", CLAUDE)).toBe(true);
+      // Invoking runs the key holder's code on input a session chose: denied too.
+      expect(allowedBy(deploy, "lambda:InvokeFunction", FUNCTIONS[0] ?? "", CLAUDE)).toBe(false);
+    });
+
+    it("denies the Claude user writing deploy assets or the assets bucket's settings (a planted asset would become the launcher's code)", () => {
+      for (const action of ["s3:PutObject", "s3:DeleteObject"]) expect(allowedBy(deploy, action, ASSET, CLAUDE), action).toBe(false);
+      expect(allowedBy(deploy, "s3:GetObject", ASSET, CLAUDE)).toBe(true);
+      for (const action of ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "s3:PutBucketVersioning"]) {
+        expect(allowedBy(deploy, action, `arn:aws:s3:::${ASSETS_BUCKET_NAME}`, CLAUDE), action).toBe(false);
+      }
+    });
+
+    it("denies every workload role writing deploy assets (a role a session creates could plant one otherwise)", () => {
+      const role = { ...REQUEST, "aws:PrincipalArn": WORKLOAD_ROLE };
+      for (const action of ["s3:PutObject", "s3:DeleteObject", "s3:PutObjectAcl"]) expect(allowedBy(boundary, action, ASSET, role), action).toBe(false);
+      expect(allowedBy(boundary, "s3:GetObject", ASSET, role)).toBe(true);
+      // Nor its settings (a bucket policy could open object writes to anyone).
+      const bucket = `arn:aws:s3:::${ASSETS_BUCKET_NAME}`;
+      for (const action of ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "s3:PutBucketVersioning", "s3:PutLifecycleConfiguration", "s3:DeleteBucket"]) {
+        expect(allowedBy(boundary, action, bucket, role), action).toBe(false);
+      }
+      for (const action of ["s3:GetBucketLocation", "s3:ListBucket"]) expect(allowedBy(boundary, action, bucket, role), action).toBe(true);
+      expect(allowedBy(boundary, "s3:PutObject", `arn:aws:s3:::ssd-workshop-apps-${ACCOUNT}/apps/x/index.html`, role)).toBe(true);
+    });
+
+    it("names exactly the launcher's role from config (both forms)", () => {
+      const deny = deploy.find((s) => s.Sid === "NoLauncherForSessions");
+      const resources = list(deny?.Resource).map(live);
+      for (const role of ROLES) expect(resources).toContain(role);
+      expect(ROLES[0]).toBe(BUILD_LAUNCHER_ROLE_ARN);
+    });
+
+    it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {
+      for (const action of ["iam:CreateRole", "iam:PassRole", "iam:PutRolePolicy"]) expect(allowedBy(deploy, action, BUILD_LAUNCHER_ROLE_ARN, DEPLOY), action).toBe(true);
+      for (const action of ["lambda:CreateFunction", "lambda:UpdateFunctionCode"]) expect(allowedBy(deploy, action, FUNCTIONS[0] ?? "", DEPLOY), action).toBe(true);
+      expect(allowedBy(deploy, "s3:PutObject", ASSET, DEPLOY)).toBe(true);
+    });
   });
 });

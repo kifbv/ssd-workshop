@@ -73,6 +73,7 @@ import {
   BUILDS_VPC_NAME,
   BUILDER_IMAGES_KEPT,
   BUILDER_REPOSITORY_NAME,
+  GITHUB_SECRET_NAME,
   TABLE_NAME,
 } from "./config.js";
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
@@ -92,6 +93,7 @@ import {
   DEPLOY_MAX_RECEIVES as PLATFORM_DEPLOY_MAX_RECEIVES,
   DEPLOY_QUEUE_NAME as PLATFORM_DEPLOY_QUEUE_NAME,
   DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
+  GITHUB_SECRET_NAME as PLATFORM_GITHUB_SECRET_NAME,
 } from "../../platform/api/settings.js";
 
 interface Resource {
@@ -125,6 +127,7 @@ const MUST_BE_TAGGED = [
   "AWS::ECS::Cluster",
   "AWS::ECR::Repository",
   "AWS::CloudFront::Function",
+  "AWS::SecretsManager::Secret",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -1765,6 +1768,61 @@ describe("builds stack: network, cluster and image repository (ticket 2.1)", () 
     expect(policy.rules[0]?.selection).toMatchObject({ tagStatus: "any", countType: "imageCountMoreThan", countNumber: 5 });
     expect(policy.rules[0]?.action).toEqual({ type: "expire" });
     expect(BUILDER_IMAGES_KEPT).toBe(5);
+  });
+});
+
+describe("builds stack: the GitHub App's secret (ticket 2.6)", () => {
+  const secrets = () => ofType("AWS::SecretsManager::Secret");
+  /** Actions that read a secret's value (BatchGetSecretValue takes Resource "*" and is checked per secret). */
+  const SECRET_READS = ["secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue"];
+
+  it("creates exactly one secret, ssd-workshop-github, in the builds stack, retained and tagged, its value left to Franck", () => {
+    expect(secrets()).toHaveLength(1);
+    const [s, id, secret] = secrets()[0] as [string, string, Resource];
+    expect(s, id).toBe(STACK_NAMES.builds);
+    expect(GITHUB_SECRET_NAME).toBe("ssd-workshop-github");
+    expect(PLATFORM_GITHUB_SECRET_NAME).toBe(GITHUB_SECRET_NAME);
+    expect(secret).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+    expect(tagsOf(secret).project).toBe("ssd-workshop");
+    // Pinned whole: a change to these properties is an update of the secret, which must be deliberate (decision 2.6).
+    expect(secret.Properties).toEqual({
+      Name: GITHUB_SECRET_NAME,
+      Description: "SSD Workshop GitHub App credentials {appId, privateKey}; Franck loads the value (infra/README.md)",
+      GenerateSecretString: {},
+      Tags: [{ Key: "project", Value: "ssd-workshop" }],
+    });
+  });
+
+  it("has no resource policy, no rotation and no other secret resource anywhere", () => {
+    for (const type of ["AWS::SecretsManager::ResourcePolicy", "AWS::SecretsManager::RotationSchedule", "AWS::SecretsManager::SecretTargetAttachment"]) {
+      expect(ofType(type), type).toEqual([]);
+    }
+  });
+
+  it("no IAM policy in any stack may read the secret yet (ticket 2.9 adds the build launcher as the one reader)", () => {
+    const secretIds = secrets().map(([, id]) => id);
+    const secretArn = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:${GITHUB_SECRET_NAME}-AbCdEf`;
+    const reachesSecret = (resource: unknown): boolean => resourceReaches(resource, [secretArn], secretIds, [GITHUB_SECRET_NAME]);
+    for (const pattern of ["*", "arn:aws:secretsmanager:*", "arn:aws:secretsmanager:*:*:secret:ssd-*", `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-github-??????`]) {
+      expect(reachesSecret(pattern), pattern).toBe(true);
+    }
+    expect(reachesSecret(`arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-other-*`)).toBe(false);
+    expect(actionCovers("secretsmanager:Get*", "secretsmanager:GetSecretValue")).toBe(true);
+    let policies = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      policies += 1;
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        assertNoExclusions(`${s}/${id}`, st);
+        if (st.Effect !== "Allow") continue;
+        if (!([st.Action].flat() as string[]).some((g) => SECRET_READS.some((action) => actionCovers(g, action)))) continue;
+        for (const resource of [st.Resource].flat()) expect(reachesSecret(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
+      }
+    }
+    expect(policies).toBeGreaterThan(5);
+    // No role's inline policies either (CDK puts grants in AWS::IAM::Policy, but a raw role could carry them).
+    for (const [s, id, role] of ofType("AWS::IAM::Role")) {
+      expect(JSON.stringify(role.Properties?.Policies ?? []), `${s}/${id}`).not.toContain("secretsmanager");
+    }
   });
 });
 

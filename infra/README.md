@@ -606,6 +606,68 @@ repository `ssd-workshop-builder` stays: delete it before the retry, or the crea
 Build tasks must always name the `ssd-workshop-builds` security group in `RunTask`: without it, ECS
 uses the VPC's default group (all traffic out), and IAM cannot require the group (ticket 2.8 tests it).
 
+## GitHub App secret (ticket 2.6)
+
+```mermaid
+flowchart LR
+  franck["Franck's machine<br/>app id + .pem key"] -->|put-secret-value| secret[("Secret ssd-workshop-github<br/>builds stack, eu-central-1")]
+  secret -->|read by the launcher, from 2.9| platform["Platform<br/>signs the app's JWT"]
+  platform -->|create ssd-nickname,<br/>first commit| org["GitHub organization<br/>ssd-workshop-apps"]
+  platform -->|one-hour token,<br/>one repository, contents write| builder["Builder task (2.8)"]
+  builder -->|commits| org
+```
+
+The deploy creates the secret `ssd-workshop-github` with a random placeholder; nothing reads it until 2.9.
+
+**Order: the key goes in last.** The access stack's `NoGitHubKey` deny (in `ssd-workshop-deploy-read`, ticket 2.6)
+keeps the deploy role and the Claude user from doing anything with `secret:ssd-workshop-github-*` but creating,
+describing and tagging it, and the boundary's `GitHubKeyForTheLauncherOnly` lets no workload role but the build
+launcher read it, `NoLauncherForSessions` keeps Claude sessions from creating, passing, changing or invoking that
+launcher's role and function or touching deploy assets, and the boundary's `NoDeployAssetWrites` keeps workload roles from
+changing the assets bucket or its objects; without them they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
+after these steps, in this order:
+
+1. The pull request is merged and the builds stack is deployed (the secret exists, holding CDK's placeholder).
+   The deploy creates the secret whether or not the deny is applied (creating and describing it stay allowed).
+2. Franck applies `infra/access/access-stack.yaml` from `main` (the four denies).
+3. Franck loads the GitHub App's id and key with the command below, from his own machine.
+
+Until step 3 the secret holds only the placeholder: `smoke github` and the repository code fail with "The
+GitHub secret is not loaded yet", no repository is created and no token is minted, and nothing in GitHub can
+be reached through the platform. Build launches (2.9) need the key, so step 3 must be done before 2.9 goes live.
+Check after step 2 and before step 3 only (from a session, while the secret still holds the placeholder):
+`aws secretsmanager get-secret-value --region eu-central-1 --secret-id ssd-workshop-github` with the Claude user
+answers `AccessDenied` "with an explicit deny". Never run it once the key is loaded.
+
+Franck loads the GitHub App's id (on the app's settings page, "App ID", a number) and its private key (the
+`.pem` file GitHub downloaded), from his own machine:
+
+```sh
+aws secretsmanager put-secret-value --profile franck --region eu-central-1 --secret-id ssd-workshop-github \
+  --secret-string "$(jq -n --arg appId '<APP_ID>' --rawfile privateKey <path/to/key.pem> '{appId: $appId, privateKey: $privateKey}')"
+# expect: JSON with "Name": "ssd-workshop-github" and a new VersionId (no secret value is printed)
+AWS_PROFILE=franck npm run -s smoke -- github
+# expect (no token, JWT or key printed):
+#   Secret:        ssd-workshop-github (eu-central-1)
+#   GitHub App:    <app name> (ssd-workshop-gh-app), owned by <owner>
+#   Installed on:  ssd-workshop-apps (Organization), installation <id>
+#   Repositories:  all repositories of the account
+#   Rights:        administration: write, contents: write, metadata: read
+```
+
+`jq --rawfile` (jq 1.6 or later) keeps the key's line breaks. The key appears for a moment in the
+`aws` command's arguments on Franck's machine; to avoid that, write the JSON to a file only he can read
+and pass `--secret-string file://<file>`, then delete the file. "The GitHub secret is not loaded yet" means
+the value is still the placeholder or not that JSON; "is not installed on the organization" means the app
+must be installed on `ssd-workshop-apps`. The app needs Administration and Contents read and write (it
+creates repositories and writes commits); more rights than these show in `Rights` and can be removed in
+the app's settings. Rotating the key: generate a new one in the app's settings, load it with the same
+command, run the smoke check, then delete the old key in GitHub.
+
+After the deny, only Franck can read or change the value (and, from 2.9, the build launcher can read it; the
+builder task never can). The deny also blocks `UpdateSecret` for the deploy role, so a change of the secret's
+pinned properties in CDK then needs Franck (the synth test pins them so that never happens by accident).
+
 ## Start a participant's conversation over
 
 For tests and dry runs, with Franck's own AWS credentials (it reads and deletes items of one participant

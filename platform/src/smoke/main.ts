@@ -1,5 +1,5 @@
 // `npm run -s smoke -- <command>`: proves the account can reach Bedrock, read its quotas and send email,
-// and that the live site sends sign-in codes.
+// that the live site sends sign-in codes, and which GitHub account the platform's GitHub App reaches (ticket 2.6).
 // The AWS calls stay thin; the rules live in ./logic.ts.
 // Always run it with `-s`: without it npm echoes the command line, so `ses <address>` or `signin <address>` would print the
 // recipient address. The root script calls this workspace with `-s` already; the outer `-s` is on you.
@@ -12,8 +12,11 @@ import {
   paginateListServiceQuotas,
   type ServiceQuota,
 } from "@aws-sdk/client-service-quotas";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { appJwt, findInstallation, getApp, parseGitHubSecret, type GitHubDeps } from "../../api/github/app.js";
+import { GITHUB_SECRET_NAME } from "../../api/settings.js";
 import {
   CONFIGURATION_SET,
   REGION,
@@ -22,6 +25,7 @@ import {
   buildSignInRequest,
   buildTestEmail,
   findModelQuotas,
+  formatGitHubReport,
   formatSignInResult,
   formatLatency,
   formatQuotaLine,
@@ -119,6 +123,21 @@ async function smokeSignIn(address: string): Promise<boolean> {
   return response.status === 202;
 }
 
+// Reads the GitHub App's secret with the caller's AWS credentials (Franck's), signs the app's JWT and asks GitHub
+// which account the app is installed on and with which rights. It mints no installation token, and prints only
+// the report's fields: never the secret, the key or the JWT. Node's fetch does not use HTTPS_PROXY: run it from
+// your own machine.
+async function smokeGitHub(): Promise<void> {
+  const client = new SecretsManagerClient(clientConfig);
+  const secret = await client.send(new GetSecretValueCommand({ SecretId: GITHUB_SECRET_NAME }));
+  const credentials = parseGitHubSecret(secret.SecretString);
+  const deps: GitHubDeps = { fetch: (url, init) => fetch(url, init), now: () => new Date(), log: () => undefined };
+  const jwt = appJwt(credentials, deps.now());
+  const app = await getApp(deps, jwt);
+  const installation = await findInstallation(deps, jwt);
+  console.log(formatGitHubReport(app, installation));
+}
+
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -134,6 +153,9 @@ async function main(): Promise<number> {
       break;
     case "ses":
       await smokeSes(parsed.address);
+      break;
+    case "github":
+      await smokeGitHub();
       break;
     case "signin":
       return (await smokeSignIn(parsed.address)) ? 0 : 1;
