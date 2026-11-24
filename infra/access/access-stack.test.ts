@@ -1736,7 +1736,7 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
 // Ticket 2.9 follow-up: the deploy workflow logs in to ECR Public before building the builder image (anonymous pulls
 // from GitHub's runners got 429). Actions and condition key from the Service Authorization Reference
 // (servicereference.us-east-1.amazonaws.com/v1/ecr-public/ecr-public.json and sts.json, read 2026-11-24): neither action
-// takes a resource, and sts:GetServiceBearerToken carries sts:AWSServiceName.
+// takes a resource. The bearer token has no sts:AWSServiceName condition: with one, the live login was denied.
 describe("access stack: ECR Public login for the deploy workflow (ticket 2.9 follow-up)", () => {
   const deploy = deployStatements(template);
   const boundary = boundaryStatements(template);
@@ -1748,11 +1748,8 @@ describe("access stack: ECR Public login for the deploy workflow (ticket 2.9 fol
     expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", { ...DEPLOY_ROLE, ...ECR_PUBLIC })).toBe(true);
   });
 
-  it("limits the bearer token to ECR Public and grants nothing else in ECR Public", () => {
-    for (const service of ["codeartifact.amazonaws.com", "ecr.amazonaws.com"]) {
-      expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", { ...DEPLOY_ROLE, "sts:AWSServiceName": service }), service).toBe(false);
-    }
-    expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", DEPLOY_ROLE)).toBe(false);
+  it("grants the bearer token without a service condition (the live login carried none that matched) and nothing else in ECR Public", () => {
+    expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", DEPLOY_ROLE)).toBe(true);
     for (const action of ["ecr-public:PutImage", "ecr-public:CreateRepository", "ecr-public:InitiateLayerUpload"]) {
       expect(allowedBy(deploy, action, `arn:aws:ecr-public::${ACCOUNT}:repository/ssd-workshop-x`, DEPLOY_ROLE), action).toBe(false);
     }

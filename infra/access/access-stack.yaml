@@ -667,12 +667,12 @@ Resources:
             Effect: Allow
             Action: ecr-public:GetAuthorizationToken
             Resource: "*"
+          # No sts:AWSServiceName condition: the ECR Public login's own call did not match one (denied live,
+          # 2026-11-24). A bearer token alone grants nothing; each service still checks its own rights.
           - Sid: EcrPublicBearerToken
             Effect: Allow
             Action: sts:GetServiceBearerToken
             Resource: "*"
-            Condition:
-              StringEquals: {sts:AWSServiceName: ecr-public.amazonaws.com}
           # Session denies on the builds cluster's tasks (ticket 2.9; moved from -deploy-read for its size): a
           # task's override holds its build's GitHub token.
           - Sid: NoBuildTasksForSessions
