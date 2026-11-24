@@ -4,16 +4,25 @@
  * (`ANTHROPIC_BEDROCK_BASE_URL`, with `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`), so the agent's process holds no AWS
  * credential at all (decision "Spec delta, CHANGED ... Builder": the AI that writes code has no AWS rights).
  *
- * It forwards only `POST /model/<url-encoded build model id>/invoke` and `.../invoke-with-response-stream` (no query)
- * to the Bedrock runtime in eu-central-1, signed (SigV4, service `bedrock`) with the runner's own credentials (the
- * task role, or the caller's for the eval), and streams the answer back. Anything else (another model, path or
- * method, a body over MAX_BODY_BYTES) gets 403 (or 413) and never leaves the machine. Only `content-type` and
- * `accept` are passed on from the request; the agent's own headers (an `authorization` included) are dropped.
+ * It forwards only `POST /<prefix>/model/<url-encoded build model id>/invoke` and `.../invoke-with-response-stream` (no
+ * query) to the Bedrock runtime in eu-central-1 (without the prefix), signed (SigV4, service `bedrock`) with the
+ * runner's own credentials (the task role, or the caller's for the eval), and streams the answer back. Anything else
+ * (another model, path or method, a body over MAX_BODY_BYTES) gets 403 (or 413) and never leaves the machine.
  *
- * Logs (optional): the method, the path's shape (`/model/<build>/invoke`, `/model/<other>/...`, or the first segment
- * only), the outcome and the status; never a header, body or credential.
+ * Try 3, mainly for the eval on a developer machine, where any browser page could POST to 127.0.0.1: the proxy also
+ * refuses (403) a request whose `Host` is not exactly `127.0.0.1:<port>` (DNS rebinding), one with an `Origin` header
+ * (browsers send it on cross-origin POSTs), a `content-type` other than exactly `application/json` (a page can send
+ * `text/plain` without a preflight), an `accept` other than `application/json` or `application/vnd.amazon.eventstream`
+ * (absent is fine: Bedrock's default), and a path without the run's 128-bit random prefix (`<prefix>`, only in the
+ * agent's `ANTHROPIC_BEDROCK_BASE_URL`, never logged). At most MAX_IN_FLIGHT requests are forwarded at once (429
+ * above). Upstream it sends `content-type: application/json` (a constant) and the accepted `accept`; the agent's other
+ * headers (an `authorization` included) are dropped. A Bedrock answer other than 2xx keeps its status, but its body and
+ * headers are replaced by a fixed JSON message, so no ARN or account id reaches the agent.
+ *
+ * Logs (optional): the method, the path's shape (`/model/<build>/invoke`, `/model/<other>/...`, or a known first segment
+ * only), the outcome and the status; never a header, body, credential or the prefix.
  */
-import { createHash, createHmac, type Hash, type Hmac } from "node:crypto";
+import { createHash, createHmac, randomBytes, type Hash, type Hmac } from "node:crypto";
 import { createServer, request as httpRequest, type Agent as HttpAgent, type IncomingMessage, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { AddressInfo } from "node:net";
@@ -34,7 +43,7 @@ export interface BedrockProxyLogEntry {
   method: string;
   /** The path's shape: never a value the agent chose beyond a fixed segment name. */
   shape: string;
-  outcome: "forwarded" | "refused" | "upstream-error";
+  outcome: "forwarded" | "refused" | "busy" | "upstream-error";
   status: number;
 }
 
@@ -51,7 +60,7 @@ export interface BedrockProxyOptions {
 }
 
 export interface BedrockProxy {
-  /** `http://127.0.0.1:<port>`, the agent's `ANTHROPIC_BEDROCK_BASE_URL`. */
+  /** `http://127.0.0.1:<port>/<prefix>`, the agent's `ANTHROPIC_BEDROCK_BASE_URL` (the prefix is the run's secret). */
   url: string;
   close(): Promise<void>;
 }
@@ -61,6 +70,18 @@ export const BEDROCK_RUNTIME_URL = `https://bedrock-runtime.${REGION}.amazonaws.
 /** A Claude request with the whole app in context stays far below this; Bedrock's own limit is 20 MB. */
 export const MAX_BODY_BYTES = 20 * 1024 * 1024;
 
+/** At most this many requests are forwarded at once (Claude Code runs one turn at a time, plus a few side calls). */
+export const MAX_IN_FLIGHT = 4;
+
+/** The body that replaces a Bedrock answer other than 2xx (its own may name the role ARN and the account). */
+export const UPSTREAM_ERROR_MESSAGE = "Bedrock refused or could not answer the request.";
+
+/** The only `content-type` the proxy accepts, and the one it sends upstream. */
+const JSON_TYPE = "application/json";
+
+/** The `accept` values the proxy passes on (none is fine too). */
+const ACCEPTED = new Set([JSON_TYPE, "application/vnd.amazon.eventstream"]);
+
 /** The Bedrock runtime operations the agent may use (InvokeModel, InvokeModelWithResponseStream). */
 export const ALLOWED_OPERATIONS = ["invoke", "invoke-with-response-stream"] as const;
 
@@ -69,13 +90,23 @@ export function allowedPaths(modelId: string): string[] {
   return ALLOWED_OPERATIONS.map((operation) => `/model/${encodeURIComponent(modelId)}/${operation}`);
 }
 
-/** The shape of a request path for the logs: the build model or `<other>`, and the operation; never more. */
+/** Bedrock runtime operations and first path segments the logs may name; anything else is `<op>` or `<other>`. */
+const KNOWN_OPERATIONS = new Set(["invoke", "invoke-with-response-stream", "converse", "converse-stream", "count-tokens"]);
+const KNOWN_SEGMENTS = new Set(["model", "inference-profiles", "foundation-models", "guardrail", "async-invoke", "latest"]);
+
+/**
+ * The shape of a request path (without the run's prefix) for the logs: the build model or `<other>`, and a known
+ * operation; otherwise a known first segment. Never a text the agent chose, so never the prefix either.
+ */
 export function pathShape(url: string, modelId: string): string {
   const path = url.split("?")[0] ?? "";
-  const match = /^\/model\/([^/]*)\/([a-z-]{1,40})$/.exec(path);
-  if (match) return `/model/${match[1] === encodeURIComponent(modelId) ? "<build>" : "<other>"}/${match[2]}${url.includes("?") ? "?<query>" : ""}`;
+  const match = /^\/model\/([^/]*)\/([^/]*)$/.exec(path);
+  if (match) {
+    const operation = KNOWN_OPERATIONS.has(match[2] ?? "") ? match[2] : "<op>";
+    return `/model/${match[1] === encodeURIComponent(modelId) ? "<build>" : "<other>"}/${operation}${url.includes("?") ? "?<query>" : ""}`;
+  }
   const first = /^\/([a-z-]{1,40})(\/|$)/.exec(path);
-  return first ? `/${first[1]}${first[2] === "/" ? "/..." : ""}` : "<other>";
+  return first && KNOWN_SEGMENTS.has(first[1] ?? "") ? `/${first[1]}${first[2] === "/" ? "/..." : ""}` : "<other>";
 }
 
 type SourceData = string | ArrayBuffer | ArrayBufferView;
@@ -127,8 +158,9 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "proxy-connection", "upgrade", "trailer", "te"]);
 
 function refuse(response: ServerResponse, status: number): void {
-  response.writeHead(status, { "content-type": "application/json" });
-  const message = status === 413 ? "Request too large." : status === 502 ? "Bedrock could not be reached." : "Only the build model can be called.";
+  response.writeHead(status, { "content-type": JSON_TYPE });
+  const message =
+    status === 413 ? "Request too large." : status === 502 ? "Bedrock could not be reached." : status === 429 ? "Too many requests at once." : "Only the build model can be called.";
   response.end(JSON.stringify({ message }));
 }
 
@@ -136,20 +168,43 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
   const upstream = new URL(options.upstream ?? BEDROCK_RUNTIME_URL);
   const secure = upstream.protocol === "https:";
   const host = upstream.host;
+  // The run's secret path prefix: 128 random bits, in the agent's base URL only.
+  const prefix = `/${randomBytes(16).toString("hex")}`;
   const allowed = new Set(allowedPaths(options.modelId));
+  let expectedHost = "";
+  let inFlight = 0;
   const signer = new SignatureV4({ service: "bedrock", region: options.region ?? REGION, credentials: options.credentials, sha256: NodeSha256 });
-  const log = (method: string, url: string, outcome: BedrockProxyLogEntry["outcome"], status: number): void =>
-    options.log?.({ event: "bedrock-proxy", method, shape: pathShape(url, options.modelId), outcome, status });
+  /** The path without the run's prefix, or undefined when it does not start with exactly `<prefix>/`. */
+  const unprefixed = (url: string): string | undefined => (url.startsWith(`${prefix}/`) ? url.slice(prefix.length) : undefined);
+  const log = (method: string, url: string, outcome: BedrockProxyLogEntry["outcome"], status: number): void => {
+    const path = unprefixed(url);
+    options.log?.({ event: "bedrock-proxy", method, shape: path === undefined ? "<other>" : pathShape(path, options.modelId), outcome, status });
+  };
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const method = request.method ?? "";
     const url = request.url ?? "";
-    if (method !== "POST" || !allowed.has(url)) {
+    const path = unprefixed(url);
+    const type = request.headers["content-type"];
+    const accept = request.headers.accept;
+    const fromHere = request.headers.host === expectedHost && request.headers.origin === undefined;
+    const typed = type === JSON_TYPE && (accept === undefined || ACCEPTED.has(accept));
+    if (method !== "POST" || path === undefined || !allowed.has(path) || !fromHere || !typed) {
       request.resume();
       log(method, url, "refused", 403);
       refuse(response, 403);
       return;
     }
+    if (inFlight >= MAX_IN_FLIGHT) {
+      request.resume();
+      log(method, url, "busy", 429);
+      refuse(response, 429);
+      return;
+    }
+    inFlight += 1;
+    response.once("close", () => {
+      inFlight -= 1;
+    });
     let body: Buffer;
     try {
       body = await readBody(request);
@@ -160,14 +215,14 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
       request.resume();
       return;
     }
-    const headers: Record<string, string> = { host, "content-type": String(request.headers["content-type"] ?? "application/json") };
-    if (typeof request.headers.accept === "string") headers.accept = request.headers.accept;
+    const headers: Record<string, string> = { host, "content-type": JSON_TYPE };
+    if (accept !== undefined) headers.accept = accept;
     const signed = await signer.sign({
       method: "POST",
       protocol: upstream.protocol,
       hostname: upstream.hostname,
       ...(upstream.port === "" ? {} : { port: Number(upstream.port) }),
-      path: url,
+      path,
       query: {},
       headers,
       body,
@@ -178,7 +233,7 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
       protocol: upstream.protocol,
       hostname: upstream.hostname,
       port: upstream.port === "" ? undefined : Number(upstream.port),
-      path: url,
+      path,
       headers: { ...(signed.headers as Record<string, string>), "content-length": String(body.length) },
       ...(options.agent === undefined ? {} : { agent: options.agent }),
     });
@@ -187,12 +242,21 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
       if (!response.writableFinished) outbound.destroy();
     });
     outbound.on("response", (answer) => {
+      const status = answer.statusCode ?? 502;
+      if (status < 200 || status > 299) {
+        // Bedrock's own error text may name the role ARN and the account: only the status goes on.
+        answer.resume();
+        log(method, url, "forwarded", status);
+        response.writeHead(status, { "content-type": JSON_TYPE });
+        response.end(JSON.stringify({ message: UPSTREAM_ERROR_MESSAGE }));
+        return;
+      }
       const forwarded: Record<string, string | string[]> = {};
       for (const [name, value] of Object.entries(answer.headers)) {
         if (value !== undefined && !HOP_BY_HOP.has(name.toLowerCase())) forwarded[name] = value;
       }
-      log(method, url, "forwarded", answer.statusCode ?? 502);
-      response.writeHead(answer.statusCode ?? 502, forwarded);
+      log(method, url, "forwarded", status);
+      response.writeHead(status, forwarded);
       answer.pipe(response);
       answer.on("error", () => response.destroy());
     });
@@ -204,7 +268,8 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
     outbound.end(body);
   };
 
-  const server = createServer((request, response) => {
+  // Host is checked by the proxy itself (403), so a request without one is refused the same way.
+  const server = createServer({ requireHostHeader: false }, (request, response) => {
     handle(request, response).catch(() => {
       log(request.method ?? "", request.url ?? "", "upstream-error", 502);
       if (!response.headersSent) refuse(response, 502);
@@ -216,8 +281,9 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
     server.listen(0, "127.0.0.1", () => resolve());
   });
   const { port } = server.address() as AddressInfo;
+  expectedHost = `127.0.0.1:${port}`;
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://127.0.0.1:${port}${prefix}`,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());

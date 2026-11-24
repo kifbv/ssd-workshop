@@ -1,10 +1,21 @@
 // Ticket 2.8, try 2: the agent's Bedrock proxy forwards only the build model's two invoke calls, signed with the
 // runner's credentials; everything else is refused on the machine. A local fake stands in for the Bedrock runtime.
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { MAX_BODY_BYTES, NodeSha256, allowedPaths, pathShape, startBedrockProxy, type BedrockProxy, type BedrockProxyLogEntry } from "./bedrock-proxy.js";
+import { settle } from "../api/sign-in/fakes.js";
+import {
+  MAX_BODY_BYTES,
+  MAX_IN_FLIGHT,
+  NodeSha256,
+  UPSTREAM_ERROR_MESSAGE,
+  allowedPaths,
+  pathShape,
+  startBedrockProxy,
+  type BedrockProxy,
+  type BedrockProxyLogEntry,
+} from "./bedrock-proxy.js";
 
 const MODEL = "eu.anthropic.claude-sonnet-4-6";
 const CREDENTIALS = { accessKeyId: "AKIDTESTPROXY", secretAccessKey: "secret-test-key", sessionToken: "session-test-token" };
@@ -19,6 +30,10 @@ interface Seen {
 let upstream: Server;
 let upstreamUrl: string;
 const seen: Seen[] = [];
+/** How the fake Bedrock answers: a 200 stream, an error naming the account (as Bedrock's do), or held until released. */
+let mode: "stream" | "error" | "hold" = "stream";
+const held: ServerResponse[] = [];
+const ERROR_BODY = JSON.stringify({ message: "User: arn:aws:sts::123456789012:assumed-role/ssd-workshop-builder/x is not authorized" });
 
 beforeAll(async () => {
   upstream = createServer((request, response) => {
@@ -26,6 +41,15 @@ beforeAll(async () => {
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       seen.push({ method: request.method ?? "", url: request.url ?? "", headers: request.headers, body: Buffer.concat(chunks).toString() });
+      if (mode === "error") {
+        response.writeHead(403, { "content-type": "application/json", "x-amzn-errortype": "AccessDeniedException:arn:aws:iam::123456789012:x" });
+        response.end(ERROR_BODY);
+        return;
+      }
+      if (mode === "hold") {
+        held.push(response);
+        return;
+      }
       // Streams its answer in two parts, as invoke-with-response-stream does.
       response.writeHead(200, { "content-type": "application/vnd.amazon.eventstream", "x-amzn-requestid": "req-1" });
       response.write("part-1;");
@@ -41,6 +65,8 @@ afterAll(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
 const proxies: BedrockProxy[] = [];
 afterEach(async () => {
   seen.length = 0;
+  mode = "stream";
+  for (const response of held.splice(0)) response.end();
   await Promise.all(proxies.splice(0).map((proxy) => proxy.close()));
 });
 
@@ -51,11 +77,32 @@ async function start(logs: BedrockProxyLogEntry[] = []): Promise<BedrockProxy> {
 }
 
 const BODY = JSON.stringify({ anthropic_version: "bedrock-2023-05-31", max_tokens: 10, messages: [{ role: "user", content: "hi" }] });
+// fetch sends `accept: */*` unless told otherwise, which the proxy refuses.
+const JSON_TYPE = { "content-type": "application/json", accept: "application/json" };
+
+/** One request with exactly these headers (fetch would set Host itself and refuse some names). */
+function raw(url: string, method: string, headers: Record<string, string>, body?: string): Promise<{ status: number; headers: IncomingMessage["headers"]; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const outbound = httpRequest({ method, hostname: target.hostname, port: target.port, path: `${target.pathname}${target.search}`, headers, setHost: false }, (answer) => {
+      const chunks: Buffer[] = [];
+      answer.on("data", (chunk: Buffer) => chunks.push(chunk));
+      answer.on("end", () => resolve({ status: answer.statusCode ?? 0, headers: answer.headers, body: Buffer.concat(chunks).toString() }));
+    });
+    outbound.on("error", reject);
+    outbound.end(body);
+  });
+}
+
+const hostOf = (proxy: BedrockProxy): string => new URL(proxy.url).host;
+const prefixOf = (proxy: BedrockProxy): string => new URL(proxy.url).pathname;
 
 describe("the Bedrock proxy (finding 1: the agent holds no AWS credential)", () => {
-  it("listens on 127.0.0.1 only, on a port of its own", async () => {
+  it("listens on 127.0.0.1 only, on a port of its own, under a 128-bit random path prefix of its own (try 3)", async () => {
     const proxy = await start();
-    expect(proxy.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    const other = await start();
+    expect(proxy.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{32}$/);
+    expect(prefixOf(other)).not.toBe(prefixOf(proxy));
   });
 
   it("forwards POST invoke and invoke-with-response-stream of the build model, signed with the runner's credentials, and streams the answer back", async () => {
@@ -123,7 +170,7 @@ describe("the Bedrock proxy (finding 1: the agent holds no AWS credential)", () 
       ["GET", "/latest/meta-data/iam/security-credentials/"],
     ];
     for (const [method, path] of refused) {
-      const answer = await fetch(`${proxy.url}${path}`, { method, ...(method === "GET" ? {} : { body: BODY }) });
+      const answer = await fetch(`${proxy.url}${path}`, { method, ...(method === "GET" ? {} : { headers: JSON_TYPE, body: BODY }) });
       expect(answer.status, `${method} ${path}`).toBe(403);
       await answer.text();
     }
@@ -136,7 +183,7 @@ describe("the Bedrock proxy (finding 1: the agent holds no AWS credential)", () 
 
   it("refuses a body over the limit with 413", async () => {
     const proxy = await start();
-    const answer = await fetch(`${proxy.url}${allowedPaths(MODEL)[0]}`, { method: "POST", body: "x".repeat(MAX_BODY_BYTES + 1) });
+    const answer = await fetch(`${proxy.url}${allowedPaths(MODEL)[0]}`, { method: "POST", headers: JSON_TYPE, body: "x".repeat(MAX_BODY_BYTES + 1) });
     expect(answer.status).toBe(413);
     expect(seen).toEqual([]);
   });
@@ -144,14 +191,14 @@ describe("the Bedrock proxy (finding 1: the agent holds no AWS credential)", () 
   it("answers 502 when Bedrock cannot be reached", async () => {
     const proxy = await startBedrockProxy({ modelId: MODEL, credentials: async () => CREDENTIALS, upstream: "http://127.0.0.1:1" });
     proxies.push(proxy);
-    const answer = await fetch(`${proxy.url}${allowedPaths(MODEL)[0]}`, { method: "POST", body: BODY });
+    const answer = await fetch(`${proxy.url}${allowedPaths(MODEL)[0]}`, { method: "POST", headers: JSON_TYPE, body: BODY });
     expect(answer.status).toBe(502);
   });
 
   it("stops listening when closed", async () => {
     const proxy = await startBedrockProxy({ modelId: MODEL, credentials: async () => CREDENTIALS, upstream: upstreamUrl });
     await proxy.close();
-    await expect(fetch(`${proxy.url}${allowedPaths(MODEL)[0]}`, { method: "POST", body: BODY })).rejects.toThrow();
+    await expect(fetch(`${proxy.url}${allowedPaths(MODEL)[0]}`, { method: "POST", headers: JSON_TYPE, body: BODY })).rejects.toThrow();
   });
 
   it("logs a path's shape only", () => {
@@ -160,5 +207,111 @@ describe("the Bedrock proxy (finding 1: the agent holds no AWS credential)", () 
     expect(pathShape(`/model/${MODEL}/invoke?a=b`, MODEL)).toBe("/model/<build>/invoke?<query>");
     expect(pathShape("/guardrail/some-id/version/1", MODEL)).toBe("/guardrail/...");
     expect(pathShape("http://x/y", MODEL)).toBe("<other>");
+  });
+});
+
+describe("the Bedrock proxy refuses what a browser page or a guess could send (try 3)", () => {
+  const invoke = (proxy: BedrockProxy): string => `${proxy.url}${allowedPaths(MODEL)[1]}`;
+
+  it("forwards only a content-type of exactly application/json, and sends that constant upstream", async () => {
+    const logs: BedrockProxyLogEntry[] = [];
+    const proxy = await start(logs);
+    for (const type of ["text/plain", "text/plain;charset=UTF-8", "application/json; charset=utf-8", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "Application/JSON", ""]) {
+      const answer = await raw(invoke(proxy), "POST", { host: hostOf(proxy), ...(type === "" ? {} : { "content-type": type }) }, BODY);
+      expect(answer.status, type).toBe(403);
+    }
+    expect(seen).toEqual([]);
+    const ok = await raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json" }, BODY);
+    expect(ok.status).toBe(200);
+    expect(seen.map((request) => request.headers["content-type"])).toEqual(["application/json"]);
+  });
+
+  it("forwards accept only when it is application/json or application/vnd.amazon.eventstream, or absent (Bedrock's default)", async () => {
+    const proxy = await start();
+    for (const accept of ["text/html", "*/*", "application/json, text/plain", "application/vnd.amazon.eventstream; q=1"]) {
+      const answer = await raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json", accept }, BODY);
+      expect(answer.status, accept).toBe(403);
+    }
+    expect(seen).toEqual([]);
+    for (const accept of ["application/json", "application/vnd.amazon.eventstream", undefined]) {
+      const answer = await raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json", ...(accept === undefined ? {} : { accept }) }, BODY);
+      expect(answer.status, String(accept)).toBe(200);
+    }
+    expect(seen.map((request) => request.headers.accept)).toEqual(["application/json", "application/vnd.amazon.eventstream", undefined]);
+  });
+
+  it("refuses a Host other than exactly 127.0.0.1:<port> (DNS rebinding), and any Origin header", async () => {
+    const proxy = await start();
+    const port = new URL(proxy.url).port;
+    for (const host of [`localhost:${port}`, "127.0.0.1", `127.0.0.1:${Number(port) + 1}`, `evil.example:${port}`, `[::1]:${port}`, `127.0.0.1:${port}.evil.example`, ""]) {
+      const answer = await raw(invoke(proxy), "POST", { ...(host === "" ? {} : { host }), "content-type": "application/json" }, BODY);
+      expect(answer.status, host).toBe(403);
+    }
+    for (const origin of ["null", "https://evil.example", `http://127.0.0.1:${port}`]) {
+      const answer = await raw(invoke(proxy), "POST", { host: hostOf(proxy), origin, "content-type": "application/json" }, BODY);
+      expect(answer.status, origin).toBe(403);
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("refuses a missing or wrong path prefix, and never logs the prefix", async () => {
+    const logs: BedrockProxyLogEntry[] = [];
+    const proxy = await start(logs);
+    const origin = new URL(proxy.url).origin;
+    const prefix = prefixOf(proxy);
+    const wrong = [
+      `${origin}${allowedPaths(MODEL)[1]}`,
+      `${origin}/${"0".repeat(32)}${allowedPaths(MODEL)[1]}`,
+      `${origin}${prefix.toUpperCase()}${allowedPaths(MODEL)[1]}`,
+      `${origin}${prefix}x${allowedPaths(MODEL)[1]}`,
+      `${origin}${prefix.slice(0, -1)}${allowedPaths(MODEL)[1]}`,
+      `${origin}/x${prefix}${allowedPaths(MODEL)[1]}`,
+      `${origin}${prefix}${prefix}${allowedPaths(MODEL)[1]}`,
+    ];
+    for (const url of wrong) {
+      const answer = await raw(url, "POST", { host: hostOf(proxy), "content-type": "application/json" }, BODY);
+      expect(answer.status, url).toBe(403);
+    }
+    expect(seen).toEqual([]);
+    const ok = await raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json" }, BODY);
+    expect(ok.status).toBe(200);
+    // Upstream gets the Bedrock path without the prefix.
+    expect(seen.map((request) => request.url)).toEqual([allowedPaths(MODEL)[1]]);
+    expect(logs.length).toBe(wrong.length + 1);
+    expect(JSON.stringify(logs)).not.toContain(prefix.slice(1));
+    expect(JSON.stringify(logs)).not.toContain(prefix.slice(1, 9));
+  });
+
+  it("keeps the status of a Bedrock error but replaces its body and headers with a fixed message (no ARN or account id)", async () => {
+    mode = "error";
+    const proxy = await start();
+    const answer = await raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json" }, BODY);
+    expect(seen).toHaveLength(1);
+    expect(answer.status).toBe(403);
+    expect(JSON.parse(answer.body)).toEqual({ message: UPSTREAM_ERROR_MESSAGE });
+    expect(answer.body).not.toContain("arn:");
+    expect(answer.body).not.toContain("123456789012");
+    expect(JSON.stringify(answer.headers)).not.toContain("123456789012");
+    expect(answer.headers["x-amzn-errortype"]).toBeUndefined();
+  });
+
+  it(`forwards at most ${MAX_IN_FLIGHT} requests at once and answers 429 above that`, async () => {
+    expect(MAX_IN_FLIGHT).toBe(4);
+    mode = "hold";
+    const proxy = await start();
+    const send = () => raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json" }, BODY);
+    const first = Array.from({ length: MAX_IN_FLIGHT }, () => send());
+    await settle(() => held.length === MAX_IN_FLIGHT);
+    const fifth = await send();
+    expect(fifth.status).toBe(429);
+    expect(seen).toHaveLength(MAX_IN_FLIGHT);
+    for (const response of held.splice(0)) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    }
+    expect((await Promise.all(first)).map((answer) => answer.status)).toEqual(Array.from({ length: MAX_IN_FLIGHT }, () => 200));
+    // Once they are done, a new request goes through again.
+    mode = "stream";
+    expect((await send()).status).toBe(200);
   });
 });
