@@ -12,7 +12,7 @@ afterEach(() => {
 function deps(download: () => Promise<Uint8Array>) {
   const records = new FakeDeployRecords();
   records.builds.set("b1", { nickname: "Ada", pushedCommit: COMMIT, status: "building" });
-  return { records, deps: { compare: async () => "identical", download, objects: new FakeAppObjects(), cdn: new FakeCdn(), records, now: () => new Date(), log: logEntry } };
+  return { records, deps: { download, objects: new FakeAppObjects(), cdn: new FakeCdn(), records, now: () => new Date(), log: logEntry } };
 }
 
 const body = JSON.stringify({ buildId: "b1", nickname: "Ada", commit: COMMIT });

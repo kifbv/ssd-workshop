@@ -73,6 +73,12 @@ export const appRepositoryName = (nickname: string): string => `ssd-${nickname.t
 /** GitHub's tarball of a repository at one commit (public repositories, downloaded without a token). */
 export const appArchiveUrl = (nickname: string, commit: string): string =>
   `https://codeload.github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/tar.gz/${commit}`;
+/**
+ * GitHub's tarball of the app repository's `main` branch, named in full (`refs/heads/main`: a bare `main` would pick a
+ * tag of that name first). The deployer downloads this one (ticket 2.8, try 3).
+ */
+export const appMainArchiveUrl = (nickname: string): string =>
+  `https://codeload.github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/tar.gz/refs/heads/main`;
 /** The deploy queue (FIFO, one message group per app) from the builder (ticket 2.8) to the deployer. */
 export const DEPLOY_QUEUE_NAME = "ssd-workshop-deploys.fifo";
 export const DEPLOY_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${DEPLOY_QUEUE_NAME}`;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ALLOWED_EXTENSIONS } from "../build/check.js";
-import { appArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
+import { appMainArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
 import {
   CACHE_CONTROL,
   contentTypeOf,
@@ -9,8 +9,8 @@ import {
   DownloadProblem,
   MAX_REASON_CHARS,
   MAX_REASONS_CHARS,
-  NOT_ON_MAIN_REASON,
-  NOT_FOUND_REASON,
+  MAIN_MOVED_REASON,
+  NO_COMMIT_REASON,
   SERVICE_PROBLEM_REASON,
   TIME_UP_REASON,
   parseDeployJob,
@@ -21,7 +21,7 @@ import {
   type DeployLogEntry,
 } from "./deploy.js";
 import { FakeAppObjects, FakeCdn, FakeDeployRecords } from "./fakes.js";
-import { COMMIT, TOP, githubTar, gzip } from "./tar-fixtures.js";
+import { COMMIT, TOP, githubTar, githubTarAt, gzip, paxRecord } from "./tar-fixtures.js";
 
 const NOW = new Date("2026-11-24T10:00:00.000Z");
 const EARLIER = "2026-11-20T08:00:00.000Z";
@@ -36,16 +36,9 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
   records.builds.set(BUILD, { nickname: "Ada", pushedCommit: COMMIT, status: "building" });
   const downloads: string[] = [];
   const downloadTimeouts: number[] = [];
-  const compares: string[] = [];
   const logs: DeployLogEntry[] = [];
   let clock = NOW.getTime();
-  /** What GitHub's compare of main...<commit> answers (ticket 2.8, try 2); a function may throw. */
-  const github: { compare: string | (() => Promise<string>) } = { compare: "identical" };
   const deps: DeployDeps = {
-    compare: async (nickname, commit) => {
-      compares.push(`${nickname}:${commit}`);
-      return typeof github.compare === "function" ? github.compare() : github.compare;
-    },
     download: async (url, timeoutMs) => {
       downloads.push(url);
       downloadTimeouts.push(timeoutMs);
@@ -62,7 +55,7 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
     clock += ms;
   };
   const now = (): number => clock;
-  return { deps, objects, cdn, records, downloads, downloadTimeouts, compares, github, logs, advance, now };
+  return { deps, objects, cdn, records, downloads, downloadTimeouts, logs, advance, now };
 }
 
 const passing = () => gzip(githubTar({ "index.html": PAGE, "app.js": "console.log(1);\n", "css/style.css": "p { color: red; }\n", "img/Logo.PNG": new Uint8Array([137, 80, 78, 71]) }));
@@ -75,11 +68,11 @@ function seed(objects: FakeAppObjects): void {
 }
 
 describe("criterion 1: a commit that passes the check is published under apps/<nickname>/ only, and the build is live", () => {
-  it("downloads the commit's tarball from the app's public repository", async () => {
+  it("downloads the tarball of the app's public repository's own main (refs/heads/main), once", async () => {
     const t = setup(passing());
     await processDeploy(job(), 1, t.deps);
-    expect(t.downloads).toEqual([appArchiveUrl("Ada", COMMIT)]);
-    expect(t.downloads[0]).toBe(`https://codeload.github.com/ssd-workshop-apps/ssd-ada/tar.gz/${COMMIT}`);
+    expect(t.downloads).toEqual([appMainArchiveUrl("Ada")]);
+    expect(t.downloads[0]).toBe("https://codeload.github.com/ssd-workshop-apps/ssd-ada/tar.gz/refs/heads/main");
   });
 
   it("puts every file under apps/<lower-cased nickname>/ and nothing else, removes what the new version no longer has, and leaves other apps alone", async () => {
@@ -335,60 +328,86 @@ describe("deploy messages", () => {
   });
 });
 
-describe("the commit must be on the app repository's own main (ticket 2.8, try 2: the fork-network route)", () => {
-  it("asks GitHub about the message's app and commit before downloading, and publishes when main is the commit (identical) or holds it (behind)", async () => {
-    for (const status of ["identical", "behind"]) {
-      const t = setup(passing());
-      t.github.compare = status;
-      await processDeploy(job(), 1, t.deps);
-      expect(t.compares).toEqual([`Ada:${COMMIT}`]);
-      expect(t.downloads).toHaveLength(1);
-      expect(t.records.builds.get(BUILD)?.status, status).toBe("live");
-    }
+describe("only the pushed commit, as the app repository's own main, is published (ticket 2.8, try 3: the fork-network route)", () => {
+  const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
+  const FILES = { "index.html": PAGE, "app.js": "console.log(1);\n", "css/style.css": "p { color: red; }\n" };
+
+  it("publishes exactly the bytes it checked when main's archive names the message's commit (no second download)", async () => {
+    const t = setup(gzip(githubTarAt(COMMIT, FILES)));
+    await processDeploy(job(), 1, t.deps);
+    expect(t.downloads).toEqual([appMainArchiveUrl("Ada")]);
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "live", deployedCommit: COMMIT });
+    expect(new TextDecoder().decode(t.objects.objects.get("apps/ada/index.html")?.bytes)).toBe(PAGE);
+    expect(new TextDecoder().decode(t.objects.objects.get("apps/ada/app.js")?.bytes)).toBe("console.log(1);\n");
   });
 
-  it("publishes nothing and marks the build failed with a plain reason when the commit is not on main (ahead, diverged, anything else)", async () => {
-    for (const status of ["ahead", "diverged", "something-new"]) {
-      const t = setup(passing());
-      t.records.live.set("ada", { nickname: "Ada", liveAt: EARLIER });
-      t.github.compare = status;
+  it("publishes nothing while codeload serves another commit for main (main moved on, or a stale copy): retried, then failed with a plain reason", async () => {
+    const t = setup(gzip(githubTarAt(OTHER, FILES)));
+    t.records.live.set("ada", { nickname: "Ada", liveAt: EARLIER });
+    for (let receive = 1; receive < DEPLOY_MAX_RECEIVES; receive += 1) {
+      await expect(processDeploy(job(), receive, t.deps)).rejects.toThrow(/^deploy failed$/);
+      expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
+    }
+    expect(t.logs.at(-1)).toEqual({ event: "deployer", outcome: "retry", error: "DownloadProblem", durationMs: expect.any(Number) });
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.objects.removed).toEqual([]);
+    expect(t.cdn.invalidations).toEqual([]);
+    expect(t.records.live.get("ada")).toEqual({ nickname: "Ada", liveAt: EARLIER });
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [MAIN_MOVED_REASON] });
+    expect(MAIN_MOVED_REASON).toBe("The app's main branch on GitHub is not at the commit the builder pushed, so nothing was published.");
+    expect(t.logs.at(-1)).toEqual({ event: "deployer", outcome: "gave-up", error: "DownloadProblem", durationMs: expect.any(Number) });
+  });
+
+  it("goes by the first entry only: a comment in a later global header or a per-file header is ignored", async () => {
+    // main names the pushed commit first; later headers naming another do not stop it.
+    const later = [
+      { path: "pax_global_header", type: "g", data: paxRecord("comment", OTHER) },
+      { path: "PaxHeaders/x", type: "x", data: paxRecord("comment", OTHER) },
+      { path: `${TOP}/later.txt`, data: "later\n" },
+    ];
+    const ok = setup(gzip(githubTar(FILES, later)));
+    await processDeploy(job(), 1, ok.deps);
+    expect(ok.records.builds.get(BUILD)?.status).toBe("live");
+    // main names another commit first; later headers naming the pushed one do not make it publishable.
+    const pushedLater = [
+      { path: "pax_global_header", type: "g", data: paxRecord("comment", COMMIT) },
+      { path: "PaxHeaders/x", type: "x", data: paxRecord("comment", COMMIT) },
+      { path: `${TOP}/later.txt`, data: "later\n" },
+    ];
+    const moved = setup(gzip(githubTar(FILES, pushedLater, paxRecord("comment", OTHER))));
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, moved.deps);
+    expect(moved.objects.puts).toEqual([]);
+    expect(moved.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [MAIN_MOVED_REASON] });
+  });
+
+  it("fails closed, at once and publishing nothing, when the archive names no commit or a malformed one", async () => {
+    for (const records of [null, paxRecord("mtime", "1700000000"), paxRecord("comment", COMMIT.toUpperCase()), paxRecord("comment", COMMIT.slice(1)), paxRecord("comment", COMMIT) + paxRecord("comment", COMMIT)]) {
+      const t = setup(gzip(githubTar(FILES, [], records)));
       await processDeploy(job(), 1, t.deps);
-      expect(t.downloads, status).toEqual([]);
-      expect(t.objects.puts).toEqual([]);
+      expect(t.objects.puts, String(records)).toEqual([]);
       expect(t.cdn.invalidations).toEqual([]);
-      expect(t.records.live.get("ada")).toEqual({ nickname: "Ada", liveAt: EARLIER });
-      expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [NOT_ON_MAIN_REASON] });
+      expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [NO_COMMIT_REASON] });
       expect(t.logs).toEqual([{ event: "deployer", outcome: "failed", problems: 1, durationMs: expect.any(Number) }]);
     }
+    expect(NO_COMMIT_REASON).toBe("GitHub's download of the app's main branch does not name its commit, so nothing was published.");
   });
 
-  it("publishes nothing and marks the build failed when GitHub knows no such repository or commit (404)", async () => {
-    const t = setup(passing());
-    t.github.compare = "not-found";
-    await processDeploy(job(), 1, t.deps);
-    expect(t.downloads).toEqual([]);
-    expect(t.objects.puts).toEqual([]);
-    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [NOT_FOUND_REASON] });
-  });
-
-  it("a GitHub error is a passing problem: retried before the last delivery, then the build failed with its reason; nothing published", async () => {
-    const t = setup(passing());
-    t.github.compare = async () => {
-      throw new DownloadProblem("GitHub could not tell whether the commit is on the app's main branch.", true);
-    };
+  it("a 404 for main (GitHub's short-lived one right after a push) is retried, then the build failed on the last delivery; nothing published", async () => {
+    const t = setup(async () => {
+      throw new DownloadProblem("GitHub answered 404 to the download of the commit; check that the repository and the commit exist.", true);
+    });
     await expect(processDeploy(job(), 1, t.deps)).rejects.toThrow(/^deploy failed$/);
     expect(t.records.builds.get(BUILD)?.status).toBe("deploying");
-    expect(t.logs).toEqual([{ event: "deployer", outcome: "retry", error: "DownloadProblem", durationMs: expect.any(Number) }]);
     await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps);
-    expect(t.downloads).toEqual([]);
     expect(t.objects.puts).toEqual([]);
-    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: ["GitHub could not tell whether the commit is on the app's main branch."] });
+    expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [expect.stringMatching(/^GitHub answered 404/)] });
   });
 
-  it("never asks GitHub for a message the build does not expect (no claim, nothing recorded)", async () => {
+  it("never downloads for a message the build does not expect (no claim, nothing recorded)", async () => {
     const t = setup(passing());
     await processDeploy(job({ commit: "f".repeat(40) }), 1, t.deps);
-    expect(t.compares).toEqual([]);
+    expect(t.downloads).toEqual([]);
     expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", durationMs: expect.any(Number) }]);
   });
 });

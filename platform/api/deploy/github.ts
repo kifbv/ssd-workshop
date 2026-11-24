@@ -3,11 +3,10 @@
  * anonymous (ticket 2.6 may add a token). The body is read as a stream and dropped past
  * MAX_DOWNLOAD_BYTES; the whole download has a time limit.
  *
- * Before the download, the deployer asks GitHub (anonymously, the repositories are public) whether the commit is on
- * the app repository's own `main` (`compareWithMain`, ticket 2.8 try 2): GitHub serves a commit of any fork in the
- * repository's network through the parent's archive address, so the commit id alone does not prove where it is.
+ * The deployer downloads the app repository's own `main` (`appMainArchiveUrl`, ticket 2.8 try 3) with redirects
+ * refused (downloadForDeployer), and publishes it only when the archive's commit is the pushed one: GitHub serves a
+ * commit of any fork in the repository's network through the parent's address by commit id, never by branch.
  */
-import { APPS_GITHUB_OWNER, GITHUB_API_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT, appRepositoryName } from "../settings.js";
 import { DOWNLOAD_TIMEOUT_MS, DownloadProblem } from "./deploy.js";
 
 export { DOWNLOAD_TIMEOUT_MS };
@@ -25,6 +24,8 @@ export interface DownloadOptions {
   timeoutMs?: number;
   /** Stops the download when aborted (the deployer's phase deadline), like the time limit. */
   signal?: AbortSignal;
+  /** Default "follow" (the builder's clone by commit id); the deployer passes "error" (downloadForDeployer). */
+  redirect?: "follow" | "error";
 }
 
 export async function downloadArchive(url: string, options: DownloadOptions = {}): Promise<Uint8Array> {
@@ -33,7 +34,7 @@ export async function downloadArchive(url: string, options: DownloadOptions = {}
   const signal = options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]);
   let response: Response;
   try {
-    response = await fetchFn(url, { signal, redirect: "follow" });
+    response = await fetchFn(url, { signal, redirect: options.redirect ?? "follow" });
   } catch {
     throw new DownloadProblem(UNREACHABLE, true);
   }
@@ -73,44 +74,10 @@ export async function downloadArchive(url: string, options: DownloadOptions = {}
   return bytes;
 }
 
-/** GitHub's compare of the app's `main` with the commit (one commit per page: only the status is read). */
-export const compareUrl = (nickname: string, commit: string): string =>
-  `${GITHUB_API_URL}/repos/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/compare/main...${commit}?per_page=1`;
-
-const COMPARE_FAILED = "GitHub could not tell whether the commit is on the app's main branch.";
-
 /**
- * Where the commit stands against the app repository's `main`: GitHub's `status` (`identical`: main is the commit;
- * `behind`: main holds it; `ahead`, `diverged`: it is not on main), or `not-found` when GitHub answers 404 (no such
- * repository or commit in it). Any other answer, one without a status, or no answer is a passing DownloadProblem
- * (SQS delivers the message again). `commit` must already be 40 hex digits (parseDeployJob).
+ * The deployer's download (ticket 2.8, try 3): downloadArchive with redirects refused, so a renamed or transferred
+ * repository (GitHub answers those with a redirect) never answers for the app.
  */
-export async function compareWithMain(nickname: string, commit: string, options: DownloadOptions = {}): Promise<string> {
-  const fetchFn = options.fetch ?? fetch;
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS);
-  const signal = options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]);
-  let response: Response;
-  try {
-    response = await fetchFn(compareUrl(nickname, commit), {
-      headers: { accept: "application/vnd.github+json", "user-agent": GITHUB_USER_AGENT, "x-github-api-version": GITHUB_API_VERSION },
-      redirect: "error",
-      signal,
-    });
-  } catch {
-    throw new DownloadProblem(COMPARE_FAILED, true);
-  }
-  if (response.status === 404) {
-    await response.body?.cancel().catch(() => undefined);
-    return "not-found";
-  }
-  let body: unknown;
-  try {
-    body = response.status === 200 ? await response.json() : undefined;
-  } catch {
-    body = undefined;
-  }
-  if (response.status !== 200) await response.body?.cancel().catch(() => undefined);
-  const status = body !== null && typeof body === "object" ? (body as { status?: unknown }).status : undefined;
-  if (typeof status !== "string" || status === "") throw new DownloadProblem(COMPARE_FAILED, true);
-  return status;
+export function downloadForDeployer(url: string, options: Omit<DownloadOptions, "redirect"> = {}): Promise<Uint8Array> {
+  return downloadArchive(url, { ...options, redirect: "error" });
 }
