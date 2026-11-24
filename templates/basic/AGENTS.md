@@ -26,10 +26,32 @@ network and no package manager. You cannot run or preview the app, so check your
    no JavaScript modules (`type="module"`, `import`, `export`).
 2. One page: `index.html`. Show different screens by hiding and showing sections, not with more
    HTML files.
-3. No outside addresses anywhere, in any file, comments included: no http, https, ws or wss
-   address and no address starting with two slashes followed by a server name. No fonts, images, scripts, styles or APIs from other
-   websites. Draw icons and images as inline SVG or CSS, or as `.svg`/`.png` files in this folder,
-   referenced by relative paths such as `images/logo.svg`. SVG namespace names (`xmlns`) are fine.
+3. No outside addresses anywhere, in any file, comments, Markdown and `placeholder` texts included.
+   No fonts, images, scripts, styles or APIs from other websites. Draw icons and images as inline
+   SVG or CSS, or as `.svg`/`.png` files in this folder, referenced by relative paths such as
+   `images/logo.svg`. The deploy check refuses:
+   - any address of the form name, colon, two slashes (whatever the name: http, https, ws, wss, ftp,
+     git and any other);
+   - http, https, ws, wss or ftp followed by a colon and more text, even without slashes;
+   - two or more slashes or backslashes followed by a server name after a quote, a backtick, `=`,
+     a comma or `url(`, even with spaces between;
+   - the same written with HTML entities (`&#47;`, `&colon;`) or escapes (`\2f`, `\/`, `\u002f`).
+
+   The only addresses allowed are these XML namespace names, exactly as written (SVG, MathML and
+   `createElementNS` need them; they are never loaded):
+
+   ```
+   http://www.w3.org/2000/svg
+   http://www.w3.org/1999/xlink
+   http://www.w3.org/1999/xhtml
+   http://www.w3.org/XML/1998/namespace
+   http://www.w3.org/2000/xmlns/
+   http://www.w3.org/1998/Math/MathML
+   ```
+
+   Do not give SVG files a `<!DOCTYPE>`: it names an address. Start JavaScript comments with two
+   slashes and a space, never two slashes and a word: a comment that follows a closing quote with
+   no space between looks like an address to the check.
 4. No `localStorage`, `sessionStorage`, `indexedDB` or cookies: the app runs in a sandbox where
    using them throws an error. Keep state in variables and store anything that must last with
    `workshop-data.js`.
@@ -47,8 +69,10 @@ network and no package manager. You cannot run or preview the app, so check your
    `prefers-color-scheme: dark` block, and give every new colour a value in both.
 10. Accessible: real `<button>`, `<label>` and heading elements, `alt` text on images, enough colour
     contrast, visible focus, and `role="status"` on text that changes after an action.
-11. No inline `<script>`, `<style>`, `style="..."` or `onclick="..."`: put styles in `style.css`
-    and behaviour in `app.js`, and set text with `textContent`.
+11. No inline `<script>` or `<style>` elements and no `style="..."` or `on...="..."` attributes
+    (`onclick`, `onload`, ...): the app's security policy blocks them, so they would do nothing.
+    Put styles in `style.css` and behaviour in `app.js` (use `addEventListener`), and set text with
+    `textContent`. The page may load only its own files: images also from `data:` addresses.
 12. Set the page's `<title>` and `<h1>` to the app's name from `SPEC.md`.
 
 ## The deploy check
@@ -57,6 +81,7 @@ Before the app goes live, a check refuses it if any rule below is broken. The wh
 
 - Allowed file types only: `.html .css .js .json .md .txt .svg .png .jpg .jpeg .gif .webp .ico .woff .woff2`.
   No other types, no files without a type, no hidden files (names starting with a dot) and no links.
+- Text files are saved as UTF-8.
 - File and folder names use only letters, digits, `-`, `_` and `.`.
 - No outside address in any text file (rule 3). The only address allowed is the workshop's own, and
   the app never needs it: use relative paths.

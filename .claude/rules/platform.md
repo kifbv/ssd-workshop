@@ -65,3 +65,7 @@ paths:
   as the originals, and the first to finish leaves the second unpatched (CSP violations in CI, PR #24).
 - A large browser-only library goes into its own esbuild entry (`platform/web/build.ts` `SCRIPTS`), loaded only when
   needed, so the other pages stay small (ticket 1.9, `diagram.js`).
+- A scanner regex that runs on untrusted text (the deploy check, `platform/api/build/check.ts`) must be linear:
+  start a variable run only where it begins (a lookbehind such as `(?<![a-z0-9+.-])` before a scheme), never put
+  two optional runs of the same characters side by side (`=\s*["']?\s*` is quadratic on spaces), and test it with
+  lines of several MB against a time limit. Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters.

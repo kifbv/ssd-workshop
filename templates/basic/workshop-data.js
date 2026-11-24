@@ -38,7 +38,9 @@
       }
       throw error;
     }
-    if (method === "GET" && response.status === 404) return null;
+    if (response.status === 404) {
+      throw new Error("This app is not live on the workshop yet, so it cannot load or save data.");
+    }
     if (!response.ok) {
       let message = "The data service answered with an error (" + response.status + ").";
       try {
@@ -49,6 +51,7 @@
       }
       throw new Error(message);
     }
+    // A key with no value answers null.
     return method === "GET" ? response.json() : undefined;
   }
 

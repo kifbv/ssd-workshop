@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
-import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, readAppFolder } from "./check.js";
+import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, NAMESPACE_ADDRESSES, readAppFolder } from "./check.js";
 
 const TEMPLATE_DIR = fileURLToPath(new URL("../../../templates/basic/", import.meta.url));
 const NICKNAME = "test-nick";
@@ -19,8 +19,6 @@ const DATA_PREFIX = `/api/apps/${NICKNAME}/data/`;
 const PHONE = { width: 375, height: 667 };
 const TYPES: Record<string, string> = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript" };
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept" };
-/** Chromium logs every non-2xx answer (a missing key's 404) as a console error; that one is expected. */
-const EXPECTED_404 = "Failed to load resource: the server responded with a status of 404";
 
 describe("the template in a browser under the apps' sandbox (criterion 5)", () => {
   let server: Server;
@@ -31,6 +29,10 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
   let errors: string[];
   let store: Map<string, string>;
   let calls: { method: string; path: string; origin: string | undefined; cookie: string | undefined }[];
+  /** Another server (another origin) that answers anything, to prove the CSP keeps the app from it. */
+  let outside: Server;
+  let outsideOrigin: string;
+  let outsideHits: string[];
 
   beforeAll(async () => {
     server = createServer((request, response) => {
@@ -52,12 +54,20 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    outside = createServer((request, response) => {
+      outsideHits.push(request.url ?? "");
+      response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "image/svg+xml" });
+      response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
+    });
+    await new Promise<void>((resolve) => outside.listen(0, "127.0.0.1", resolve));
+    outsideOrigin = `http://127.0.0.1:${(outside.address() as AddressInfo).port}`;
     browser = await chromium.launch();
   }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
     await new Promise((resolve) => server?.close(resolve));
+    await new Promise((resolve) => outside?.close(resolve));
   });
 
   beforeEach(async () => {
@@ -66,12 +76,14 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     page.setDefaultTimeout(5_000);
     errors = [];
     page.on("console", (message) => {
-      if (message.type() === "error" && !message.text().startsWith(EXPECTED_404)) errors.push(message.text());
+      if (message.type() === "error") errors.push(message.text());
     });
     page.on("pageerror", (error) => errors.push(error.message));
     store = new Map();
     calls = [];
+    outsideHits = [];
     // A stand-in for the data API (ticket 2.4): JSON values by key, CORS for any origin, no cookies.
+    // A key with no value answers 200 with null (Chromium logs every 404 as a console error).
     await page.route("**/api/apps/**", async (route: Route) => {
       const request = route.request();
       const path = new URL(request.url()).pathname;
@@ -88,10 +100,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
         store.delete(key);
         return route.fulfill({ status: 204, headers: CORS });
       }
-      const value = store.get(key);
-      return value === undefined
-        ? route.fulfill({ status: 404, headers: json, body: JSON.stringify({ message: "Not found." }) })
-        : route.fulfill({ status: 200, headers: json, body: value });
+      return route.fulfill({ status: 200, headers: json, body: store.get(key) ?? "null" });
     });
   });
 
@@ -154,6 +163,71 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     );
   });
 
+  it("blocks an outside fetch and an outside image under the CSP, while its own files and data load", async () => {
+    await page.goto(`${origin}${APP_PATH}`);
+    await expect.poll(() => page.locator("#count").textContent()).toBe("0");
+    // The CSP's refusals are console errors here, and only they are expected.
+    page.removeAllListeners("console");
+    const refused: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() !== "error") return;
+      if (message.text().includes("Content Security Policy")) refused.push(message.text());
+      else errors.push(message.text());
+    });
+    const outcome = await page.evaluate<{ fetch: string; image: string; violations: string[] }>(`(async () => {
+      const violations = [];
+      document.addEventListener("securitypolicyviolation", (event) => violations.push(event.effectiveDirective));
+      const fetched = await fetch("${outsideOrigin}/data.json").then(() => "loaded", () => "blocked");
+      const image = await new Promise((resolve) => {
+        const img = document.createElement("img");
+        img.onload = () => resolve("loaded");
+        img.onerror = () => resolve("blocked");
+        img.src = "${outsideOrigin}/pixel.svg";
+        document.body.append(img);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return { fetch: fetched, image, violations };
+    })()`);
+    expect(outcome).toEqual({ fetch: "blocked", image: "blocked", violations: ["connect-src", "img-src"] });
+    expect(refused).toEqual([
+      expect.stringContaining(`Connecting to '${outsideOrigin}/data.json' violates`),
+      expect.stringContaining("Refused to connect"),
+      expect.stringContaining(`Loading the image '${outsideOrigin}/pixel.svg' violates`),
+    ]);
+    expect(outsideHits).toEqual([]);
+  });
+
+  it("refuses an inline script under the CSP", async () => {
+    await page.goto(`${origin}${APP_PATH}`);
+    await expect.poll(() => page.locator("#count").textContent()).toBe("0");
+    page.removeAllListeners("console");
+    page.on("console", (message) => {
+      if (message.type() === "error" && !message.text().startsWith("Executing inline script violates")) errors.push(message.text());
+    });
+    const ran = await page.evaluate<boolean>(`(async () => {
+      const script = document.createElement("script");
+      script.textContent = "window.inlineRan = true;";
+      document.body.append(script);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return window.inlineRan === true;
+    })()`);
+    expect(ran).toBe(false);
+  });
+
+  it("shows a plain message when the app is not live (the data API answers 404)", async () => {
+    await page.unroute("**/api/apps/**");
+    await page.route("**/api/apps/**", (route) =>
+      route.fulfill({ status: 404, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: "Not found." }) }),
+    );
+    // Chromium logs the 404 itself; only that line is allowed in this test.
+    page.removeAllListeners("console");
+    page.on("console", (message) => {
+      if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 404")) errors.push(message.text());
+    });
+    await page.goto(`${origin}${APP_PATH}`);
+    await expect.poll(() => page.locator("#status").textContent()).toBe("This app is not live on the workshop yet, so it cannot load or save data.");
+  });
+
   it("shows a plain message, not a console error, when the data service cannot be reached", async () => {
     await page.unroute("**/api/apps/**");
     await page.route("**/api/apps/**", (route) => route.abort("connectionrefused"));
@@ -212,6 +286,9 @@ describe("the template's contents", () => {
     const agents = readFileSync(join(TEMPLATE_DIR, "AGENTS.md"), "utf8");
     expect(agents).toContain(ALLOWED_EXTENSIONS.join(" "));
     expect(agents).toContain(`${MAX_APP_BYTES / 1024 / 1024} MB`);
+    // The namespace names it lists, one per line in a code block, are exactly the allowed ones.
+    const listed = agents.split("\n").map((line) => line.trim()).filter((line) => /^[a-z]+:\/\//.test(line));
+    expect(listed).toEqual([...NAMESPACE_ADDRESSES]);
   });
 
   it("README.md lists every file of the template", async () => {
