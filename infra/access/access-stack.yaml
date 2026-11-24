@@ -561,7 +561,8 @@ Resources:
                   - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-*
                   - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-*
 
-  # Deploy rights, part 3: EC2 (networks and the advanced track's k3s nodes). A request tag is
+  # Deploy rights, part 3: EC2 (networks and the advanced track's k3s nodes), the ECR Public login and
+  # the session denies on build tasks (both at the end). A request tag is
   # true for every resource a call names, so each request-tag statement lists only ARN types that
   # are new in every call of its actions; the existing parents a call names (VPC, subnet, security
   # group, route table, Elastic IP, network interface, launch template) need the project tag
@@ -660,6 +661,45 @@ Resources:
             Resource: "*"
             Condition:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
+          # Registry login for the deploy workflow's base image pulls from ECR Public (anonymous pulls from
+          # GitHub's runners get 429). Neither action takes a resource; the bearer token is limited to ECR Public.
+          - Sid: EcrPublicLogin
+            Effect: Allow
+            Action: ecr-public:GetAuthorizationToken
+            Resource: "*"
+          - Sid: EcrPublicBearerToken
+            Effect: Allow
+            Action: sts:GetServiceBearerToken
+            Resource: "*"
+            Condition:
+              StringEquals: {sts:AWSServiceName: ecr-public.amazonaws.com}
+          # Session denies on the builds cluster's tasks (ticket 2.9; moved from -deploy-read for its size): a
+          # task's override holds its build's GitHub token.
+          - Sid: NoBuildTasksForSessions
+            Effect: Deny
+            Action: [ecs:DescribeTasks, ecs:RunTask, ecs:StopTask, ecs:ExecuteCommand]
+            Resource:
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task/ssd-workshop-builds/*
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop-builder:*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Nor any task on the builds cluster.
+          - Sid: NoBuildsClusterTasksForSessions
+            Effect: Deny
+            Action: ecs:RunTask
+            Resource: "*"
+            Condition:
+              ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-builds"}
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Nor a service or task set there: their tasks would run as a session-chosen task definition.
+          - Sid: NoBuildsClusterServicesForSessions
+            Effect: Deny
+            Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateTaskSet]
+            Resource:
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:service/ssd-workshop-builds/*
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-set/ssd-workshop-builds/*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
 
   # Deploy rights, part 4: reads. Account-wide only where the answer holds no secrets and
   # no other project's configuration; everything else is read on workshop names or tags.
@@ -681,18 +721,19 @@ Resources:
           # through by name (the builder's two roles, the AI worker, the check's scheduler) and the
           # apps deployer (the apps bucket's only writer, 2.5), and the two functions that run as
           # them: a session could otherwise pass such a role to its own task or function, or rewrite
-          # that code. role*/<name> is the role with or without its path (a role name is unique).
+          # that code. These roles exist only under role/ssd-workshop/ (sessions create roles only there,
+          # WorkshopRolesWithBoundaryOnly). IAM rejects role*/<name> in a Resource (conditions only).
           - Sid: NoLauncherForSessions
             Effect: Deny
             NotAction: [iam:GetRole, iam:GetRolePolicy, iam:ListRolePolicies, iam:ListAttachedRolePolicies, iam:ListRoleTags, "lambda:Get*", "lambda:List*", "s3:Get*", "s3:List*"]
             Resource:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-builds-launcher
-              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder
-              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder-execution
-              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-api-ai-worker
-              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-check-scheduler
-              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-apps-deployer
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builder
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builder-execution
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-api-ai-worker
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-check-scheduler
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-apps-deployer
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher:*
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-api-ai-worker
@@ -718,18 +759,10 @@ Resources:
               - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-deploys*
             Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
-          - Sid: NoBuildTasksForSessions
-            Effect: Deny
-            Action: [ecs:DescribeTasks, ecs:RunTask, ecs:StopTask, ecs:ExecuteCommand]
-            Resource:
-              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task/ssd-workshop-builds/*
-              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop-builder:*
-            Condition:
-              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           # Ticket 2.9 try 3 (Franck's yes, 2026-11-24): no event source mappings at all for sessions (no
           # condition key names a mapping's queue, and a call by mapping UUID may carry no function
           # ARN): a session could otherwise feed the launch or deploy queue to its own function. Nor
-          # change or remove the stuck-build check's schedule, nor run any task on the builds cluster.
+          # change or remove the stuck-build check's schedule (the build task denies are in -deploy-ec2).
           - Sid: NoEventSourcesForSessions
             Effect: Deny
             Action: [lambda:CreateEventSourceMapping, lambda:UpdateEventSourceMapping, lambda:DeleteEventSourceMapping]
@@ -740,22 +773,6 @@ Resources:
             Effect: Deny
             Action: ["scheduler:Create*", "scheduler:Update*", "scheduler:Delete*"]
             Resource: !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule/*/ssd-workshop-builds-check
-            Condition:
-              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
-          - Sid: NoBuildsClusterTasksForSessions
-            Effect: Deny
-            Action: ecs:RunTask
-            Resource: "*"
-            Condition:
-              ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-builds"}
-              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
-          # Nor a service or task set there: their tasks would run as a session-chosen task definition.
-          - Sid: NoBuildsClusterServicesForSessions
-            Effect: Deny
-            Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateTaskSet]
-            Resource:
-              - !Sub arn:aws:ecs:*:${AWS::AccountId}:service/ssd-workshop-builds/*
-              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-set/ssd-workshop-builds/*
             Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey

@@ -69,8 +69,15 @@ jobs:
             > "$RUNNER_TEMP/zone-before.json"
           echo "Zone has $(jq length "$RUNNER_TEMP/zone-before.json") record sets"
 
+      # The builder's base image comes from ECR Public, which rate-limits anonymous pulls from
+      # GitHub's shared runners (429). A login (as the deploy role; ECR Public's API is only in
+      # us-east-1) gives authenticated pull limits.
+      - name: Log in to ECR Public
+        run: aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+
       # Ticket 2.9: the builder image, tagged with the commit and pinned by digest in the task
-      # definition, so a later push to a tag cannot change what build tasks run.
+      # definition, so a later push to a tag cannot change what build tasks run. The build is tried
+      # three times with a growing pause, for a pull that is still refused.
       - name: Build and push the builder image
         id: builder
         env:
@@ -79,7 +86,15 @@ jobs:
         run: |
           aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
           image="$REGISTRY/$REPOSITORY:$GITHUB_SHA"
-          docker build -f platform/builder/Dockerfile -t "$image" .
+          for attempt in 1 2 3; do
+            if docker build -f platform/builder/Dockerfile -t "$image" .; then break; fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::The builder image did not build after 3 attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt: docker build failed, retrying in $((attempt * 30)) seconds"
+            sleep $((attempt * 30))
+          done
           docker push "$image"
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)
           if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then

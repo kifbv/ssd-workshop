@@ -228,16 +228,22 @@ paths:
   called by the handler, or in a separate module (`platform/api/github/template-files.ts`, ticket 2.9). Files the
   function needs next to it are copied in `commandHooks.afterBundling`, and a synth test compares them with the source.
 - Docker Hub rate-limits anonymous pulls (429 in sessions and CI): base images come from the ECR Public mirror
-  `public.ecr.aws/docker/library/<image>:<exact version>`.
+  `public.ecr.aws/docker/library/<image>:<exact version>`. ECR Public also rate-limits anonymous pulls from GitHub's
+  shared runners (429 on the first deploy after 2.9): the deploy workflow logs in first (`aws ecr-public
+  get-login-password --region us-east-1`, as the deploy role: `ecr-public:GetAuthorizationToken` and
+  `sts:GetServiceBearerToken` with `sts:AWSServiceName` `ecr-public.amazonaws.com`) and retries the build 3 times.
 - In a session, `docker build` cannot reach npm through the agent proxy's TLS (SELF_SIGNED_CERT_IN_CHAIN): build a
   local copy of the Dockerfile that mounts the proxy CA (`--build-context`, `NODE_EXTRA_CA_CERTS`); never commit it.
 - A deny "for every role but X" in the boundary (ticket 2.9 try 2): `ArnNotLike` `aws:PrincipalArn`
   `arn:aws:iam::<account>:role*/<name>` covers X with and without its path in one value (a role name is unique in
   an account), half the size of listing both forms; test look-alikes (`x-<name>`, `<name>x`, `<name>-execution`). The
-  boundary is close to 6,144 characters (5,978 after 2.9's access review; `-deploy-read` 6,106): check the size test
+  boundary is close to 6,144 characters (5,978 after 2.9's access review; `-deploy-read` 5,155 and `-ec2` 4,405 after the 2.9 follow-up): check the size test
   before adding to it. Every role such a deny lets through by name is then a target to borrow: deny the Claude user everything but reads on it (and on the
-  functions that run as it) in `NoLauncherForSessions` (ticket 2.9 try 3; `role*/<name>` works in `Resource` too), or a
-  session passes it to its own task or function.
+  functions that run as it) in `NoLauncherForSessions` (ticket 2.9 try 3), or a
+  session passes it to its own task or function. `role*/<name>` works only in a condition: IAM rejects it in a
+  `Resource` ("IAM resource path must either be "*", root, or start with user/, ..."; the access stack update after
+  2.9 rolled back) and cfn-lint does not catch it. Name the role with its path (`role/ssd-workshop/<name>`) there;
+  a test checks every IAM ARN in a `Resource`/`NotResource`.
 - Lambda has no condition key for an event source mapping's queue, and calls by mapping UUID may carry no
   `lambda:FunctionArn`: keep sessions off a queue's consumers with an unconditional deny of
   `lambda:Create/Update/DeleteEventSourceMapping` for the Claude user (`NoEventSourcesForSessions`, ticket 2.9 try 3).
