@@ -123,7 +123,7 @@ Resources:
             Effect: Allow
             Action: [ecs:StopTask, ecs:DescribeTasks]
             Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/ssd-workshop-*/*
-          # Ticket 2.9 try 2 (pending Franck's yes): whatever a role's own policy says, only the launcher reads or
+          # Ticket 2.9 try 2 (Franck's yes, 2026-11-24): whatever a role's own policy says, only the launcher reads or
           # stops build tasks (the task's override holds the build's GitHub token), only the builder sends deploy
           # messages, and only the AI worker and the check's schedule send to the builds queues. role*/<name> is the
           # role with or without its path: a role name is unique in an account.
@@ -677,7 +677,7 @@ Resources:
           # user may not create, pass, change or invoke its role or function, nor write deploy assets
           # or the assets bucket's settings (a planted asset would become its code). Deploys from main
           # stay trusted (Franck reviews what merges).
-          # Ticket 2.9 try 3 (pending Franck's yes): the same for every role the boundary's denies let
+          # Ticket 2.9 try 3 (Franck's yes, 2026-11-24): the same for every role the boundary's denies let
           # through by name (the builder's two roles, the AI worker, the check's scheduler) and the
           # apps deployer (the apps bucket's only writer, 2.5), and the two functions that run as
           # them: a session could otherwise pass such a role to its own task or function, or rewrite
@@ -706,7 +706,7 @@ Resources:
           # Sessions cannot start, redirect or empty builds (Franck, 2026-11-24, ticket 2.9): the
           # launch queue's messages make the launcher mint a repository token and start a task.
           # Retries run from Franck's machine (npm run builds -- retry). Deploys from main may manage
-          # the queues; only the Claude user is denied. Ticket 2.9 try 2 (pending Franck's yes): nor
+          # the queues; only the Claude user is denied. Ticket 2.9 try 2 (Franck's yes, 2026-11-24): nor
           # read, delete or remove them, nor send a deploy message (the deployer publishes the commit
           # a build names), nor read, start or stop build tasks (a task's override holds its build's
           # GitHub token), nor point another queue at the launcher.
@@ -726,7 +726,7 @@ Resources:
               - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop-builder:*
             Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
-          # Ticket 2.9 try 3 (pending Franck's yes): no event source mappings at all for sessions (no
+          # Ticket 2.9 try 3 (Franck's yes, 2026-11-24): no event source mappings at all for sessions (no
           # condition key names a mapping's queue, and a call by mapping UUID may carry no function
           # ARN): a session could otherwise feed the launch or deploy queue to its own function. Nor
           # change or remove the stuck-build check's schedule, nor run any task on the builds cluster.

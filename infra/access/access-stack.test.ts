@@ -1483,7 +1483,7 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(deny?.Effect).toBe("Deny");
     });
 
-    // Ticket 2.9 try 2, access review HIGH 1 (pending Franck's yes): a session could read a running build's token from
+    // Ticket 2.9 try 2, access review HIGH 1 (Franck's yes, 2026-11-24): a session could read a running build's token from
     // its task (DescribeTasks shows the override), push with it, write pushedCommit and send a deploy message.
     const BUILD_TASK = `${ECS_ARN}:task/${BUILDS_CLUSTER_NAME}/0123456789abcdef0123456789abcdef`;
     const BUILDER_DEFINITION = `${ECS_ARN}:task-definition/${BUILDER_TASK_FAMILY}:7`;
