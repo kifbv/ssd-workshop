@@ -4,7 +4,10 @@ import { BUILDER_COMMIT_EMAIL } from "../settings.js";
 import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "./app.js";
 import { FAKE_TOKEN_PREFIX, FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "./fakes.js";
 import {
+  BOOTSTRAP_FILE,
   BOOTSTRAP_MESSAGE,
+  BOOTSTRAP_TEXT,
+  RETRY_WAITS_MS,
   COMMIT_IDENTITY,
   FIRST_COMMIT_MESSAGE,
   REBUILD_COMMIT_MESSAGE,
@@ -21,42 +24,40 @@ const NOW = new Date("2026-11-24T10:00:00Z");
 const credentials = parseGitHubSecret(TEST_SECRET_TEXT);
 const SPEC = "# Plant diary\n\nAda (ada.lovelace@example.com) wants to note when each plant was watered.\n";
 
-/** Every log line any test here wrote, through the module's log or the console (criterion 5). */
-const logged: string[] = [];
-const consoleMethods = ["log", "info", "warn", "error", "debug"] as const;
-const everyBearer = new Set<string>();
+interface Setup {
+  github: FakeGitHub;
+  deps: GitHubDeps;
+  logs: GitHubLogEntry[];
+  /** Every wait the retry asked for (ms); nothing really waits. */
+  waits: number[];
+}
 
-beforeAll(() => {
-  for (const method of consoleMethods) {
-    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
-      logged.push(args.map(String).join(" "));
-    });
-  }
-});
-
-afterAll(() => {
-  vi.restoreAllMocks();
-});
-
-function setup(): { github: FakeGitHub; deps: GitHubDeps; logs: GitHubLogEntry[] } {
+function setup(): Setup {
   let at = NOW.getTime();
   const now = (): Date => new Date((at += 5));
   const github = new FakeGitHub(() => new Date(at));
   const logs: GitHubLogEntry[] = [];
+  const waits: number[] = [];
   const deps: GitHubDeps = {
     fetch: github.fetch,
     now,
-    log: (entry) => {
-      logs.push(entry);
-      logged.push(JSON.stringify(entry));
+    log: (entry) => logs.push(entry),
+    sleep: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
     },
   };
-  return { github, deps, logs };
+  return { github, deps, logs, waits };
 }
 
-const forget = (github: FakeGitHub): void => {
-  for (const bearer of github.bearers) everyBearer.add(bearer);
-};
+/** deps.fetch rewritten: `answer` may return a replacement Response for a call, or undefined to let GitHub answer. */
+function intercept(s: Setup, answer: (url: string, init: RequestInit) => Response | undefined): void {
+  const fetch = s.github.fetch;
+  s.deps.fetch = async (url, init) => answer(url, init) ?? fetch(url, init);
+}
+
+const jsonAnswer = (status: number, body: unknown): Response =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let template: RepositoryFile[];
 beforeAll(async () => {
@@ -96,7 +97,6 @@ describe("prepareRepository: a new repository (criterion 1)", () => {
   it("creates ssd-<nickname> public in lower case in ssd-workshop-apps, and the history's first commit holds the template and the spec", async () => {
     const { github, deps } = setup();
     const result = await prepareRepository({ credentials, nickname: "Ada-Lovelace", spec: SPEC, templateFiles: template }, deps);
-    forget(github);
     expect(result.repository).toBe("ssd-workshop-apps/ssd-ada-lovelace");
     expect(result.created).toBe(true);
     const repo = github.repo("ssd-ada-lovelace");
@@ -121,7 +121,6 @@ describe("prepareRepository: a new repository (criterion 1)", () => {
   it("creates the repository with a token for administration only, and writes files with a token for that one repository", async () => {
     const { github, deps } = setup();
     await prepareRepository({ credentials, nickname: "Bob", spec: SPEC, templateFiles: template }, deps);
-    forget(github);
     const create = github.calls.find((c) => c.path === "/orgs/ssd-workshop-apps/repos");
     const createGrant = github.grants.get(create?.authorization?.replace("Bearer ", "") ?? "");
     expect(createGrant).toEqual({ permissions: { administration: "write", metadata: "read" }, repositories: undefined });
@@ -139,7 +138,6 @@ describe("prepareRepository: a new repository (criterion 1)", () => {
     const { github, deps } = setup();
     github.defaultBranch = "master";
     await expect(prepareRepository({ credentials, nickname: "Carol", spec: SPEC, templateFiles: template }, deps)).rejects.toThrow(/default branch is not main/);
-    forget(github);
   });
 
   it("refuses an installation on another account", async () => {
@@ -147,7 +145,6 @@ describe("prepareRepository: a new repository (criterion 1)", () => {
     github.installationAccount = "someone-else";
     await expect(prepareRepository({ credentials, nickname: "Carol", spec: SPEC, templateFiles: template }, deps)).rejects.toThrow(/installation on ssd-workshop-apps/);
     expect(github.repositories.size).toBe(0);
-    forget(github);
   });
 });
 
@@ -157,7 +154,6 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     const first = await prepareRepository({ credentials, nickname: "Dora", spec: SPEC, templateFiles: template }, deps);
     const newSpec = "# Plant diary v2\n\nAlso show the next watering day.\n";
     const second = await prepareRepository({ credentials, nickname: "DORA", spec: newSpec, templateFiles: template }, deps);
-    forget(github);
     expect(second.created).toBe(false);
     expect(second.repository).toBe("ssd-workshop-apps/ssd-dora");
     expect(github.repositories.size).toBe(1);
@@ -173,7 +169,6 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     const { github, deps } = setup();
     github.addRepository("ssd-erin");
     const result = await prepareRepository({ credentials, nickname: "erin", spec: SPEC, templateFiles: template }, deps);
-    forget(github);
     expect(result.created).toBe(false);
     const history = github.history("ssd-erin");
     expect(history).toHaveLength(1);
@@ -195,7 +190,6 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     await expect(prepareRepository({ credentials, nickname: "Finn", spec: SPEC, templateFiles: template }, deps)).rejects.toThrow(/could not be reached \(tree\)/);
     expect(github.history("ssd-finn").map((c) => c.message)).toEqual([BOOTSTRAP_MESSAGE]);
     const result = await prepareRepository({ credentials, nickname: "Finn", spec: SPEC, templateFiles: template }, deps);
-    forget(github);
     expect(github.history("ssd-finn").map((c) => c.sha)).toEqual([result.commit]);
     expect(github.history("ssd-finn")[0]?.message).toBe(FIRST_COMMIT_MESSAGE);
   });
@@ -204,7 +198,6 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     const { github, deps } = setup();
     github.addRepository("ssd-gail", { private: true });
     await expect(prepareRepository({ credentials, nickname: "gail", spec: SPEC, templateFiles: template }, deps)).rejects.toThrow(/not public/);
-    forget(github);
   });
 });
 
@@ -212,7 +205,6 @@ describe("builderToken (criterion 3)", () => {
   it("is limited to that one repository with contents write, and expires within an hour", async () => {
     const { github, deps } = setup();
     const token = await builderToken(credentials, "Hana", deps);
-    forget(github);
     expect(token.token.startsWith(FAKE_TOKEN_PREFIX)).toBe(true);
     expect(token.repository).toBe("ssd-workshop-apps/ssd-hana");
     const ask = github.calls.find((c) => c.path.endsWith("/access_tokens"));
@@ -228,8 +220,7 @@ describe("builderToken (criterion 3)", () => {
       const { github, deps } = setup();
       github.tokenLifetimeMs = lifetime;
       await expect(builderToken(credentials, "Hana", deps)).rejects.toThrow(/within an hour/);
-      forget(github);
-    }
+      }
   });
 
   it("refuses an answer that reaches all repositories, another repository or more rights", async () => {
@@ -246,8 +237,7 @@ describe("builderToken (criterion 3)", () => {
       const { github, deps } = setup();
       github.overrideTokenAnswer = answer;
       await expect(builderToken(credentials, "Hana", deps), JSON.stringify(answer)).rejects.toThrow(/more than the one repository/);
-      forget(github);
-    }
+      }
   });
 });
 
@@ -262,7 +252,6 @@ describe("commit identity (criterion 4)", () => {
     const { github, deps } = setup();
     await prepareRepository({ credentials, nickname: "Ivy", spec: SPEC, templateFiles: template }, deps);
     await prepareRepository({ credentials, nickname: "Ivy", spec: `${SPEC}\nContact: someone@example.org\n`, templateFiles: template }, deps);
-    forget(github);
     const commits = [...github.repo("ssd-ivy").commits.values()];
     expect(commits.length).toBe(3);
     for (const commit of commits) {
@@ -292,23 +281,268 @@ describe("commit identity (criterion 4)", () => {
   });
 });
 
-describe("logs (criterion 5)", () => {
-  it("one JSON line per GitHub call: step, status and duration only", () => {
-    const { logs } = setup();
-    expect(logs).toEqual([]);
-    const lines = logged.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(lines.length).toBeGreaterThan(50);
-    for (const line of lines) {
-      expect(Object.keys(line).every((key) => ["event", "step", "status", "error", "durationMs"].includes(key))).toBe(true);
+describe("the organization-wide token (administration write)", () => {
+  it("is used only when GitHub's answer grants exactly administration write and metadata read", async () => {
+    const answers = [
+      { permissions: { administration: "write", metadata: "read", contents: "write" } },
+      { permissions: { administration: "read", metadata: "read" } },
+      { permissions: { administration: "write", members: "write" } },
+      { permissions: { metadata: "read" } },
+    ];
+    for (const answer of answers) {
+      const { github, deps } = setup();
+      github.overrideTokenAnswer = answer;
+      await expect(prepareRepository({ credentials, nickname: "Jack", spec: SPEC, templateFiles: template }, deps), JSON.stringify(answer)).rejects.toThrow(
+        /more than administration write/,
+      );
+      expect(github.repositories.size).toBe(0);
+      expect(github.calls.some((c) => c.path === "/orgs/ssd-workshop-apps/repos")).toBe(false);
+    }
+  });
+});
+
+describe("ids from GitHub that go into a URL path", () => {
+  const malformed = ["../../../orgs/ssd-workshop-apps/repos", "ABCDEF0123456789ABCDEF0123456789ABCDEF01", "abc123", `${"a".repeat(40)}/x`];
+
+  it("a malformed commit id from the branch fails plainly, and is never put into a path", async () => {
+    for (const bad of malformed) {
+      const s = setup();
+      await prepareRepository({ credentials, nickname: "Kira", spec: SPEC, templateFiles: template }, s.deps);
+      const before = s.github.calls.length;
+      intercept(s, (url, init) => (url.endsWith("/git/ref/heads/main") && init.method === "GET" ? jsonAnswer(200, { object: { sha: bad } }) : undefined));
+      await expect(prepareRepository({ credentials, nickname: "Kira", spec: SPEC, templateFiles: template }, s.deps), bad).rejects.toThrow(
+        'GitHub\'s answer to the step "get-branch" holds no valid id.',
+      );
+      const later = s.github.calls.slice(before);
+      expect(later.some((c) => c.path.includes("/git/commits/"))).toBe(false);
     }
   });
 
-  it("after all these tests, no token, JWT, key, nickname, repository name or spec appears in the logs", () => {
-    const all = logged.join("\n");
-    expect(everyBearer.size).toBeGreaterThan(20);
-    expect([...everyBearer].some((bearer) => bearer.startsWith(FAKE_TOKEN_PREFIX))).toBe(true);
-    expect([...everyBearer].some((bearer) => bearer.startsWith("eyJ"))).toBe(true);
-    for (const bearer of everyBearer) expect(all.includes(bearer)).toBe(false);
+  it("malformed blob, tree, commit and commit-tree ids fail plainly", async () => {
+    const cases: { step: string; match: (url: string, method: string) => boolean; body: (bad: string) => unknown; status: number }[] = [
+      { step: "blob", match: (url, m) => m === "POST" && url.endsWith("/git/blobs"), body: (bad) => ({ sha: bad }), status: 201 },
+      { step: "tree", match: (url, m) => m === "POST" && url.endsWith("/git/trees"), body: (bad) => ({ sha: bad }), status: 201 },
+      { step: "commit", match: (url, m) => m === "POST" && url.endsWith("/git/commits"), body: (bad) => ({ sha: bad }), status: 201 },
+    ];
+    for (const one of cases) {
+      const s = setup();
+      intercept(s, (url, init) => (one.match(url, init.method ?? "GET") ? jsonAnswer(one.status, one.body(malformed[0] ?? "")) : undefined));
+      await expect(prepareRepository({ credentials, nickname: "Kira", spec: SPEC, templateFiles: template }, s.deps), one.step).rejects.toThrow(
+        `GitHub's answer to the step "${one.step}" holds no valid id.`,
+      );
+      expect(s.github.calls.some((c) => c.path.includes(".."))).toBe(false);
+    }
+    // The tree id of `main`'s commit (read to recognise a leftover opening commit) goes into a path too.
+    const s = setup();
+    await prepareRepository({ credentials, nickname: "Kira", spec: SPEC, templateFiles: template }, s.deps);
+    intercept(s, (url, init) =>
+      init.method === "GET" && url.includes("/git/commits/")
+        ? jsonAnswer(200, { message: BOOTSTRAP_MESSAGE, parents: [], tree: { sha: malformed[0] } })
+        : undefined,
+    );
+    await expect(prepareRepository({ credentials, nickname: "Kira", spec: SPEC, templateFiles: template }, s.deps)).rejects.toThrow(
+      'GitHub\'s answer to the step "get-commit" holds no valid id.',
+    );
+    expect(s.github.calls.some((c) => c.path.includes(".."))).toBe(false);
+  });
+});
+
+describe("a parentless commit with the opening message is replaced only when it is exactly the opening commit", () => {
+  it("a lone opening commit (README.md holding the opening line only) is replaced by the template's first commit", async () => {
+    const { github, deps } = setup();
+    github.addRepository("ssd-lena");
+    github.seedCommit("ssd-lena", { [BOOTSTRAP_FILE]: BOOTSTRAP_TEXT }, BOOTSTRAP_MESSAGE);
+    const result = await prepareRepository({ credentials, nickname: "lena", spec: SPEC, templateFiles: template }, deps);
+    expect(github.history("ssd-lena").map((c) => c.sha)).toEqual([result.commit]);
+    expect(github.history("ssd-lena")[0]?.message).toBe(FIRST_COMMIT_MESSAGE);
+  });
+
+  it("with other files, or another README text, it is kept: a rebuild commit goes on top, not forced", async () => {
+    const trees = [
+      { [BOOTSTRAP_FILE]: BOOTSTRAP_TEXT, "app.js": "console.log('mine');\n" },
+      { [BOOTSTRAP_FILE]: "Someone's own notes.\n" },
+      { "notes.md": BOOTSTRAP_TEXT },
+    ];
+    for (const files of trees) {
+      const { github, deps } = setup();
+      github.addRepository("ssd-milo");
+      const kept = github.seedCommit("ssd-milo", files, BOOTSTRAP_MESSAGE);
+      const result = await prepareRepository({ credentials, nickname: "milo", spec: SPEC, templateFiles: template }, deps);
+      const history = github.history("ssd-milo");
+      expect(history.map((c) => c.sha), JSON.stringify(files)).toEqual([result.commit, kept]);
+      expect(history[0]?.message).toBe(REBUILD_COMMIT_MESSAGE);
+      const update = github.calls.find((c) => c.method === "PATCH");
+      expect(update?.body?.force).toBe(false);
+    }
+  });
+});
+
+describe("GitHub's brief 404 or 409 right after creating or opening the repository", () => {
+  /** Answers `status` to the first `times` calls that match, then lets GitHub answer. */
+  const failFirst = (s: Setup, match: (url: string, method: string) => boolean, status: number, times: number): (() => number) => {
+    let seen = 0;
+    intercept(s, (url, init) => {
+      if (!match(url, init.method ?? "GET")) return undefined;
+      seen += 1;
+      return seen <= times ? jsonAnswer(status, { message: "Git Repository is empty." }) : undefined;
+    });
+    return () => seen;
+  };
+  const firstBlob = (url: string, method: string): boolean => method === "POST" && url.endsWith("/git/blobs");
+
+  it("is tried again, at most 3 tries, after waiting 1 s then 2 s", async () => {
+    expect(RETRY_WAITS_MS).toEqual([1000, 2000]);
+    for (const status of [404, 409]) {
+      const s = setup();
+      const seen = failFirst(s, firstBlob, status, 2);
+      const result = await prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, s.deps);
+      expect(s.github.history("ssd-nora").map((c) => c.sha)).toEqual([result.commit]);
+      expect(s.waits).toEqual([1000, 2000]);
+      expect(seen()).toBe(template.length + 2);
+    }
+  });
+
+  it("applies to the opening commit and every Git Data step", async () => {
+    const steps: ((url: string, method: string) => boolean)[] = [
+      (url, m) => m === "PUT" && url.includes("/contents/"),
+      (url, m) => m === "POST" && url.endsWith("/git/trees"),
+      (url, m) => m === "POST" && url.endsWith("/git/commits"),
+      (url, m) => m === "PATCH" && url.endsWith("/git/refs/heads/main"),
+    ];
+    for (const match of steps) {
+      const s = setup();
+      failFirst(s, match, 409, 1);
+      await prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, s.deps);
+      expect(s.waits).toEqual([1000]);
+    }
+    const s = setup();
+    await prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, s.deps);
+    failFirst(s, (url, m) => m === "GET" && url.includes("/git/commits/"), 404, 1);
+    await prepareRepository({ credentials, nickname: "Nora", spec: "v2", templateFiles: template }, s.deps);
+    expect(s.waits).toEqual([1000]);
+    // The opening commit's tree is read only for a lone opening commit.
+    const t = setup();
+    t.github.addRepository("ssd-nora");
+    t.github.seedCommit("ssd-nora", { [BOOTSTRAP_FILE]: BOOTSTRAP_TEXT }, BOOTSTRAP_MESSAGE);
+    const trees = failFirst(t, (url, m) => m === "GET" && url.includes("/git/trees/"), 404, 1);
+    const result = await prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, t.deps);
+    expect(trees()).toBe(2);
+    expect(t.waits).toEqual([1000]);
+    expect(t.github.history("ssd-nora").map((c) => c.sha)).toEqual([result.commit]);
+  });
+
+  it("fails plainly after the third 404 or 409", async () => {
+    const s = setup();
+    const seen = failFirst(s, firstBlob, 409, 3);
+    await expect(prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, s.deps)).rejects.toThrow(
+      'GitHub answered 409 to the step "blob".',
+    );
+    expect(seen()).toBe(3);
+    expect(s.waits).toEqual([1000, 2000]);
+  });
+
+  it("never tries again after 401, 403 or 422", async () => {
+    for (const status of [401, 403, 422]) {
+      const s = setup();
+      const seen = failFirst(s, firstBlob, status, 1);
+      await expect(prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, s.deps), String(status)).rejects.toThrow(
+        `GitHub answered ${status} to the step "blob".`,
+      );
+      expect(seen()).toBe(1);
+      expect(s.waits).toEqual([]);
+    }
+  });
+
+  it("stops waiting when the caller's deadline aborts", async () => {
+    const s = setup();
+    const controller = new AbortController();
+    s.deps.signal = controller.signal;
+    s.deps.sleep = (ms) => {
+      s.waits.push(ms);
+      controller.abort();
+      return Promise.resolve();
+    };
+    failFirst(s, firstBlob, 409, 3);
+    await expect(prepareRepository({ credentials, nickname: "Nora", spec: SPEC, templateFiles: template }, s.deps)).rejects.toThrow(
+      'GitHub answered 409 to the step "blob".',
+    );
+    expect(s.waits).toEqual([1000]);
+  });
+});
+
+describe("logs (criterion 5)", () => {
+  // These checks run their own flows here, so they hold whatever order the tests run in.
+  const lines: string[] = [];
+  const bearers = new Set<string>();
+
+  beforeAll(async () => {
+    for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(" "));
+      });
+    }
+    const run = async (flow: (s: Setup) => Promise<unknown>, tamper?: (s: Setup) => void): Promise<void> => {
+      const s = setup();
+      s.deps.log = (entry) => {
+        s.logs.push(entry);
+        lines.push(JSON.stringify(entry));
+      };
+      tamper?.(s);
+      await flow(s).catch(() => undefined);
+      for (const bearer of s.github.bearers) bearers.add(bearer);
+    };
+    const prepare = (nickname: string, spec: string) => (s: Setup) => prepareRepository({ credentials, nickname, spec, templateFiles: template }, s.deps);
+    // A new repository, then a rebuild of it, in one GitHub.
+    await run(async (s) => {
+      await prepare("Ada-Lovelace", SPEC)(s);
+      await prepare("Ada-Lovelace", `${SPEC}\nv2\n`)(s);
+    });
+    await run((s) => builderToken(credentials, "Hana", s.deps));
+    // Failures: a refused token, an unreachable GitHub, a retried step.
+    await run(
+      (s) => builderToken(credentials, "Hana", s.deps),
+      (s) => {
+        s.github.overrideTokenAnswer = { repository_selection: "all" };
+      },
+    );
+    await run(prepare("Ada-Lovelace", SPEC), (s) => {
+      intercept(s, (url) => {
+        if (url.endsWith("/git/trees")) throw new TypeError("fetch failed");
+        return undefined;
+      });
+    });
+    await run(prepare("Ada-Lovelace", SPEC), (s) => {
+      let once = true;
+      intercept(s, (url) => {
+        if (once && url.endsWith("/git/blobs")) {
+          once = false;
+          return jsonAnswer(409, { message: "Git Repository is empty." });
+        }
+        return undefined;
+      });
+    });
+  });
+
+  afterAll(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("one JSON line per GitHub call: step, status and duration only", () => {
+    const entries = lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(entries.length).toBeGreaterThan(30);
+    expect(entries.some((entry) => entry.status === "unreachable")).toBe(true);
+    expect(entries.some((entry) => entry.status === 409)).toBe(true);
+    for (const entry of entries) {
+      expect(Object.keys(entry).every((key) => ["event", "step", "status", "error", "durationMs"].includes(key))).toBe(true);
+    }
+  });
+
+  it("no token, JWT, key, nickname, repository name or spec appears in the logs", () => {
+    const all = lines.join("\n");
+    expect(bearers.size).toBeGreaterThan(8);
+    expect([...bearers].some((bearer) => bearer.startsWith(FAKE_TOKEN_PREFIX))).toBe(true);
+    expect([...bearers].some((bearer) => bearer.startsWith("eyJ"))).toBe(true);
+    for (const bearer of bearers) expect(all.includes(bearer)).toBe(false);
     expect(all).not.toContain(FAKE_TOKEN_PREFIX);
     expect(all).not.toContain("ghs_");
     expect(all).not.toContain("eyJ");

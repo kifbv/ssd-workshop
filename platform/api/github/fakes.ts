@@ -52,6 +52,9 @@ export interface FakeCall {
 let minted = 0;
 
 const sha1 = (data: string | Uint8Array): string => createHash("sha1").update(data).digest("hex");
+/** Git's id of a blob (`blob <size>\0<bytes>`), as GitHub reports it in trees. */
+export const gitBlobSha = (bytes: Uint8Array): string =>
+  createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 
 export class FakeGitHub {
   readonly repositories = new Map<string, FakeRepository>();
@@ -126,6 +129,26 @@ export class FakeGitHub {
     };
     this.repositories.set(name, repo);
     return repo;
+  }
+
+  /**
+   * A commit already on `main` (a repository some earlier run or a person left): the given files, message and
+   * parents, by the builder's identity. Returns its id.
+   */
+  seedCommit(name: string, files: Record<string, string>, message: string, parents: string[] = []): string {
+    const repo = this.repo(name);
+    const tree = new Map<string, string>();
+    for (const [path, content] of Object.entries(files)) {
+      const bytes = new TextEncoder().encode(content);
+      const blob = gitBlobSha(bytes);
+      repo.blobs.set(blob, bytes);
+      tree.set(path, blob);
+    }
+    const treeSha = sha1(`seed ${JSON.stringify([...tree])}`);
+    repo.trees.set(treeSha, tree);
+    const commit = this.addCommit(repo, { message, tree: treeSha, parents, author: undefined, committer: undefined });
+    repo.main = commit;
+    return commit;
   }
 
   private jwtValid(authorization: string): boolean {
@@ -215,7 +238,7 @@ export class FakeGitHub {
     if (method === "PUT" && rest.startsWith("/contents/")) {
       const file = rest.slice("/contents/".length);
       const bytes = Buffer.from(String(body.content), "base64");
-      const blob = sha1(bytes);
+      const blob = gitBlobSha(bytes);
       repo.blobs.set(blob, bytes);
       const tree = sha1(`tree ${file} ${blob}`);
       repo.trees.set(tree, new Map([[file, blob]]));
@@ -227,11 +250,19 @@ export class FakeGitHub {
     if (method === "GET" && rest === "/git/ref/heads/main") return json(200, { ref: "refs/heads/main", object: { sha: repo.main, type: "commit" } });
     if (method === "GET" && rest.startsWith("/git/commits/")) {
       const commit = repo.commits.get(rest.slice("/git/commits/".length));
-      return commit ? json(200, { sha: commit.sha, message: commit.message, parents: commit.parents.map((sha) => ({ sha })) }) : json(404, {});
+      return commit
+        ? json(200, { sha: commit.sha, message: commit.message, tree: { sha: commit.tree }, parents: commit.parents.map((sha) => ({ sha })) })
+        : json(404, {});
+    }
+    if (method === "GET" && rest.startsWith("/git/trees/")) {
+      const sha = rest.slice("/git/trees/".length);
+      const tree = repo.trees.get(sha);
+      if (!tree) return json(404, { message: "Not Found" });
+      return json(200, { sha, truncated: false, tree: [...tree].map(([path, blob]) => ({ path, mode: "100644", type: "blob", sha: blob })) });
     }
     if (method === "POST" && rest === "/git/blobs") {
       const bytes = body.encoding === "base64" ? Buffer.from(String(body.content), "base64") : Buffer.from(String(body.content));
-      const blob = sha1(bytes);
+      const blob = gitBlobSha(bytes);
       repo.blobs.set(blob, bytes);
       return json(201, { sha: blob });
     }

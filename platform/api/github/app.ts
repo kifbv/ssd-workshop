@@ -26,6 +26,7 @@ export type GitHubStep =
   | "get-repository"
   | "get-branch"
   | "get-commit"
+  | "get-tree"
   | "bootstrap"
   | "blob"
   | "tree"
@@ -50,6 +51,8 @@ export interface GitHubDeps {
   timeoutMs?: number;
   /** Stops every call when aborted (a caller's deadline). */
   signal?: AbortSignal;
+  /** Waits between tries of a step GitHub briefly refuses (default: a real timer). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Each call to GitHub gets at most this long. */

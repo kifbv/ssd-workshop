@@ -7,6 +7,7 @@
  * Every commit is authored and committed by BUILDER_COMMIT_NAME <BUILDER_COMMIT_EMAIL> with a fixed message: no
  * participant's email address or text ever goes into a commit's metadata (the spec only goes into SPEC.md).
  */
+import { createHash } from "node:crypto";
 import { NICKNAME_PATTERN } from "../participant/participant.js";
 import {
   APPS_DEFAULT_BRANCH,
@@ -23,7 +24,9 @@ import {
   GitHubProblem,
   mintInstallationToken,
   type AppCredentials,
+  type GitHubAnswer,
   type GitHubDeps,
+  type GitHubStep,
   type InstallationToken,
 } from "./app.js";
 
@@ -81,6 +84,27 @@ export const ADMIN_PERMISSIONS = { administration: "write" } as const;
 /** Rights of a token limited to one repository: its files and history only. */
 export const CONTENTS_PERMISSIONS = { contents: "write" } as const;
 
+/** True when the token grants `right: write` and nothing else but `metadata: read` (GitHub adds it to every token). */
+function grantsOnly(token: InstallationToken, right: string): boolean {
+  return (
+    token.permissions[right] === "write" &&
+    Object.entries(token.permissions).every(([key, value]) => (key === right && value === "write") || (key === "metadata" && value === "read"))
+  );
+}
+
+/**
+ * The organization-wide token that creates or finds the repository: GitHub's answer must grant only
+ * `administration: write` (plus `metadata: read`). It reaches every repository of the organization, so it stays in
+ * the process that asked for it (from 2.9, the launcher) and is never handed on.
+ */
+async function adminToken(deps: GitHubDeps, jwt: string, installationId: number): Promise<InstallationToken> {
+  const token = await mintInstallationToken(deps, jwt, installationId, { permissions: { ...ADMIN_PERMISSIONS } });
+  if (!grantsOnly(token, "administration")) {
+    throw new GitHubProblem("GitHub's token grants more than administration write (or not that), so it was not used.");
+  }
+  return token;
+}
+
 /**
  * A token for exactly one repository with contents write: GitHub's answer must say `selected`, list only that
  * repository and grant only `contents: write` (plus `metadata: read`, which GitHub adds to every token).
@@ -89,15 +113,11 @@ async function repositoryToken(deps: GitHubDeps, jwt: string, installationId: nu
   const token = await mintInstallationToken(deps, jwt, installationId, { repositories: [name], permissions: { ...CONTENTS_PERMISSIONS } });
   const fullName = `${APPS_GITHUB_OWNER}/${name}`.toLowerCase();
   const repositories = token.repositories ?? [];
-  const permissions = Object.entries(token.permissions);
-  const permissionsOk =
-    token.permissions.contents === "write" &&
-    permissions.every(([key, value]) => (key === "contents" && value === "write") || (key === "metadata" && value === "read"));
   if (
     token.repositorySelection !== "selected" ||
     repositories.length !== 1 ||
     repositories[0]?.toLowerCase() !== fullName ||
-    !permissionsOk
+    !grantsOnly(token, "contents")
   ) {
     throw new GitHubProblem("GitHub's token reaches more than the one repository with contents write, so it was not used.");
   }
@@ -136,6 +156,47 @@ interface RepositoryFacts {
 const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+/** A Git object id as GitHub gives it: 40 lower-case hex digits (SHA-1). Anything else never goes into a path. */
+export const GIT_ID_PATTERN = /^[0-9a-f]{40}$/;
+
+/** The id at `value`, checked against GIT_ID_PATTERN; fails plainly naming the step otherwise. */
+function gitId(value: unknown, step: GitHubStep): string {
+  const id = text(value);
+  if (id === undefined || !GIT_ID_PATTERN.test(id)) throw new GitHubProblem(`GitHub's answer to the step "${step}" holds no valid id.`);
+  return id;
+}
+
+/** Git's id of a blob holding `bytes` (`blob <size>\0<bytes>`), as a tree lists it. */
+function gitBlobId(bytes: Uint8Array): string {
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
+const BOOTSTRAP_BLOB_ID = gitBlobId(new TextEncoder().encode(BOOTSTRAP_TEXT));
+
+/**
+ * Waits before each further try of a step GitHub answered 404 or 409 (right after a repository is created or
+ * opened, GitHub briefly answers so while it settles): at most RETRY_WAITS_MS.length + 1 tries in all.
+ */
+export const RETRY_WAITS_MS = [1000, 2000] as const;
+const RETRIED_STATUSES = new Set([404, 409]);
+const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Calls GitHub, trying again after a 404 or 409 (never after any other status: an authorization refusal or a 422
+ * is final) until the waits run out or the caller's signal aborts; then returns the last answer for the caller to
+ * check.
+ */
+async function withRetry(deps: GitHubDeps, call: () => Promise<GitHubAnswer>): Promise<GitHubAnswer> {
+  const aborted = (): boolean => deps.signal?.aborted === true;
+  let answer = await call();
+  for (const wait of RETRY_WAITS_MS) {
+    if (!RETRIED_STATUSES.has(answer.status) || aborted()) return answer;
+    await (deps.sleep ?? realSleep)(wait);
+    if (aborted()) return answer;
+    answer = await call();
+  }
+  return answer;
+}
 
 /** Checks GitHub's description of the repository: in the organization, the expected name, public. */
 function checkRepository(json: Record<string, unknown>, name: string): RepositoryFacts {
@@ -189,22 +250,25 @@ export async function prepareRepository(
   const files = withSpec(input.templateFiles, input.spec);
   const jwt = appJwt(input.credentials, deps.now());
   const installation = await findInstallation(deps, jwt);
-  const admin = await mintInstallationToken(deps, jwt, installation.id, { permissions: { ...ADMIN_PERMISSIONS } });
+  const admin = await adminToken(deps, jwt, installation.id);
   const { created, facts } = await createOrFindRepository(deps, admin.token, name);
   if (facts.defaultBranch !== APPS_DEFAULT_BRANCH) {
     throw new GitHubProblem(`The app's repository's default branch is not ${APPS_DEFAULT_BRANCH}; set the organization's default branch to ${APPS_DEFAULT_BRANCH}.`);
   }
   const { token } = await repositoryToken(deps, jwt, installation.id, name);
   const repo = `/repos/${APPS_GITHUB_OWNER}/${name}`;
-  const call = (step: Parameters<typeof githubCall>[1], method: "GET" | "POST" | "PUT" | "PATCH", path: string, body?: unknown) =>
+  const once = (step: GitHubStep, method: "GET" | "POST" | "PUT" | "PATCH", path: string, body?: unknown) =>
     githubCall(deps, step, method, `${repo}${path}`, token, body);
+  // Every step after `get-branch` is tried again on GitHub's brief 404 or 409 (decision "(2.6) Retry").
+  const call = (step: GitHubStep, method: "GET" | "POST" | "PUT" | "PATCH", path: string, body?: unknown) =>
+    withRetry(deps, () => once(step, method, path, body));
 
   // Where `main` stands: 409 (empty) or 404 (no main yet) means the repository must be opened first.
   let head: string | undefined;
-  const branch = await call("get-branch", "GET", `/git/ref/heads/${APPS_DEFAULT_BRANCH}`);
+  // Not retried: its 404 or 409 is the expected answer for an empty repository.
+  const branch = await once("get-branch", "GET", `/git/ref/heads/${APPS_DEFAULT_BRANCH}`);
   if (branch.status === 200) {
-    head = text(record(branch.json.object).sha);
-    if (head === undefined) throw new GitHubProblem('GitHub\'s answer to the step "get-branch" holds no commit.');
+    head = gitId(record(branch.json.object).sha, "get-branch");
   } else if (branch.status !== 404 && branch.status !== 409) {
     expectStatus(branch, "get-branch", 200);
   }
@@ -222,9 +286,7 @@ export async function prepareRepository(
       201,
     );
   } else {
-    const commit = expectStatus(await call("get-commit", "GET", `/git/commits/${head}`), "get-commit", 200);
-    const parents = Array.isArray(commit.parents) ? commit.parents : [];
-    if (text(commit.message)?.trim() === BOOTSTRAP_MESSAGE && parents.length === 0) fresh = true;
+    fresh = await isLoneOpeningCommit(head, call);
   }
 
   const entries: { path: string; mode: "100644"; type: "blob"; sha: string }[] = [];
@@ -234,18 +296,46 @@ export async function prepareRepository(
       "blob",
       201,
     );
-    const sha = text(blob.sha);
-    if (sha === undefined) throw new GitHubProblem('GitHub\'s answer to the step "blob" holds no id.');
+    const sha = gitId(blob.sha, "blob");
     entries.push({ path: file.path, mode: "100644", type: "blob", sha });
   }
   // No base_tree: the tree is exactly the template and the spec.
-  const tree = text(expectStatus(await call("tree", "POST", "/git/trees", { tree: entries }), "tree", 201).sha);
-  if (tree === undefined) throw new GitHubProblem('GitHub\'s answer to the step "tree" holds no id.');
+  const tree = gitId(expectStatus(await call("tree", "POST", "/git/trees", { tree: entries }), "tree", 201).sha, "tree");
   const parents = fresh || head === undefined ? [] : [head];
   const message = parents.length === 0 ? FIRST_COMMIT_MESSAGE : REBUILD_COMMIT_MESSAGE;
-  const commit = text(expectStatus(await call("commit", "POST", "/git/commits", commitRequest(message, tree, parents, deps.now())), "commit", 201).sha);
-  if (commit === undefined) throw new GitHubProblem('GitHub\'s answer to the step "commit" holds no id.');
+  const commit = gitId(
+    expectStatus(await call("commit", "POST", "/git/commits", commitRequest(message, tree, parents, deps.now())), "commit", 201).sha,
+    "commit",
+  );
   // A first commit replaces the opening one (force); a rebuild's commit moves `main` forward only.
   expectStatus(await call("update-branch", "PATCH", `/git/refs/heads/${APPS_DEFAULT_BRANCH}`, { sha: commit, force: parents.length === 0 }), "update-branch", 200);
   return { repository: `${APPS_GITHUB_OWNER}/${name}`, created, commit };
+}
+
+/**
+ * True only for the platform's own opening commit left alone on `main` (an earlier try stopped half-way): no
+ * parent, the opening message, and a tree of exactly BOOTSTRAP_FILE holding BOOTSTRAP_TEXT. Anything else with
+ * that message (other files, other text) is kept as history: the new commit goes on top of it, never forced
+ * (decision "(2.6) Leftover opening commit").
+ */
+async function isLoneOpeningCommit(
+  head: string,
+  call: (step: GitHubStep, method: "GET", path: string) => Promise<GitHubAnswer>,
+): Promise<boolean> {
+  const commit = expectStatus(await call("get-commit", "GET", `/git/commits/${head}`), "get-commit", 200);
+  const parents = Array.isArray(commit.parents) ? commit.parents : [];
+  if (text(commit.message)?.trim() !== BOOTSTRAP_MESSAGE || parents.length !== 0) return false;
+  const treeId = gitId(record(commit.tree).sha, "get-commit");
+  const tree = expectStatus(await call("get-tree", "GET", `/git/trees/${treeId}`), "get-tree", 200);
+  const entries = Array.isArray(tree.tree) ? tree.tree.map(record) : [];
+  const [only] = entries;
+  return (
+    tree.truncated !== true &&
+    entries.length === 1 &&
+    only !== undefined &&
+    only.path === BOOTSTRAP_FILE &&
+    only.type === "blob" &&
+    only.mode === "100644" &&
+    only.sha === BOOTSTRAP_BLOB_ID
+  );
 }

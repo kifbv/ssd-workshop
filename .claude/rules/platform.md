@@ -120,3 +120,8 @@ paths:
   real first commit with no parent and force `main` to it (ticket 2.6, `platform/api/github/repository.ts`). GitHub App
   tokens: check the answer of `access_tokens` (selection `selected`, the one repository, only the asked rights plus
   `metadata: read`, `expires_at` within an hour) before using it, and never log a token, the JWT or a repository name.
+  Every id from GitHub that goes into a URL path (commit, tree, blob) must match `^[0-9a-f]{40}$` first. Right after
+  creating or opening a repository GitHub briefly answers 404 or 409: retry those Git Data steps a bounded number of
+  times (3 tries, 1 s and 2 s, injected `sleep`), never on 401, 403 or 422, and never the call whose 404/409 means
+  "empty" (`get-branch`). Recognise the platform's own leftover commit by its content (tree and blob id), not its
+  message alone, before forcing a branch over it.
