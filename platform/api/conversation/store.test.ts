@@ -5,15 +5,18 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNT as INFRA_ACCOUNT,
   AI_QUEUE_NAME as INFRA_QUEUE_NAME,
+  AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
   AI_WORKER_UPDATE_ATTRIBUTES,
+  BUILD_QUEUE_NAME as INFRA_BUILD_QUEUE_NAME,
   CONVERSATION_UPDATE_ATTRIBUTES,
   MODEL_ID as INFRA_MODEL_ID,
 } from "../../../infra/lib/config.js";
-import { ACCOUNT, AI_QUEUE_NAME, AI_QUEUE_URL, MODEL_ID, PRICE_PER_MILLION_TOKENS } from "../settings.js";
+import { ACCOUNT, AI_QUEUE_NAME, AI_QUEUE_URL, BUILD_QUEUE_NAME, BUILD_QUEUE_URL, MODEL_ID, PRICE_PER_MILLION_TOKENS } from "../settings.js";
 import { DEFAULT_MODEL_ID } from "../../src/smoke/logic.js";
 import { BedrockModel, usageOf } from "./model.js";
-import { SqsMessageQueue } from "./queue.js";
-import { FAILURE_REPLY, STALE_PENDING_SECONDS, type Finish } from "./state.js";
+import { SqsBuildQueue, SqsMessageQueue } from "./queue.js";
+import { READINESS_REQUEST } from "./readiness.js";
+import { buildIdFor, FAILURE_REPLY, STALE_PENDING_SECONDS, type Finish, type ReadinessFinish } from "./state.js";
 import { DynamoConversationStore, type ConversationSender } from "./store.js";
 
 type Sent = GetItemCommand | QueryCommand | TransactWriteItemsCommand;
@@ -202,7 +205,9 @@ describe("DynamoConversationStore", () => {
       expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain(marker);
       expect(CONVERSATION_UPDATE_ATTRIBUTES).not.toContain(marker);
     }
-    expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("step");
+    // An answer never moves the step (only the readiness check's outcome does, ticket 2.7).
+    expect(namesUsed(sent[0])).not.toContain("step");
+    expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("approvedAt");
   });
 
   it("adds spent tokens to the usage totals on their own, inside the worker's attribute list", async () => {
@@ -357,35 +362,177 @@ describe("DynamoConversationStore", () => {
     expect((sent[3] as GetItemCommand).input.Key).toEqual({ pk: { S: "PARTICIPANT#p-1" }, sk: { S: "SPEC#0002" } });
   });
 
-  it("approves a version in one transaction inside the conversation function's list, and tells why it could not (ticket 1.9)", async () => {
+  it("approves a version and stores the readiness request in one transaction inside the conversation function's list, and tells why it could not (tickets 1.9, 2.7)", async () => {
+    const readiness = { id: ID, step: "approved" as const, text: READINESS_REQUEST, createdAt: NOW_ISO, nowSeconds: 5000 };
     const { client, sent } = stubClient([{}]);
-    await expect(new DynamoConversationStore(client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO)).resolves.toBe("approved");
+    await expect(new DynamoConversationStore(client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO, readiness)).resolves.toBe("approved");
     const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
-    expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual(["PROFILE", "CONVERSATION", "SPEC#0002"]);
+    expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual(["PROFILE", "CONVERSATION", "SPEC#0002", `MSG#${ID}`]);
     expect(items[0]?.Update).toMatchObject({ ConditionExpression: "#step = :spec", ExpressionAttributeValues: { ":step": { S: "approved" }, ":spec": { S: "spec" } } });
     expect(items[1]?.Update).toMatchObject({
-      UpdateExpression: "SET #approvedSpecVersion = :approvedSpecVersion, #updatedAt = :updatedAt REMOVE #pendingId, #pendingSince",
+      UpdateExpression:
+        "SET #approvedSpecVersion = :approvedSpecVersion, #state = :state, #pendingId = :pendingId, #pendingSince = :pendingSince, #updatedAt = :updatedAt",
       ConditionExpression:
         "#latestSpecVersion = :version AND attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
-      ExpressionAttributeValues: { ":version": { N: "2" }, ":staleBefore": { N: String(5000 - STALE_PENDING_SECONDS) } },
+      ExpressionAttributeValues: { ":version": { N: "2" }, ":pendingId": { S: ID }, ":staleBefore": { N: String(5000 - STALE_PENDING_SECONDS) } },
     });
     expect(items[2]?.Update).toMatchObject({ UpdateExpression: "SET #approvedAt = :approvedAt", ConditionExpression: "attribute_exists(#pk)" });
+    expect(items[3]?.Update).toMatchObject({
+      ConditionExpression: "attribute_not_exists(#pk)",
+      ExpressionAttributeValues: { ":step": { S: "approved" }, ":text": { S: READINESS_REQUEST }, ":status": { S: "pending" }, ":author": { S: "participant" } },
+    });
     for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
 
     const conv = (fields: Record<string, unknown>) => ({ Item: { state: { S: "open" }, ...fields } });
     const cases: [string[], Record<string, unknown> | undefined, string][] = [
-      [["ConditionalCheckFailed", "None", "None"], undefined, "wrong-step"],
-      [["None", "ConditionalCheckFailed", "None"], conv({}), "no-spec"],
-      [["None", "ConditionalCheckFailed", "None"], conv({ latestSpecVersion: { N: "3" } }), "stale"],
-      [["None", "ConditionalCheckFailed", "None"], conv({ latestSpecVersion: { N: "2" }, state: { S: "waiting" } }), "waiting"],
-      [["None", "ConditionalCheckFailed", "None"], conv({ latestSpecVersion: { N: "2" }, pendingId: { S: ID } }), "busy"],
+      [["ConditionalCheckFailed", "None", "None", "None"], undefined, "wrong-step"],
+      [["None", "ConditionalCheckFailed", "None", "None"], conv({}), "no-spec"],
+      [["None", "ConditionalCheckFailed", "None", "None"], conv({ latestSpecVersion: { N: "3" } }), "stale"],
+      [["None", "ConditionalCheckFailed", "None", "None"], conv({ latestSpecVersion: { N: "2" }, state: { S: "waiting" } }), "waiting"],
+      [["None", "ConditionalCheckFailed", "None", "None"], conv({ latestSpecVersion: { N: "2" }, pendingId: { S: ID } }), "busy"],
     ];
     for (const [codes, read, expected] of cases) {
       const stub = stubClient(read === undefined ? [cancelled(codes)] : [cancelled(codes), read]);
-      await expect(new DynamoConversationStore(stub.client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO), expected).resolves.toBe(expected);
+      await expect(new DynamoConversationStore(stub.client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO, readiness), expected).resolves.toBe(expected);
     }
     const down = stubClient([Object.assign(new Error("x"), { name: "InternalServerError" })]);
-    await expect(new DynamoConversationStore(down.client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO)).rejects.toThrow("x");
+    await expect(new DynamoConversationStore(down.client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO, readiness)).rejects.toThrow("x");
+  });
+
+  it("asks for the readiness check again only for the same approval with no build and nothing in flight (ticket 2.7)", async () => {
+    const message = { id: ID, step: "approved" as const, text: READINESS_REQUEST, createdAt: NOW_ISO, nowSeconds: 5000 };
+    const { client, sent } = stubClient([{}]);
+    await expect(new DynamoConversationStore(client, TABLE).requestReadiness("p-1", 2, message)).resolves.toBe("created");
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
+    expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual(["CONVERSATION", `MSG#${ID}`]);
+    expect(items[0]?.Update).toMatchObject({
+      ConditionExpression:
+        "#approvedSpecVersion = :version AND attribute_not_exists(#buildId) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+      ExpressionAttributeValues: { ":version": { N: "2" }, ":pendingId": { S: ID } },
+    });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    const conv = (fields: Record<string, unknown>) => ({ Item: { state: { S: "open" }, ...fields } });
+    for (const [read, expected] of [
+      [conv({ approvedSpecVersion: { N: "2" }, pendingId: { S: ID } }), "busy"],
+      [conv({ approvedSpecVersion: { N: "2" }, buildId: { S: "b-1" } }), "wrong-step"],
+      [conv({}), "wrong-step"],
+    ] as const) {
+      const stub = stubClient([cancelled(["ConditionalCheckFailed", "None"]), read]);
+      await expect(new DynamoConversationStore(stub.client, TABLE).requestReadiness("p-1", 2, message), expected).resolves.toBe(expected);
+    }
+  });
+
+  describe("finishReadiness (ticket 2.7)", () => {
+    const answer = { prompt: READINESS_REQUEST, modelId: MODEL_ID, promptVersion: "readiness-v1", historyCount: 0, usage: usage(900, 60) };
+    const BUILD_ID = buildIdFor(ID);
+    const READY: ReadinessFinish = { kind: "ready", reply: "Ready.", version: 2, answer, build: { buildId: BUILD_ID, nickname: "Ada-Lovelace" } };
+    const NOT_READY: ReadinessFinish = { kind: "not-ready", reply: "Not ready:\n- login", version: 2, answer };
+    const run = async (outcome: ReadinessFinish) => {
+      const { client, sent } = stubClient([{}]);
+      await expect(new DynamoConversationStore(client, TABLE).finishReadiness("p-1", ID, outcome, NOW_ISO)).resolves.toBe(true);
+      return { sent, items: (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems };
+    };
+
+    it("a pass: message done, reply, conversation with the build id, step building, the new build (only if absent) and the tokens, in one transaction", async () => {
+      const { sent, items } = await run(READY);
+      expect(items.map((i) => `${i.Update?.Key?.["pk"]?.S}/${i.Update?.Key?.["sk"]?.S}`)).toEqual([
+        `PARTICIPANT#p-1/MSG#${ID}`,
+        `PARTICIPANT#p-1/MSG#${ID}-r`,
+        "PARTICIPANT#p-1/CONVERSATION",
+        "PARTICIPANT#p-1/PROFILE",
+        `BUILD#${BUILD_ID}/BUILD`,
+        "PARTICIPANT#p-1/USAGE",
+      ]);
+      expect(items[0]?.Update).toMatchObject({ ConditionExpression: "#status = :pending", ExpressionAttributeValues: { ":status": { S: "done" } } });
+      expect(items[1]?.Update).toMatchObject({ ConditionExpression: "attribute_not_exists(#pk)", ExpressionAttributeValues: { ":kind": { S: "answer" }, ":promptVersion": { S: "readiness-v1" } } });
+      expect(items[2]?.Update).toMatchObject({
+        UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt, #buildId = :buildId REMOVE #pendingId, #pendingSince",
+        ConditionExpression: "#pendingId = :messageId AND #approvedSpecVersion = :version",
+        ExpressionAttributeValues: { ":messageId": { S: ID }, ":version": { N: "2" }, ":buildId": { S: BUILD_ID } },
+      });
+      expect(items[3]?.Update).toMatchObject({ ConditionExpression: "#step = :approved", ExpressionAttributeValues: { ":step": { S: "building" } } });
+      expect(items[4]?.Update).toMatchObject({
+        ConditionExpression: "attribute_not_exists(#pk)",
+        ExpressionAttributeValues: {
+          ":type": { S: "build" },
+          ":buildId": { S: BUILD_ID },
+          ":nickname": { S: "Ada-Lovelace" },
+          ":participantId": { S: "p-1" },
+          ":status": { S: "queued" },
+          ":createdAt": { S: NOW_ISO },
+          ":updatedAt": { S: NOW_ISO },
+        },
+      });
+      expect(items[5]?.Update?.ExpressionAttributeValues).toMatchObject({ ":add_inputTokens": { N: "900" }, ":add_outputTokens": { N: "60" } });
+      // Every name is in the AI worker's lists (participant partition, build partition); the placeholders all match.
+      const used = namesUsed(sent[0]);
+      expect(used.length).toBeGreaterThan(10);
+      for (const item of items) {
+        const names = ["pk", "sk", ...Object.values(item.Update?.ExpressionAttributeNames ?? {})];
+        const list: readonly string[] = item.Update?.Key?.["pk"]?.S?.startsWith("BUILD#") ? AI_WORKER_BUILD_UPDATE_ATTRIBUTES : AI_WORKER_UPDATE_ATTRIBUTES;
+        for (const name of names) expect(list, name).toContain(name);
+      }
+      expect(BUILD_ID).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    });
+
+    it("no pass: back to step spec with the approval removed, the reasons as the reply, the tokens counted, no build", async () => {
+      const { sent, items } = await run(NOT_READY);
+      expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, `MSG#${ID}-r`, "CONVERSATION", "PROFILE", "USAGE"]);
+      expect(items[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":text": { S: "Not ready:\n- login" }, ":kind": { S: "answer" } });
+      expect(items[2]?.Update).toMatchObject({
+        UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt REMOVE #pendingId, #pendingSince, #approvedSpecVersion",
+        ConditionExpression: "#pendingId = :messageId AND #approvedSpecVersion = :version",
+      });
+      expect(items[3]?.Update).toMatchObject({ ConditionExpression: "#step = :approved", ExpressionAttributeValues: { ":step": { S: "spec" } } });
+      for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    });
+
+    it("no verdict: the message failed with the neutral reply; without tokens no usage item; inside both roles' lists (the conversation function uses it on a queue failure)", async () => {
+      const { sent, items } = await run({ kind: "failed", reply: "Sorry.", version: 2 });
+      expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, `MSG#${ID}-r`, "CONVERSATION", "PROFILE"]);
+      expect(items[0]?.Update?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" } });
+      expect(items[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":kind": { S: "failure" } });
+      for (const name of namesUsed(sent[0])) {
+        expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+        expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+      }
+      const withTokens = await run({ kind: "failed", reply: "Sorry.", version: 2, usage: usage(10, 1) });
+      expect(withTokens.items.at(-1)?.Update?.Key?.["sk"]?.S).toBe("USAGE");
+    });
+
+    it("answers false on a lost race (a duplicate delivery, a second build) and throws anything else", async () => {
+      const { client } = stubClient([cancelled(["None", "None", "None", "None", "ConditionalCheckFailed", "None"]), new Error("down")]);
+      const store = new DynamoConversationStore(client, TABLE);
+      await expect(store.finishReadiness("p-1", ID, READY, NOW_ISO)).resolves.toBe(false);
+      await expect(store.finishReadiness("p-1", ID, READY, NOW_ISO)).rejects.toThrow("down");
+    });
+  });
+
+  it("reads a profile's step and nickname, and a build only when it is one (ticket 2.7)", async () => {
+    const { client, sent } = stubClient([
+      { Item: { step: { S: "approved" }, nickname: { S: "Ada" } } },
+      { Item: { type: { S: "build" }, buildId: { S: "b-1" }, participantId: { S: "p-1" }, status: { S: "failed" }, failureReasons: { L: [{ S: "a" }, { S: "b" }] } } },
+      { Item: { type: { S: "app-live" }, buildId: { S: "b-1" }, participantId: { S: "p-1" }, status: { S: "queued" } } },
+      {},
+    ]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.getParticipantInfo("p-1")).resolves.toEqual({ step: "approved", nickname: "Ada" });
+    await expect(store.getBuild("b-1")).resolves.toEqual({ buildId: "b-1", participantId: "p-1", status: "failed", failureReasons: ["a", "b"] });
+    await expect(store.getBuild("b-1")).resolves.toBeUndefined();
+    await expect(store.getBuild("b-1")).resolves.toBeUndefined();
+    // A malformed id is not even read.
+    await expect(store.getBuild("../x")).resolves.toBeUndefined();
+    expect(sent).toHaveLength(4);
+    expect((sent[1] as GetItemCommand).input).toMatchObject({ Key: { pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } }, ConsistentRead: true });
+  });
+
+  it("sends a build id alone to the FIFO launch queue, deduplicated by the build id, grouped by participant (ticket 2.7)", async () => {
+    const sent: SendMessageCommand[] = [];
+    const queue = new SqsBuildQueue({ send: async (c: SendMessageCommand) => (sent.push(c), { $metadata: {} }) }, BUILD_QUEUE_URL);
+    await queue.send({ buildId: "b-1", participantId: "p-1" });
+    expect(sent[0]?.input).toEqual({ QueueUrl: BUILD_QUEUE_URL, MessageBody: '{"buildId":"b-1"}', MessageDeduplicationId: "b-1", MessageGroupId: "p-1" });
+    expect(BUILD_QUEUE_NAME).toBe(INFRA_BUILD_QUEUE_NAME);
+    expect(BUILD_QUEUE_URL).toBe(`https://sqs.eu-central-1.amazonaws.com/${INFRA_ACCOUNT}/ssd-workshop-builds.fifo`);
   });
 
   it("refuses a message once the spec is approved (ticket 1.9)", async () => {

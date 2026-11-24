@@ -47,6 +47,9 @@ import {
   APPS_INDEX_FUNCTION_NAME,
   DEPLOY_DLQ_NAME,
   DEPLOY_QUEUE_NAME,
+  AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
+  BUILD_DLQ_NAME,
+  BUILD_QUEUE_NAME,
   DEPLOYER_FUNCTION_NAME,
   DEPLOYER_LIVE_UPDATE_ATTRIBUTES,
   DEPLOYER_ROLE_ARN,
@@ -88,13 +91,20 @@ import {
   DEPLOYER_TIMEOUT_SECONDS,
 } from "./apps-stack.js";
 import { APPS_INDEX_FUNCTION_FILE, NOT_FOUND_CACHE_SECONDS } from "./edge-stack.js";
+import { BUILD_QUEUE_MAX_RECEIVES, BUILD_QUEUE_VISIBILITY_SECONDS } from "./builds-stack.js";
 import {
   APPS_BUCKET_NAME as PLATFORM_APPS_BUCKET_NAME,
+  BUILD_QUEUE_NAME as PLATFORM_BUILD_QUEUE_NAME,
   DEPLOY_MAX_RECEIVES as PLATFORM_DEPLOY_MAX_RECEIVES,
   DEPLOY_QUEUE_NAME as PLATFORM_DEPLOY_QUEUE_NAME,
   DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
   GITHUB_SECRET_NAME as PLATFORM_GITHUB_SECRET_NAME,
 } from "../../platform/api/settings.js";
+
+function must<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("missing value");
+  return value;
+}
 
 interface Resource {
   Type: string;
@@ -846,6 +856,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/step",
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
+      "GET /api/build",
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
@@ -1524,6 +1535,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "POST /api/conversation/step",
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
+      "GET /api/build",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -1543,7 +1555,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
         Effect: "Allow",
         Action: "dynamodb:GetItem",
         Resource: f.tableArn(),
-        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*"] } },
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*", "BUILD#*"] } },
       },
       {
         Effect: "Allow",
@@ -1560,7 +1572,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
           "ForAllValues:StringEquals": {
             "dynamodb:Attributes": [
               "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
-              "approvedSpecVersion", "latestSpecVersion", "approvedAt",
+              "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId",
             ],
           },
         },
@@ -1589,7 +1601,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
     expect(f.permissions()).toEqual([]);
   });
 
-  it("allows only its logs, reads and updates of listed attributes in participants, the one model and consuming its queue", () => {
+  it("allows only its logs, reads and updates of listed attributes in participants, new builds of listed attributes, the one model, sending to the launch queue and consuming its queue", () => {
     const queueArn = { "Fn::GetAtt": [ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1], "Arn"] };
     expect(f.statements()).toEqual([
       { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
@@ -1605,7 +1617,17 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": expect.not.arrayContaining(["approved", "approvedTextHash", "step", "role", "group", "nickname", "id"]) },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": expect.not.arrayContaining(["approved", "approvedTextHash", "approvedAt", "role", "group", "nickname", "id"]) },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },
       {
@@ -1616,6 +1638,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
           "arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-4-6",
         ],
       },
+      { Effect: "Allow", Action: "sqs:SendMessage", Resource: `arn:aws:sqs:${REGION}:${ACCOUNT}:ssd-workshop-builds.fifo` },
       {
         Effect: "Allow",
         Action: ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
@@ -1624,26 +1647,67 @@ describe("api stack: AI worker (ticket 1.7)", () => {
     ]);
     // Each forbidden name on its own (not.arrayContaining only fails when all of them are listed). The
     // approval marker skips the guardrail check: neither Lambda role may write it.
-    const workerUpdate = f.statements().find((st) => st.Action === "dynamodb:UpdateItem") as
-      | { Condition: { "ForAllValues:StringEquals": { "dynamodb:Attributes": string[] } } }
-      | undefined;
+    const workerUpdate = f.statements().find(
+      (st) => st.Action === "dynamodb:UpdateItem" && JSON.stringify(st).includes("PARTICIPANT#*"),
+    ) as { Condition: { "ForAllValues:StringEquals": { "dynamodb:Attributes": string[] } } } | undefined;
     const conversationUpdate = apiFunction(CONVERSATION_FUNCTION_NAME).statements().find((st) => st.Action === "dynamodb:UpdateItem") as typeof workerUpdate;
     for (const update of [workerUpdate, conversationUpdate]) {
       const names = update?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
       expect(names?.length).toBeGreaterThan(5);
       for (const forbidden of ["approved", "approvedTextHash", "role", "group", "nickname", "id"]) expect(names, forbidden).not.toContain(forbidden);
     }
-    expect(workerUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"]).not.toContain("step");
     // Ticket 1.9: only the AI worker makes spec versions (readers require specVersion), and only the
-    // participant's Approve spec (the conversation function) approves one.
+    // participant's Approve spec (the conversation function) approves one (approvedAt). Ticket 2.7: the worker's
+    // readiness outcome moves the step (approved to building, or back to spec) and clears approvedSpecVersion after a
+    // failed check, each conditional on the step being approved with that version approved; it never sets approvedAt.
     const workerNames = workerUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
     const conversationNames = conversationUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
     expect(workerNames).toContain("specVersion");
     expect(conversationNames).not.toContain("specVersion");
-    for (const approval of ["approvedSpecVersion", "approvedAt"]) {
-      expect(workerNames, approval).not.toContain(approval);
-      expect(conversationNames, approval).toContain(approval);
+    expect(workerNames).not.toContain("approvedAt");
+    expect(conversationNames).toContain("approvedAt");
+    for (const name of ["step", "approvedSpecVersion", "buildId"]) expect(workerNames, name).toContain(name);
+    // The worker's build rights never reach the deployer's or the builder's attributes.
+    const buildNames = AI_WORKER_BUILD_UPDATE_ATTRIBUTES as readonly string[];
+    for (const name of ["deployedCommit", "failureReasons", "finishedAt", "pushedCommit"]) expect(buildNames, name).not.toContain(name);
+  });
+
+  it("the launch queue (ticket 2.7): FIFO ssd-workshop-builds.fifo with SQS-managed encryption and a FIFO dead-letter queue, tagged; only the AI worker may send to it", () => {
+    const buildsQueues = resources(STACK_NAMES.builds).filter(([, r]) => r.Type === "AWS::SQS::Queue");
+    const byName = (name: string) => buildsQueues.find(([, r]) => r.Properties?.QueueName === name);
+    expect(BUILD_QUEUE_NAME).toBe("ssd-workshop-builds.fifo");
+    expect(byName(BUILD_QUEUE_NAME)?.[1].Properties).toMatchObject({
+      FifoQueue: true,
+      ContentBasedDeduplication: false,
+      SqsManagedSseEnabled: true,
+      MessageRetentionPeriod: 86_400,
+      VisibilityTimeout: BUILD_QUEUE_VISIBILITY_SECONDS,
+      RedrivePolicy: { deadLetterTargetArn: { "Fn::GetAtt": [byName(BUILD_DLQ_NAME)?.[0], "Arn"] }, maxReceiveCount: BUILD_QUEUE_MAX_RECEIVES },
+    });
+    expect(byName(BUILD_DLQ_NAME)?.[1].Properties).toMatchObject({ FifoQueue: true, SqsManagedSseEnabled: true, MessageRetentionPeriod: 1_209_600 });
+    for (const name of [BUILD_QUEUE_NAME, BUILD_DLQ_NAME]) expect(tagsOf(must(byName(name))[1]).project, name).toBe("ssd-workshop");
+    expect(buildsQueues).toHaveLength(2);
+    expect(PLATFORM_BUILD_QUEUE_NAME).toBe(BUILD_QUEUE_NAME);
+
+    // Senders: every allowing statement in every stack that may SendMessage to it is the AI worker's own.
+    const queueIds = buildsQueues.map(([id]) => id);
+    const queueArn = `arn:aws:sqs:${REGION}:${ACCOUNT}:${BUILD_QUEUE_NAME}`;
+    const reaches = (resource: unknown): boolean => resourceReaches(resource, [queueArn], queueIds, ["ssd-workshop-builds"]);
+    for (const pattern of ["*", "arn:aws:sqs:*", "arn:aws:sqs:*:*:ssd-workshop-build*", "arn:aws:sqs:eu-central-1:*:*.fifo"]) expect(reaches(pattern), pattern).toBe(true);
+    expect(reaches(`arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}`)).toBe(false);
+    const workerRoleId = f.roleEntry()?.[0];
+    const senders: string[] = [];
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        if (!([st.Action].flat() as string[]).some((g) => actionCovers(g, "sqs:SendMessage"))) continue;
+        if (![st.Resource].flat().some(reaches)) continue;
+        senders.push(`${s}/${id}`);
+        expect(JSON.stringify(r.Properties?.Roles), `${s}/${id}`).toBe(JSON.stringify([{ Ref: workerRoleId }]));
+      }
     }
+    expect(senders).toHaveLength(1);
+    expect(resources(STACK_NAMES.builds).filter(([, r]) => r.Type === "AWS::SQS::QueuePolicy")).toEqual([]);
   });
 
   it("bundles the handler into a self-contained index.js that skips a malformed job without any AWS call", async () => {

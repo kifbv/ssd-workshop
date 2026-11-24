@@ -78,3 +78,12 @@ export const APPS_DEFAULT_BRANCH = "main";
  */
 export const BUILDER_COMMIT_NAME = "SSD Workshop builder";
 export const BUILDER_COMMIT_EMAIL = "noreply@workshop.rankly.games";
+
+/**
+ * The launch queue (ticket 2.7): the AI worker sends `{"buildId": "<id>"}` once the readiness check passed and the build
+ * record exists; the build launcher (ticket 2.9) consumes it. FIFO: the build id is the deduplication id and the
+ * participant id the message group, so a re-send within 5 minutes is dropped by SQS and one participant's launches
+ * run one at a time. A later re-send can still arrive: the launcher acts only on a build that is still `queued`.
+ */
+export const BUILD_QUEUE_NAME = "ssd-workshop-builds.fifo";
+export const BUILD_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${BUILD_QUEUE_NAME}`;

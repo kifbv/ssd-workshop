@@ -1,7 +1,7 @@
 // The conversation's records and the store interface shared by the API routes, the AI worker and
 // the flags command (ticket 1.7). The DynamoDB adapter is ./store.ts; tests use ./fakes.ts.
 import { createHash } from "node:crypto";
-import type { ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
+import type { BuildStatus, ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 
 /**
@@ -43,6 +43,8 @@ export interface StoredConversation {
   latestSpecVersion?: number;
   /** The approved spec version (ticket 1.9): no more messages once set. */
   approvedSpecVersion?: number;
+  /** The build the readiness check started (ticket 2.7). */
+  buildId?: string;
 }
 
 /** One version of a participant's spec (ticket 1.9). */
@@ -159,13 +161,68 @@ export interface ConversationStore {
    * was approved and no message is in flight; a stale pending one is let go), and `approvedAt` on the
    * version. Otherwise `wrong-step`, `stale` (a newer version exists), `no-spec`, `busy` or `waiting`.
    */
-  approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<ApproveResult>;
+  approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string, readiness: NewMessage): Promise<ApproveResult>;
+  /**
+   * Ticket 2.7: the approval also stores the readiness request (`readiness`, a pending message at step
+   * `approved` with READINESS_REQUEST as its text) as the conversation's message in flight, in the same
+   * transaction. `requestReadiness` stores a new one for a participant still at step approved with that
+   * version approved and nothing in flight (a stale pending one is let go): an approval from before 2.7, or
+   * a check whose worker never finished. Otherwise `busy`, or `wrong-step`.
+   */
+  requestReadiness(participantId: string, version: number, message: NewMessage): Promise<ReadinessRequestResult>;
+  /**
+   * Ends the readiness message (ticket 2.7), only while it is pending, the conversation's message in flight
+   * with `version` approved, and the profile at step approved: the message's status (done, or failed), the
+   * reply, the conversation (no message in flight; `ready`: the build id; otherwise the approval removed),
+   * the profile's step (building, or spec), `ready`: the new build record (only if absent), and the tokens.
+   * False when a condition failed (nothing written).
+   */
+  finishReadiness(participantId: string, messageId: string, outcome: ReadinessFinish, nowIso: string): Promise<boolean>;
+  /** The profile's step and nickname (ticket 2.7). */
+  getParticipantInfo(participantId: string): Promise<ParticipantInfo | undefined>;
+  /** A build (ticket 2.7), or undefined; the caller checks it belongs to the participant asking. */
+  getBuild(buildId: string): Promise<StoredBuild | undefined>;
   /**
    * Adds tokens and cost to the participant's usage totals on their own: only when the final write
    * failed for good, so tokens already spent are still counted.
    */
   addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void>;
 }
+
+/** What the AI worker reads of a profile for the readiness check (ticket 2.7). */
+export interface ParticipantInfo {
+  step: Step;
+  /** As the participant typed it: the build record keeps it exactly so (the deployer compares it exactly). */
+  nickname?: string;
+}
+
+/** A build as `GET /api/build` reads it (ticket 2.7). */
+export interface StoredBuild {
+  buildId: string;
+  participantId: string;
+  status: BuildStatus;
+  failureReasons?: string[];
+}
+
+/**
+ * How the readiness check ends (ticket 2.7), stored in one transaction with the reply and the tokens:
+ * `ready` moves the step to building and creates the build; `not-ready` and `failed` go back to step 2 with
+ * the approval cleared, so the participant can approve again.
+ */
+export type ReadinessFinish =
+  | { kind: "ready"; reply: string; version: number; answer: AnswerRecord; build: { buildId: string; nickname: string } }
+  | { kind: "not-ready"; reply: string; version: number; answer: AnswerRecord }
+  | { kind: "failed"; reply: string; version: number; usage?: TokenUsage };
+
+/** The build a readiness message starts: its id is made from the message id, so one approval can only ever make one build. */
+export function buildIdFor(messageId: string): string {
+  const id = messageId.replace(/[^A-Za-z0-9_-]/g, "-");
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("message id makes no build id");
+  return id;
+}
+
+/** `requestReadiness`: the check was asked for again, or something is still in flight. */
+export type ReadinessRequestResult = "created" | "busy" | "wrong-step";
 
 /** Hands a stored message to the AI worker: ids only, never the text. */
 export interface MessageQueue {
@@ -195,4 +252,20 @@ export function parseJob(body: string | undefined): AiJob | undefined {
 
 export function jobBody(job: AiJob): string {
   return JSON.stringify({ participantId: job.participantId, messageId: job.messageId });
+}
+
+/** Hands a build to the build launcher (ticket 2.7; consumed from ticket 2.9): the build id only. */
+export interface BuildQueue {
+  /** `participantId` groups one participant's launches (FIFO message group); the body holds only the build id. */
+  send(job: BuildJob): Promise<void>;
+}
+
+export interface BuildJob {
+  buildId: string;
+  participantId: string;
+}
+
+/** The launch message body: exactly `{"buildId": "<id>"}`. */
+export function buildJobBody(job: BuildJob): string {
+  return JSON.stringify({ buildId: job.buildId });
 }

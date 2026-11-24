@@ -17,7 +17,7 @@ import {
   type ConversationDeps,
   type ConversationLogEntry,
 } from "./conversation.js";
-import { FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "./fakes.js";
+import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "./fakes.js";
 import {
   checkSpec,
   DEFAULT_SPEC_ANSWER,
@@ -180,7 +180,7 @@ async function setup() {
   let counter = 0;
   const logs: ConversationLogEntry[] = [];
   const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
-  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, now: () => clock, log: () => undefined, sleep: async () => undefined };
+  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), now: () => clock, log: () => undefined, sleep: async () => undefined };
   const advance = (seconds: number) => {
     clock = new Date(clock.getTime() + seconds * 1000);
   };
@@ -316,7 +316,9 @@ describe("criterion 4: Approve spec", () => {
     await s.ask("Add a longest run screen.", specAnswer("Added.", SPEC_V2));
     const res = await s.call(approve(2));
     expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ step: "approved", version: 2 });
+    // Ticket 2.7: the answer also carries the id of the readiness request, the one job the approval queued.
+    expect(json(res)).toEqual({ step: "approved", version: 2, id: expect.any(String) as unknown });
+    const readinessJob = { participantId: "me-1", messageId: json(res)["id"] };
     expect(s.table.profiles.get("me-1")?.step).toBe("approved");
     expect(s.table.conversations.get("me-1")).toMatchObject({ approvedSpecVersion: 2, latestSpecVersion: 2 });
     expect(s.table.specs.get("me-1")?.map((v) => v.approvedAt !== undefined)).toEqual([false, true]);
@@ -329,7 +331,7 @@ describe("criterion 4: Approve spec", () => {
     expect(refused.statusCode).toBe(409);
     expect(json(refused)).toEqual({ reason: "approved", message: MESSAGES.approved });
     expect(await s.table.createMessage("me-1", { id: "x", step: "spec", text: "sneaky", createdAt: "x", nowSeconds: START_S })).toBe("approved");
-    expect(s.queue.sent).toEqual([]);
+    expect(s.queue.sent).toEqual([readinessJob]);
     expect(json(await s.call(writeSpec()))).toEqual({ reason: "wrong-step", message: MESSAGES["wrong-step"] });
     // A second press with the same version is fine; another version is refused.
     expect((await s.call(approve(2))).statusCode).toBe(200);

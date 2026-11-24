@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "../conversation/fakes.js";
+import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, verdictReply } from "../conversation/fakes.js";
 import type { HttpRequest } from "../http.js";
 import { hashToken, SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
@@ -44,7 +44,7 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
     const model = new FakeModel();
     let clock = NOW;
     const api = createHandler({ sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, 9), log: logEntry });
-    const worker = createWorker({ store: table, model, modelId: MODEL_ID, now: () => clock, log: workerLogEntry });
+    const worker = createWorker({ store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), now: () => clock, log: workerLogEntry });
     const send = (text: string): HttpRequest => ({
       routeKey: "POST /api/conversation/messages",
       cookies: [`${SESSION_COOKIE}=${TOKEN}`],
@@ -81,6 +81,7 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
       store: { getMessage: async () => Promise.reject(Object.assign(new Error(`read failed: ${SECRET_TEXT}`), { name: "ProvisionedThroughputExceededException" })) } as never,
       model,
       modelId: MODEL_ID,
+      builds: new FakeBuildQueue(),
       now: () => clock,
       log: workerLogEntry,
     });
