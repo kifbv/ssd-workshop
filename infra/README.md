@@ -622,13 +622,14 @@ The deploy creates the secret `ssd-workshop-github` with a random placeholder; n
 **Order: the key goes in last.** The access stack's `NoGitHubKey` deny (in `ssd-workshop-deploy-read`, ticket 2.6)
 keeps the deploy role and the Claude user from doing anything with `secret:ssd-workshop-github-*` but creating,
 describing and tagging it, and the boundary's `GitHubKeyForTheLauncherOnly` lets no workload role but the build
-launcher read it, and `NoLauncherForSessions` keeps Claude sessions from creating, passing or changing that launcher's
-role and function or planting deploy assets; without them they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
+launcher read it, `NoLauncherForSessions` keeps Claude sessions from creating, passing, changing or invoking that
+launcher's role and function or touching deploy assets, and `NoDeployAssetWrites` keeps workload roles from planting
+deploy assets; without them they hold `secretsmanager:*` on `ssd-workshop-*`. Load the key only
 after these steps, in this order:
 
 1. The pull request is merged and the builds stack is deployed (the secret exists, holding CDK's placeholder).
    The deploy creates the secret whether or not the deny is applied (creating and describing it stay allowed).
-2. Franck applies `infra/access/access-stack.yaml` from `main` (the three denies).
+2. Franck applies `infra/access/access-stack.yaml` from `main` (the four denies).
 3. Franck loads the GitHub App's id and key with the command below, from his own machine.
 
 Until step 3 the secret holds only the placeholder: `smoke github` and the repository code fail with "The

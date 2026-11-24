@@ -1396,16 +1396,35 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       }
     });
 
-    it("denies the Claude user changing the launcher's function, but not invoking or reading it", () => {
+    it("denies the Claude user changing or invoking the launcher's function, but not reading it", () => {
       for (const fn of FUNCTIONS) {
         for (const action of FUNCTION_WRITES) expect(allowedBy(deploy, action, fn, CLAUDE), `${action} ${fn}`).toBe(false);
       }
-      for (const action of ["lambda:GetFunction", "lambda:InvokeFunction"]) expect(allowedBy(deploy, action, FUNCTIONS[0] ?? "", CLAUDE), action).toBe(true);
+      expect(allowedBy(deploy, "lambda:GetFunction", FUNCTIONS[0] ?? "", CLAUDE)).toBe(true);
+      // Invoking runs the key holder's code on input a session chose: denied too.
+      expect(allowedBy(deploy, "lambda:InvokeFunction", FUNCTIONS[0] ?? "", CLAUDE)).toBe(false);
     });
 
-    it("denies the Claude user writing deploy assets (a planted asset would become the launcher's code)", () => {
+    it("denies the Claude user writing deploy assets or the assets bucket's settings (a planted asset would become the launcher's code)", () => {
       for (const action of ["s3:PutObject", "s3:DeleteObject"]) expect(allowedBy(deploy, action, ASSET, CLAUDE), action).toBe(false);
       expect(allowedBy(deploy, "s3:GetObject", ASSET, CLAUDE)).toBe(true);
+      for (const action of ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:PutBucketOwnershipControls", "s3:PutBucketVersioning"]) {
+        expect(allowedBy(deploy, action, `arn:aws:s3:::${ASSETS_BUCKET_NAME}`, CLAUDE), action).toBe(false);
+      }
+    });
+
+    it("denies every workload role writing deploy assets (a role a session creates could plant one otherwise)", () => {
+      const role = { ...REQUEST, "aws:PrincipalArn": WORKLOAD_ROLE };
+      for (const action of ["s3:PutObject", "s3:DeleteObject", "s3:PutObjectAcl"]) expect(allowedBy(boundary, action, ASSET, role), action).toBe(false);
+      expect(allowedBy(boundary, "s3:GetObject", ASSET, role)).toBe(true);
+      expect(allowedBy(boundary, "s3:PutObject", `arn:aws:s3:::ssd-workshop-apps-${ACCOUNT}/apps/x/index.html`, role)).toBe(true);
+    });
+
+    it("names exactly the launcher's role from config (both forms)", () => {
+      const deny = deploy.find((s) => s.Sid === "NoLauncherForSessions");
+      const resources = list(deny?.Resource).map(live);
+      for (const role of ROLES) expect(resources).toContain(role);
+      expect(ROLES[0]).toBe(BUILD_LAUNCHER_ROLE_ARN);
     });
 
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {

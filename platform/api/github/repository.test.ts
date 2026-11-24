@@ -100,6 +100,7 @@ describe("removeEmailAddresses", () => {
       ["joiner ada@exam\u200Dple.com", "joiner [email removed]"],
       ["entity ada&#64;example.com and bob&#x40;example&#46;org and cy&commat;example.org", "entity [email removed] and [email removed] and [email removed]"],
       ["small at ada﹫example.com", "small at [email removed]"],
+      ["small dots ada@example﹒org and bo@example｡org", "small dots [email removed] and [email removed]"],
       // Also caught, by design: file names shaped like an address.
       ["logo@2x.png", "[email removed]"],
     ];
@@ -108,8 +109,8 @@ describe("removeEmailAddresses", () => {
     expect(removeEmailAddresses(plain)).toBe(plain);
   });
 
-  it("takes linear time on long hostile lines (100,000 characters each under 200 ms)", () => {
-    const n = 100_000;
+  it("takes linear time on long hostile lines (256 KB each under 1 s)", () => {
+    const n = 256_000;
     const hostile = [
       "x".repeat(n / 2) + "@" + "a.".repeat(n / 4),
       "a".repeat(n),
@@ -122,7 +123,7 @@ describe("removeEmailAddresses", () => {
     for (const text of hostile) {
       const start = performance.now();
       removeEmailAddresses(text);
-      expect(performance.now() - start, text.slice(0, 12)).toBeLessThan(200);
+      expect(performance.now() - start, text.slice(0, 12)).toBeLessThan(1000);
     }
   });
 

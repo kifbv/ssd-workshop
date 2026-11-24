@@ -62,7 +62,7 @@ export function repositoryNameFor(nickname: string): string {
 
 /**
  * Email-shaped text: a local part, an at sign (`@`, full-width `＠` or small `﹫`), and a domain with at least one dot
- * (`.`, `．` or `。`) ending in a label of two letters or more (or a punycode `xn--` label). Letters and marks of any
+ * (`.`, `．`, `。`, `﹒` or `｡`) ending in a label of two letters or more (or a punycode `xn--` label). Letters and marks of any
  * script count, the text is first put in Unicode's composed form (NFC), invisible format characters (`\p{Cf}`: zero
  * width space, joiners, bidirectional marks) may sit anywhere inside, and the HTML entities GitHub renders as `@` or
  * `.` (`&#64;`, `&#x40;`, `&commat;`, `&#46;`, `&#x2e;`, `&period;`) are read as those characters. Not caught:
@@ -72,7 +72,7 @@ export function repositoryNameFor(nickname: string): string {
  */
 const LOCAL = "[\\p{L}\\p{M}\\p{N}\\p{Cf}._%+'-]";
 const LABEL = "[\\p{L}\\p{M}\\p{N}\\p{Cf}-]";
-const DOT = "[.．。]";
+const DOT = "[.．。﹒｡]";
 const EMAIL_SHAPED = new RegExp(
   `(?<!${LOCAL})${LOCAL}+[@＠﹫]${LABEL}+(?:${DOT}${LABEL}+)*${DOT}\\p{Cf}*(?:xn--[\\p{L}\\p{N}-]+|\\p{L}[\\p{L}\\p{M}\\p{Cf}]+)`,
   "gu",
