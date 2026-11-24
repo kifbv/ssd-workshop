@@ -539,8 +539,8 @@ AWS_PROFILE=franck aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<n
 # expect: An error occurred (AccessDenied) when calling the PutObject operation ... with an explicit deny in a resource-based policy
 ```
 
-(From a Claude session the same command is refused earlier since ticket 2.12, "because no identity-based policy allows
-the s3:PutObject action": the user has no write at all.) The refusal names the deny `OnlyTheDeployerWritesApps`, so
+(From a Claude session the same command is refused since ticket 2.12 by the explicit deny `OnlyReadsForSessions` in an
+identity-based policy, or by this bucket policy's deny: the user has no write at all.) The refusal names the deny `OnlyTheDeployerWritesApps`, so
 the `aws:PrincipalArn` form used by the deny is checked from both sides: other principals are refused, and the first successful deploy (the deployer's puts pass) proves that
 `aws:PrincipalArn` matches the deployer's role (the policy names it with and without its path). If the first deploy
 fails with `AccessDenied` on `PutObject` "with an explicit deny in a resource-based policy", the key carries a form
@@ -806,7 +806,8 @@ aws lambda update-function-configuration --region eu-central-1 --function-name s
 # expect: AccessDeniedException ... with an explicit deny in an identity-based policy (OnlyReadsForSessions, ticket 2.12 try 3)
 echo x > /tmp/x.txt
 aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
-# expect: AccessDenied ... with an explicit deny in an identity-based policy
+# expect: AccessDenied ... with an explicit deny in an identity-based policy (or in a resource-based policy: the
+#         bucket's OnlyTheDeployerWritesApps denies it too)
 aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
 # expect: AccessDeniedException ... with an explicit deny in an identity-based policy
 npm run -s smoke -- ses success@simulator.amazonses.com
