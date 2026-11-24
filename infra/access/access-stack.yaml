@@ -139,12 +139,13 @@ Resources:
             Effect: Allow
             Action: [ssmmessages:*, ec2messages:*, ec2:DescribeInstances, ec2:DescribeTags]
             Resource: "*"
-          # ECS network placement (ticket 2.2): ecs:subnet exists only on CreateService and
-          # UpdateService. ForAnyValue: an UpdateService that leaves the network alone carries no
-          # subnet and is not denied. RunTask has no subnet key; StartTask is never needed.
+          # ECS network placement (ticket 2.2): ecs:subnet exists on CreateService/UpdateService and
+          # CreateExpressGatewayService/UpdateExpressGatewayService; never on RunTask/StartTask.
+          # ForAnyValue: an update that leaves the network alone carries no subnet and is not
+          # denied. StartTask is never needed.
           - Sid: ServicesInWorkshopSubnetsOnly
             Effect: Deny
-            Action: [ecs:CreateService, ecs:UpdateService]
+            Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateExpressGatewayService, ecs:UpdateExpressGatewayService]
             Resource: "*"
             Condition:
               ForAnyValue:StringNotEquals: {ecs:subnet: [subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]}
@@ -294,10 +295,10 @@ Resources:
             Resource: "*"
             Condition:
               ArnNotLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-*"}
-          # ecs:subnet exists only on CreateService and UpdateService (see the boundary).
+          # Every action carrying ecs:subnet (see the boundary).
           - Sid: ServicesInWorkshopSubnetsOnly
             Effect: Deny
-            Action: [ecs:CreateService, ecs:UpdateService]
+            Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateExpressGatewayService, ecs:UpdateExpressGatewayService]
             Resource: "*"
             Condition:
               ForAnyValue:StringNotEquals: {ecs:subnet: [subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]}

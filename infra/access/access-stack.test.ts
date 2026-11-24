@@ -611,7 +611,14 @@ const BUILDER_TASK_DEFINITION = `${ECS_ARN}:task-definition/ssd-workshop-builder
 const WORKSHOP_SERVICE = `${ECS_ARN}:service/ssd-workshop-builds/ssd-workshop-app`;
 const OTHER_SUBNET = "subnet-0aaaaaaaaaaaaaaaa";
 const WORKLOAD_ROLE = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-builder-task`;
-const LAUNCHER_SUBNET_LIST = "[subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]";
+const SERVICE_DENY_SUBNET_LIST = "[subnet-05229d71b1e0b41ff, subnet-0965bcee41d455dba]";
+// Every ECS action that carries ecs:subnet, per servicereference ecs.json
+// (servicereference.us-east-1.amazonaws.com/v1/ecs/ecs.json), read 2026-11-24. RunTask and
+// StartTask carry none. A new action with the key must be added here and to both denies.
+const ECS_SUBNET_ACTIONS = [
+  "ecs:CreateService", "ecs:UpdateService",
+  "ecs:CreateExpressGatewayService", "ecs:UpdateExpressGatewayService",
+];
 
 const template = loadTemplate();
 
@@ -992,35 +999,49 @@ describe("access stack: ECS network placement (ticket 2.2)", () => {
     expect(allowedBy(old, "ecs:StartTask", BUILDER_TASK_DEFINITION, { "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
   });
 
-  it("denies CreateService and UpdateService with a subnet outside the two workshop subnets", () => {
+  it("denies every action carrying ecs:subnet with a subnet outside the two workshop subnets", () => {
     for (const [name, stmts] of [["deploy", deploy], ["boundary", boundary]] as const) {
-      for (const action of ["ecs:CreateService", "ecs:UpdateService"]) {
-        const deny = stmts.find((s) => s.Sid === "ServicesInWorkshopSubnetsOnly");
-        expect(deny?.Effect, name).toBe("Deny");
+      const deny = stmts.find((s) => s.Sid === "ServicesInWorkshopSubnetsOnly");
+      expect(deny?.Effect, name).toBe("Deny");
+      // Exactly the actions that carry the key: no more (a key an action lacks is never
+      // there, so the deny would be dead), no less (an action left out runs anywhere).
+      expect([...list(deny?.Action)].sort(), name).toEqual([...ECS_SUBNET_ACTIONS].sort());
+      for (const action of ECS_SUBNET_ACTIONS) {
         expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] }), `${name} ${action}`).toBe(true);
         expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, { "ecs:subnet": [subnetA as string, OTHER_SUBNET] }), `${name} ${action} mixed`).toBe(true);
         expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, { "ecs:subnet": [...BUILDS_SUBNET_IDS] }), `${name} ${action} workshop`).toBe(false);
-        // ForAnyValue: an UpdateService that does not touch the network carries no subnet.
+        // ForAnyValue: an update that does not touch the network carries no subnet.
         expect(statementApplies(deny as Statement, action, WORKSHOP_SERVICE, {}), `${name} ${action} no key`).toBe(false);
       }
     }
     // End to end for the deploy principals, who hold ecs:* on workshop services.
-    expect(allowedBy(deploy, "ecs:CreateService", WORKSHOP_SERVICE, { "ecs:subnet": [subnetA as string, subnetB as string] })).toBe(true);
-    expect(allowedBy(deploy, "ecs:CreateService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(false);
-    expect(allowedBy(deploy, "ecs:UpdateService", WORKSHOP_SERVICE, { "ecs:subnet": [subnetB as string, OTHER_SUBNET] })).toBe(false);
-    expect(allowedBy(deploy, "ecs:UpdateService", WORKSHOP_SERVICE, {})).toBe(true);
+    for (const action of ECS_SUBNET_ACTIONS) {
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, { "ecs:subnet": [subnetA as string, subnetB as string] }), action).toBe(true);
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] }), action).toBe(false);
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, { "ecs:subnet": [subnetB as string, OTHER_SUBNET] }), action).toBe(false);
+      expect(allowedBy(deploy, action, WORKSHOP_SERVICE, {}), action).toBe(true);
+    }
     // Old pattern: without the deny, a service could run in another project's subnet.
     const old = deploy.filter((s) => s.Sid !== "ServicesInWorkshopSubnetsOnly");
     expect(allowedBy(old, "ecs:CreateService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(true);
+    // Try 1's pattern: only CreateService/UpdateService, so an Express Gateway service ran anywhere.
+    const tryOne = withAll(
+      "Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateExpressGatewayService, ecs:UpdateExpressGatewayService]",
+      "Action: [ecs:CreateService, ecs:UpdateService]",
+    );
+    expect(allowedBy(deployStatements(tryOne), "ecs:CreateExpressGatewayService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(true);
+    expect(allowedBy(deployStatements(tryOne), "ecs:UpdateExpressGatewayService", WORKSHOP_SERVICE, { "ecs:subnet": [OTHER_SUBNET] })).toBe(true);
   });
 
-  it("writes no deny on a subnet key for RunTask or StartTask (RunTask has no ecs:subnet key)", () => {
-    // Per the Service Authorization Reference, ecs:subnet exists only on CreateService and
-    // UpdateService. A negated operator on the missing key would deny every RunTask; a
-    // ForAnyValue one would deny none.
+  it("writes no deny on a subnet key for RunTask or StartTask (they carry no ecs:subnet key)", () => {
+    // ecs:subnet exists on CreateService/UpdateService and CreateExpressGatewayService/
+    // UpdateExpressGatewayService; never on RunTask/StartTask. A negated operator on the missing
+    // key would deny every RunTask; a ForAnyValue one would deny none.
+    expect(ECS_SUBNET_ACTIONS).not.toContain("ecs:RunTask");
+    expect(ECS_SUBNET_ACTIONS).not.toContain("ecs:StartTask");
     for (const s of [...deploy, ...boundary]) {
       if (!JSON.stringify(s.Condition ?? {}).includes("ecs:subnet")) continue;
-      expect(list(s.Action), s.Sid).toEqual(["ecs:CreateService", "ecs:UpdateService"]);
+      expect([...list(s.Action)].sort(), s.Sid).toEqual([...ECS_SUBNET_ACTIONS].sort());
     }
   });
 
@@ -1063,7 +1084,7 @@ describe("access stack: ECS network placement (ticket 2.2)", () => {
       const deny = stmts.find((s) => s.Sid === "ServicesInWorkshopSubnetsOnly");
       expect(condValues(deny?.Condition, "ForAnyValue:StringNotEquals", "ecs:subnet")).toEqual([...BUILDS_SUBNET_IDS]);
     }
-    expect(templateText.split(LAUNCHER_SUBNET_LIST)).toHaveLength(3);
+    expect(templateText.split(SERVICE_DENY_SUBNET_LIST)).toHaveLength(3);
     const pinned = boundary.filter((s) => s.Condition?.ArnEquals?.["aws:PrincipalArn"] !== undefined);
     expect(pinned.map((s) => s.Sid)).toEqual(["RunBuilds", "TagBuildsOnStart"]);
     for (const s of pinned) expect(condValues(s.Condition, "ArnEquals", "aws:PrincipalArn").map(live), s.Sid).toEqual([BUILD_LAUNCHER_ROLE_ARN]);

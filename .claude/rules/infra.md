@@ -68,9 +68,10 @@ paths:
   from snapshots are denied. k3s nodes use IMDSv2 with hop limit 1, so pods cannot reach the node
   role.
 - ECS tasks run only on `ssd-workshop-*` clusters (`ecs:cluster` deny); service ARNs hold the
-  cluster name, so services are limited the same way. `ecs:subnet` exists only on `CreateService` and
-  `UpdateService` (services are pinned to `BUILDS_SUBNET_IDS`); `RunTask` and `StartTask` have no
-  subnet key, so IAM cannot pin a task to subnets: the launcher must name the two subnets itself.
+  cluster name, so services are limited the same way. `ecs:subnet` exists on CreateService/UpdateService and
+  CreateExpressGatewayService/UpdateExpressGatewayService; never on RunTask/StartTask (all four are
+  pinned to `BUILDS_SUBNET_IDS`, and the test's `ECS_SUBNET_ACTIONS` must list every action with the
+  key); `RunTask` and `StartTask` have no subnet key, so IAM cannot pin a task to subnets: the launcher must name the two subnets itself.
   `StartTask` is denied, and under the boundary only the role `ssd-workshop-builds-launcher` may
   `RunTask` (`aws:PrincipalArn`). Before relying on a condition key, check that the action lists it in
   `servicereference.us-east-1.amazonaws.com/v1/<service>/<service>.json`: a negated operator on a key the

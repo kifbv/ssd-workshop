@@ -57,6 +57,11 @@ Acceptance criteria (each starts as FAIL):
 - WHEN `infra/access/README.md` is read THEN risk 1 is marked closed and the `DescribeTaskDefinition` risk is listed with its check
 - WHEN the template handed to Franck is diffed with the applied one THEN it holds every change already applied (lesson of 2026-11-23)
 
+Proposed wording (pending Franck, 2026-11-24; IAM has no subnet key on `RunTask`/`StartTask`, see `docs/decisions.md`), replacing the first and third criteria:
+
+- WHEN the access-stack test runs THEN StartTask is denied, every action carrying `ecs:subnet` is denied outside the two subnets, and under the boundary only the launcher role may RunTask
+- WHEN infra/access/README.md is read THEN risk 1 is marked narrowed with a CloudTrail check and the DescribeTaskDefinition risk is listed with its check
+
 ### 2.3 App template and the deploy check
 
 `templates/basic/` becomes the starter every app is built from: `index.html`, `style.css`, `app.js`, a small `workshop-data.js` client for the data API, `SPEC.md` (filled with the approved spec), a README explaining the files, and `AGENTS.md`, the coding agent's instructions (plain HTML, CSS and JavaScript, no frameworks, no outside addresses, no `localStorage`, store data only through `workshop-data.js`, works at 375 px). The deploy check (`platform/api/build/check.ts`) holds the spec's rules: only allowed file types, no address outside the workshop, at most 5 MB.
