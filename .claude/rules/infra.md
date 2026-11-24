@@ -231,7 +231,9 @@ paths:
   `public.ecr.aws/docker/library/<image>:<exact version>`. ECR Public also rate-limits anonymous pulls from GitHub's
   shared runners (429 on the first deploy after 2.9): the deploy workflow logs in first (`aws ecr-public
   get-login-password --region us-east-1`, as the deploy role: `ecr-public:GetAuthorizationToken` and
-  `sts:GetServiceBearerToken` with `sts:AWSServiceName` `ecr-public.amazonaws.com`) and retries the build 3 times.
+  `sts:GetServiceBearerToken` WITHOUT an `sts:AWSServiceName` condition: with `ecr-public.amazonaws.com` the live
+  login was denied) and retries the build 3 times. Unit tests of a condition cannot prove the real request carries it:
+  check a new login or token right live (as the Claude user, printing no token) before handing the template over.
 - In a session, `docker build` cannot reach npm through the agent proxy's TLS (SELF_SIGNED_CERT_IN_CHAIN): build a
   local copy of the Dockerfile that mounts the proxy CA (`--build-context`, `NODE_EXTRA_CA_CERTS`); never commit it.
 - A deny "for every role but X" in the boundary (ticket 2.9 try 2): `ArnNotLike` `aws:PrincipalArn`
