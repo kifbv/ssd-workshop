@@ -155,7 +155,7 @@ Depends on: 2.2 applied, 2.5, 2.7, 2.8. Areas: infra, builder.
 
 Acceptance criteria (each starts as FAIL):
 
-- WHEN the synthesized task definition is inspected THEN its role has the boundary, may invoke only `eu.anthropic.claude-sonnet-4-6` and its foundation models, write only build records (`dynamodb:Attributes`), and send only to `ssd-workshop-deploys`, and the task has no secret in its environment
+- WHEN the synthesized task definition is inspected THEN its role has the boundary, may invoke only `eu.anthropic.claude-sonnet-4-6` and its foundation models, write only build records and the token counters of participants' usage items (`dynamodb:Attributes`; usage added by Franck's choice in 2.8), and send only to `ssd-workshop-deploys`, and the task has no secret in its environment
 - WHEN the launcher starts a task THEN it names the `ssd-workshop-builds` cluster and the two workshop subnets with a public IP
 - WHEN a task stops without the build being finished THEN the build is marked failed within 2 minutes (launcher check, unit test)
 - WHEN `npm run builds -- retry <nickname>` runs on a failed build THEN a new task starts on the same repository
