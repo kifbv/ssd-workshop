@@ -237,7 +237,11 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
             written.add(path);
             fileWrites.push(
               feed({ kind: "file", path: feedPath(path), at: nowIso() }).catch((error: unknown) => {
-                if (!(error instanceof BuildGone)) return;
+                if (!(error instanceof BuildGone)) {
+                  // The build goes on without this file in its feed: say so (error name only, no path).
+                  log("writing", "error", { error: errorName(error) });
+                  return;
+                }
                 gone = true;
                 controller.abort();
                 stopGone?.();

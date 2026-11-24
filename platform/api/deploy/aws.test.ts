@@ -151,7 +151,7 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
     await expect(records.markFailed("nope", [], NOW)).rejects.toThrow("x");
   });
 
-  it("never sets or removes a build's nickname (the role could: IAM cannot tell a compared name from a set one), and sets status only to deploying, live or failed", async () => {
+  it("never sets or removes a build's nickname or pushedCommit (the role could: IAM cannot tell a compared name from a set one), and sets status only to deploying, live or failed", async () => {
     const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
     const records = new DynamoDeployRecords(client, TABLE);
     await records.startDeploy("build-1", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW);
@@ -165,6 +165,7 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
       const written = [...sets.map(([target]) => target ?? ""), ...removePart.split(",").map((name) => name.trim()).filter((name) => name !== "")];
       const attributes = written.map((placeholder) => names[placeholder] ?? placeholder);
       expect(attributes, input.UpdateExpression).not.toContain("nickname");
+      expect(attributes, input.UpdateExpression).not.toContain("pushedCommit");
       const statusClause = sets.find(([target]) => names[target ?? ""] === "status");
       expect(removePart).not.toContain("#status");
       return input.ExpressionAttributeValues?.[statusClause?.[1] ?? ""]?.S;

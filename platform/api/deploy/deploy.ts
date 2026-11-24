@@ -9,7 +9,7 @@
  *    parent's address by commit id, so the deployer never downloads by commit id. It goes on only when the archive's
  *    own commit (its first entry, GitHub's pax global header) is the message's commit: another commit (main moved on,
  *    or a stale copy right after the push) is a passing problem, retried and then failed; no commit named fails at once;
- * 3. publishes exactly those checked bytes (no second download);
+ * 3. keeps those bytes: what is checked and published below is exactly them (no second download);
  * 4. runs the deploy check (../build/check.ts). When it fails, nothing is uploaded or removed, the live
  *    marker is left alone and the build is marked `failed` with the check's reasons;
  * 5. otherwise puts every file under `apps/<lower-cased nickname>/` (pages last), removes the keys the
