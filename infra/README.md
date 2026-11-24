@@ -9,12 +9,14 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v1` and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check, own record, nickname) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push); see "Build network (ticket 2.1)" | inline template (`LegacyStackSynthesizer`) |
 
-Deploy order: cdk-assets, then site, then edge; api after cdk-assets (it needs the assets
-bucket for its Lambda code, and nothing from site or edge); builds on its own (no file assets, nothing
+Deploy order: cdk-assets, then site and apps, then edge; api after cdk-assets (it needs the assets
+bucket for its Lambda code, and nothing from site or edge); apps after cdk-assets and before edge (edge
+serves its bucket at `/apps/*`); builds on its own (no file assets, nothing
 from the other stacks). Nothing is passed between regions: the edge
 stack finds the site bucket by its fixed name, and the site bucket policy lets this account's
 CloudFront distributions read it.
@@ -32,7 +34,7 @@ flowchart LR
   wf --> oidc["GitHub OIDC token<br/>sub = repo:kifbv@7999713/ssd-workshop@1467373954:ref:refs/heads/main"]
   oidc --> role["sts:AssumeRoleWithWebIdentity<br/>ssd-workshop-deploy (1 hour)"]
   role --> before["DNS zone snapshot"]
-  before --> cdk["cdk deploy --all<br/>assets, site, edge, api, builds"]
+  before --> cdk["cdk deploy --all<br/>assets, site, apps, edge, api, builds"]
   cdk --> after["DNS zone snapshot<br/>diff: no change"]
   after --> smoke["Smoke checks<br/>page heading, /api/health direct and through CloudFront"]
   other["Any other branch,<br/>pull request or tag"] -.->|"refused: sub does not match"| role
@@ -462,6 +464,78 @@ Each app may also write 5 MB per UTC day, counted as DynamoDB bills its writes (
 `DATA_USAGE` item, which also holds each key's size in `sizes`); past that,
 `PUT` and `DELETE` answer 429 "This app has saved a lot of data today. Saving starts again tomorrow." until
 midnight UTC.
+
+## Check after the apps deploy (ticket 2.5)
+
+```mermaid
+flowchart LR
+  builder["Builder (2.8)"] -->|"SQS FIFO<br/>group = nickname"| q[ssd-workshop-deploys.fifo]
+  q --> d[Deployer Lambda]
+  d -->|"tar.gz at the commit"| gh[(GitHub<br/>ssd-workshop-apps/ssd-nickname)]
+  d -->|"deploy check fails:<br/>build failed + reasons"| db[(DynamoDB<br/>BUILD#, APP# LIVE)]
+  d -->|"passes: put, remove stale"| s3[(ssd-workshop-apps-account<br/>apps/nickname/)]
+  d -->|"invalidate /apps/nickname/*"| cf[CloudFront]
+  cf -->|"/apps/* + sandbox CSP"| browser[Visitor]
+  s3 --> cf
+```
+
+Nothing sends to the deploy queue until ticket 2.8. To publish an app by hand, create a public repository
+`ssd-workshop-apps/ssd-<nickname>` from `templates/basic/`, create a build item and send one message (FIFO: message
+group = lower-cased nickname, deduplication id = build id):
+
+```sh
+aws dynamodb put-item --region eu-central-1 --table-name ssd-workshop-data \
+  --item '{"pk":{"S":"BUILD#manual-1"},"sk":{"S":"BUILD"},"type":{"S":"build"},"buildId":{"S":"manual-1"},"nickname":{"S":"<nickname>"},"status":{"S":"building"},"updatedAt":{"S":"2026-11-24T00:00:00Z"}}'
+aws sqs send-message --region eu-central-1 \
+  --queue-url https://sqs.eu-central-1.amazonaws.com/<account>/ssd-workshop-deploys.fifo \
+  --message-group-id <nickname, lower-cased> --message-deduplication-id manual-1 \
+  --message-body '{"buildId":"manual-1","nickname":"<nickname>","commit":"<40-hex commit>"}'
+aws dynamodb get-item --region eu-central-1 --table-name ssd-workshop-data \
+  --key '{"pk":{"S":"BUILD#manual-1"},"sk":{"S":"BUILD"}}' --query 'Item.[status.S, deployedCommit.S, failureReasons]'
+# expect within a minute: ["live", "<commit>", null]; the log group ssd-workshop-apps-deployer has one line
+#         {"event":"deployer","outcome":"live","files":N,"bytes":N,"removed":0,"durationMs":N}
+```
+
+Criterion 3, the headers (the apps' policy `ssd-workshop-apps-v1`):
+
+```sh
+curl -sS -I https://workshop.rankly.games/apps/<nickname>/ \
+  | grep -i -E '^(HTTP/|content-type|content-security-policy|x-content-type-options|strict-transport-security|referrer-policy)'
+# expect: 200, content-type: text/html; charset=utf-8,
+#         content-security-policy: sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self';
+#           connect-src 'self'; img-src 'self' data:; form-action 'self'
+#         x-content-type-options: nosniff, strict-transport-security: max-age=31536000,
+#         referrer-policy: strict-origin-when-cross-origin
+curl -sS -I https://workshop.rankly.games/apps/<nickname> | grep -i -E '^(HTTP/|location)'
+# expect: 301 with location: /apps/<nickname>/ (the CloudFront Function; also for an upper-case nickname)
+```
+
+Criterion 5, an unknown address under `/apps/` (and anywhere on the site) shows the plain 404 page:
+
+```sh
+curl -sS -i https://workshop.rankly.games/apps/nope/ | sed -n '1p;/<h1>/p'
+# expect: HTTP/2 404 and <h1>Page not found</h1>
+curl -sS -i https://workshop.rankly.games/apps/<nickname>/missing.js | sed -n '1p'
+# expect: HTTP/2 404
+```
+
+Only the deployer writes app files (criterion 4, bucket policy `OnlyTheDeployerWritesApps`). With the Claude user's
+(or the deploy role's) credentials:
+
+```sh
+echo x > /tmp/x.txt
+aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
+# expect: An error occurred (AccessDenied) when calling the PutObject operation ... with an explicit deny in a resource-based policy
+```
+
+The first successful deploy also proves that `aws:PrincipalArn` matches the deployer's role (the policy names it with and
+without its path). A failing commit (add `shell.php` or a `https://` address to the repository and send a new
+message with a new build id) leaves the live files as they were and gives the build `"failed"` with its
+`failureReasons`.
+
+**Safari on an iPhone** (decision "(2.3) For 2.5": the sandbox with `'self'` was proved only in Chromium): open
+`https://workshop.rankly.games/apps/<nickname>/` on an iPhone, check that the page's styles apply, press the
+template's counter, reload: the count is kept (the data API saved it).
 
 ## Build network (ticket 2.1)
 

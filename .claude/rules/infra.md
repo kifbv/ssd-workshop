@@ -186,3 +186,11 @@ paths:
   data API's CloudFront behaviour `/api/apps/*` (before `/api/*`) adds `Access-Control-Allow-Origin: *` with a custom
   response headers policy (`ssd-workshop-app-data-v1`, CORS `originOverride: true` so the function's own header is
   replaced, not doubled), which keeps the managed SecurityHeadersPolicy's headers (ticket 2.4).
+- S3 behind an origin access control answers a missing key with 403 (CloudFront may not list the bucket): the
+  distribution's custom error response 403 -> `/404.html` (status 404) gives the plain page, for every behaviour
+  (ticket 2.5). Never map 404 there: the API's own JSON 404s would become the page.
+- A bucket only one role may write (the apps bucket, ticket 2.5): a bucket policy `Deny` of the object-changing actions
+  for `AnyPrincipal` with `ArnNotEquals` `aws:PrincipalArn` [role ARN with path, same without] keeps even the deploy
+  role and the Claude user out; bucket-level actions stay allowed so deploys can still manage the bucket.
+- CloudFront Function code lives in a plain `.js` file (`FunctionCode.fromFile`, inlined in the template, no asset) that
+  a test evaluates (`new Function(code + "return handler;")`); `AWS::CloudFront::Function` takes `Tags`.

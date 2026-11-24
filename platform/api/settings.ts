@@ -33,3 +33,28 @@ export const PRICE_PER_MILLION_TOKENS = { input: 3.3, output: 16.5 } as const;
 /** The queue that hands a stored message to the AI worker (ticket 1.7); it carries ids only. */
 export const AI_QUEUE_NAME = "ssd-workshop-ai-messages";
 export const AI_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${AI_QUEUE_NAME}`;
+
+/**
+ * Apps hosting (ticket 2.5): the private bucket served at `/apps/*`, where every app's files live under
+ * `apps/<lower-cased nickname>/`. Only the deployer's role may write to it (bucket policy).
+ */
+export const APPS_BUCKET_NAME = `ssd-workshop-apps-${ACCOUNT}`;
+/** Prefix of every app's files in the apps bucket; the CloudFront path `/apps/<nickname>/...` maps straight to it. */
+export const APPS_KEY_PREFIX = "apps/";
+/** The live CloudFront distribution of workshop.rankly.games (edge stack); the deployer invalidates `/apps/<nickname>/*` on it. */
+export const DISTRIBUTION_ID = "E2TOZV0ERAXKZ9";
+/** The free GitHub organization that holds the participants' public repositories (Franck, 2026-11-23). */
+export const APPS_GITHUB_OWNER = "ssd-workshop-apps";
+/** A participant's repository: `ssd-<lower-cased nickname>` in APPS_GITHUB_OWNER. */
+export const appRepositoryName = (nickname: string): string => `ssd-${nickname.toLowerCase()}`;
+/** GitHub's tarball of a repository at one commit (public repositories, downloaded without a token). */
+export const appArchiveUrl = (nickname: string, commit: string): string =>
+  `https://codeload.github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/tar.gz/${commit}`;
+/** The deploy queue (FIFO, one message group per app) from the builder (ticket 2.8) to the deployer. */
+export const DEPLOY_QUEUE_NAME = "ssd-workshop-deploys.fifo";
+export const DEPLOY_QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${DEPLOY_QUEUE_NAME}`;
+/**
+ * SQS delivers a deploy at most this many times: a passing failure (GitHub or AWS) is retried, and on the last
+ * delivery the build is marked failed instead (only a failure to record that reaches the dead-letter queue).
+ */
+export const DEPLOY_MAX_RECEIVES = 3;

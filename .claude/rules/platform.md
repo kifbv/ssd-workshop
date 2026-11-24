@@ -91,3 +91,7 @@ paths:
   under the apps' CSP (`platform/api/app-data/browser.test.ts`); Chromium logs every 4xx answer as a console error.
 - JSON from strangers: cap nesting depth by scanning the text (`nestingDepth` in `app-data/data.ts`); `JSON.stringify`
   of a few thousand nested lists overflows the stack, while `JSON.parse` accepts it.
+- Archives from strangers (the deployer's GitHub tarballs, ticket 2.5): cap the download while streaming (and the
+  announced length first), unpack with `gunzipSync(..., { maxOutputLength })` (a zip bomb stops there), reject an
+  absolute or `..` path before anything else, and never write to disk. In tests, a `ReadableStream` pulls its first
+  chunk when constructed, so "nothing was read" cannot be asserted on it.

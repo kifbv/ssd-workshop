@@ -70,6 +70,18 @@ export const appLiveKey = (nickname: string): ItemKey => ({
   sk: "LIVE",
 });
 
+/**
+ * One build of an app (ticket 2.5; ticket 2.7 creates them): its status and the deployer's outcome. Its own
+ * partition (`BUILD#`), so the `APP#` partition keeps only the live marker (the data API's role reads all
+ * of `APP#*`). The id is chosen by its creator: 1 to 64 letters, digits, dashes or underscores.
+ */
+export const BUILD_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function buildKey(buildId: string): ItemKey {
+  if (!BUILD_ID_PATTERN.test(buildId)) throw new Error("build id is not 1 to 64 letters, digits, dashes or underscores");
+  return { pk: `BUILD#${buildId}`, sk: "BUILD" };
+}
+
 /** Prefix of every stored value's sort key in an app's data partition (ticket 2.4). */
 export const APP_DATA_PREFIX = "DATA#";
 

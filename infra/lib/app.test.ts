@@ -40,6 +40,18 @@ import {
   PAGES_CONTENT_SECURITY_POLICY,
   PAGES_HEADERS_POLICY_NAME,
   APP_DATA_HEADERS_POLICY_NAME,
+  APPS_BUCKET_NAME,
+  APPS_BUCKET_REGIONAL_DOMAIN,
+  APPS_CONTENT_SECURITY_POLICY,
+  APPS_HEADERS_POLICY_NAME,
+  APPS_INDEX_FUNCTION_NAME,
+  DEPLOY_DLQ_NAME,
+  DEPLOY_QUEUE_NAME,
+  DEPLOYER_FUNCTION_NAME,
+  DEPLOYER_LIVE_UPDATE_ATTRIBUTES,
+  DEPLOYER_ROLE_ARN,
+  DEPLOYER_ROLE_ARN_WITHOUT_PATH,
+  DISTRIBUTION_ID,
   SENDER_ADDRESS,
   SES_CONFIGURATION_SET,
   SIGN_IN_CODE_FUNCTION_NAME,
@@ -66,6 +78,21 @@ import {
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
+import {
+  APPS_OBJECT_WRITE_ACTIONS,
+  DEPLOY_QUEUE_MAX_RECEIVES,
+  DEPLOY_QUEUE_VISIBILITY_SECONDS,
+  DEPLOYER_MAX_CONCURRENCY,
+  DEPLOYER_MEMORY_MB,
+  DEPLOYER_TIMEOUT_SECONDS,
+} from "./apps-stack.js";
+import { APPS_INDEX_FUNCTION_FILE, NOT_FOUND_CACHE_SECONDS } from "./edge-stack.js";
+import {
+  APPS_BUCKET_NAME as PLATFORM_APPS_BUCKET_NAME,
+  DEPLOY_MAX_RECEIVES as PLATFORM_DEPLOY_MAX_RECEIVES,
+  DEPLOY_QUEUE_NAME as PLATFORM_DEPLOY_QUEUE_NAME,
+  DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
+} from "../../platform/api/settings.js";
 
 interface Resource {
   Type: string;
@@ -75,7 +102,7 @@ interface Resource {
   DependsOn?: string | string[];
 }
 
-const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api, STACK_NAMES.builds];
+const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api, STACK_NAMES.builds, STACK_NAMES.apps];
 
 /** Types that must carry the project tag in their own template (taggable in CloudFormation). */
 const MUST_BE_TAGGED = [
@@ -97,6 +124,7 @@ const MUST_BE_TAGGED = [
   "AWS::EC2::SecurityGroup",
   "AWS::ECS::Cluster",
   "AWS::ECR::Repository",
+  "AWS::CloudFront::Function",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -220,6 +248,7 @@ describe("stacks", () => {
     expect(stack(STACK_NAMES.builds).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.site).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.api).environment).toMatchObject({ account: ACCOUNT, region: REGION });
+    expect(stack(STACK_NAMES.apps).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.edge).environment).toMatchObject({ account: ACCOUNT, region: EDGE_REGION });
   });
 
@@ -228,6 +257,9 @@ describe("stacks", () => {
     expect(deps(STACK_NAMES.site)).toContain(STACK_NAMES.assets);
     expect(deps(STACK_NAMES.edge)).toContain(STACK_NAMES.site);
     expect(deps(STACK_NAMES.api)).toContain(STACK_NAMES.assets);
+    // Ticket 2.5: the apps stack (bundled deployer) after assets; the edge stack serves its bucket, so after it.
+    expect(deps(STACK_NAMES.apps)).toContain(STACK_NAMES.assets);
+    expect(deps(STACK_NAMES.edge)).toContain(STACK_NAMES.apps);
   });
 
   it.each(STACKS)("%s needs no CDK bootstrap (no BootstrapVersion parameter, no bootstrap roles)", (name) => {
@@ -237,8 +269,8 @@ describe("stacks", () => {
     expect(s.cloudFormationExecutionRoleArn).toBeUndefined();
   });
 
-  it("uploads only the site and api stacks' assets and templates, to our assets bucket in eu-central-1", () => {
-    for (const name of [STACK_NAMES.site, STACK_NAMES.api]) {
+  it("uploads only the site, api and apps stacks' assets and templates, to our assets bucket in eu-central-1", () => {
+    for (const name of [STACK_NAMES.site, STACK_NAMES.api, STACK_NAMES.apps]) {
       const s = stack(name);
       expect(s.stackTemplateAssetObjectUrl?.startsWith(`s3://${ASSETS_BUCKET_NAME}/`), name).toBe(true);
       for (const [, r] of resources(name).filter(([, r]) => r.Type === "AWS::Lambda::Function")) {
@@ -303,16 +335,15 @@ describe("tags, boundary and names (criterion 3)", () => {
     for (const path of EXPECTED_NAME_PATHS) expect(seen, path).toContain(path);
   });
 
-  it("names the Origin Access Control ssd-workshop-site", () => {
+  it("names the Origin Access Controls ssd-workshop-site and, from ticket 2.5, ssd-workshop-apps", () => {
     const oacs = ofType("AWS::CloudFront::OriginAccessControl");
-    expect(oacs).toHaveLength(1);
-    expect(oacs[0]?.[2].Properties?.OriginAccessControlConfig).toMatchObject({ Name: "ssd-workshop-site" });
+    expect(oacs.map(([, , r]) => (r.Properties?.OriginAccessControlConfig as { Name?: string }).Name).sort()).toEqual(["ssd-workshop-apps", "ssd-workshop-site"]);
   });
 
-  it("retains the Origin Access Control (the deploy rights cannot update or delete one)", () => {
+  it("retains the Origin Access Controls (the deploy rights cannot update or delete one)", () => {
     const oacs = ofType("AWS::CloudFront::OriginAccessControl");
-    expect(oacs).toHaveLength(1);
-    expect(oacs[0]?.[2]).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+    expect(oacs).toHaveLength(2);
+    for (const [, , oac] of oacs) expect(oac).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 
   it("names every Lambda function, layer and role explicitly (the access policy allows only ssd-workshop-*)", () => {
@@ -341,7 +372,7 @@ describe("tags, boundary and names (criterion 3)", () => {
 describe("buckets (criterion 2)", () => {
   it("creates the assets bucket and the site bucket with their fixed names", () => {
     const names = ofType("AWS::S3::Bucket").map(([, , r]) => r.Properties?.BucketName);
-    expect(names.sort()).toEqual([ASSETS_BUCKET_NAME, SITE_BUCKET_NAME].sort());
+    expect(names.sort()).toEqual([ASSETS_BUCKET_NAME, SITE_BUCKET_NAME, APPS_BUCKET_NAME].sort());
   });
 
   it("blocks all public access, turns ACLs off and encrypts every bucket", () => {
@@ -392,12 +423,13 @@ describe("buckets (criterion 2)", () => {
     expect(deployment?.[1].Properties?.DestinationBucketName).toBeDefined();
   });
 
-  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), no TypeScript or tests (ticket 1.6)", () => {
+  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), no TypeScript or tests (ticket 1.6)", () => {
     // The built folder in the assembly, and the asset CDK staged from it (same content).
-    expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(["app.js", "diagram.js", "index.html", "style.css"]);
-    const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")));
+    const site = ["404.html", "app.js", "diagram.js", "index.html", "style.css"];
+    expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(site);
+    const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")) && existsSync(join(dir, name, "style.css")));
     expect(staged).toHaveLength(1);
-    expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(["app.js", "diagram.js", "index.html", "style.css"]);
+    expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(site);
   });
 });
 
@@ -447,14 +479,14 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
       },
     });
 
-    // Two origins: the site bucket (default) and, from ticket 1.2, the HTTP API.
+    // Three origins: the site bucket (default), from ticket 1.2 the HTTP API, from ticket 2.5 the apps bucket.
     const origins = config.Origins as Record<string, unknown>[];
-    expect(origins).toHaveLength(2);
+    expect(origins).toHaveLength(3);
     const siteOrigin = origins.find((o) => o.DomainName === SITE_BUCKET_REGIONAL_DOMAIN);
     expect(siteOrigin).toBeDefined();
     expect(siteOrigin?.OriginAccessControlId).toBeDefined();
     expect((config.DefaultCacheBehavior as Record<string, unknown>).TargetOriginId).toBe(siteOrigin?.Id);
-    expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(1);
+    expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(2);
   });
 
   it("changes only the workshop.rankly.games records (A and AAAA aliases to CloudFront)", () => {
@@ -487,8 +519,8 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
 
   it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
     const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
-    // /api/* and the data API's /api/apps/* (ticket 2.4).
-    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*"]);
+    // /api/*, the data API's /api/apps/* (ticket 2.4) and the apps' /apps/* (ticket 2.5), in this order.
+    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*"]);
     const behaviour = apiBehaviour();
     expect(behaviour).toMatchObject({
       PathPattern: "/api/*",
@@ -516,14 +548,16 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
   });
 
   it("uses managed policies only (no new untaggable CloudFront resource)", () => {
-    for (const type of ["AWS::CloudFront::CachePolicy", "AWS::CloudFront::OriginRequestPolicy", "AWS::CloudFront::Function"]) {
+    for (const type of ["AWS::CloudFront::CachePolicy", "AWS::CloudFront::OriginRequestPolicy"]) {
       expect(ofType(type), type).toEqual([]);
     }
-    // The pages' headers policy (ticket 1.6) and the data API's (ticket 2.4) are the only custom
-    // CloudFront policies, and /api/* keeps the managed SecurityHeadersPolicy (asserted above).
+    // The one CloudFront Function is the apps' (ticket 2.5), on /apps/* only.
+    expect(ofType("AWS::CloudFront::Function").map(([, , r]) => r.Properties?.Name)).toEqual([APPS_INDEX_FUNCTION_NAME]);
+    // The pages' headers policy (ticket 1.6), the data API's (ticket 2.4) and the apps' (ticket 2.5) are the
+    // only custom CloudFront policies, and /api/* keeps the managed SecurityHeadersPolicy (asserted above).
     const custom = ofType("AWS::CloudFront::ResponseHeadersPolicy");
     expect(custom.map(([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name).sort()).toEqual(
-      [APP_DATA_HEADERS_POLICY_NAME, PAGES_HEADERS_POLICY_NAME].sort(),
+      [APP_DATA_HEADERS_POLICY_NAME, APPS_HEADERS_POLICY_NAME, PAGES_HEADERS_POLICY_NAME].sort(),
     );
     for (const [, id] of custom) expect(JSON.stringify(apiBehaviour())).not.toContain(id);
   });
@@ -565,7 +599,7 @@ describe("CloudFront /api/apps/* behaviour: every data API answer readable by sa
     // Same origin, methods, HTTPS only, caching disabled, origin request policy.
     expect(appsRest).toEqual(apiRest);
     expect(appsRest).toMatchObject({ ViewerProtocolPolicy: "https-only", CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac" });
-    expect((distributionConfig().Origins as unknown[]).length).toBe(2);
+    expect((distributionConfig().Origins as unknown[]).length).toBe(3);
     expect(apiPolicy).toBe("67f7725c-6f97-4210-82d7-5512b31e9d03");
     expect(appsPolicy).toEqual({ Ref: policy()?.[1] });
   });
@@ -1356,7 +1390,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
 });
 
 describe("api stack: conversation queue (ticket 1.7)", () => {
-  const queues = () => ofType("AWS::SQS::Queue").map(([, id, r]) => [id, r] as const);
+  const queues = () => resources(STACK_NAMES.api).filter(([, r]) => r.Type === "AWS::SQS::Queue");
   const queue = (name: string) => queues().find(([, r]) => r.Properties?.QueueName === name);
 
   it("creates the queue ssd-workshop-ai-messages and its dead-letter queue, SQS-encrypted and tagged, without a queue policy", () => {
@@ -1393,7 +1427,7 @@ describe("api stack: conversation queue (ticket 1.7)", () => {
   });
 
   it("feeds the worker one job at a time, at most 5 workers at once, through a tagged event source mapping", () => {
-    const mappings = ofType("AWS::Lambda::EventSourceMapping");
+    const mappings = ofType("AWS::Lambda::EventSourceMapping").filter(([s]) => s === STACK_NAMES.api);
     expect(mappings).toHaveLength(1);
     const worker = apiFunction(AI_WORKER_FUNCTION_NAME);
     expect(AI_WORKER_MAX_CONCURRENCY).toBe(5);
@@ -1673,5 +1707,315 @@ describe("builds stack: network, cluster and image repository (ticket 2.1)", () 
     expect(policy.rules[0]?.selection).toMatchObject({ tagStatus: "any", countType: "imageCountMoreThan", countNumber: 5 });
     expect(policy.rules[0]?.action).toEqual({ type: "expire" });
     expect(BUILDER_IMAGES_KEPT).toBe(5);
+  });
+});
+
+describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
+  const appsResources = () => resources(STACK_NAMES.apps);
+  const bucketEntry = () => appsResources().find(([, r]) => r.Type === "AWS::S3::Bucket");
+  const bucketStatements = () =>
+    (appsResources().find(([, r]) => r.Type === "AWS::S3::BucketPolicy")?.[1].Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement;
+  const fnEntry = () => appsResources().find(([, r]) => r.Type === "AWS::Lambda::Function" && r.Properties?.FunctionName === DEPLOYER_FUNCTION_NAME);
+  const roleEntry = () => appsResources().find(([, r]) => r.Type === "AWS::IAM::Role" && r.Properties?.RoleName === DEPLOYER_FUNCTION_NAME);
+  const deployerStatements = () =>
+    appsResources()
+      .filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties?.Roles).includes(roleEntry()?.[0] ?? "?"))
+      .flatMap(([, r]) => (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement);
+  const queue = (name: string) => appsResources().find(([, r]) => r.Type === "AWS::SQS::Queue" && r.Properties?.QueueName === name);
+  const bucketArn = () => ({ "Fn::GetAtt": [bucketEntry()?.[0], "Arn"] });
+
+  it("creates the private apps bucket ssd-workshop-apps-<account>: no public access, ACLs off, encrypted, retained", () => {
+    expect(APPS_BUCKET_NAME).toBe(`ssd-workshop-apps-${ACCOUNT}`);
+    expect(bucketEntry()?.[1]).toMatchObject({
+      DeletionPolicy: "Retain",
+      Properties: {
+        BucketName: APPS_BUCKET_NAME,
+        OwnershipControls: { Rules: [{ ObjectOwnership: "BucketOwnerEnforced" }] },
+        PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true },
+        BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: "AES256" } }] },
+      },
+    });
+  });
+
+  it("lets only CloudFront of this account read app files, only over TLS", () => {
+    const allows = bucketStatements().filter((st) => st.Effect === "Allow");
+    expect(allows).toEqual([
+      expect.objectContaining({
+        Action: "s3:GetObject",
+        Principal: { Service: "cloudfront.amazonaws.com" },
+        Condition: { StringEquals: { "AWS:SourceAccount": ACCOUNT }, ArnLike: { "AWS:SourceArn": `arn:aws:cloudfront::${ACCOUNT}:distribution/*` } },
+      }),
+    ]);
+    expect(bucketStatements()).toContainEqual(
+      expect.objectContaining({ Effect: "Deny", Action: "s3:*", Principal: { AWS: "*" }, Condition: { Bool: { "aws:SecureTransport": "false" } } }),
+    );
+  });
+
+  it("criterion 4: the bucket policy refuses every object write and delete to any principal but the deployer's role (deploy role and Claude user included)", () => {
+    const deny = bucketStatements().find((st) => st.Sid === "OnlyTheDeployerWritesApps");
+    expect(deny).toEqual({
+      Sid: "OnlyTheDeployerWritesApps",
+      Effect: "Deny",
+      Action: [...APPS_OBJECT_WRITE_ACTIONS],
+      Principal: { AWS: "*" },
+      Resource: { "Fn::Join": ["", [bucketArn(), "/*"]] },
+      Condition: { ArnNotEquals: { "aws:PrincipalArn": [DEPLOYER_ROLE_ARN, DEPLOYER_ROLE_ARN_WITHOUT_PATH] } },
+    });
+    for (const action of ["s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:PutObjectAcl", "s3:RestoreObject"]) {
+      expect(APPS_OBJECT_WRITE_ACTIONS, action).toContain(action);
+    }
+    expect(DEPLOYER_ROLE_ARN).toBe(`arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-apps-deployer`);
+    expect(DEPLOYER_ROLE_ARN_WITHOUT_PATH).toBe(`arn:aws:iam::${ACCOUNT}:role/ssd-workshop-apps-deployer`);
+    // The deployer's role is that ARN: its name and path.
+    expect(roleEntry()?.[1].Properties).toMatchObject({ RoleName: DEPLOYER_FUNCTION_NAME, Path: IAM_PATH });
+  });
+
+  it("criterion 4: no IAM policy in any stack, other than the deployer's, may write to the apps bucket", () => {
+    const writes = (action: string): boolean => action === "*" || /^s3:(\*|Put|Delete|Restore|Replicate|Abort|Object)/i.test(action) || /^s3:.*\*/.test(action);
+    const reachesApps = (resource: unknown): boolean => {
+      const text = JSON.stringify(resource);
+      const appsBucketIds = appsResources().filter(([, r]) => r.Type === "AWS::S3::Bucket").map(([id]) => id);
+      return (
+        text === '"*"' ||
+        text.includes("arn:aws:s3:::*") ||
+        text.includes("arn:aws:s3:::ssd-workshop-*") ||
+        text.includes(APPS_BUCKET_NAME) ||
+        text.includes("ssd-workshop-apps") ||
+        appsBucketIds.some((id) => text.includes(`"${id}"`))
+      );
+    };
+    const deployerRole = roleEntry()?.[0];
+    let checked = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      const forDeployer = s === STACK_NAMES.apps && JSON.stringify(r.Properties?.Roles) === JSON.stringify([{ Ref: deployerRole }]);
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        const actions = [st.Action].flat() as string[];
+        if (!actions.some(writes)) continue;
+        checked += 1;
+        if (forDeployer) continue;
+        for (const resource of [st.Resource].flat()) expect(reachesApps(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
+      }
+    }
+    // The BucketDeployment's and the deployer's write statements were seen.
+    expect(checked).toBeGreaterThanOrEqual(2);
+    // No role carries inline policies of its own (all rights are in AWS::IAM::Policy above), and the only
+    // managed policy any role gets is AWS's basic Lambda logging one (the BucketDeployment's; no S3 right).
+    for (const [s, id, r] of ofType("AWS::IAM::Role")) {
+      expect(r.Properties?.Policies, `${s}/${id}`).toBeUndefined();
+      for (const arn of (r.Properties?.ManagedPolicyArns as unknown[] | undefined) ?? []) {
+        expect(JSON.stringify(arn), `${s}/${id}`).toMatch(/:iam::aws:policy\/service-role\/AWSLambdaBasicExecutionRole"/);
+      }
+    }
+  });
+
+  it("criterion 4: the site's BucketDeployment writes to the site bucket only, so it cannot remove app files", () => {
+    const deployments = ofType("Custom::CDKBucketDeployment");
+    expect(deployments).toHaveLength(1);
+    const [s, , deployment] = deployments[0] ?? [];
+    expect(s).toBe(STACK_NAMES.site);
+    const siteBucket = resources(STACK_NAMES.site).find(([, r]) => r.Type === "AWS::S3::Bucket");
+    expect(siteBucket?.[1].Properties?.BucketName).toBe(SITE_BUCKET_NAME);
+    expect(deployment?.Properties?.DestinationBucketName).toEqual({ Ref: siteBucket?.[0] });
+    expect(JSON.stringify(deployment?.Properties)).not.toContain("ssd-workshop-apps");
+    // Its role's rights name the site bucket and the assets bucket, never the apps bucket.
+    const role = resources(STACK_NAMES.site).find(([, r]) => r.Type === "AWS::IAM::Role" && r.Properties?.RoleName === "ssd-workshop-site-deploy");
+    const statements = resources(STACK_NAMES.site)
+      .filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties?.Roles).includes(role?.[0] ?? "?"))
+      .flatMap(([, r]) => (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement);
+    expect(statements.length).toBeGreaterThan(0);
+    expect(JSON.stringify(statements)).not.toContain("ssd-workshop-apps");
+    expect(JSON.stringify(statements)).toContain(siteBucket?.[0]);
+  });
+
+  it("gives the deployer only its logs, object writes and deletes under apps/, listing under apps/, one distribution's invalidation, marker and build updates of listed attributes, and its queue", () => {
+    const logGroupId = (fnEntry()?.[1].Properties?.LoggingConfig as { LogGroup?: { Ref?: string } }).LogGroup?.Ref;
+    const statements = deployerStatements();
+    expect(statements).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [logGroupId, "Arn"] } },
+      { Effect: "Allow", Action: ["s3:PutObject", "s3:DeleteObject"], Resource: { "Fn::Join": ["", [bucketArn(), "/apps/*"]] } },
+      { Effect: "Allow", Action: "s3:ListBucket", Resource: bucketArn(), Condition: { StringLike: { "s3:prefix": ["apps/*"] } } },
+      { Effect: "Allow", Action: "cloudfront:CreateInvalidation", Resource: `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}` },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: expect.anything(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "nickname", "liveAt"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: expect.anything(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status", "updatedAt", "finishedAt", "deployedCommit", "failureReasons"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+        Resource: { "Fn::GetAtt": [queue(DEPLOY_QUEUE_NAME)?.[0], "Arn"] },
+      },
+    ]);
+    // The table by name in this account and region, not across stacks.
+    for (const st of statements.filter((st) => st.Action === "dynamodb:UpdateItem")) {
+      expect(st.Resource).toEqual({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`]] });
+    }
+    expect(DISTRIBUTION_ID).toBe("E2TOZV0ERAXKZ9");
+    // The live marker needs `liveAt` (the data API requires it); no other role may write it, and the deployer never writes app data.
+    expect(DEPLOYER_LIVE_UPDATE_ATTRIBUTES).toContain("liveAt");
+    expect(JSON.stringify(statements)).not.toContain("APPDATA#");
+    expect(JSON.stringify(statements)).not.toMatch(/dynamodb:(PutItem|DeleteItem|GetItem|Query|Scan|BatchWriteItem)/);
+  });
+
+  it("names the function, role and log group ssd-workshop-apps-deployer; Node.js 22 arm64, 512 MB, 120 s; role on /ssd-workshop/ with the boundary; no route or invoke permission", () => {
+    expect(DEPLOYER_FUNCTION_NAME).toBe("ssd-workshop-apps-deployer");
+    expect(fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: DEPLOYER_MEMORY_MB,
+      Timeout: DEPLOYER_TIMEOUT_SECONDS,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect([DEPLOYER_MEMORY_MB, DEPLOYER_TIMEOUT_SECONDS]).toEqual([512, 120]);
+    const logGroupId = (fnEntry()?.[1].Properties?.LoggingConfig as { LogGroup?: { Ref?: string } }).LogGroup?.Ref;
+    expect(appsResources().find(([id]) => id === logGroupId)?.[1].Properties).toMatchObject({ LogGroupName: DEPLOYER_FUNCTION_NAME, RetentionInDays: 14 });
+    expect(roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(appsResources().filter(([, r]) => r.Type === "AWS::Lambda::Permission")).toEqual([]);
+  });
+
+  it("creates the FIFO queue ssd-workshop-deploys.fifo (deduplication by the sender's build id) and its FIFO dead-letter queue, encrypted, tagged, without a queue policy", () => {
+    expect(DEPLOY_QUEUE_NAME).toBe("ssd-workshop-deploys.fifo");
+    expect(DEPLOY_DLQ_NAME).toBe("ssd-workshop-deploys-dlq.fifo");
+    expect(queue(DEPLOY_QUEUE_NAME)?.[1].Properties).toMatchObject({
+      FifoQueue: true,
+      ContentBasedDeduplication: false,
+      SqsManagedSseEnabled: true,
+      VisibilityTimeout: DEPLOY_QUEUE_VISIBILITY_SECONDS,
+      RedrivePolicy: { deadLetterTargetArn: { "Fn::GetAtt": [queue(DEPLOY_DLQ_NAME)?.[0], "Arn"] }, maxReceiveCount: DEPLOY_QUEUE_MAX_RECEIVES },
+    });
+    expect(queue(DEPLOY_DLQ_NAME)?.[1].Properties).toMatchObject({ FifoQueue: true, SqsManagedSseEnabled: true });
+    for (const name of [DEPLOY_QUEUE_NAME, DEPLOY_DLQ_NAME]) expect(tagsOf(queue(name)?.[1] as Resource).project).toBe("ssd-workshop");
+    // SQS refuses a Lambda source whose visibility timeout is shorter than the function's timeout.
+    expect(DEPLOY_QUEUE_VISIBILITY_SECONDS).toBeGreaterThan(DEPLOYER_TIMEOUT_SECONDS);
+    expect(appsResources().filter(([, r]) => r.Type === "AWS::SQS::QueuePolicy")).toEqual([]);
+  });
+
+  it("feeds the deployer one message at a time, at most 5 at once, through a tagged event source mapping", () => {
+    const mappings = appsResources().filter(([, r]) => r.Type === "AWS::Lambda::EventSourceMapping");
+    expect(mappings).toHaveLength(1);
+    expect(mappings[0]?.[1].Properties).toMatchObject({
+      BatchSize: 1,
+      ScalingConfig: { MaximumConcurrency: DEPLOYER_MAX_CONCURRENCY },
+      EventSourceArn: { "Fn::GetAtt": [queue(DEPLOY_QUEUE_NAME)?.[0], "Arn"] },
+      FunctionName: { Ref: fnEntry()?.[0] },
+      Tags: [{ Key: "project", Value: "ssd-workshop" }],
+    });
+  });
+
+  it("keeps the platform's settings equal to the infrastructure's (bucket, distribution, queue, deliveries)", () => {
+    expect(PLATFORM_APPS_BUCKET_NAME).toBe(APPS_BUCKET_NAME);
+    expect(PLATFORM_DISTRIBUTION_ID).toBe(DISTRIBUTION_ID);
+    expect(PLATFORM_DEPLOY_QUEUE_NAME).toBe(DEPLOY_QUEUE_NAME);
+    expect(PLATFORM_DEPLOY_MAX_RECEIVES).toBe(DEPLOY_QUEUE_MAX_RECEIVES);
+  });
+
+  it("bundles the handler into a self-contained index.js that drops a malformed message without any AWS call", async () => {
+    const key = (fnEntry()?.[1].Properties?.Code as { S3Key?: string } | undefined)?.S3Key;
+    const manifest = JSON.parse(readFileSync(join(dir, `${STACK_NAMES.apps}.assets.json`), "utf8")) as {
+      files: Record<string, { source: { path: string }; destinations: Record<string, { objectKey: string }> }>;
+    };
+    const asset = Object.values(manifest.files).find((f) => Object.values(f.destinations).some((d) => d.objectKey === key));
+    expect(asset).toBeDefined();
+    const bundle = createRequire(import.meta.url)(join(dir, asset?.source.path ?? "?", "index.js")) as {
+      handler: (event: { Records: { body: string }[] }) => Promise<void>;
+    };
+    await expect(quietly(() => bundle.handler({ Records: [{ body: "not json" }] }))).resolves.toBeUndefined();
+  });
+});
+
+describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
+  const distributionConfig = (): Record<string, unknown> =>
+    ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as Record<string, unknown>;
+  const behaviour = () => (distributionConfig().CacheBehaviors as Record<string, unknown>[]).find((b) => b.PathPattern === "/apps/*");
+  const policy = () =>
+    ofType("AWS::CloudFront::ResponseHeadersPolicy").find(
+      ([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name === APPS_HEADERS_POLICY_NAME,
+    );
+  const fn = () => ofType("AWS::CloudFront::Function")[0];
+
+  it("serves /apps/* from the apps bucket through the ssd-workshop-apps origin access control: GET and HEAD, HTTPS (redirect), managed CachingOptimized", () => {
+    expect(behaviour()).toMatchObject({
+      AllowedMethods: ["GET", "HEAD"],
+      ViewerProtocolPolicy: "redirect-to-https",
+      CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6",
+      ResponseHeadersPolicyId: { Ref: policy()?.[1] },
+      FunctionAssociations: [{ EventType: "viewer-request", FunctionARN: { "Fn::GetAtt": [fn()?.[1], "FunctionARN"] } }],
+    });
+    expect(behaviour()?.OriginRequestPolicyId).toBeUndefined();
+    const origin = (distributionConfig().Origins as Record<string, unknown>[]).find((o) => o.Id === behaviour()?.TargetOriginId);
+    expect(origin?.DomainName).toBe(APPS_BUCKET_REGIONAL_DOMAIN);
+    expect(APPS_BUCKET_REGIONAL_DOMAIN).toBe(`${APPS_BUCKET_NAME}.s3.${REGION}.amazonaws.com`);
+    const oac = ofType("AWS::CloudFront::OriginAccessControl").find(([, , r]) => (r.Properties?.OriginAccessControlConfig as { Name?: string }).Name === "ssd-workshop-apps");
+    expect(origin?.OriginAccessControlId).toEqual({ "Fn::GetAtt": [oac?.[1], "Id"] });
+    expect(oac?.[2].Properties?.OriginAccessControlConfig).toMatchObject({ OriginAccessControlOriginType: "s3", SigningBehavior: "always", SigningProtocol: "sigv4" });
+  });
+
+  it("keeps the API behaviours first: /apps/* cannot match an /api/ path", () => {
+    const patterns = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).map((b) => b.PathPattern);
+    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*"]);
+    const matches = (pattern: string, path: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(path);
+    expect(matches("/apps/*", "/api/apps/ada/data/k")).toBe(false);
+    expect(matches("/apps/*", "/apps/ada/index.html")).toBe(true);
+  });
+
+  it("criterion 3: sends the sandbox CSP (overriding the origin), nosniff, HSTS one year and the referrer policy on every /apps/* answer", () => {
+    const config = policy()?.[2].Properties?.ResponseHeadersPolicyConfig as Record<string, unknown>;
+    expect(config.SecurityHeadersConfig).toEqual({
+      ContentSecurityPolicy: { ContentSecurityPolicy: APPS_CONTENT_SECURITY_POLICY, Override: true },
+      ContentTypeOptions: { Override: true },
+      StrictTransportSecurity: { AccessControlMaxAgeSec: 31536000, IncludeSubdomains: false, Preload: false, Override: true },
+      ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
+    });
+    expect(APPS_CONTENT_SECURITY_POLICY).toBe(
+      "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'self'",
+    );
+    expect(APPS_CONTENT_SECURITY_POLICY).not.toContain("allow-same-origin");
+    expect(config.CorsConfig).toBeUndefined();
+    expect(config.CustomHeadersConfig).toBeUndefined();
+  });
+
+  it("names the policy ssd-workshop-apps-v1 in the edge stack, retained, versioned in its logical id", () => {
+    const [stackName, id, resource] = policy() ?? [];
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v1");
+    expect(id).toMatch(/^AppsHeadersV1[0-9A-F]{8}$/);
+    expect(resource).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+  });
+
+  it("runs the function ssd-workshop-apps-index (cloudfront-js-2.0) with the tested code, published", () => {
+    const [stackName, , resource] = fn() ?? [];
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(resource?.Properties).toMatchObject({
+      Name: APPS_INDEX_FUNCTION_NAME,
+      AutoPublish: true,
+      FunctionConfig: { Runtime: "cloudfront-js-2.0" },
+      FunctionCode: readFileSync(APPS_INDEX_FUNCTION_FILE, "utf8"),
+    });
+    expect(APPS_INDEX_FUNCTION_NAME).toBe("ssd-workshop-apps-index");
+  });
+
+  it("criterion 5: answers a missing address (S3's 403 behind the origin access control) with the plain /404.html page and status 404, cached 60 s", () => {
+    expect(distributionConfig().CustomErrorResponses).toEqual([
+      { ErrorCode: 403, ResponseCode: 404, ResponsePagePath: "/404.html", ErrorCachingMinTTL: NOT_FOUND_CACHE_SECONDS },
+    ]);
+    expect(NOT_FOUND_CACHE_SECONDS).toBe(60);
+    // /404.html matches no behaviour pattern, so it comes from the site bucket (default behaviour), where the site build puts it.
+    const patterns = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).map((b) => String(b.PathPattern));
+    expect(patterns.some((p) => p === "/404.html" || p === "/*" || p === "*")).toBe(false);
+    expect(readdirSync(join(dir, WEB_BUILD_FOLDER))).toContain("404.html");
   });
 });

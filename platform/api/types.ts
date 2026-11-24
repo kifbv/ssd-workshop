@@ -19,6 +19,7 @@
  * | App live marker      | `APP#<nickname>`       | `LIVE`               | never                     |
  * | App data value       | `APPDATA#<nickname>`   | `DATA#<key>`         | never                     |
  * | App data usage       | `APPDATA#<nickname>`   | `DATA_USAGE`         | never                     |
+ * | Build                | `BUILD#<build id>`     | `BUILD`              | never                     |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
  *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email`,
@@ -330,6 +331,30 @@ export interface AppDataUsageItem extends Keyed {
   sizes: Record<string, number>;
 }
 
+/** Where a build is: queued and building (ticket 2.7, 2.8), then the deployer's deploying, live or failed (2.5). */
+export type BuildStatus = "queued" | "building" | "deploying" | "live" | "failed";
+
+/**
+ * One build of an app (ticket 2.5 defines it; ticket 2.7 creates it). The deployer only updates an existing
+ * build (condition `attribute_exists(pk)`), and only `status`, `updatedAt`, `deployedCommit`,
+ * `failureReasons` and `finishedAt` (`DEPLOYER_BUILD_UPDATE_ATTRIBUTES` in infra/lib/config.ts).
+ */
+export interface BuildItem extends Keyed {
+  type: "build";
+  buildId: string;
+  /** As the participant typed it. */
+  nickname: string;
+  status: BuildStatus;
+  /** ISO 8601: the last status change. */
+  updatedAt: string;
+  /** The commit the deployer published (status `live`). */
+  deployedCommit?: string;
+  /** Why the deploy failed (status `failed`): the deploy check's reasons, or a download or service problem. */
+  failureReasons?: string[];
+  /** ISO 8601: when the deployer finished (live or failed). */
+  finishedAt?: string;
+}
+
 export type TableItem =
   | AllowListEntry
   | CodeItem
@@ -343,4 +368,5 @@ export type TableItem =
   | UsageItem
   | AppLiveItem
   | AppDataItem
-  | AppDataUsageItem;
+  | AppDataUsageItem
+  | BuildItem;

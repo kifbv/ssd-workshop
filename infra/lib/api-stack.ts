@@ -467,7 +467,7 @@ export class ApiStack extends Stack {
  * its own named role (only the right to write its logs; the caller adds what the
  * function needs; the app's aspect adds the path and boundary) and its own named log group with two weeks of retention.
  */
-function workshopFunction(
+export function workshopFunction(
   scope: Construct,
   id: string,
   name: string,

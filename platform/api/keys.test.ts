@@ -18,6 +18,7 @@ import {
   appDataKey,
   appDataUsageKey,
   appLiveKey,
+  buildKey,
 } from "./keys.js";
 
 describe("normalizeEmail", () => {
@@ -135,5 +136,17 @@ describe("app keys (ticket 2.4)", () => {
     expect(() => appLiveKey("a#b")).toThrow(/separator/);
     expect(() => appDataKey("ada", "a#b")).toThrow(/separator/);
     expect(() => appDataUsageKey("")).toThrow(/empty/);
+  });
+});
+
+describe("buildKey (ticket 2.5)", () => {
+  it("keys a build in its own BUILD# partition, apart from the app's live marker", () => {
+    expect(buildKey("b-2026_11-24")).toEqual({ pk: "BUILD#b-2026_11-24", sk: "BUILD" });
+    expect(buildKey("x").pk.startsWith("APP#")).toBe(false);
+  });
+
+  it("refuses an id that is empty, too long or holds anything but letters, digits, dashes and underscores", () => {
+    for (const bad of ["", "a".repeat(65), "a#b", "a/b", "a b", "é"]) expect(() => buildKey(bad), bad).toThrow(/build id/);
+    expect(buildKey("a".repeat(64)).pk).toBe(`BUILD#${"a".repeat(64)}`);
   });
 });
