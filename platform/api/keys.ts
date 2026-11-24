@@ -76,10 +76,27 @@ export const appLiveKey = (nickname: string): ItemKey => ({
  * of `APP#*`). The id is chosen by its creator: 1 to 64 letters, digits, dashes or underscores.
  */
 export const BUILD_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * One launch of a build (ticket 2.9 try 2): a random UUID the launcher's claim stores on the build (`attemptId`) and
+ * passes to the task it starts; the runner's writes hold only under it, so a second runner for the build is refused.
+ */
+export const ATTEMPT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function buildKey(buildId: string): ItemKey {
   if (!BUILD_ID_PATTERN.test(buildId)) throw new Error("build id is not 1 to 64 letters, digits, dashes or underscores");
   return { pk: `BUILD#${buildId}`, sk: "BUILD" };
+}
+
+/**
+ * The launcher's watch list (ticket 2.9): one item per build it claimed and has not seen finish, at `LAUNCHES` /
+ * `BUILD#<build id>`, holding the build's task once started. The stuck-build check reads this one partition (no scan).
+ * Its partition key is not `BUILD#...` (IAM's `BUILD#*` never matches `LAUNCHES`), so the builder's task role cannot
+ * touch it.
+ */
+export const LAUNCHES_PK = "LAUNCHES";
+
+export function launchKey(buildId: string): ItemKey {
+  return { pk: LAUNCHES_PK, sk: buildKey(buildId).pk };
 }
 
 /** Prefix of every stored value's sort key in an app's data partition (ticket 2.4). */

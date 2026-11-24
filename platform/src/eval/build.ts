@@ -3,6 +3,7 @@
 // process gets none), with GitHub, the table and the deploy queue in memory (no repository
 // is created). The pushed commit is then checked as the deployer would (download, unpack, deploy check) and opened in
 // Playwright's Chromium at 375 px, served under the apps' sandbox CSP with an in-memory data API.
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
 import { tmpdir } from "node:os";
@@ -98,18 +99,20 @@ export async function evalBuild(
   const github = new FakeGitHub(() => new Date());
   github.addRepository(REPOSITORY);
   const files = withSpec(await loadTemplateFiles(), spec);
-  github.seedCommit(REPOSITORY, Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)])), FIRST_COMMIT_MESSAGE);
+  const baseCommit = github.seedCommit(REPOSITORY, Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)])), FIRST_COMMIT_MESSAGE);
   const token = `${FAKE_TOKEN_PREFIX}eval`;
   github.grants.set(token, { permissions: { contents: "write", metadata: "read" }, repositories: [REPOSITORY] });
   const records = new FakeBuildRecords();
-  records.builds.set(BUILD_ID, { nickname: NICKNAME, participantId: "eval-participant", status: "queued" });
+  // As the launcher leaves it (ticket 2.9): building under one launch.
+  const attemptId = randomUUID();
+  records.builds.set(BUILD_ID, { nickname: NICKNAME, participantId: "eval-participant", status: "building", attemptId });
   const queue = new FakeDeployQueue();
   const fetchFake = (url: string, init?: RequestInit): Promise<Response> => github.fetch(url, init ?? {});
   const temporary: string[] = [];
   const started = Date.now();
   try {
     const outcome = await runBuild(
-      { buildId: BUILD_ID, token },
+      { buildId: BUILD_ID, token, baseCommit, attemptId },
       {
         records,
         github: { fetch: fetchFake, now: () => new Date(), log: () => undefined },

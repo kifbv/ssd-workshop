@@ -15,6 +15,7 @@ import { BEHAVIOUR_COMMIT_MESSAGE, PAGE_COMMIT_MESSAGE, SINGLE_COMMIT_MESSAGE, p
 import {
   AGENT_FAILED_REASON,
   HAND_OVER_REASON,
+  MAIN_MOVED_REASON,
   NOTHING_CHANGED_REASON,
   TIME_UP_REASON,
   exitWhenDone,
@@ -28,6 +29,9 @@ const BUILD = "2026-11-24T10-00-00-000Z-0101010101010101";
 const TOKEN = `${FAKE_TOKEN_PREFIX}builder0001xyz`;
 const SPEC = "# Run Log\n\n## Screens\n- Home: this week's runs.\n\nQuestions to ada.lovelace@example.org\n";
 const PAGE = '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8">\n    <title>Run Log</title>\n    <link rel="stylesheet" href="style.css">\n    <script src="workshop-data.js" defer></script>\n    <script src="app.js" defer></script>\n  </head>\n  <body><main><h1>Run Log</h1><h2>Home</h2></main></body>\n</html>\n';
+const ATTEMPT = "6f1c2a9e-1111-4222-8333-444455556666";
+/** The job as the launcher passes it: the build, its token, the commit it prepared and its launch. */
+const jobFor = (t: { start: string }) => ({ buildId: BUILD, token: TOKEN, baseCommit: t.start, attemptId: ATTEMPT });
 const TOKENS = { input: 1_000, output: 20_000, cacheRead: 600_000, cacheWrite: 40_000 };
 
 const workspaces: string[] = [];
@@ -57,7 +61,8 @@ async function setup(script: AgentStep[], options: { status?: "queued" | "buildi
   // The launcher's one-repository token (ticket 2.6's builderToken), as GitHub granted it.
   github.grants.set(TOKEN, { permissions: { contents: "write", metadata: "read" }, repositories: ["ssd-ada"] });
   const records = new FakeBuildRecords();
-  records.builds.set(BUILD, { nickname: options.nickname ?? "Ada", participantId: "p-1", status: options.status ?? "queued" });
+  // As the launcher's claim leaves it (ticket 2.9): building under one launch.
+  records.builds.set(BUILD, { nickname: options.nickname ?? "Ada", participantId: "p-1", status: options.status ?? "building", attemptId: ATTEMPT });
   const queue = new FakeDeployQueue();
   const agent = new FakeAgent(script);
   const logs: (BuilderLogEntry | GitHubLogEntry)[] = [];
@@ -86,7 +91,7 @@ const filesOf = (feed: readonly FeedEvent[] | undefined): string[] => (feed ?? [
 describe("criterion 3: the feed holds the steps in order and every written file, and the repository at least two commits", () => {
   it("builds, commits in two commits on top of main, stores pushedCommit and hands exactly {buildId, nickname, commit} to the deployer", async () => {
     const t = await setup(goodScript());
-    const outcome = await runBuild({ buildId: BUILD, token: TOKEN }, t.deps);
+    const outcome = await runBuild(jobFor(t), t.deps);
     expect(outcome).toBe("handed-over");
     const build = t.records.builds.get(BUILD);
     expect(build?.status).toBe("building");
@@ -123,7 +128,7 @@ describe("criterion 3: the feed holds the steps in order and every written file,
 
   it("feed events carry times, and a single commit is made when only one kind of file changed", async () => {
     const t = await setup([{ write: "index.html", content: PAGE }]);
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("handed-over");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("handed-over");
     expect(t.github.history("ssd-ada").map((commit) => commit.message)).toEqual([SINGLE_COMMIT_MESSAGE, "Start from the workshop template and the approved spec"]);
     for (const event of t.records.builds.get(BUILD)?.feed ?? []) expect(Number.isNaN(Date.parse(event.at))).toBe(false);
   });
@@ -131,22 +136,22 @@ describe("criterion 3: the feed holds the steps in order and every written file,
   it("does nothing for a build that is missing, already finished, or already handed over", async () => {
     for (const status of ["live", "failed"] as const) {
       const t = await setup(goodScript(), { status });
-      expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+      expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
       expect(t.agent.runs).toEqual([]);
       expect(t.records.writes).toEqual([]);
     }
     const missing = await setup(goodScript());
-    expect(await runBuild({ buildId: "another-build", token: TOKEN }, missing.deps)).toBe("no-build");
+    expect(await runBuild({ ...jobFor(missing), buildId: "another-build" }, missing.deps)).toBe("no-build");
     const handed = await setup(goodScript(), { status: "building" });
     const stored = handed.records.builds.get(BUILD);
     if (stored) stored.pushedCommit = "0123456789abcdef0123456789abcdef01234567";
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, handed.deps)).toBe("no-build");
+    expect(await runBuild(jobFor(handed), handed.deps)).toBe("no-build");
     expect(handed.agent.runs).toEqual([]);
   });
 
   it("fails with the check's reasons, and commits and sends nothing, when the app fails the deploy check", async () => {
     const t = await setup([{ write: "app.js", content: 'fetch("https://api.example.org/x");\n' }]);
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("failed");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("failed");
     const build = t.records.builds.get(BUILD);
     expect(build?.status).toBe("failed");
     expect(build?.failureReasons?.[0]).toMatch(/^app\.js, line 1: /);
@@ -157,10 +162,10 @@ describe("criterion 3: the feed holds the steps in order and every written file,
 
   it("fails plainly when the agent changed nothing or stopped on an error", async () => {
     const unchanged = await setup([]);
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, unchanged.deps)).toBe("failed");
+    expect(await runBuild(jobFor(unchanged), unchanged.deps)).toBe("failed");
     expect(unchanged.records.builds.get(BUILD)?.failureReasons).toEqual([NOTHING_CHANGED_REASON]);
     const broken = await setup([{ write: "app.js", content: "// x\n" }, { fail: true }]);
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, broken.deps)).toBe("failed");
+    expect(await runBuild(jobFor(broken), broken.deps)).toBe("failed");
     expect(broken.records.builds.get(BUILD)?.failureReasons).toEqual([AGENT_FAILED_REASON]);
     expect(broken.queue.sent).toEqual([]);
   });
@@ -168,18 +173,18 @@ describe("criterion 3: the feed holds the steps in order and every written file,
   it("tries the deploy message three times, then marks the build failed", async () => {
     const flaky = await setup(goodScript());
     flaky.queue.failures = 2;
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, flaky.deps)).toBe("handed-over");
+    expect(await runBuild(jobFor(flaky), flaky.deps)).toBe("handed-over");
     expect(flaky.queue.sent).toHaveLength(1);
     const down = await setup(goodScript());
     down.queue.failures = 3;
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, down.deps)).toBe("failed");
+    expect(await runBuild(jobFor(down), down.deps)).toBe("failed");
     expect(down.records.builds.get(BUILD)?.failureReasons).toEqual([HAND_OVER_REASON]);
   });
 
   it("fails with GitHub's plain reason when the token does not reach the repository", async () => {
     const t = await setup(goodScript());
     t.github.grants.clear();
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("failed");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("failed");
     expect(t.records.builds.get(BUILD)?.failureReasons).toEqual(['GitHub: GitHub answered 404 to the step "get-branch".']);
     expect(t.agent.runs).toEqual([]);
   });
@@ -195,7 +200,7 @@ describe("a build marked failed by someone else while it runs (try 3): the runne
   it("between writing and checking: no check step, no commit, no message, outcome no-build", async () => {
     const t = await setup([...goodScript()]);
     t.agent.script.push({ call: failElsewhere(t.records) });
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
     const build = t.records.builds.get(BUILD);
     expect(build?.status).toBe("failed");
     expect(steps(build?.feed)).toEqual(["preparing", "writing"]);
@@ -221,7 +226,7 @@ describe("a build marked failed by someone else while it runs (try 3): the runne
         failElsewhere(t.records)();
       },
     });
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
     expect(t.agent.runs[0]?.signal.aborted).toBe(true);
     const build = t.records.builds.get(BUILD);
     expect(build?.status).toBe("failed");
@@ -246,7 +251,7 @@ describe("a build marked failed by someone else while it runs (try 3): the runne
         return new Promise(() => undefined);
       },
     };
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
     expect(signal?.aborted).toBe(true);
     expect(t.queue.sent).toEqual([]);
   });
@@ -254,11 +259,11 @@ describe("a build marked failed by someone else while it runs (try 3): the runne
   it("before writing (the writing step refused): the agent never starts", async () => {
     const t = await setup(goodScript());
     const original = t.records.addFeed.bind(t.records);
-    t.records.addFeed = async (buildId, events, nowIso) => {
+    t.records.addFeed = async (buildId, attemptId, events, nowIso) => {
       failElsewhere(t.records)();
-      return original(buildId, events, nowIso);
+      return original(buildId, attemptId, events, nowIso);
     };
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
     expect(t.agent.runs).toEqual([]);
     expect(t.queue.sent).toEqual([]);
   });
@@ -266,13 +271,77 @@ describe("a build marked failed by someone else while it runs (try 3): the runne
   it("before committing (the committing step refused): nothing is pushed", async () => {
     const t = await setup(goodScript());
     const original = t.records.addFeed.bind(t.records);
-    t.records.addFeed = async (buildId, events, nowIso) => {
+    t.records.addFeed = async (buildId, attemptId, events, nowIso) => {
       if (events.some((event) => event.kind === "step" && event.step === "committing")) failElsewhere(t.records)();
-      return original(buildId, events, nowIso);
+      return original(buildId, attemptId, events, nowIso);
     };
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("no-build");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
     expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([t.start]);
     expect(t.queue.sent).toEqual([]);
+  });
+});
+
+describe("the build starts from the commit the launcher prepared (ticket 2.9 try 2, access review HIGH 2)", () => {
+  it("WHEN main moved after the launch THEN the build fails and nothing is pushed", async () => {
+    const t = await setup(goodScript());
+    // A holder of the build's token pushes between RunTask and the runner's read of main.
+    const planted = t.github.seedCommit("ssd-ada", { "index.html": "<p>planted</p>\n" }, "Planted", [t.start]);
+    t.github.repo("ssd-ada").main = planted;
+    expect(await runBuild(jobFor(t), t.deps)).toBe("failed");
+    const build = t.records.builds.get(BUILD);
+    expect(build?.failureReasons).toEqual([MAIN_MOVED_REASON]);
+    expect(build?.pushedCommit).toBeUndefined();
+    expect(t.agent.runs).toEqual([]);
+    expect(t.queue.sent).toEqual([]);
+    expect(t.github.repo("ssd-ada").main).toBe(planted);
+    expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([planted, t.start]);
+  });
+
+  it("downloads exactly the prepared commit and builds on top of it", async () => {
+    const t = await setup(goodScript());
+    const urls: string[] = [];
+    const download = t.deps.download;
+    t.deps.download = (url) => (urls.push(url), download(url));
+    expect(await runBuild(jobFor(t), t.deps)).toBe("handed-over");
+    expect(urls).toHaveLength(1);
+    expect(urls[0]?.endsWith(`/tar.gz/${t.start}`)).toBe(true);
+    expect(t.github.history("ssd-ada").at(-1)?.sha).toBe(t.start);
+  });
+});
+
+describe("each run is bound to its launch (ticket 2.9 try 2, access review MEDIUM 3)", () => {
+  it("WHEN a second runner starts for the same build with another attempt id THEN it claims nothing and writes nothing", async () => {
+    const t = await setup(goodScript());
+    expect(await runBuild({ ...jobFor(t), attemptId: "00000000-0000-4000-8000-000000000000" }, t.deps)).toBe("no-build");
+    expect(t.records.writes).toEqual([]);
+    expect(t.agent.runs).toEqual([]);
+    expect(t.queue.sent).toEqual([]);
+  });
+
+  it("WHEN the build is relaunched while an earlier runner still works THEN the earlier runner's feed, hand-over and failure writes are refused", async () => {
+    const t = await setup([...goodScript()]);
+    // Mid-run, the build is relaunched (retry, then the launcher's claim): a new attempt id.
+    t.agent.script.push({
+      call: () => {
+        const build = t.records.builds.get(BUILD);
+        if (build) build.attemptId = "00000000-0000-4000-8000-000000000001";
+      },
+    });
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
+    const build = t.records.builds.get(BUILD);
+    expect(build?.status).toBe("building");
+    expect(build?.pushedCommit).toBeUndefined();
+    expect(t.queue.sent).toEqual([]);
+    expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([t.start]);
+    expect(t.records.writes.filter((write) => write.method === "markFailed" || write.method === "handOver")).toEqual([]);
+    // Nor can it fail the new launch's build.
+    expect(await t.records.markFailed(BUILD, ATTEMPT, ["x"], "2026-11-24T10:05:00.000Z")).toBe(false);
+  });
+
+  it("refuses a queued build: only the launcher's claim (building, with the attempt id) lets a runner start", async () => {
+    const t = await setup(goodScript(), { status: "queued" });
+    expect(await runBuild(jobFor(t), t.deps)).toBe("no-build");
+    expect(t.records.writes).toEqual([]);
   });
 });
 
@@ -282,7 +351,7 @@ describe("the token reaches one repository: the stored build's nickname decides 
     // Bob's repository exists too; the token was minted for Ada's only.
     t.github.addRepository("ssd-bob");
     const bobStart = t.github.seedCommit("ssd-bob", { "README.md": "Bob's app\n" }, "Start");
-    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("failed");
+    expect(await runBuild(jobFor(t), t.deps)).toBe("failed");
     const build = t.records.builds.get(BUILD);
     expect(build?.status).toBe("failed");
     expect(build?.failureReasons).toEqual(['GitHub: GitHub answered 404 to the step "get-branch".']);
@@ -326,7 +395,7 @@ describe("criterion 4: at 12 minutes the agent is stopped and the build fails wi
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const t = await setup([{ write: "index.html", content: PAGE }, { tokens: TOKENS }, { hang: true }]);
     let outcome: string | undefined;
-    void runBuild({ buildId: BUILD, token: TOKEN }, t.deps).then((value) => (outcome = value));
+    void runBuild(jobFor(t), t.deps).then((value) => (outcome = value));
     await settle(() => t.agent.runs.length === 1 && filesOf(t.records.builds.get(BUILD)?.feed).length === 1);
     expect(BUILD_AGENT_TIMEOUT_MS).toBe(12 * 60 * 1000);
     await vi.advanceTimersByTimeAsync(BUILD_AGENT_TIMEOUT_MS - 1);
@@ -351,7 +420,7 @@ describe("criterion 4: at 12 minutes the agent is stopped and the build fails wi
     const t = await setup([]);
     t.deps.agent = { run: () => new Promise(() => undefined) };
     let outcome: string | undefined;
-    void runBuild({ buildId: BUILD, token: TOKEN }, t.deps).then((value) => (outcome = value));
+    void runBuild(jobFor(t), t.deps).then((value) => (outcome = value));
     await settle(() => steps(t.records.builds.get(BUILD)?.feed).includes("writing"));
     await vi.advanceTimersByTimeAsync(BUILD_AGENT_TIMEOUT_MS);
     await settle(() => outcome !== undefined);
@@ -362,7 +431,7 @@ describe("criterion 4: at 12 minutes the agent is stopped and the build fails wi
 describe("criterion 5: the build's tokens and their cost are added to the participant's usage", () => {
   it("adds every input kind and the output, priced at the build role's EU prices", async () => {
     const t = await setup(goodScript());
-    await runBuild({ buildId: BUILD, token: TOKEN }, t.deps);
+    await runBuild(jobFor(t), t.deps);
     const usage = t.records.usage.get("p-1");
     expect(usage).toEqual({ inputTokens: 641_000, outputTokens: 20_000, costUsd: 0.6963 });
     // 1,000 x 3.30 + 20,000 x 16.50 + 600,000 x 0.33 + 40,000 x 4.125, per million.
@@ -372,7 +441,7 @@ describe("criterion 5: the build's tokens and their cost are added to the partic
 
   it("adds the tokens of a failed run too", async () => {
     const t = await setup([{ tokens: TOKENS }, { fail: true }]);
-    await runBuild({ buildId: BUILD, token: TOKEN }, t.deps);
+    await runBuild(jobFor(t), t.deps);
     expect(t.records.usage.get("p-1")?.costUsd).toBe(0.6963);
   });
 });
@@ -383,7 +452,7 @@ describe("criterion 6: the runner's output and the feed hold no token and no ema
   it("logs counts and names only, and keeps email-shaped text out of the feed's file names", async () => {
     const script: AgentStep[] = [...goodScript(), { write: "ada.lovelace@example.org.html", content: "<p>x</p>" }];
     const t = await setup(script);
-    await runBuild({ buildId: BUILD, token: TOKEN }, t.deps);
+    await runBuild(jobFor(t), t.deps);
     const output = t.logs.map((entry) => JSON.stringify(entry)).join("\n");
     const feed = JSON.stringify(t.records.builds.get(BUILD));
     for (const text of [output, feed]) {
@@ -402,7 +471,7 @@ describe("criterion 6: the runner's output and the feed hold no token and no ema
 
   it("logs the same way on a successful build", async () => {
     const t = await setup(goodScript());
-    await runBuild({ buildId: BUILD, token: TOKEN }, t.deps);
+    await runBuild(jobFor(t), t.deps);
     const output = t.logs.map((entry) => JSON.stringify(entry)).join("\n");
     expect(output).not.toContain(TOKEN);
     expect(output).not.toMatch(EMAIL);

@@ -19,7 +19,7 @@ import {
   removeEmailAddresses,
   type RepositoryFile,
 } from "./repository.js";
-import { TEMPLATE_DIR, loadTemplateFiles } from "./template.js";
+import { loadTemplateFiles, templateDir } from "./template.js";
 
 const NOW = new Date("2026-11-24T10:00:00Z");
 const credentials = parseGitHubSecret(TEST_SECRET_TEXT);
@@ -75,7 +75,7 @@ describe("loadTemplateFiles and withSpec", () => {
   it("reads every file of templates/basic, and the spec replaces SPEC.md whole", async () => {
     const paths = template.map((file) => file.path);
     expect(paths).toEqual(["AGENTS.md", "README.md", "SPEC.md", "app.js", "index.html", "style.css", "workshop-data.js"]);
-    expect(TEMPLATE_DIR.endsWith("/templates/basic/")).toBe(true);
+    expect(templateDir().endsWith("/templates/basic/")).toBe(true);
     const files = withSpec(template, SPEC);
     expect(files.map((file) => file.path)).toEqual(paths);
     expect(decode(files.find((file) => file.path === "SPEC.md")?.bytes ?? new Uint8Array())).toBe(PUBLISHED_SPEC);

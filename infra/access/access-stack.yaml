@@ -123,6 +123,31 @@ Resources:
             Effect: Allow
             Action: [ecs:StopTask, ecs:DescribeTasks]
             Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/ssd-workshop-*/*
+          # Ticket 2.9 try 2 (Franck's yes, 2026-11-24): whatever a role's own policy says, only the launcher reads or
+          # stops build tasks (the task's override holds the build's GitHub token), only the builder sends deploy
+          # messages, and only the AI worker and the check's schedule send to the builds queues. role*/<name> is the
+          # role with or without its path: a role name is unique in an account.
+          - Sid: WatchBuildsLauncherOnly
+            Effect: Deny
+            Action: [ecs:DescribeTasks, ecs:StopTask]
+            Resource: !Sub arn:aws:ecs:*:${AWS::AccountId}:task/ssd-workshop-builds/*
+            Condition:
+              ArnNotLike: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-launcher"}
+          - Sid: DeploysFromTheBuilderOnly
+            Effect: Deny
+            Action: sqs:SendMessage
+            Resource: !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-deploys*
+            Condition:
+              ArnNotLike: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder"}
+          - Sid: BuildsFromTheirSendersOnly
+            Effect: Deny
+            Action: sqs:SendMessage
+            Resource: !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-builds*
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-api-ai-worker
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-check-scheduler
           - Sid: PullImages
             Effect: Allow
             Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
@@ -174,7 +199,9 @@ Resources:
             Action: ecs:StartTask
             Resource: "*"
           # Same sharing and egress denies as the deploy policies, except s3:PutBucketNotification,
-          # which CDK's bucket notifications handler (a workshop role) needs.
+          # which CDK's bucket notifications handler (a workshop role) needs. Plus queue attribute writes
+          # and deletes (a queue Policy would open the deploy and builds queues to outside senders); only
+          # CloudFormation (the deploy role, no boundary) changes queues.
           - Sid: NoExternalSharing
             Effect: Deny
             Action:
@@ -191,6 +218,9 @@ Resources:
               - lambda:UpdateFunctionUrlConfig
               - lambda:AddLayerVersionPermission
               - sqs:AddPermission
+              - sqs:SetQueueAttributes
+              - sqs:DeleteQueue
+              - sqs:PurgeQueue
               - sns:AddPermission
               - dynamodb:PutResourcePolicy
               - dynamodb:ExportTableToPointInTime
@@ -647,16 +677,85 @@ Resources:
           # user may not create, pass, change or invoke its role or function, nor write deploy assets
           # or the assets bucket's settings (a planted asset would become its code). Deploys from main
           # stay trusted (Franck reviews what merges).
+          # Ticket 2.9 try 3 (Franck's yes, 2026-11-24): the same for every role the boundary's denies let
+          # through by name (the builder's two roles, the AI worker, the check's scheduler) and the
+          # apps deployer (the apps bucket's only writer, 2.5), and the two functions that run as
+          # them: a session could otherwise pass such a role to its own task or function, or rewrite
+          # that code. role*/<name> is the role with or without its path (a role name is unique).
           - Sid: NoLauncherForSessions
             Effect: Deny
             NotAction: [iam:GetRole, iam:GetRolePolicy, iam:ListRolePolicies, iam:ListAttachedRolePolicies, iam:ListRoleTags, "lambda:Get*", "lambda:List*", "s3:Get*", "s3:List*"]
             Resource:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher
               - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-builds-launcher
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder-execution
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-api-ai-worker
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-check-scheduler
+              - !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-apps-deployer
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher
               - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-builds-launcher:*
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-api-ai-worker
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-api-ai-worker:*
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-apps-deployer
+              - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:ssd-workshop-apps-deployer:*
               - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}
               - !Sub arn:aws:s3:::ssd-workshop-cdk-assets-${AWS::AccountId}/*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Sessions cannot start, redirect or empty builds (Franck, 2026-11-24, ticket 2.9): the
+          # launch queue's messages make the launcher mint a repository token and start a task.
+          # Retries run from Franck's machine (npm run builds -- retry). Deploys from main may manage
+          # the queues; only the Claude user is denied. Ticket 2.9 try 2 (Franck's yes, 2026-11-24): nor
+          # read, delete or remove them, nor send a deploy message (the deployer publishes the commit
+          # a build names), nor read, start or stop build tasks (a task's override holds its build's
+          # GitHub token), nor point another queue at the launcher.
+          - Sid: NoBuildQueueForSessions
+            Effect: Deny
+            Action: [sqs:SendMessage, sqs:SetQueueAttributes, sqs:PurgeQueue, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:DeleteQueue]
+            Resource:
+              - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-builds*
+              - !Sub arn:aws:sqs:*:${AWS::AccountId}:ssd-workshop-deploys*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoBuildTasksForSessions
+            Effect: Deny
+            Action: [ecs:DescribeTasks, ecs:RunTask, ecs:StopTask, ecs:ExecuteCommand]
+            Resource:
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task/ssd-workshop-builds/*
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-definition/ssd-workshop-builder:*
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Ticket 2.9 try 3 (Franck's yes, 2026-11-24): no event source mappings at all for sessions (no
+          # condition key names a mapping's queue, and a call by mapping UUID may carry no function
+          # ARN): a session could otherwise feed the launch or deploy queue to its own function. Nor
+          # change or remove the stuck-build check's schedule, nor run any task on the builds cluster.
+          - Sid: NoEventSourcesForSessions
+            Effect: Deny
+            Action: [lambda:CreateEventSourceMapping, lambda:UpdateEventSourceMapping, lambda:DeleteEventSourceMapping]
+            Resource: "*"
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoBuildCheckScheduleForSessions
+            Effect: Deny
+            Action: ["scheduler:Create*", "scheduler:Update*", "scheduler:Delete*"]
+            Resource: !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule/*/ssd-workshop-builds-check
+            Condition:
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          - Sid: NoBuildsClusterTasksForSessions
+            Effect: Deny
+            Action: ecs:RunTask
+            Resource: "*"
+            Condition:
+              ArnLike: {ecs:cluster: !Sub "arn:aws:ecs:*:${AWS::AccountId}:cluster/ssd-workshop-builds"}
+              ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
+          # Nor a service or task set there: their tasks would run as a session-chosen task definition.
+          - Sid: NoBuildsClusterServicesForSessions
+            Effect: Deny
+            Action: [ecs:CreateService, ecs:UpdateService, ecs:CreateTaskSet]
+            Resource:
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:service/ssd-workshop-builds/*
+              - !Sub arn:aws:ecs:*:${AWS::AccountId}:task-set/ssd-workshop-builds/*
             Condition:
               ArnEquals: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:user/ssd-workshop-claude"}
           - Sid: NoGitHubKey

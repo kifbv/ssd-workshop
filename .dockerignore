@@ -1,0 +1,6 @@
+# The builder image (platform/builder/Dockerfile) needs only the package files and platform/ sources.
+**/node_modules
+**/cdk.out
+.git
+.env*
+secrets

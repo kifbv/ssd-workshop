@@ -3,7 +3,9 @@
  *
  * 1. reads the build (nickname and participant come only from the stored record, decision "(2.6) For 2.7 to 2.9")
  *    and claims it (`building`, a new feed starting with the step `preparing`);
- * 2. preparing: reads `main` and downloads the repository at that commit into a fresh workspace folder;
+ * 2. preparing: reads `main`, fails the build unless it is still the commit the launcher prepared (`baseCommit`: a
+ *    holder of the build's token could otherwise slip files in between the launch and this read, ticket 2.9 try 2), and
+ *    downloads the repository at that commit into a fresh workspace folder;
  * 3. writing: runs the coding agent (./agent.ts) with AGENTS.md and SPEC.md, at most BUILD_AGENT_TIMEOUT_MS (12
  *    minutes); every file it writes goes into the feed; its tokens and their cost go to the participant's usage;
  * 4. checking: the deploy check (../api/build/check.ts) on the workspace;
@@ -11,8 +13,9 @@
  * 6. deploying: stores the pushed commit on the build (`pushedCommit`, which the deployer's start condition requires)
  *    and sends `{buildId, nickname, commit}` to the deploy queue; the deployer then marks the build live or failed.
  *
- * Any failure marks the build `failed` with one plain reason ("The build took too long." at the time limit), only
- * while it is still `building`. When a feed write is refused (the build is no longer `building`: someone else marked
+ * Every write is bound to the launch that started this task (`attemptId`, ticket 2.9 try 2): a second runner for the
+ * same build can never claim, feed, hand over or fail it. Any failure marks the build `failed` with one plain reason
+ * ("The build took too long." at the time limit), only while it is still `building` under this launch. When a feed write is refused (the build is no longer `building`: someone else marked
  * it failed), the runner stops at once (try 3): it aborts the agent, pushes no commit, sends no message, writes nothing
  * more on the build and ends with `no-build`. Logs are one JSON line per phase: the phase, its outcome, counts, the duration and an
  * error name; never a token, nickname, build id, path, spec text or error message.
@@ -24,8 +27,8 @@ import { storedReason, storedReasons } from "../api/deploy/deploy.js";
 import { ArchiveProblem, readTarGz } from "../api/deploy/tar.js";
 import { DownloadProblem } from "../api/deploy/deploy.js";
 import { GitHubProblem, type GitHubDeps } from "../api/github/app.js";
-import { removeEmailAddresses, type RepositoryFile } from "../api/github/repository.js";
-import { BUILD_ID_PATTERN } from "../api/keys.js";
+import { GIT_ID_PATTERN, removeEmailAddresses, type RepositoryFile } from "../api/github/repository.js";
+import { ATTEMPT_ID_PATTERN, BUILD_ID_PATTERN } from "../api/keys.js";
 import { appArchiveUrl, BUILD_AGENT_TIMEOUT_MS, type ModelSetting } from "../api/settings.js";
 import { errorName } from "../api/sign-in/code-request.js";
 import type { TokenUsage } from "../api/types.js";
@@ -83,19 +86,27 @@ export interface BuildJob {
   buildId: string;
   /** The build's one-repository GitHub token (ticket 2.6's `builderToken`, minted by the launcher). */
   token: string;
+  /** The commit the launcher prepared (`prepareRepository`'s answer): the build starts from it or not at all. */
+  baseCommit: string;
+  /** The launch this task belongs to (the launcher's claim stored it on the build). */
+  attemptId: string;
 }
 
 /**
- * The job from the task's environment (ticket 2.9 sets it): `BUILD_ID` and `BUILDER_GITHUB_TOKEN`. The token is removed
- * from `env` as soon as it is read. An error names the variable only.
+ * The job from the task's environment (ticket 2.9 sets it): `BUILD_ID`, `BUILDER_GITHUB_TOKEN`, `BUILDER_BASE_COMMIT`
+ * and `BUILDER_ATTEMPT_ID`. The token is removed from `env` as soon as it is read. An error names the variable only.
  */
-export function jobFromEnvironment(env: Record<string, string | undefined>): { buildId: string; token: string } | { error: string } {
+export function jobFromEnvironment(env: Record<string, string | undefined>): BuildJob | { error: string } {
   const buildId = env.BUILD_ID;
   const token = env.BUILDER_GITHUB_TOKEN;
   delete env.BUILDER_GITHUB_TOKEN;
+  const baseCommit = env.BUILDER_BASE_COMMIT;
+  const attemptId = env.BUILDER_ATTEMPT_ID;
   if (buildId === undefined || !BUILD_ID_PATTERN.test(buildId)) return { error: "BUILD_ID is missing or not a build id" };
   if (token === undefined || token.trim() === "") return { error: "BUILDER_GITHUB_TOKEN is missing" };
-  return { buildId, token: token.trim() };
+  if (baseCommit === undefined || !GIT_ID_PATTERN.test(baseCommit)) return { error: "BUILDER_BASE_COMMIT is missing or not a commit id" };
+  if (attemptId === undefined || !ATTEMPT_ID_PATTERN.test(attemptId)) return { error: "BUILDER_ATTEMPT_ID is missing or not an attempt id" };
+  return { buildId, token: token.trim(), baseCommit, attemptId };
 }
 
 /** `handed-over`: the deployer has the commit; `failed`: the build was marked failed; `no-build`: nothing to do. */
@@ -107,6 +118,7 @@ export const NOTHING_CHANGED_REASON = "The AI did not change the app, so there w
 export const NOT_PLAIN_FILES_REASON = "The app's repository holds something other than plain files and folders, so it was not built.";
 export const HAND_OVER_REASON = "The finished app could not be handed to the publishing step.";
 export const SERVICE_REASON = "The build stopped because of a problem on the workshop's side.";
+export const MAIN_MOVED_REASON = "The app's repository changed after the build was started, so it was not built. Your facilitator can restart it.";
 
 /** A feed write was refused: the build is no longer `building` (someone else finished it). The runner stops. */
 class BuildGone extends Error {
@@ -172,7 +184,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     return "no-build";
   }
   const { nickname, participantId } = build;
-  if (!(await deps.records.claim(job.buildId, nickname, step("preparing"), nowIso()))) {
+  if (!(await deps.records.claim(job.buildId, job.attemptId, nickname, step("preparing"), nowIso()))) {
     log("start", "no-build");
     return "no-build";
   }
@@ -182,7 +194,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
   // BuildGone, and the run stops: nothing more is written, pushed or sent.
   let feedQueue: Promise<unknown> = Promise.resolve();
   const feed = (...events: FeedEvent[]): Promise<void> => {
-    const next = feedQueue.then(() => deps.records.addFeed(job.buildId, events, nowIso()));
+    const next = feedQueue.then(() => deps.records.addFeed(job.buildId, job.attemptId, events, nowIso()));
     feedQueue = next.catch(() => undefined);
     return next.then((written) => {
       if (!written) throw new BuildGone();
@@ -194,8 +206,10 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
   try {
     // preparing
     workspace = await deps.makeWorkspace();
+    // Only the commit the launcher prepared: a `main` that moved since (someone holding the token pushed) is not built.
     const head = await readMain(deps.github, job.token, nickname);
-    const entries = readTarGz(await deps.download(appArchiveUrl(nickname, head)));
+    if (head !== job.baseCommit) throw new BuildFailure([MAIN_MOVED_REASON]);
+    const entries = readTarGz(await deps.download(appArchiveUrl(nickname, job.baseCommit)));
     if (entries.some((entry) => entry.kind !== "file" && entry.kind !== "dir")) throw new BuildFailure([NOT_PLAIN_FILES_REASON]);
     const base: RepositoryFile[] = entries.filter((entry) => entry.kind === "file").map((entry) => ({ path: entry.path, bytes: entry.bytes }));
     await writeWorkspace(workspace, base);
@@ -288,7 +302,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     // committing
     phase = "committing";
     await feed(step("committing"));
-    const pushed = await pushCommits(deps.github, job.token, nickname, head, planned);
+    const pushed = await pushCommits(deps.github, job.token, nickname, job.baseCommit, planned);
     const last = pushed[pushed.length - 1];
     if (last === undefined) throw new BuildFailure([NOTHING_CHANGED_REASON]);
     await feed(...pushed.map((commit): FeedEvent => ({ kind: "commit", sha: commit.sha, message: commit.message, at: nowIso() })));
@@ -297,7 +311,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     // deploying
     phase = "deploying";
     await feedQueue;
-    if (!(await deps.records.handOver(job.buildId, last.sha, [step("deploying")], nowIso()))) {
+    if (!(await deps.records.handOver(job.buildId, job.attemptId, last.sha, [step("deploying")], nowIso()))) {
       log("deploying", "no-build");
       return "no-build";
     }
@@ -330,7 +344,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     const reasons = reasonsFor(error).map((reason) => storedReason(removeEmailAddresses(reason)));
     let marked: boolean;
     try {
-      marked = await deps.records.markFailed(job.buildId, reasons, nowIso());
+      marked = await deps.records.markFailed(job.buildId, job.attemptId, reasons, nowIso());
     } catch (markError) {
       log(phase, "error", { error: errorName(markError) });
       // eslint-disable-next-line preserve-caught-error -- no cause, as above

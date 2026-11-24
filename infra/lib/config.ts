@@ -345,11 +345,12 @@ export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "buildId",
  *
  * - BUILDER_BUILD_READ_ATTRIBUTES: GetItem, its keys and projection (`nickname`, `participantId`, `status`);
  * - BUILDER_BUILD_UPDATE_ATTRIBUTES: UpdateItem (claim, feed, hand-over, failure), every name in its update and
- *   condition expressions. `nickname` is only compared (the claim's condition), never set. Never `participantId` (only
+ *   condition expressions. `nickname` and `attemptId` (the launch the task belongs to, ticket 2.9 try 2) are only
+ *   compared, never set. Never `participantId` (only
  *   read), `deployedCommit` or `liveAt` (the deployer's), `type`, `buildId` or `createdAt` (the AI worker's).
  */
 export const BUILDER_BUILD_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status"] as const;
-export const BUILDER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "pushedCommit", "feed", "updatedAt", "finishedAt", "failureReasons"] as const;
+export const BUILDER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "attemptId", "pushedCommit", "feed", "updatedAt", "finishedAt", "failureReasons"] as const;
 /** The attribute names the builder may name in `PARTICIPANT#*` (UpdateItem of the `USAGE` item only): the build's tokens and cost. */
 export const BUILDER_USAGE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "participantId", "updatedAt", "inputTokens", "outputTokens", "costUsd"] as const;
 /**
@@ -384,3 +385,53 @@ export const SES_SEND_RESOURCES = [
  */
 export const DEPLOY_ROLE_NAME = `${PREFIX}-deploy`;
 export const DEPLOY_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/${DEPLOY_ROLE_NAME}`;
+
+/**
+ * The builder's task (ticket 2.9): the Fargate task definition family, its container, size and log group, its task
+ * role (the runner's AWS rights) and execution role (image pull and logs). The image is the deploy workflow's push to
+ * BUILDER_REPOSITORY_NAME, named by digest (context `builderImageDigest`), so a later push to a tag never changes what
+ * runs.
+ */
+export const BUILDER_TASK_FAMILY = `${PREFIX}-builder`;
+export const BUILDER_CONTAINER_NAME = "builder";
+export const BUILDER_TASK_ROLE_NAME = `${PREFIX}-builder`;
+export const BUILDER_EXECUTION_ROLE_NAME = `${PREFIX}-builder-execution`;
+export const BUILDER_LOG_GROUP_NAME = `/ecs/${PREFIX}-builder`;
+/** 1 vCPU and 2 GB (the brief). */
+export const BUILDER_CPU = 1024;
+export const BUILDER_MEMORY_MB = 2048;
+/** CDK context key the deploy workflow sets to the pushed image's digest (`sha256:<64 hex>`). */
+export const BUILDER_IMAGE_DIGEST_CONTEXT = "builderImageDigest";
+/** Used by `cdk synth` without that context (CI): a digest no image has, so a deploy that forgets it cannot start builds. */
+export const BUILDER_IMAGE_DIGEST_UNSET = `sha256:${"0".repeat(64)}`;
+/**
+ * The builder image digest from the CDK context (BUILDER_IMAGE_DIGEST_UNSET when absent), refused unless it is
+ * `sha256:<64 hex digits>`. `buildApp` calls it before building any stack (fails fast) and the builds stack uses its result.
+ */
+export function builderImageDigest(context: unknown): string {
+  const digest = String(context ?? BUILDER_IMAGE_DIGEST_UNSET);
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${BUILDER_IMAGE_DIGEST_CONTEXT} must be sha256:<64 hex digits>`);
+  return digest;
+}
+/** The launcher's Lambda function (and its role, BUILD_LAUNCHER_ROLE_NAME, and its log group). */
+export const BUILD_LAUNCHER_FUNCTION_NAME = BUILD_LAUNCHER_ROLE_NAME;
+/** The queue EventBridge Scheduler fills every minute for the launcher's stuck-build check, the schedule and its role. */
+export const BUILD_CHECK_QUEUE_NAME = `${PREFIX}-builds-check`;
+export const BUILD_CHECK_SCHEDULE_NAME = `${PREFIX}-builds-check`;
+export const BUILD_CHECK_SCHEDULER_ROLE_NAME = `${PREFIX}-builds-check-scheduler`;
+/**
+ * The attribute names the launcher may read (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES) in
+ * `BUILD#*` and `PARTICIPANT#*`: the build's nickname, participant and status, the profile's nickname, the
+ * conversation's build and approved version, and the approved spec version's text.
+ */
+export const LAUNCHER_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status", "buildId", "approvedSpecVersion", "specVersion", "text", "approvedAt"] as const;
+/**
+ * The attribute names the launcher may name in `BUILD#*` (UpdateItem, also inside its claim transaction): the move from
+ * `queued` to `building` under a new launch (`attemptId`, ticket 2.9 try 2), the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only
+ * compared (IAM counts condition names).
+ */
+export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "participantId", "pushedCommit", "attemptId", "taskArn", "launchedAt", "updatedAt", "failureReasons", "finishedAt"] as const;
+/** The watch list's attribute names (`LAUNCHES` partition: PutItem, UpdateItem, DeleteItem, Query). */
+export const LAUNCHER_LAUNCH_ATTRIBUTES = ["pk", "sk", "type", "buildId", "taskArn", "claimedAt"] as const;
+/** The watch list's partition key (platform/api/keys.ts LAUNCHES_PK). */
+export const LAUNCHES_PARTITION = "LAUNCHES";

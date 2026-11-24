@@ -69,9 +69,30 @@ jobs:
             > "$RUNNER_TEMP/zone-before.json"
           echo "Zone has $(jq length "$RUNNER_TEMP/zone-before.json") record sets"
 
+      # Ticket 2.9: the builder image, tagged with the commit and pinned by digest in the task
+      # definition, so a later push to a tag cannot change what build tasks run.
+      - name: Build and push the builder image
+        id: builder
+        env:
+          REGISTRY: ${{ steps.settings.outputs.builder_registry }}
+          REPOSITORY: ${{ steps.settings.outputs.builder_repository }}
+        run: |
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          image="$REGISTRY/$REPOSITORY:$GITHUB_SHA"
+          docker build -f platform/builder/Dockerfile -t "$image" .
+          docker push "$image"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No digest for the pushed builder image"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: CDK deploy
         working-directory: infra
-        run: npx cdk deploy --all --require-approval never
+        env:
+          BUILDER_IMAGE_DIGEST: ${{ steps.builder.outputs.digest }}
+        run: npx cdk deploy --all --require-approval never -c "builderImageDigest=$BUILDER_IMAGE_DIGEST"
 
       # Runs even when the deploy failed, so a partial change is caught as well.
       - name: Check the DNS zone did not change

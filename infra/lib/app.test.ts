@@ -76,6 +76,26 @@ import {
   BUILDS_VPC_NAME,
   BUILDER_IMAGES_KEPT,
   BUILDER_REPOSITORY_NAME,
+  BUILD_CHECK_QUEUE_NAME,
+  BUILD_CHECK_SCHEDULE_NAME,
+  BUILD_CHECK_SCHEDULER_ROLE_NAME,
+  BUILD_LAUNCHER_FUNCTION_NAME,
+  BUILDER_BUILD_READ_ATTRIBUTES,
+  BUILDER_BUILD_UPDATE_ATTRIBUTES,
+  BUILDER_CONTAINER_NAME,
+  BUILDER_CPU,
+  BUILDER_EXECUTION_ROLE_NAME,
+  BUILDER_IMAGE_DIGEST_UNSET,
+  BUILDER_LOG_GROUP_NAME,
+  BUILDER_MEMORY_MB,
+  BUILDER_TASK_FAMILY,
+  BUILDER_TASK_ROLE_NAME,
+  BUILDER_USAGE_UPDATE_ATTRIBUTES,
+  LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
+  LAUNCHER_LAUNCH_ATTRIBUTES,
+  LAUNCHER_READ_ATTRIBUTES,
+  LAUNCHES_PARTITION,
+  ATTRIBUTE_LIMITED_RETURN_VALUES,
   GITHUB_SECRET_NAME,
   TABLE_NAME,
 } from "./config.js";
@@ -91,7 +111,16 @@ import {
   DEPLOYER_TIMEOUT_SECONDS,
 } from "./apps-stack.js";
 import { APPS_INDEX_FUNCTION_FILE, NOT_FOUND_CACHE_SECONDS } from "./edge-stack.js";
-import { BUILD_QUEUE_MAX_RECEIVES, BUILD_QUEUE_VISIBILITY_SECONDS } from "./builds-stack.js";
+import {
+  BUILD_CHECK_SCHEDULE,
+  BUILD_QUEUE_MAX_RECEIVES,
+  BUILD_QUEUE_VISIBILITY_SECONDS,
+  LAUNCHER_MAX_CONCURRENCY,
+  LAUNCHER_MEMORY_MB,
+  LAUNCHER_TIMEOUT_SECONDS,
+  TEMPLATE_DIR,
+} from "./builds-stack.js";
+import { LAUNCH_RESERVE_MS } from "../../platform/api/handlers/builds-launcher.js";
 import {
   APPS_BUCKET_NAME as PLATFORM_APPS_BUCKET_NAME,
   BUILD_QUEUE_NAME as PLATFORM_BUILD_QUEUE_NAME,
@@ -99,6 +128,7 @@ import {
   DEPLOY_QUEUE_NAME as PLATFORM_DEPLOY_QUEUE_NAME,
   DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
   GITHUB_SECRET_NAME as PLATFORM_GITHUB_SECRET_NAME,
+  HANDED_OVER_GRACE_MS,
 } from "../../platform/api/settings.js";
 
 function must<T>(value: T | undefined): T {
@@ -138,6 +168,7 @@ const MUST_BE_TAGGED = [
   "AWS::ECR::Repository",
   "AWS::CloudFront::Function",
   "AWS::SecretsManager::Secret",
+  "AWS::ECS::TaskDefinition",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -156,6 +187,8 @@ const NOT_TAGGABLE = [
   "AWS::EC2::VPCGatewayAttachment",
   "AWS::EC2::Route",
   "AWS::EC2::SubnetRouteTableAssociation",
+  // Ticket 2.9: EventBridge Scheduler schedules take no tags (its schedule groups do; the check uses the default group).
+  "AWS::Scheduler::Schedule",
 ];
 
 /**
@@ -190,6 +223,8 @@ const DNS_NAME_PROPERTIES: Record<string, string[]> = {
  */
 const NOT_NAME_PATHS: Record<string, RegExp[]> = {
   "AWS::ECS::Cluster": [/^\.ClusterSettings\[\d+\]\.Name$/],
+  // Ticket 2.9: a container's name lives inside its (named) task definition, like an inline policy's.
+  "AWS::ECS::TaskDefinition": [/^\.ContainerDefinitions\[\d+\]\.Name$/],
 };
 
 /** Every [path, value] under `value` whose key is a physical name ("Name" or "*Name"). */
@@ -331,6 +366,8 @@ describe("stacks", () => {
     // Ticket 2.5: the apps stack (bundled deployer) after assets; the edge stack serves its bucket, so after it.
     expect(deps(STACK_NAMES.apps)).toContain(STACK_NAMES.assets);
     expect(deps(STACK_NAMES.edge)).toContain(STACK_NAMES.apps);
+    // Ticket 2.9: the builds stack (bundled launcher) after assets.
+    expect(deps(STACK_NAMES.builds)).toContain(STACK_NAMES.assets);
   });
 
   it.each(STACKS)("%s needs no CDK bootstrap (no BootstrapVersion parameter, no bootstrap roles)", (name) => {
@@ -340,8 +377,8 @@ describe("stacks", () => {
     expect(s.cloudFormationExecutionRoleArn).toBeUndefined();
   });
 
-  it("uploads only the site, api and apps stacks' assets and templates, to our assets bucket in eu-central-1", () => {
-    for (const name of [STACK_NAMES.site, STACK_NAMES.api, STACK_NAMES.apps]) {
+  it("uploads only the site, api, apps and builds stacks' assets and templates, to our assets bucket in eu-central-1", () => {
+    for (const name of [STACK_NAMES.site, STACK_NAMES.api, STACK_NAMES.apps, STACK_NAMES.builds]) {
       const s = stack(name);
       expect(s.stackTemplateAssetObjectUrl?.startsWith(`s3://${ASSETS_BUCKET_NAME}/`), name).toBe(true);
       for (const [, r] of resources(name).filter(([, r]) => r.Type === "AWS::Lambda::Function")) {
@@ -349,8 +386,8 @@ describe("stacks", () => {
       }
     }
     // The assets stack creates the bucket and the edge stack is in another region,
-    // so both send their template inline and must have no file assets; the builds stack has none.
-    for (const name of [STACK_NAMES.assets, STACK_NAMES.edge, STACK_NAMES.builds]) {
+    // so both send their template inline and must have no file assets.
+    for (const name of [STACK_NAMES.assets, STACK_NAMES.edge]) {
       const s = stack(name);
       expect(s.stackTemplateAssetObjectUrl).toBeUndefined();
       expect(s.assets).toEqual([]);
@@ -400,7 +437,9 @@ describe("tags, boundary and names (criterion 3)", () => {
       for (const [path, value] of physicalNames(r.Properties, "", DNS_NAME_PROPERTIES[r.Type] ?? [])) {
         if ((NOT_NAME_PATHS[r.Type] ?? []).some((p) => p.test(path))) continue;
         seen.add(path.slice(1));
-        expect(value, `${s}/${id}${path}`).toMatch(/^ssd-workshop-/);
+        // ECS task logs live under /ecs/ssd-workshop-* (the access stack's log rights name exactly that prefix).
+        const ecsLogGroup = r.Type === "AWS::Logs::LogGroup" && path === ".LogGroupName" && typeof value === "string" && value.startsWith("/ecs/");
+        expect(ecsLogGroup ? (value as string).slice("/ecs/".length) : value, `${s}/${id}${path}`).toMatch(/^ssd-workshop-/);
       }
     }
     for (const path of EXPECTED_NAME_PATHS) expect(seen, path).toContain(path);
@@ -1686,11 +1725,12 @@ describe("api stack: AI worker (ticket 1.7)", () => {
     });
     expect(byName(BUILD_DLQ_NAME)?.[1].Properties).toMatchObject({ FifoQueue: true, SqsManagedSseEnabled: true, MessageRetentionPeriod: 1_209_600 });
     for (const name of [BUILD_QUEUE_NAME, BUILD_DLQ_NAME]) expect(tagsOf(must(byName(name))[1]).project, name).toBe("ssd-workshop");
-    expect(buildsQueues).toHaveLength(2);
+    // Ticket 2.9 adds the check queue (the schedule's trigger, its own sender, tested below).
+    expect(buildsQueues).toHaveLength(3);
     expect(PLATFORM_BUILD_QUEUE_NAME).toBe(BUILD_QUEUE_NAME);
 
     // Senders: every allowing statement in every stack that may SendMessage to it is the AI worker's own.
-    const queueIds = buildsQueues.map(([id]) => id);
+    const queueIds = [BUILD_QUEUE_NAME, BUILD_DLQ_NAME].map((name) => must(byName(name))[0]);
     const queueArn = `arn:aws:sqs:${REGION}:${ACCOUNT}:${BUILD_QUEUE_NAME}`;
     const reaches = (resource: unknown): boolean => resourceReaches(resource, [queueArn], queueIds, ["ssd-workshop-builds"]);
     for (const pattern of ["*", "arn:aws:sqs:*", "arn:aws:sqs:*:*:ssd-workshop-build*", "arn:aws:sqs:eu-central-1:*:*.fifo"]) expect(reaches(pattern), pattern).toBe(true);
@@ -1761,14 +1801,16 @@ describe("builds stack: network, cluster and image repository (ticket 2.1)", () 
     }
   });
 
-  it("has no NAT gateway, Elastic IP, VPC endpoint, flow log, Lambda function or custom resource (criterion 1)", () => {
+  it("has no NAT gateway, Elastic IP, VPC endpoint, flow log or custom resource, and one Lambda function: the launcher (criterion 1, ticket 2.9)", () => {
     const types = buildsResources().map(([, r]) => r.Type);
     expect(types).not.toContain("AWS::EC2::NatGateway");
     expect(types).not.toContain("AWS::EC2::EIP");
     expect(types).not.toContain("AWS::EC2::VPCEndpoint");
     expect(types).not.toContain("AWS::EC2::FlowLog");
-    expect(types).not.toContain("AWS::Lambda::Function");
-    expect(types).not.toContain("AWS::IAM::Role");
+    expect(buildsOfType("AWS::Lambda::Function").map(([, r]) => r.Properties?.FunctionName)).toEqual([BUILD_LAUNCHER_FUNCTION_NAME]);
+    expect(buildsOfType("AWS::IAM::Role").map(([, r]) => r.Properties?.RoleName).sort()).toEqual(
+      [BUILD_LAUNCHER_FUNCTION_NAME, BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME, BUILD_CHECK_SCHEDULER_ROLE_NAME].sort(),
+    );
     expect(types.filter((t) => t.startsWith("Custom::"))).toEqual([]);
     // CDK's restrictDefaultSecurityGroup would add a custom resource on the untagged default group.
     expect(JSON.stringify(stack(STACK_NAMES.builds).template)).not.toContain("RestrictDefaultSecurityGroup");
@@ -1863,7 +1905,7 @@ describe("builds stack: the GitHub App's secret (ticket 2.6)", () => {
     }
   });
 
-  it("no IAM policy in any stack may read the secret yet (ticket 2.9 adds the build launcher as the one reader)", () => {
+  it("no IAM policy in any stack may read the secret but the build launcher's own GetSecretValue on it (ticket 2.9)", () => {
     const secretIds = secrets().map(([, id]) => id);
     const secretArn = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:${GITHUB_SECRET_NAME}-AbCdEf`;
     const reachesSecret = (resource: unknown): boolean => resourceReaches(resource, [secretArn], secretIds, [GITHUB_SECRET_NAME]);
@@ -1872,21 +1914,320 @@ describe("builds stack: the GitHub App's secret (ticket 2.6)", () => {
     }
     expect(reachesSecret(`arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-other-*`)).toBe(false);
     expect(actionCovers("secretsmanager:Get*", "secretsmanager:GetSecretValue")).toBe(true);
+    const launcherRoleId = must(ofType("AWS::IAM::Role").find(([, , r]) => r.Properties?.RoleName === BUILD_LAUNCHER_FUNCTION_NAME))[1];
     let policies = 0;
+    const readers: string[] = [];
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       policies += 1;
       for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
         assertNoExclusions(`${s}/${id}`, st);
         if (st.Effect !== "Allow") continue;
         if (!([st.Action].flat() as string[]).some((g) => SECRET_READS.some((action) => actionCovers(g, action)))) continue;
-        for (const resource of [st.Resource].flat()) expect(reachesSecret(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
+        if (![st.Resource].flat().some(reachesSecret)) continue;
+        readers.push(`${s}/${id}`);
+        // The one reader: the launcher's role, GetSecretValue on this secret only.
+        expect(s).toBe(STACK_NAMES.builds);
+        expect(JSON.stringify(r.Properties?.Roles), `${s}/${id}`).toBe(JSON.stringify([{ Ref: launcherRoleId }]));
+        expect(st.Action).toBe("secretsmanager:GetSecretValue");
+        expect(st.Resource).toEqual({ Ref: secrets()[0]?.[1] });
       }
     }
+    expect(readers).toHaveLength(1);
     expect(policies).toBeGreaterThan(5);
     // No role's inline policies either (CDK puts grants in AWS::IAM::Policy, but a raw role could carry them).
     for (const [s, id, role] of ofType("AWS::IAM::Role")) {
       expect(JSON.stringify(role.Properties?.Policies ?? []), `${s}/${id}`).not.toContain("secretsmanager");
     }
+  });
+});
+
+describe("builds stack: builder task and launcher (ticket 2.9)", () => {
+  const buildsResources = () => resources(STACK_NAMES.builds);
+  const buildsOfType = (type: string) => buildsResources().filter(([, r]) => r.Type === type);
+  const roleEntry = (name: string) => must(buildsOfType("AWS::IAM::Role").find(([, r]) => r.Properties?.RoleName === name));
+  const statementsOf = (name: string) =>
+    buildsOfType("AWS::IAM::Policy")
+      .filter(([, r]) => JSON.stringify(r.Properties?.Roles) === JSON.stringify([{ Ref: roleEntry(name)[0] }]))
+      .flatMap(([, r]) => (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement);
+  const idOf = (type: string, key: string, value: string) => must(buildsOfType(type).find(([, r]) => r.Properties?.[key] === value))[0];
+  const arnOf = (id: string) => ({ "Fn::GetAtt": [id, "Arn"] });
+  const queueArn = (name: string) => arnOf(idOf("AWS::SQS::Queue", "QueueName", name));
+  const tableArn = { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`]] };
+  const taskDefinition = () => must(buildsOfType("AWS::ECS::TaskDefinition")[0]);
+  const launcher = () => must(buildsOfType("AWS::Lambda::Function").find(([, r]) => r.Properties?.FunctionName === BUILD_LAUNCHER_FUNCTION_NAME));
+  const launcherAsset = (): string => {
+    const key = (launcher()[1].Properties?.Code as { S3Key?: string }).S3Key;
+    const manifest = JSON.parse(readFileSync(join(dir, `${STACK_NAMES.builds}.assets.json`), "utf8")) as {
+      files: Record<string, { source: { path: string }; destinations: Record<string, { objectKey: string }> }>;
+    };
+    const asset = Object.values(manifest.files).find((f) => Object.values(f.destinations).some((d) => d.objectKey === key));
+    return join(dir, must(asset).source.path);
+  };
+  const filesUnder = (root: string, sub = ""): string[] =>
+    readdirSync(join(root, sub), { withFileTypes: true })
+      .flatMap((e) => (e.isDirectory() ? filesUnder(root, join(sub, e.name)) : [join(sub, e.name)]))
+      .sort();
+
+  it("criterion 1: the builder task's role carries the boundary and may only invoke the build model, write build records and usage counters, and send to the deploy queue", () => {
+    const [, role] = roleEntry(BUILDER_TASK_ROLE_NAME);
+    expect(role.Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(JSON.stringify(role.Properties?.AssumeRolePolicyDocument)).toContain("ecs-tasks.amazonaws.com");
+    expect(role.Properties?.Policies).toBeUndefined();
+    expect(role.Properties?.ManagedPolicyArns).toBeUndefined();
+    expect(statementsOf(BUILDER_TASK_ROLE_NAME)).toEqual([
+      {
+        Effect: "Allow",
+        Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+        Resource: [`arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/eu.anthropic.claude-sonnet-4-6`, "arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-4-6"],
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...BUILDER_BUILD_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...BUILDER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...BUILDER_USAGE_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      { Effect: "Allow", Action: "sqs:SendMessage", Resource: `arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}` },
+    ]);
+    // The usage writes reach only the token counters: no nickname, status or spec attribute.
+    expect([...BUILDER_USAGE_UPDATE_ATTRIBUTES]).not.toContain("nickname");
+    expect([...BUILDER_USAGE_UPDATE_ATTRIBUTES]).not.toContain("status");
+    // No write to the launcher's triggers (launch and check queues) or its launches partition.
+    expect(JSON.stringify(statementsOf(BUILDER_TASK_ROLE_NAME))).not.toContain("ssd-workshop-builds");
+    expect(JSON.stringify(statementsOf(BUILDER_TASK_ROLE_NAME))).not.toContain(LAUNCHES_PARTITION);
+  });
+
+  it("criterion 1: the task definition holds no secret and no environment; the image is pinned by digest; logs go to /ecs/ssd-workshop-builder", () => {
+    const [, td] = taskDefinition();
+    expect(td.Properties).toMatchObject({
+      Family: BUILDER_TASK_FAMILY,
+      Cpu: String(BUILDER_CPU),
+      Memory: String(BUILDER_MEMORY_MB),
+      NetworkMode: "awsvpc",
+      RequiresCompatibilities: ["FARGATE"],
+      RuntimePlatform: { CpuArchitecture: "X86_64", OperatingSystemFamily: "LINUX" },
+      TaskRoleArn: arnOf(roleEntry(BUILDER_TASK_ROLE_NAME)[0]),
+      ExecutionRoleArn: arnOf(roleEntry(BUILDER_EXECUTION_ROLE_NAME)[0]),
+    });
+    const containers = td.Properties?.ContainerDefinitions as Record<string, unknown>[];
+    expect(containers).toHaveLength(1);
+    const [container] = containers;
+    expect(container?.Name).toBe(BUILDER_CONTAINER_NAME);
+    expect(container?.Environment).toBeUndefined();
+    expect(container?.Secrets).toBeUndefined();
+    expect(container?.EnvironmentFiles).toBeUndefined();
+    expect(JSON.stringify(container?.Image)).toContain(`@${BUILDER_IMAGE_DIGEST_UNSET}`);
+    expect(JSON.stringify(container?.Image)).toContain(idOf("AWS::ECR::Repository", "RepositoryName", BUILDER_REPOSITORY_NAME));
+    const logs = container?.LogConfiguration as { LogDriver: string; Options: Record<string, unknown> };
+    expect(logs.LogDriver).toBe("awslogs");
+    expect(logs.Options["awslogs-group"]).toEqual({ Ref: idOf("AWS::Logs::LogGroup", "LogGroupName", BUILDER_LOG_GROUP_NAME) });
+    expect(BUILDER_LOG_GROUP_NAME).toBe("/ecs/ssd-workshop-builder");
+    // The execution role pulls the image and writes the logs: nothing else, and no secret.
+    expect(roleEntry(BUILDER_EXECUTION_ROLE_NAME)[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    const repositoryArn = arnOf(idOf("AWS::ECR::Repository", "RepositoryName", BUILDER_REPOSITORY_NAME));
+    expect(statementsOf(BUILDER_EXECUTION_ROLE_NAME)).toEqual([
+      { Effect: "Allow", Action: ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"], Resource: repositoryArn },
+      { Effect: "Allow", Action: "ecr:GetAuthorizationToken", Resource: "*" },
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: arnOf(idOf("AWS::Logs::LogGroup", "LogGroupName", BUILDER_LOG_GROUP_NAME)) },
+    ]);
+  });
+
+  it("refuses an image digest that is not sha256:<64 hex digits>", () => {
+    const out = mkdtempSync(join(tmpdir(), "ssd-workshop-cdk-digest-"));
+    try {
+      expect(() => buildApp({ outdir: out, context: { builderImageDigest: "latest" } })).toThrow(/builderImageDigest/);
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it("the launcher: its own role and log group, memory and timeout; only the task definition and security group in its environment", () => {
+    const [, fn] = launcher();
+    expect(fn.Properties).toMatchObject({ MemorySize: LAUNCHER_MEMORY_MB, Timeout: LAUNCHER_TIMEOUT_SECONDS, Role: arnOf(roleEntry(BUILD_LAUNCHER_FUNCTION_NAME)[0]) });
+    expect(roleEntry(BUILD_LAUNCHER_FUNCTION_NAME)[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(JSON.stringify(roleEntry(BUILD_LAUNCHER_FUNCTION_NAME)[1].Properties?.AssumeRolePolicyDocument)).toContain("lambda.amazonaws.com");
+    const variables = (fn.Properties?.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables).toEqual({
+      BUILDER_TASK_DEFINITION_ARN: { Ref: taskDefinition()[0] },
+      BUILDS_SECURITY_GROUP_ID: { "Fn::GetAtt": [idOf("AWS::EC2::SecurityGroup", "GroupName", BUILDS_SECURITY_GROUP_NAME), "GroupId"] },
+    });
+    const logGroupId = (fn.Properties?.LoggingConfig as { LogGroup?: { Ref?: string } }).LogGroup?.Ref;
+    expect(buildsResources().find(([id]) => id === logGroupId)?.[1].Properties?.LogGroupName).toBe(BUILD_LAUNCHER_FUNCTION_NAME);
+  });
+
+  it("the launcher's rights: the secret, reads and writes by attribute list, RunTask of the builder on the builds cluster only, the dead-letter queues; no send", () => {
+    const tasks = `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`;
+    const limited = [...ATTRIBUTE_LIMITED_RETURN_VALUES];
+    const queueReads = ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"];
+    const logGroupId = (launcher()[1].Properties?.LoggingConfig as { LogGroup: { Ref: string } }).LogGroup.Ref;
+    expect(statementsOf(BUILD_LAUNCHER_FUNCTION_NAME)).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: arnOf(logGroupId) },
+      { Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: idOf("AWS::SecretsManager::Secret", "Name", GITHUB_SECRET_NAME) } },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*", "PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [LAUNCHES_PARTITION], "dynamodb:Attributes": [...LAUNCHER_LAUNCH_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "ecs:RunTask",
+        Resource: { Ref: taskDefinition()[0] },
+        Condition: { ArnEquals: { "ecs:cluster": arnOf(idOf("AWS::ECS::Cluster", "ClusterName", BUILDS_CLUSTER_NAME)) } },
+      },
+      { Effect: "Allow", Action: "ecs:TagResource", Resource: tasks, Condition: { StringEquals: { "ecs:CreateAction": "RunTask" } } },
+      { Effect: "Allow", Action: ["ecs:DescribeTasks", "ecs:StopTask"], Resource: tasks },
+      {
+        Effect: "Allow",
+        Action: "iam:PassRole",
+        Resource: [arnOf(roleEntry(BUILDER_TASK_ROLE_NAME)[0]), arnOf(roleEntry(BUILDER_EXECUTION_ROLE_NAME)[0])],
+        Condition: { StringEquals: { "iam:PassedToService": "ecs-tasks.amazonaws.com" } },
+      },
+      { Effect: "Allow", Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"], Resource: [queueArn(BUILD_DLQ_NAME), `arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_DLQ_NAME}`] },
+      // The event sources' own reads (CDK's grant) on the launch and check queues.
+      { Effect: "Allow", Action: queueReads, Resource: queueArn(BUILD_QUEUE_NAME) },
+      { Effect: "Allow", Action: queueReads, Resource: queueArn(BUILD_CHECK_QUEUE_NAME) },
+    ]);
+    // The launches partition cannot overlap the build or participant prefixes.
+    expect(LAUNCHES_PARTITION).not.toMatch(/^(BUILD|PARTICIPANT)#/);
+  });
+
+  it("nothing but the launcher may RunTask, StartTask, StopTask or pass a role", () => {
+    const launcherRole = roleEntry(BUILD_LAUNCHER_FUNCTION_NAME)[0];
+    let seen = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        assertNoExclusions(`${s}/${id}`, st);
+        if (st.Effect !== "Allow") continue;
+        const actions = [st.Action].flat() as string[];
+        if (!actions.some((g) => ["ecs:RunTask", "ecs:StartTask", "ecs:StopTask", "iam:PassRole"].some((a) => actionCovers(g, a)))) continue;
+        seen += 1;
+        expect(s).toBe(STACK_NAMES.builds);
+        expect(JSON.stringify(r.Properties?.Roles), `${s}/${id}`).toBe(JSON.stringify([{ Ref: launcherRole }]));
+      }
+    }
+    expect(seen).toBe(3);
+  });
+
+  it("the launch and check queues feed the launcher one message at a time; the launch queue's visibility is just above its timeout", () => {
+    const mappings = buildsOfType("AWS::Lambda::EventSourceMapping").map(([, r]) => r.Properties ?? {});
+    expect(mappings).toHaveLength(2);
+    expect(mappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ EventSourceArn: queueArn(BUILD_QUEUE_NAME), BatchSize: 1, ScalingConfig: { MaximumConcurrency: LAUNCHER_MAX_CONCURRENCY } }),
+        expect.objectContaining({ EventSourceArn: queueArn(BUILD_CHECK_QUEUE_NAME), BatchSize: 1 }),
+      ]),
+    );
+    for (const m of mappings) expect(m.FunctionName).toEqual({ Ref: launcher()[0] });
+    expect(BUILD_QUEUE_VISIBILITY_SECONDS).toBe(LAUNCHER_TIMEOUT_SECONDS + 30);
+    expect(LAUNCHER_TIMEOUT_SECONDS * 1000).toBeGreaterThan(LAUNCH_RESERVE_MS * 3);
+    expect(must(buildsOfType("AWS::SQS::Queue").find(([, r]) => r.Properties?.QueueName === BUILD_CHECK_QUEUE_NAME))[1].Properties).toMatchObject({
+      SqsManagedSseEnabled: true,
+      VisibilityTimeout: BUILD_QUEUE_VISIBILITY_SECONDS,
+    });
+  });
+
+  it("criterion 3: the check runs every minute (Scheduler sends to the check queue; its role may send only there)", () => {
+    const schedule = must(buildsOfType("AWS::Scheduler::Schedule")[0])[1];
+    expect(schedule.Properties).toMatchObject({
+      Name: BUILD_CHECK_SCHEDULE_NAME,
+      ScheduleExpression: "rate(1 minute)",
+      State: "ENABLED",
+      FlexibleTimeWindow: { Mode: "OFF" },
+      Target: { Arn: queueArn(BUILD_CHECK_QUEUE_NAME), RoleArn: arnOf(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[0]) },
+    });
+    expect(BUILD_CHECK_SCHEDULE).toBe("rate(1 minute)");
+    expect(statementsOf(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([{ Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn(BUILD_CHECK_QUEUE_NAME) }]);
+    expect(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(JSON.stringify(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties?.AssumeRolePolicyDocument)).toContain("scheduler.amazonaws.com");
+  });
+
+  it("trusts the scheduler only for its own schedule, the builder's task role only for tasks on the builds cluster (ticket 2.9 try 2) and its execution role for ECS in this account (try 3)", () => {
+    const trust = (name: string) => (roleEntry(name)[1].Properties?.AssumeRolePolicyDocument as { Statement: { Principal: unknown; Condition: unknown }[] }).Statement;
+    expect(trust(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([
+      expect.objectContaining({
+        Principal: { Service: "scheduler.amazonaws.com" },
+        Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` } },
+      }),
+    ]);
+    const sources: [string, string][] = [
+      [BUILDER_TASK_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`],
+      // The form AWS documents for task execution roles (the confused-deputy condition): ECS in this account only.
+      [BUILDER_EXECUTION_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:*`],
+    ];
+    for (const [name, sourceArn] of sources) {
+      expect(trust(name), name).toEqual([
+        expect.objectContaining({
+          Principal: { Service: "ecs-tasks.amazonaws.com" },
+          Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT }, ArnLike: { "aws:SourceArn": sourceArn } },
+        }),
+      ]);
+    }
+  });
+
+  it("WHEN a handed-over build waits for its deploy THEN the check gives it longer than every delivery of the deploy message (checker 1)", () => {
+    const lastDelivery = ((DEPLOY_QUEUE_MAX_RECEIVES - 1) * DEPLOY_QUEUE_VISIBILITY_SECONDS + DEPLOYER_TIMEOUT_SECONDS) * 1000;
+    expect(HANDED_OVER_GRACE_MS).toBeGreaterThan(2 * lastDelivery);
+  });
+
+  it("bundles the launcher with templates/basic as template/, file for file", () => {
+    const bundled = join(launcherAsset(), "template");
+    expect(existsSync(join(launcherAsset(), "index.js"))).toBe(true);
+    const files = filesUnder(TEMPLATE_DIR);
+    expect(files.length).toBeGreaterThan(0);
+    expect(filesUnder(bundled)).toEqual(files);
+    for (const file of files) expect(readFileSync(join(bundled, file)).equals(readFileSync(join(TEMPLATE_DIR, file))), file).toBe(true);
+  });
+
+  it("the bundled launcher ignores a record from another queue without any AWS call", async () => {
+    const bundle = createRequire(import.meta.url)(join(launcherAsset(), "index.js")) as { handler: (event: unknown) => Promise<void> };
+    await expect(quietly(() => bundle.handler({ Records: [{ body: "{}", eventSourceARN: `arn:aws:sqs:${REGION}:${ACCOUNT}:other` }] }))).resolves.toBeUndefined();
   });
 });
 
@@ -2014,7 +2355,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     expect(policies).toBeGreaterThan(5);
   });
 
-  it("no IAM policy in any stack may send to the deploy queue yet (ticket 2.9 adds the builder as the one sender)", () => {
+  it("no IAM policy in any stack may send to the deploy queue but the builder task's role (ticket 2.9)", () => {
     const queueIds = appsResources().filter(([, r]) => r.Type === "AWS::SQS::Queue").map(([id]) => id);
     const queueArn = `arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}`;
     const reachesDeployQueue = (resource: unknown): boolean => resourceReaches(resource, [queueArn], queueIds, ["ssd-workshop-deploys"]);
@@ -2025,16 +2366,25 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     expect(reachesDeployQueue(`arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}`)).toBe(false);
     expect(actionCovers("sqs:Send*", "sqs:SendMessage")).toBe(true);
     expect(actionCovers("*", "sqs:SendMessage")).toBe(true);
+    const taskRoleId = must(ofType("AWS::IAM::Role").find(([, , r]) => r.Properties?.RoleName === BUILDER_TASK_ROLE_NAME))[1];
     let sends = 0;
+    const senders: string[] = [];
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
         assertNoExclusions(`${s}/${id}`, st);
         if (st.Effect !== "Allow") continue;
         if (!([st.Action].flat() as string[]).some((g) => actionCovers(g, "sqs:SendMessage"))) continue;
         sends += 1;
-        for (const resource of [st.Resource].flat()) expect(reachesDeployQueue(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
+        if (![st.Resource].flat().some(reachesDeployQueue)) continue;
+        senders.push(`${s}/${id}`);
+        // The one sender: the builder task's role, SendMessage on the deploy queue only.
+        expect(s).toBe(STACK_NAMES.builds);
+        expect(JSON.stringify(r.Properties?.Roles), `${s}/${id}`).toBe(JSON.stringify([{ Ref: taskRoleId }]));
+        expect(st.Action).toBe("sqs:SendMessage");
+        expect(st.Resource).toBe(queueArn);
       }
     }
+    expect(senders).toHaveLength(1);
     // The conversation function's send to its own queue (ticket 1.7) was seen and passes.
     expect(sends).toBeGreaterThanOrEqual(1);
     expect(appsResources().filter(([, r]) => r.Type === "AWS::SQS::QueuePolicy")).toEqual([]);

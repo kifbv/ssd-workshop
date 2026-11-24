@@ -88,6 +88,9 @@ flowchart LR
 | `RunBuilds` | Start build tasks only from `ssd-workshop-*` task definitions on `ssd-workshop-*` clusters (`ecs:cluster`), and only as the build launcher role `role/ssd-workshop/ssd-workshop-builds-launcher` (`aws:PrincipalArn`, ticket 2.9): a task role (participant code) or any other workload role cannot start tasks, even if a CDK policy grants it. |
 | `TagBuildsOnStart` | `ecs:TagResource` on `task/ssd-workshop-*/*`, which ECS also checks when `RunTask` passes tags or `propagateTags`; only as part of `RunTask` (`ecs:CreateAction`) and only for the launcher role. |
 | `WatchBuilds` | Stop and describe tasks on `ssd-workshop-*` clusters. |
+| `WatchBuildsLauncherOnly` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24). Deny `ecs:DescribeTasks` and `ecs:StopTask` on `task/ssd-workshop-builds/*` to every workload role but `ssd-workshop-builds-launcher`, whatever its own policy says: a running build's task override holds the build's GitHub token (accepted risk 16), and a role a session creates could otherwise read it. `ArnNotLike` on `aws:PrincipalArn` `role*/<name>` covers the role with and without its path (a role name is unique in an account; a look-alike such as `x-ssd-workshop-builds-launcher` does not match, tested). |
+| `DeploysFromTheBuilderOnly` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24). Deny `sqs:SendMessage` on `ssd-workshop-deploys*` to every workload role but the builder's task role `ssd-workshop-builder`: a deploy message makes the deployer publish the build's `pushedCommit`. Same `role*/<name>` form. |
+| `BuildsFromTheirSendersOnly` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24). Deny `sqs:SendMessage` on `ssd-workshop-builds*` (launch queue, its dead-letter queue, check queue) to every workload role but the AI worker (`ssd-workshop-api-ai-worker`, the launch queue's sender) and the check's scheduler role (`ssd-workshop-builds-check-scheduler`, the check queue's sender): a launch message makes the launcher mint a token and start a task. |
 | `PullImages` | Pull images only from `ssd-workshop-*` repositories. |
 | `InvalidateWorkshopSite` | Invalidate only distributions tagged `project=ssd-workshop`. |
 | `AccountWideServiceCalls` | ECR login token and X-Ray traces; neither has a resource scope. |
@@ -97,7 +100,7 @@ flowchart LR
 | `NoStartTask` | Deny `ecs:StartTask` (tasks on EC2 container instances), as in the deploy policies. |
 | `K3sNodeHeartbeat` | Advanced-track k3s nodes report to Systems Manager, only for instances tagged with the project. |
 | `K3sNodeChannels` | Session Manager and Run Command channels of the calling instance, and reading instance tags. |
-| `NoExternalSharing` | Deny, for workload roles too: the same sharing and egress actions as the deploy policies' `NoExternalSharing`, except `s3:PutBucketNotification`, which CDK's bucket notifications handler (a workshop role) needs (accepted risk 12). |
+| `NoExternalSharing` | Deny, for workload roles too: the same sharing and egress actions as the deploy policies' `NoExternalSharing`, except `s3:PutBucketNotification`, which CDK's bucket notifications handler (a workshop role) needs (accepted risk 12). Also (access review follow-up) `sqs:SetQueueAttributes`, `sqs:DeleteQueue` and `sqs:PurgeQueue`: a role a session creates could otherwise set a queue `Policy` opening `ssd-workshop-deploys*` or `ssd-workshop-builds*` to outside senders, or delete or purge them. No workload role uses them; CloudFormation changes queues as the deploy role, which has no boundary. |
 
 **`ssd-workshop-deploy`** (deploy rights, part 1: stacks, named resources, IAM, and the denies that guard them):
 
@@ -189,7 +192,13 @@ flowchart LR
 | Sid | Why |
 | --- | --- |
 | `ReadsWithoutSecrets` | Account-wide reads that CDK or Claude need and whose answers hold no secrets: stack list, template validation, EC2 and ECS listings, certificates, hosted zone list, Bedrock models and inference profiles, service quotas, the SES send quota and identities, bucket names, a random password (`secretsmanager:GetRandomPassword`, which CloudFormation calls to fill a new secret such as `ssd-workshop-github`; no resource scope, and it reads nothing), log group names, costs. |
-| `NoLauncherForSessions` | For the Claude user only (`aws:PrincipalArn`): deny everything but reads on the build launcher's role (`ssd-workshop-builds-launcher`, both ARN forms) and function (with versions and aliases; invoking included), and on the CDK assets bucket and its objects, so a session can never reach the GitHub App's key through the one role allowed to read it (ticket 2.6, Franck's choice: block sessions, trust deploys from `main`). |
+| `NoLauncherForSessions` | For the Claude user only (`aws:PrincipalArn`): deny everything but reads on the build launcher's role (`ssd-workshop-builds-launcher`, both ARN forms) and function (with versions and aliases; invoking included), and on the CDK assets bucket and its objects, so a session can never reach the GitHub App's key through the one role allowed to read it (ticket 2.6, Franck's choice: block sessions, trust deploys from `main`). Ticket 2.9 try 3 (Franck's yes, 2026-11-24): the same for the roles the boundary's denies let through by name (`role*/ssd-workshop-builder`, `-builder-execution`, `-api-ai-worker`, `-builds-check-scheduler`; `role*/<name>` is the role with or without its path) and the apps deployer's role (`role*/ssd-workshop-apps-deployer`, the apps bucket's only writer), and the functions `ssd-workshop-api-ai-worker` and `ssd-workshop-apps-deployer` (with versions and aliases): a session cannot pass one of these roles to its own task or function (`iam:PassRole` is denied too), change it, or rewrite or invoke that code. |
+| `NoBuildQueueForSessions` | For the Claude user only (`aws:PrincipalArn`): deny `sqs:SendMessage`, `sqs:SetQueueAttributes` and `sqs:PurgeQueue` on `ssd-workshop-builds*` (the launch queue, its dead-letter queue and the check queue), so a session cannot start, redirect or empty builds: a launch message makes the launcher mint a repository token and start a task (ticket 2.9, Franck's choice, 2026-11-24). Retries run from Franck's machine (`AWS_PROFILE=franck npm run builds -- retry <nickname>`, infra/README.md). Deploys from `main` still manage the queues. Ticket 2.9 try 2 (Franck's yes, 2026-11-24): also `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:DeleteQueue`, and the same six actions on `ssd-workshop-deploys*` (the deploy queue and its dead-letter queue): a session cannot send a deploy message, nor take or drop one. |
+| `NoBuildTasksForSessions` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24). For the Claude user only: deny `ecs:DescribeTasks`, `ecs:RunTask`, `ecs:StopTask` and `ecs:ExecuteCommand` on `task/ssd-workshop-builds/*` and `task-definition/ssd-workshop-builder:*`. A running build's task override holds its GitHub token (accepted risk 16); with it and the table rights a session could push, write `pushedCommit` and (before `NoBuildQueueForSessions` covered the deploy queue) send a deploy message, so the live app would change. `ecs:ListTasks` (no override) stays allowed. |
+| `NoEventSourcesForSessions` | Ticket 2.9 try 3 (Franck's yes, 2026-11-24; replaces try 2's `NoLauncherSourcesForSessions`). For the Claude user only: deny `lambda:CreateEventSourceMapping`, `UpdateEventSourceMapping` and `DeleteEventSourceMapping`, with no other condition: no condition key names a mapping's queue (Service Authorization Reference, read 2026-11-24), and a call by mapping UUID may carry no function ARN. A session cannot feed the launch or deploy queue to its own function, nor feed the launcher from another queue or cut off its check. Reading a mapping stays allowed; deploys from `main` still manage mappings. |
+| `NoBuildCheckScheduleForSessions` | Ticket 2.9 try 3 (Franck's yes, 2026-11-24). For the Claude user only: deny `scheduler:Create*`, `Update*` and `Delete*` on `schedule/*/ssd-workshop-builds-check`, so a session cannot stop or redirect the stuck-build check. |
+| `NoBuildsClusterTasksForSessions` | Ticket 2.9 try 3 (Franck's yes, 2026-11-24). For the Claude user only: deny `ecs:RunTask` of any task definition where `ecs:cluster` is `cluster/ssd-workshop-builds` (the builder's own definition is already denied by `NoBuildTasksForSessions`). |
+| `NoBuildsClusterServicesForSessions` | Access review follow-up to ticket 2.9 (Franck's yes, 2026-11-24). For the Claude user only: deny `ecs:CreateService`, `ecs:UpdateService` and `ecs:CreateTaskSet` on `service/ssd-workshop-builds/*` and `task-set/ssd-workshop-builds/*`, so a session cannot run tasks on the builds cluster through a service or task set either (no deploy policy grants task sets today). |
 | `NoGitHubKey` | Deny every Secrets Manager action on the GitHub App's private key (`secret:ssd-workshop-github-*`, ticket 2.6) except creating, describing, tagging and reading its policy or version ids (a `NotAction` list, so new actions are denied too): only Franck loads it and only the build launcher (2.9) reads it. CloudFormation still creates the secret; any later change of it (settings or tags: CloudFormation's update handler reads the value) and drift detection on it go through Franck. In this policy because `ssd-workshop-deploy` is too close to its size limit. |
 | `WorkshopZoneReads` | The rankly.games zone and its records. |
 | `WorkshopIamReads` | Read roles and instance profiles on `/ssd-workshop/` and `ssd-workshop-*` policies (not `GetAccountAuthorizationDetails` or other projects' roles). |
@@ -357,6 +366,90 @@ follow-up.
         | [.eventTime, .userIdentity.arn, .requestParameters.taskDefinition] | @tsv'
     done
     # expect: no output
+    ```
+
+16. **The builder's GitHub token is visible to some account readers for its hour** (Franck,
+    2026-11-24, ticket 2.9; wording and the session and boundary denies of tries 2 and 3 pending
+    Franck's yes, and Franck applies this template after the merge). The launcher passes the build's
+    one-repository token (`contents: write` on that participant's repository only, valid one hour)
+    to the builder task as a RunTask container override (`BUILDER_GITHUB_TOKEN`). The task
+    definition holds no secret, and the App's key and the organization-wide token never leave the
+    launcher.
+
+    Who can still read it: Franck, and admins of the shared account (other projects' principals)
+    with `ecs:DescribeTasks` on the builds cluster or `cloudtrail:LookupEvents` (RunTask
+    `requestParameters`). Claude sessions cannot: `NoBuildTasksForSessions` denies the Claude user
+    `DescribeTasks`, `RunTask` and `StopTask` on build tasks, the user has no CloudTrail rights,
+    under the boundary only the launcher role may describe build tasks (`WatchBuildsLauncherOnly`),
+    and a session cannot borrow the launcher's role (`NoLauncherForSessions`). Try 2 stated this
+    too early: a session could still pass the roles the boundary's denies let through by name to
+    its own task or function, or rewrite the AI worker's code. Since try 3 `NoLauncherForSessions`
+    also covers the builder's task and execution roles, the AI worker's and the check scheduler's
+    roles, the apps deployer's role, and the AI worker's and deployer's functions.
+
+    What a holder can do: push to that one participant repository until the token expires. That
+    does not change the live app by itself: the runner builds only from the commit the launcher
+    prepared (`BUILDER_BASE_COMMIT`; a `main` that moved fails the build), its writes hold only
+    under its launch's `attemptId`, and the deployer publishes only the commit stored as
+    `pushedCommit` and named in a deploy message. Changing the live app also needs writing
+    `pushedCommit` on the build AND sending a deploy message. The Claude user may write the table
+    (its deploy rights) but may not send to `ssd-workshop-deploys*` (`NoBuildQueueForSessions`);
+    under the boundary only the builder's task role may (`DeploysFromTheBuilderOnly`), and since try
+    3 a session can neither pass that role nor run any task on the builds cluster
+    (`NoBuildsClusterTasksForSessions`, and through a service or task set
+    `NoBuildsClusterServicesForSessions`), nor map a queue to a function (`NoEventSourcesForSessions`),
+    nor change the check's schedule (`NoBuildCheckScheduleForSessions`). An account admin with both
+    table and SQS rights could. Sessions can still change served files outside the pipeline (see
+    below).
+
+    What sessions still can (residual after try 3, by design or for lack of boundary room):
+    - Change what is served without the build pipeline, through their deploy rights: the apps
+      bucket's policy (then a plain `PutObject`), the CloudFront distribution or the apps-index
+      function. Franck's choice (2026-11-24): accepted for now; a follow-up access ticket cuts
+      Claude sessions to read-only plus narrow rights, so only deploys from `main` change live
+      apps. Until then the denies above only close the build pipeline's own paths.
+    - Write the workshop table directly. Through the build pipeline alone that changes no live
+      app (it needs a deploy message, which no session can send or make a borrowed role send).
+    - Drive the normal pipeline as a participant could: records a session writes plus a message
+      on the AI queue (open to sessions) can make the AI worker queue a build of a spec the
+      session wrote, which the platform's own roles build and publish. The session never sees
+      that build's token.
+    - Create its own function (with its own boundary role) and invoke it to receive and delete
+      launch or deploy messages (the boundary allows `sqs:ReceiveMessage` and `DeleteMessage` on
+      workshop queues and has 166 characters left, too few for a receive deny; it denies queue
+      attribute writes, deletes and purges). A denial of service only: a swallowed deploy
+      message fails the build after the check's grace, a swallowed launch leaves it `queued`
+      until `retry`.
+    - Deregister the builder's task definition (`ecs:DeregisterTaskDefinition` has Resource `*`
+      only) or delete images in `ssd-workshop-*` ECR repositories (their deploy rights). Also a
+      denial of service only: new builds fail to start until the next deploy from `main`
+      registers and pushes them again; nothing live changes.
+
+    Accepted residual (IAM cannot pin a build id): the builder's task role may update any
+    `BUILD#*` item within `BUILDER_BUILD_UPDATE_ATTRIBUTES`, so a compromised builder task (the
+    coding agent has no way to use its credentials, decisions "(2.8) Agent's environment" and "(2.8)
+    Residual risk of the proxy") could hand over
+    another build of `building` status if it knew its id and `attemptId`.
+
+    Check (run by Franck as admin): every `DescribeTasks` on the builds cluster by anyone other than
+    the launcher role, and every read of RunTask events (`LookupEvents`) by anyone, should be
+    explained. Franck's own `npm run builds -- retry` calls (`DescribeTasks`, `ListTasks`) appear
+    under his user; the launcher's under its role:
+
+    ```sh
+    aws cloudtrail lookup-events --region eu-central-1 \
+      --lookup-attributes AttributeKey=EventName,AttributeValue=DescribeTasks --output json \
+    | jq -r '.Events[].CloudTrailEvent | fromjson
+        | select((.requestParameters.cluster // "") | test("ssd-workshop-builds"))
+        | select(.userIdentity.arn | test("ssd-workshop-builds-launcher") | not)
+        | [.eventTime, .userIdentity.arn] | @tsv'
+    # expect: only Franck's own reads (his retry calls)
+    aws cloudtrail lookup-events --region eu-central-1 \
+      --lookup-attributes AttributeKey=EventName,AttributeValue=LookupEvents --output json \
+    | jq -r '.Events[].CloudTrailEvent | fromjson | [.eventTime, .userIdentity.arn] | @tsv'
+    # expect: only Franck's own lookups (this check included); CloudTrail records LookupEvents as a
+    # management read event only when the trail logs read events, so an empty answer can also mean
+    # it is not logged: then look in the trail's S3 copy, or note that this part cannot be checked.
     ```
 
 Not granted, so a later ticket brings it to Franck before it is needed:
