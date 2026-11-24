@@ -249,6 +249,11 @@ paths:
 - Lambda has no condition key for an event source mapping's queue, and calls by mapping UUID may carry no
   `lambda:FunctionArn`: keep sessions off a queue's consumers with an unconditional deny of
   `lambda:Create/Update/DeleteEventSourceMapping` for the Claude user (`NoEventSourcesForSessions`, ticket 2.9 try 3).
+  The same holds for deploys: CloudFormation reads a mapping by UUID before deleting it, checked on Resource `*` with no
+  function ARN, so a `lambda:FunctionArn` condition alone makes every mapping delete (and so every rollback) fail:
+  allow the read on `*` and changes on mappings tagged `project=ssd-workshop`.
+- EventBridge Scheduler names the schedule GROUP (`schedule-group/default`), not the schedule, as `aws:SourceArn` when
+  it assumes a role; a schedule ARN in the trust makes CreateSchedule fail.
 - An ECS task's container overrides are readable by anyone with `ecs:DescribeTasks` on it (and in CloudTrail's RunTask
   `requestParameters`): a secret passed there (2.9's builder token) needs `DescribeTasks` denied to sessions and, in the
   boundary, to every role but the one that must watch the task; and the action that would turn the secret into an

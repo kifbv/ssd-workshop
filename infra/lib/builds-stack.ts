@@ -363,10 +363,12 @@ export class BuildsStack extends Stack {
     // role: the boundary has no lambda:InvokeFunction). Its role may only send to that queue.
     const schedulerRole = new Role(this, "BuildsCheckSchedulerRole", {
       roleName: BUILD_CHECK_SCHEDULER_ROLE_NAME,
-      // Only its own schedule (in the default group) may use it (ticket 2.9 try 2).
+      // Only schedules of the default group in this account may use it. Scheduler names the schedule GROUP as
+      // aws:SourceArn (a schedule ARN there made the first deploy fail: "The execution role you provide must allow AWS
+      // EventBridge Scheduler to assume the role").
       assumedBy: new ServicePrincipal("scheduler.amazonaws.com", {
         conditions: {
-          StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` },
+          StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule-group/default` },
         },
       }),
       description: "Sends the stuck-build check's trigger to its queue every minute",

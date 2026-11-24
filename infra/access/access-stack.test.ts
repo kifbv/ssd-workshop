@@ -1564,6 +1564,21 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(allowedBy(deploy, "lambda:GetEventSourceMapping", mapping, { ...CLAUDE, "lambda:FunctionArn": FUNCTIONS[0] ?? "" })).toBe(true);
     });
 
+    // Rollback after 2.9: CloudFormation reads a mapping by UUID before deleting it, and Lambda checked
+    // GetEventSourceMapping on Resource "*" without lambda:FunctionArn (denied live). Reads go through on "*";
+    // changes by UUID only on mappings tagged for the workshop, and still never for sessions.
+    it("lets deploys read any mapping by UUID and change only workshop-tagged ones, without a function ARN", () => {
+      const mapping = `arn:aws:lambda:${REGION}:${ACCOUNT}:event-source-mapping:0123-4567`;
+      const TAGGED = { "aws:ResourceTag/project": "ssd-workshop" };
+      expect(allowedBy(deploy, "lambda:GetEventSourceMapping", "*", DEPLOY)).toBe(true);
+      for (const action of ["lambda:DeleteEventSourceMapping", "lambda:UpdateEventSourceMapping"]) {
+        expect(allowedBy(deploy, action, mapping, { ...DEPLOY, ...TAGGED }), action).toBe(true);
+        expect(allowedBy(deploy, action, mapping, DEPLOY), `${action} untagged`).toBe(false);
+        expect(allowedBy(deploy, action, mapping, { ...DEPLOY, "aws:ResourceTag/project": "letters" }), `${action} other project`).toBe(false);
+        expect(allowedBy(deploy, action, mapping, { ...CLAUDE, ...TAGGED }), `${action} session`).toBe(false);
+      }
+    });
+
     // Ticket 2.9 try 3 (access review HIGH): roles the boundary's denies let through by name, and the apps deployer
     // (the apps bucket's only writer), cannot be borrowed by a session: no PassRole to its own task or function, no
     // change to their policies or trust, and no change to the code that runs as them.
