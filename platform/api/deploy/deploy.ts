@@ -176,6 +176,10 @@ async function within<T>(work: (signal: AbortSignal) => Promise<T>, ms: number):
   });
   try {
     return await Promise.race([work(controller.signal), timeUp]);
+  } catch (error) {
+    // A failed step also stops the calls it started alongside (a batch's other puts), so none lands later.
+    if (!controller.signal.aborted) controller.abort(error);
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -325,16 +329,16 @@ export async function processDeploy(
     } catch (error) {
       const reason = error instanceof ArchiveProblem || (error instanceof DownloadProblem && !error.passing) ? error.reason : undefined;
       if (reason === undefined) throw error;
-      await deps.records.markFailed(job.buildId, [storedReason(reason)], nowIso());
-      log({ outcome: "failed", problems: 1 });
+      const marked = await deps.records.markFailed(job.buildId, [storedReason(reason)], nowIso());
+      log({ outcome: marked ? "failed" : "no-build", problems: 1 });
       return;
     }
 
     const result = checkApp(files);
     const published = files.filter((file) => file.kind === "file");
     if (!result.ok) {
-      await deps.records.markFailed(job.buildId, storedReasons(result.problems), nowIso());
-      log({ outcome: "failed", files: published.length, bytes: result.totalBytes, problems: result.problems.length });
+      const marked = await deps.records.markFailed(job.buildId, storedReasons(result.problems), nowIso());
+      log({ outcome: marked ? "failed" : "no-build", files: published.length, bytes: result.totalBytes, problems: result.problems.length });
       return;
     }
 
@@ -367,12 +371,13 @@ export async function processDeploy(
     }
     const reason = error instanceof DeployTimeUp ? TIME_UP_REASON : error instanceof DownloadProblem ? storedReason(error.reason) : SERVICE_PROBLEM_REASON;
     // A failure here goes no further than its name either (the message then reaches the dead-letter queue).
+    // true: recorded; false: the build was finished meanwhile (nothing written); undefined: the write failed.
     const recorded = await deps.records.markFailed(job.buildId, [reason], nowIso()).then(
-      () => true,
-      () => false,
+      (marked) => marked,
+      () => undefined,
     );
-    log({ outcome: recorded ? "gave-up" : "dead-letter", error: name });
+    log({ outcome: recorded === undefined ? "dead-letter" : recorded ? "gave-up" : "no-build", error: name });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
-    if (!recorded) throw new Error(DEPLOY_FAILED);
+    if (recorded === undefined) throw new Error(DEPLOY_FAILED);
   }
 }

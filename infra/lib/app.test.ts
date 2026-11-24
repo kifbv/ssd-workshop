@@ -251,12 +251,31 @@ function resourcePattern(resource: unknown): string {
   if (resource !== null && typeof resource === "object") {
     const join = (resource as { "Fn::Join"?: [string, unknown[]] })["Fn::Join"];
     if (join !== undefined) return join[1].map(resourcePattern).join(join[0]);
+    const sub = (resource as { "Fn::Sub"?: unknown })["Fn::Sub"];
+    if (sub !== undefined) {
+      const text = typeof sub === "string" ? sub : Array.isArray(sub) && typeof sub[0] === "string" ? sub[0] : undefined;
+      // A template we cannot read counts as reaching everything (the safe direction).
+      if (text === undefined) return "*";
+      return text.replace(/\$\{([^}]*)\}/g, (_, name: string) => PSEUDO_VALUES[name] ?? "\u0000");
+    }
     const ref = (resource as { Ref?: unknown }).Ref;
-    if (ref === "AWS::Partition") return "aws";
-    if (ref === "AWS::AccountId") return ACCOUNT;
-    if (ref === "AWS::Region") return REGION;
+    if (typeof ref === "string") return PSEUDO_VALUES[ref] ?? "\u0000";
+    // A reference to a resource (its literal parts are matched by resourceReaches); any other intrinsic
+    // (Fn::ImportValue, Fn::If, ...) could name anything, so it counts as `*`.
+    if ("Fn::GetAtt" in resource) return "\u0000";
+    return "*";
   }
   return "\u0000";
+}
+
+/** CloudFormation pseudo parameters as they resolve in this account. */
+const PSEUDO_VALUES: Record<string, string> = { "AWS::Partition": "aws", "AWS::AccountId": ACCOUNT, "AWS::Region": REGION };
+
+/** An Allow statement the guards cannot read safely: `NotResource` or `NotAction` grant by exclusion. */
+function assertNoExclusions(where: string, st: Record<string, unknown>): void {
+  if (st.Effect !== "Allow") return;
+  expect(st.NotResource, where).toBeUndefined();
+  expect(st.NotAction, where).toBeUndefined();
 }
 
 /** The apps bucket and one of its app keys, as IAM sees them. */
@@ -1819,6 +1838,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       const forDeployer = s === STACK_NAMES.apps && JSON.stringify(r.Properties?.Roles) === JSON.stringify([{ Ref: deployerRole }]);
       for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        assertNoExclusions(`${s}/${id}`, st);
         if (st.Effect !== "Allow") continue;
         const actions = [st.Action].flat() as string[];
         if (!actions.some(writes)) continue;
@@ -1851,6 +1871,9 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     }
     expect(reachesAppsBucket({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":s3:::ssd-*"]] })).toBe(true);
     expect(reachesAppsBucket("arn:aws:s3:::ssd-workshop-site-*")).toBe(false);
+    expect(reachesAppsBucket({ "Fn::Sub": "arn:${AWS::Partition}:s3:::ssd-*" })).toBe(true);
+    expect(reachesAppsBucket({ "Fn::ImportValue": "SomeExport" })).toBe(true);
+    expect(reachesAppsBucket({ "Fn::Sub": "arn:${AWS::Partition}:s3:::ssd-workshop-site-*" })).toBe(false);
     expect(actionCovers("s3:Put*", "s3:PutBucketPolicy")).toBe(true);
     expect(actionCovers("s3:*Bucket*", "s3:DeleteBucket")).toBe(true);
     expect(actionCovers("s3:PutObject", "s3:PutBucketPolicy")).toBe(false);
@@ -1858,6 +1881,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       policies += 1;
       for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        assertNoExclusions(`${s}/${id}`, st);
         if (st.Effect !== "Allow") continue;
         const granted = [st.Action].flat() as string[];
         const covered = bucketActions.filter((action) => granted.some((g) => actionCovers(g, action)));
@@ -1882,6 +1906,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     let sends = 0;
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        assertNoExclusions(`${s}/${id}`, st);
         if (st.Effect !== "Allow") continue;
         if (!([st.Action].flat() as string[]).some((g) => actionCovers(g, "sqs:SendMessage"))) continue;
         sends += 1;

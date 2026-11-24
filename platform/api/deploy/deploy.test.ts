@@ -542,6 +542,38 @@ describe("a phase cut off by the deadline is aborted, and a late write never cha
     expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [TIME_UP_REASON] });
   });
 
+  it("aborts the other puts of a batch when one put fails, so none lands after the deploy gave up", async () => {
+    const t = setup(passing());
+    const signals: (AbortSignal | undefined)[] = [];
+    let first = true;
+    t.objects.put = (_key, _bytes, _type, _cache, signal) => {
+      signals.push(signal);
+      if (first) {
+        first = false;
+        return Promise.reject(Object.assign(new Error("S3 is down"), { name: "ServiceUnavailable" }));
+      }
+      return hangUntilAborted(signal);
+    };
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + 120_000);
+    expect(signals.length).toBeGreaterThan(1);
+    for (const signal of signals) expect(signal?.aborted).toBe(true);
+    expect(t.records.builds.get(BUILD)?.status).toBe("failed");
+  });
+
+  it("logs no-build, not failed, when a failing check finds the build already finished by another writer", async () => {
+    const t = setup(gzip(githubTar({ "index.html": "x", "shell.php": "<?php ?>" })));
+    t.records.markFailed = () => Promise.resolve(false);
+    await processDeploy(job(), 1, t.deps, t.now() + 120_000);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", files: 2, bytes: expect.any(Number), problems: 1, durationMs: expect.any(Number) }]);
+  });
+
+  it("logs no-build, not gave-up, when the last delivery's failure write finds the build already finished", async () => {
+    const t = setup(() => Promise.reject(new Error("network down")));
+    t.records.markFailed = () => Promise.resolve(false);
+    await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, t.now() + 120_000);
+    expect(t.logs.map((entry) => entry.outcome)).toEqual(["no-build"]);
+  });
+
   it("gives the phase's signal to the clean-up, the invalidation and the live writes, unaborted when they finish in time", async () => {
     const t = setup(passing());
     seed(t.objects);
