@@ -66,10 +66,12 @@ export const SIGN_IN_VERIFY_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const
  * app's address. Each app's daily write budget caps what writes cost; the throttles cap the requests
  * (and their reads of the small totals item). PUT and DELETE get 30 requests/s (burst 60), enough for a
  * workshop room pressing shared counters (a throttled request answers 429), GET 20/s (burst 40).
- * OPTIONS keeps the stage's.
+ * OPTIONS 20/s (burst 40) too: every preflight invokes the function.
  */
 export const APP_DATA_WRITE_THROTTLE = { rateLimit: 30, burstLimit: 60 } as const;
 export const APP_DATA_READ_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+/** The data API's CORS preflight: browsers keep its answer 600 s, so few are sent; each still invokes the function. */
+export const APP_DATA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
 
 /** The protected participant routes (ticket 1.5), all served by one function behind one session check. */
 export const PARTICIPANT_ROUTES = [
@@ -443,6 +445,7 @@ export class ApiStack extends Stack {
       [HttpMethod.PUT, APP_DATA_WRITE_THROTTLE],
       [HttpMethod.DELETE, APP_DATA_WRITE_THROTTLE],
       [HttpMethod.GET, APP_DATA_READ_THROTTLE],
+      [HttpMethod.OPTIONS, APP_DATA_PREFLIGHT_THROTTLE],
     ] as const;
     for (const [method, throttle] of appDataThrottles) {
       cfnStage.addPropertyOverride(`RouteSettings.${method} ${APP_DATA_PATH}`, {

@@ -431,7 +431,9 @@ curl -sS -i -H 'origin: null' https://workshop.rankly.games/api/apps/nobody-here
 ```
 
 Once 2.5 has put an app live, `PUT` (with `content-type: application/json`), `GET` and `DELETE` on one of its keys
-round-trip a JSON value. The log group `ssd-workshop-api-app-data` has one line per request with method, outcome,
+round-trip a JSON value. Do a second `PUT` to the same key and a `DELETE`: they update `sizes.<key>` in the totals item,
+which proves IAM's `dynamodb:Attributes` sees only the top-level name `sizes` (an `AccessDeniedException` there means
+it does not). The log group `ssd-workshop-api-app-data` has one line per request with method, outcome,
 status and size only; a refusal from DynamoDB shows as `"outcome":"failed"` with the error name
 (`AccessDeniedException` for a missing right).
 
@@ -447,13 +449,13 @@ curl -sS -D - -o /dev/null -X POST -H 'origin: null' https://workshop.rankly.gam
 # expect: an answer API Gateway makes itself (404 Not Found, no route for POST) that still carries access-control-allow-origin: *
 ```
 
-The stage throttles `PUT` and `DELETE` on the route at 30 requests/s (burst 60) and `GET` at 20/s (burst 40), read-only:
+The stage throttles `PUT` and `DELETE` on the route at 30 requests/s (burst 60) and `GET` and `OPTIONS` at 20/s (burst 40), read-only:
 
 ```sh
 aws apigatewayv2 get-stage --region eu-central-1 --api-id <API id from infra/lib/config.ts> --stage-name '$default' \
   --query 'RouteSettings'
 # expect: the two sign-in routes at 5/10, "PUT /api/apps/{nickname}/data/{key}" and "DELETE ..." at 30/60,
-#         "GET ..." at 20/40
+#         "GET ..." and "OPTIONS ..." at 20/40
 ```
 
 Each app may also write 5 MB per UTC day, counted as DynamoDB bills its writes (`writeDay`, `writtenBytes` in its

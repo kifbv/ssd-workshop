@@ -17,6 +17,7 @@ import {
   AI_WORKER_TIMEOUT_SECONDS,
   APP_DATA_METHODS,
   APP_DATA_PATH,
+  APP_DATA_PREFLIGHT_THROTTLE,
   APP_DATA_READ_THROTTLE,
   APP_DATA_WRITE_THROTTLE,
 } from "./api-stack.js";
@@ -1323,9 +1324,10 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     expect(like("APPDATA#*", "APPDATA#ada")).toBe(true);
   });
 
-  it("throttles PUT and DELETE at 30 requests/s (burst 60) and GET at 20/s (burst 40), after the routes exist; OPTIONS keeps the stage's", () => {
+  it("throttles PUT and DELETE at 30 requests/s (burst 60), GET and OPTIONS at 20/s (burst 40), after the routes exist", () => {
     expect(APP_DATA_WRITE_THROTTLE).toEqual({ rateLimit: 30, burstLimit: 60 });
     expect(APP_DATA_READ_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    expect(APP_DATA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
     // Every route setting of the stage, exactly: the sign-in routes' and the data API's.
     expect(stage?.Properties?.RouteSettings).toEqual({
@@ -1334,8 +1336,9 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
       [`PUT ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
       [`DELETE ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
       [`GET ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+      [`OPTIONS ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
     });
-    for (const method of ["GET", "PUT", "DELETE"]) {
+    for (const method of ["GET", "PUT", "DELETE", "OPTIONS"]) {
       const routeId = f
         .apiResources()
         .find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === `${method} ${APP_DATA_PATH}`)?.[0];
