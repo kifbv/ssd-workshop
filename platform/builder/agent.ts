@@ -9,11 +9,14 @@
  *   is never consulted for tools listed in `allowedTools`, so it is not set (the SDK warns when it is);
  * - `permissionMode: "dontAsk"` never auto-approves anything not listed; no settings files (`settingSources: []`), no
  *   MCP servers (`strictMcpConfig`), no skills, no plugins, no saved session;
- * - the process gets an explicit, minimal environment (`agentEnvironment`): Bedrock's settings and the AWS credential
- *   variables Claude Code needs to call Bedrock, the proxy and CA settings, a fresh home folder, and nothing else (never
- *   the GitHub token, which only the runner holds). The agent has no tool that could read them.
+ * - the process gets an explicit, minimal environment (`agentEnvironment`): `PATH`, a fresh home folder and Bedrock's
+ *   settings pointing at the runner's local Bedrock proxy (./bedrock-proxy.ts, `ANTHROPIC_BEDROCK_BASE_URL` with
+ *   `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`), which signs the build model's calls with the runner's credentials and refuses
+ *   anything else. No AWS credential or credential-endpoint variable, no GitHub token, no proxy setting.
  */
+import type { Agent as HttpAgent } from "node:http";
 import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { startBedrockProxy, type BedrockProxyLogEntry, type CredentialSource } from "./bedrock-proxy.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, checkToolCall, insideWorkspace, workspacePath } from "./permissions.js";
 import { NO_TOKENS, addTokens, type AgentTokens } from "./usage.js";
 
@@ -54,31 +57,19 @@ export function buildPrompt(workspace: string): string {
 /** At most this many agent turns (a small app takes 30 to 50). */
 export const MAX_AGENT_TURNS = 120;
 
-/** Environment variables passed through to the agent's process when set: AWS credentials for Bedrock, proxy and CA settings. */
-export const PASSED_ENVIRONMENT = [
-  "PATH",
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-  "HTTPS_PROXY",
-  "https_proxy",
-  "NO_PROXY",
-  "no_proxy",
-  "NODE_EXTRA_CA_CERTS",
-  "SSL_CERT_FILE",
-  "AWS_CA_BUNDLE",
-] as const;
+/**
+ * Environment variables passed through to the agent's process when set: only `PATH`. The agent calls nothing but the
+ * local Bedrock proxy (plain HTTP on 127.0.0.1), so it needs no AWS credential, proxy or CA setting.
+ */
+export const PASSED_ENVIRONMENT = ["PATH"] as const;
 
 /**
- * The agent process's whole environment: Bedrock in eu-central-1 with every model alias set to the build model (no
- * other model is ever called, so the task role needs only that profile), no non-essential traffic (telemetry, error
- * reports, updates), a fresh home and configuration folder, and the variables of PASSED_ENVIRONMENT. Nothing else.
+ * The agent process's whole environment: Bedrock through the runner's local proxy (`bedrockUrl`, no AWS credential:
+ * `CLAUDE_CODE_SKIP_BEDROCK_AUTH`), every model alias set to the build model (the proxy forwards no other), no
+ * non-essential traffic (telemetry, error reports, updates), a fresh home and configuration folder, and `PATH`.
+ * Nothing else.
  */
-export function agentEnvironment(source: Readonly<Record<string, string | undefined>>, modelId: string, home: string): Record<string, string> {
+export function agentEnvironment(source: Readonly<Record<string, string | undefined>>, modelId: string, home: string, bedrockUrl: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of PASSED_ENVIRONMENT) {
     const value = source[name];
@@ -89,6 +80,8 @@ export function agentEnvironment(source: Readonly<Record<string, string | undefi
     HOME: home,
     CLAUDE_CONFIG_DIR: home,
     CLAUDE_CODE_USE_BEDROCK: "1",
+    ANTHROPIC_BEDROCK_BASE_URL: bedrockUrl,
+    CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
     AWS_REGION: "eu-central-1",
     ANTHROPIC_MODEL: modelId,
     ANTHROPIC_SMALL_FAST_MODEL: modelId,
@@ -196,11 +189,22 @@ export class TokenTracker {
   }
 }
 
-/** The real agent: one `query()` of the Claude Agent SDK. */
+/** How the runner's Bedrock proxy reaches Bedrock: the runner's credentials and, in local runs, the HTTPS proxy agent. */
+export interface BedrockAccess {
+  credentials: CredentialSource;
+  agent?: HttpAgent;
+  log?: (entry: BedrockProxyLogEntry) => void;
+}
+
+/**
+ * The real agent: one `query()` of the Claude Agent SDK, talking to Bedrock only through a local proxy started for
+ * the run and closed after it.
+ */
 export class ClaudeAgent implements CodingAgent {
   constructor(
     private readonly source: Readonly<Record<string, string | undefined>>,
     private readonly makeHome: () => Promise<string>,
+    private readonly bedrock: BedrockAccess,
   ) {}
 
   async run(run: AgentRun): Promise<AgentResult> {
@@ -210,8 +214,15 @@ export class ClaudeAgent implements CodingAgent {
     if (run.signal.aborted) return { outcome: "error", tokens: NO_TOKENS };
     run.signal.addEventListener("abort", stop, { once: true });
     let outcome: AgentResult["outcome"] = "error";
+    let proxy: Awaited<ReturnType<typeof startBedrockProxy>> | undefined;
     try {
-      const env = agentEnvironment(this.source, run.modelId, await this.makeHome());
+      proxy = await startBedrockProxy({
+        modelId: run.modelId,
+        credentials: this.bedrock.credentials,
+        ...(this.bedrock.agent === undefined ? {} : { agent: this.bedrock.agent }),
+        ...(this.bedrock.log === undefined ? {} : { log: this.bedrock.log }),
+      });
+      const env = agentEnvironment(this.source, run.modelId, await this.makeHome(), proxy.url);
       for await (const message of query({ prompt: run.prompt, options: agentOptions(run, controller, env) })) {
         if (tracker.see(message)) run.onTokens(tracker.total);
         if (message.type === "result") outcome = message.subtype === "success" && !message.is_error ? "done" : "error";
@@ -220,6 +231,7 @@ export class ClaudeAgent implements CodingAgent {
       outcome = "error";
     } finally {
       run.signal.removeEventListener("abort", stop);
+      await proxy?.close();
     }
     return { outcome: run.signal.aborted ? "error" : outcome, tokens: tracker.total };
   }

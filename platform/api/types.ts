@@ -344,7 +344,7 @@ export type BuildStatus = "queued" | "building" | "deploying" | "live" | "failed
 
 /**
  * One build of an app (ticket 2.5 defines it; ticket 2.7 creates it; the builder, ticket 2.8, claims it, writes its feed
- * and `pushedCommit`, or marks it failed, naming only BUILDER_BUILD_ATTRIBUTES). The deployer only updates an existing
+ * and `pushedCommit`, or marks it failed, naming only BUILDER_BUILD_UPDATE_ATTRIBUTES). The deployer only updates an existing
  * build, and only `status`, `updatedAt`, `deployedCommit`, `failureReasons` and `finishedAt`
  * (`DEPLOYER_BUILD_UPDATE_ATTRIBUTES` in infra/lib/config.ts, which also lists the compared `nickname` and `pushedCommit`). It starts
  * a deploy only when the build's `nickname` equals the message's, its `pushedCommit` the message's commit, and its status

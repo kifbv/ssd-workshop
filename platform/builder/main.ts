@@ -5,16 +5,21 @@
  * - `BUILD_ID`: the build to run (the nickname and participant come from the stored build record, never from here);
  * - `BUILDER_GITHUB_TOKEN`: the build's one-repository token (`builderToken`, ticket 2.6), minted by the launcher.
  *
- * The token is removed from this process's environment as soon as it is read, so the agent's process can never inherit
- * it (its environment is built from an allow-list anyway). AWS credentials are the task role's. Exit code 0 when the
- * build was handed to the deployer or there was nothing to do, 1 when it failed. Output: one JSON line per phase
- * (./runner.ts), never a token, nickname, build id, path or error message.
+ * The token is deleted from `process.env` as soon as it is read. That keeps it out of anything that copies the
+ * environment later, but it is not what keeps it from the agent: the agent's process gets an explicit environment
+ * built from an allow-list (./agent.ts), and `/proc/<pid>/environ` of this process still holds the original value,
+ * which the agent cannot read because its file tools are confined to the workspace (./permissions.ts). AWS
+ * credentials are the task role's and stay in this process: the agent reaches Bedrock only through the local proxy
+ * (./bedrock-proxy.ts). Exit code 0 when the build was handed to the deployer or there was nothing to do, 1 when it
+ * failed; the process exits as soon as the outcome is recorded, so a stray child process cannot keep the task alive.
+ * Output: one JSON line per phase (./runner.ts), never a token, nickname, build id, path or error message.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { downloadArchive } from "../api/deploy/github.js";
@@ -23,19 +28,21 @@ import { errorName } from "../api/sign-in/code-request.js";
 import { ClaudeAgent } from "./agent.js";
 import { SqsDeployQueue } from "./queue.js";
 import { DynamoBuildRecords } from "./records.js";
-import { jobFromEnvironment, runBuild, type RunnerDeps } from "./runner.js";
+import { exitWhenDone, jobFromEnvironment, runBuild, type RunnerDeps } from "./runner.js";
+
+/** The session's HTTPS proxy agent when one is set (local runs); none on Fargate. */
+function proxyAgent(): Agent | undefined {
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+  return proxy ? new Agent({ proxyEnv: process.env } as AgentOptions) : undefined;
+}
 
 /** AWS clients: explicit region, bounded tries, and the session's proxy when one is set (local runs). */
 function awsSettings() {
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+  const agent = proxyAgent();
   return {
     region: REGION,
     maxAttempts: 3,
-    requestHandler: new NodeHttpHandler({
-      connectionTimeout: 3000,
-      requestTimeout: 10_000,
-      ...(proxy ? { httpsAgent: new Agent({ proxyEnv: process.env } as AgentOptions) } : {}),
-    }),
+    requestHandler: new NodeHttpHandler({ connectionTimeout: 3000, requestTimeout: 10_000, ...(agent ? { httpsAgent: agent } : {}) }),
   };
 }
 
@@ -45,11 +52,19 @@ async function main(): Promise<number> {
     console.error(JSON.stringify({ event: "builder", phase: "start", outcome: "error", error: job.error }));
     return 1;
   }
+  const upstreamAgent = proxyAgent();
   const deps: RunnerDeps = {
     records: new DynamoBuildRecords(new DynamoDBClient(awsSettings()), TABLE_NAME),
     github: { fetch: (url, init) => fetch(url, init), now: () => new Date(), log: (entry) => console.log(JSON.stringify(entry)) },
     download: (url) => downloadArchive(url),
-    agent: new ClaudeAgent(process.env, () => mkdtemp(join(tmpdir(), "ssd-agent-home-"))),
+    agent: new ClaudeAgent(process.env, () => mkdtemp(join(tmpdir(), "ssd-agent-home-")), {
+      credentials: defaultProvider(),
+      ...(upstreamAgent === undefined ? {} : { agent: upstreamAgent }),
+      // Only what the proxy refused or could not forward (a path's shape and a status), never a header or body.
+      log: (entry) => {
+        if (entry.outcome !== "forwarded") console.log(JSON.stringify(entry));
+      },
+    }),
     queue: new SqsDeployQueue(new SQSClient(awsSettings()), DEPLOY_QUEUE_URL),
     makeWorkspace: () => mkdtemp(join(tmpdir(), "ssd-build-")),
     removeWorkspace: (dir) => rm(dir, { recursive: true, force: true }),
@@ -61,12 +76,6 @@ async function main(): Promise<number> {
   return outcome === "failed" ? 1 : 0;
 }
 
-main().then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (error: unknown) => {
-    console.error(JSON.stringify({ event: "builder", phase: "finish", outcome: "error", error: errorName(error) }));
-    process.exitCode = 1;
-  },
-);
+void exitWhenDone(main, (code) => process.exit(code), (error) => {
+  console.error(JSON.stringify({ event: "builder", phase: "finish", outcome: "error", error: errorName(error) }));
+});

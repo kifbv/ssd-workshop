@@ -1,10 +1,13 @@
 // `npm run eval -- build` (ticket 2.8): one example spec through the real runner and the real coding agent (Claude Agent
-// SDK on Bedrock, the caller's AWS credentials), with GitHub, the table and the deploy queue in memory (no repository
+// SDK on Bedrock through the runner's local Bedrock proxy, which signs with the caller's AWS credentials: the agent's
+// process gets none), with GitHub, the table and the deploy queue in memory (no repository
 // is created). The pushed commit is then checked as the deployer would (download, unpack, deploy check) and opened in
 // Playwright's Chromium at 375 px, served under the apps' sandbox CSP with an in-memory data API.
 import { mkdtemp, rm } from "node:fs/promises";
+import { Agent, type AgentOptions } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { chromium, type Browser, type Route } from "playwright";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
 import { checkApp, type AppFile } from "../../api/build/check.js";
@@ -16,6 +19,7 @@ import { FIRST_COMMIT_MESSAGE, withSpec } from "../../api/github/repository.js";
 import { loadTemplateFiles } from "../../api/github/template.js";
 import { appArchiveUrl, type ModelSetting } from "../../api/settings.js";
 import { ClaudeAgent } from "../../builder/agent.js";
+import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
 import { missingScreens, screenNames, specTitle, type BuildEvalOutcome } from "./logic.js";
@@ -81,10 +85,16 @@ async function openInBrowser(browser: Browser, files: readonly AppFile[]): Promi
 }
 
 /**
- * Runs one spec end to end. `log` receives the runner's phase lines (counts only). The agent's process gets the
- * caller's AWS credentials (the eval's Bedrock rights) and nothing else from the environment.
+ * Runs one spec end to end. `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
+ * path's shape and a status). The caller's AWS credentials stay in this process (the proxy signs with them); the
+ * agent's process gets none.
  */
-export async function evalBuild(spec: string, model: ModelSetting, browser: Browser, log: (entry: BuilderLogEntry) => void): Promise<BuildEvalOutcome> {
+export async function evalBuild(
+  spec: string,
+  model: ModelSetting,
+  browser: Browser,
+  log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void,
+): Promise<BuildEvalOutcome> {
   const github = new FakeGitHub(() => new Date());
   github.addRepository(REPOSITORY);
   const files = withSpec(await loadTemplateFiles(), spec);
@@ -104,11 +114,19 @@ export async function evalBuild(spec: string, model: ModelSetting, browser: Brow
         records,
         github: { fetch: fetchFake, now: () => new Date(), log: () => undefined },
         download: (url) => downloadArchive(url, { fetch: fetchFake }),
-        agent: new ClaudeAgent(process.env, async () => {
-          const home = await mkdtemp(join(tmpdir(), "ssd-eval-agent-home-"));
-          temporary.push(home);
-          return home;
-        }),
+        agent: new ClaudeAgent(
+          process.env,
+          async () => {
+            const home = await mkdtemp(join(tmpdir(), "ssd-eval-agent-home-"));
+            temporary.push(home);
+            return home;
+          },
+          {
+            credentials: defaultProvider(),
+            ...(process.env.HTTPS_PROXY || process.env.https_proxy ? { agent: new Agent({ proxyEnv: process.env } as AgentOptions) } : {}),
+            log,
+          },
+        ),
         queue,
         makeWorkspace: () => mkdtemp(join(tmpdir(), "ssd-eval-build-")),
         removeWorkspace: (dir) => rm(dir, { recursive: true, force: true }),

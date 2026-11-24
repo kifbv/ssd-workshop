@@ -71,7 +71,17 @@ describe("the agent's environment", () => {
     PATH: "/usr/bin",
     AWS_ACCESS_KEY_ID: "AKIA",
     AWS_SECRET_ACCESS_KEY: "s",
+    AWS_SESSION_TOKEN: "t",
+    AWS_PROFILE: "default",
     AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
+    AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials",
+    AWS_CONTAINER_AUTHORIZATION_TOKEN: "x",
+    AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: "/var/run/token",
+    AWS_WEB_IDENTITY_TOKEN_FILE: "/var/run/web",
+    AWS_ROLE_ARN: "arn:aws:iam::1:role/x",
+    ECS_CONTAINER_METADATA_URI_V4: "http://169.254.170.2/v4/x",
+    HTTPS_PROXY: "http://proxy:1",
+    NODE_EXTRA_CA_CERTS: "/ca.crt",
     BUILDER_GITHUB_TOKEN: "ghs_secret",
     GITHUB_TOKEN: "ghs_other",
     GH_TOKEN: "gh",
@@ -80,17 +90,17 @@ describe("the agent's environment", () => {
     HOME: "/root",
     CLAUDE_CODE_SOMETHING: "1",
   };
+  const PROXY = "http://127.0.0.1:43123";
 
-  it("is Bedrock in eu-central-1 on the build model only, with no GitHub token, no API key and a fresh home", () => {
-    const env = agentEnvironment(source, MODEL, "/tmp/agent-home");
+  it("is Bedrock through the runner's local proxy on the build model only, with no GitHub token, no API key and a fresh home", () => {
+    const env = agentEnvironment(source, MODEL, "/tmp/agent-home", PROXY);
     expect(env).toEqual({
       PATH: "/usr/bin",
-      AWS_ACCESS_KEY_ID: "AKIA",
-      AWS_SECRET_ACCESS_KEY: "s",
-      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/v2/credentials/x",
       HOME: "/tmp/agent-home",
       CLAUDE_CONFIG_DIR: "/tmp/agent-home",
       CLAUDE_CODE_USE_BEDROCK: "1",
+      ANTHROPIC_BEDROCK_BASE_URL: PROXY,
+      CLAUDE_CODE_SKIP_BEDROCK_AUTH: "1",
       AWS_REGION: "eu-central-1",
       ANTHROPIC_MODEL: MODEL,
       ANTHROPIC_SMALL_FAST_MODEL: MODEL,
@@ -103,6 +113,13 @@ describe("the agent's environment", () => {
       DISABLE_ERROR_REPORTING: "1",
     });
     expect(JSON.stringify(env)).not.toContain("ghs_");
+  });
+
+  it("holds no AWS credential, credential endpoint or profile variable (finding 1): AWS_REGION is the only AWS_ name", () => {
+    const env = agentEnvironment(source, MODEL, "/tmp/agent-home", PROXY);
+    expect(Object.keys(env).filter((name) => name.startsWith("AWS_"))).toEqual(["AWS_REGION"]);
+    expect(Object.keys(env).filter((name) => /CREDENTIAL|TOKEN|SECRET|KEY|ECS_|PROXY|CA_/.test(name))).toEqual([]);
+    for (const value of ["AKIA", "/v2/credentials/x", "169.254.170", "/var/run/"]) expect(JSON.stringify(env)).not.toContain(value);
   });
 });
 

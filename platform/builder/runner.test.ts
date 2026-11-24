@@ -17,6 +17,7 @@ import {
   HAND_OVER_REASON,
   NOTHING_CHANGED_REASON,
   TIME_UP_REASON,
+  exitWhenDone,
   runBuild,
   type BuilderLogEntry,
   type RunnerDeps,
@@ -181,6 +182,51 @@ describe("criterion 3: the feed holds the steps in order and every written file,
     expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("failed");
     expect(t.records.builds.get(BUILD)?.failureReasons).toEqual(['GitHub: GitHub answered 404 to the step "get-branch".']);
     expect(t.agent.runs).toEqual([]);
+  });
+});
+
+describe("the token reaches one repository: the stored build's nickname decides where the runner works (finding 10)", () => {
+  it("fails, and pushes nothing anywhere, when the stored build names another app than the repository the token reaches", async () => {
+    const t = await setup(goodScript(), { nickname: "Bob" });
+    // Bob's repository exists too; the token was minted for Ada's only.
+    t.github.addRepository("ssd-bob");
+    const bobStart = t.github.seedCommit("ssd-bob", { "README.md": "Bob's app\n" }, "Start");
+    expect(await runBuild({ buildId: BUILD, token: TOKEN }, t.deps)).toBe("failed");
+    const build = t.records.builds.get(BUILD);
+    expect(build?.status).toBe("failed");
+    expect(build?.failureReasons).toEqual(['GitHub: GitHub answered 404 to the step "get-branch".']);
+    expect(build?.pushedCommit).toBeUndefined();
+    expect(t.agent.runs).toEqual([]);
+    expect(t.queue.sent).toEqual([]);
+    expect(t.github.history("ssd-bob").map((commit) => commit.sha)).toEqual([bobStart]);
+    expect(t.github.history("ssd-ada").map((commit) => commit.sha)).toEqual([t.start]);
+  });
+});
+
+describe("the task's exit (finding 8): the process ends as soon as the outcome is recorded", () => {
+  it("exits with the work's code, and with 1 after reporting an error the work threw", async () => {
+    const exits: number[] = [];
+    const errors: unknown[] = [];
+    await exitWhenDone(async () => 0, (code) => exits.push(code), (error) => errors.push(error));
+    await exitWhenDone(async () => 1, (code) => exits.push(code), (error) => errors.push(error));
+    await exitWhenDone(async () => {
+      throw new Error("boom");
+    }, (code) => exits.push(code), (error) => errors.push(error));
+    expect(exits).toEqual([0, 1, 1]);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("exits even while something else keeps the event loop busy (a stray child or timer)", async () => {
+    const stray = setInterval(() => undefined, 1000);
+    try {
+      let exited: number | undefined;
+      await exitWhenDone(async () => 0, (code) => {
+        exited = code;
+      }, () => undefined);
+      expect(exited).toBe(0);
+    } finally {
+      clearInterval(stray);
+    }
   });
 });
 

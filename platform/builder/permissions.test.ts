@@ -70,6 +70,43 @@ describe("criterion 2: the permission hook refuses anything outside the workspac
     }
   });
 
+  it("refuses Glob patterns and folders with braces, brackets, '..' anywhere, a leading / or ~ (checker try 1)", () => {
+    const patterns = [".{.,}/*", "{.,}./*", "[.][.]/*", ".[.]/*", "{/etc,x}/*", "**/*.{js,css}", "img/[ab].png", "a..b/*", "x/..*", "/*", "~*", "~/x"];
+    for (const pattern of patterns) expect(checkToolCall(ws, "Glob", { pattern }).allow, pattern).toBe(false);
+    for (const path of [join(ws, "{images,x}"), join(ws, "[i]mages"), `${ws}/images/..`, "~", "images/..x"]) {
+      expect(checkToolCall(ws, "Glob", { pattern: "*", path }).allow, path).toBe(false);
+    }
+    expect(checkToolCall(ws, "Glob", { pattern: "images/*.svg" })).toEqual(allowed);
+    expect(checkToolCall(ws, "Glob", { pattern: "**/*", path: ws })).toEqual(allowed);
+  });
+
+  it("refuses writes and edits to tool and CI settings in any letter case, and still lets the agent read them", () => {
+    const paths = [
+      ".github/workflows/ci.yml",
+      ".GitHub/workflows/x.yml",
+      ".claude/settings.json",
+      ".Claude/commands/x.md",
+      ".git/config",
+      ".git/hooks/pre-commit",
+      "images/.git/config",
+      ".mcp.json",
+      ".MCP.json",
+      "CLAUDE.md",
+      "claude.md",
+      "docs/CLAUDE.md",
+      ".gitattributes",
+      ".GitAttributes",
+    ];
+    for (const path of paths) {
+      expect(checkToolCall(ws, "Write", { file_path: path, content: "x" }).allow, path).toBe(false);
+      expect(checkToolCall(ws, "Write", { file_path: join(ws, path), content: "x" }).allow, path).toBe(false);
+      expect(checkToolCall(ws, "Edit", { file_path: path, old_string: "a", new_string: "b" }).allow, path).toBe(false);
+    }
+    expect(checkToolCall(ws, "Read", { file_path: "CLAUDE.md" })).toEqual(allowed);
+    expect(checkToolCall(ws, "Write", { file_path: "github.css", content: "x" })).toEqual(allowed);
+    expect(checkToolCall(ws, "Write", { file_path: "images/claude.md.png", content: "x" })).toEqual(allowed);
+  });
+
   it("refuses running a command, fetching an address, searching the web, subagents, notebooks and any unknown tool", () => {
     const calls: [string, Record<string, unknown>][] = [
       ["Bash", { command: "ls" }],

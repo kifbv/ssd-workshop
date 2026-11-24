@@ -340,23 +340,16 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
  */
 export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt"] as const;
 /**
- * The attribute names the builder (ticket 2.8, its task role from ticket 2.9) may name in `BUILD#*`: GetItem (its
- * projection: `nickname`, `participantId`, `status`) and UpdateItem (claim, feed, hand-over, failure). `nickname` is only
- * read and compared, never written. Never `deployedCommit` or `liveAt` (the deployer's), `type`, `buildId`,
- * `participantId` writes or `createdAt` (the AI worker's).
+ * The attribute names the builder (ticket 2.8, its task role from ticket 2.9) may name in `BUILD#*`, split by call for
+ * 2.9's `dynamodb:Attributes` conditions (tested against the requests in platform/builder/aws.test.ts):
+ *
+ * - BUILDER_BUILD_READ_ATTRIBUTES: GetItem, its keys and projection (`nickname`, `participantId`, `status`);
+ * - BUILDER_BUILD_UPDATE_ATTRIBUTES: UpdateItem (claim, feed, hand-over, failure), every name in its update and
+ *   condition expressions. `nickname` is only compared (the claim's condition), never set. Never `participantId` (only
+ *   read), `deployedCommit` or `liveAt` (the deployer's), `type`, `buildId` or `createdAt` (the AI worker's).
  */
-export const BUILDER_BUILD_ATTRIBUTES = [
-  "pk",
-  "sk",
-  "status",
-  "nickname",
-  "participantId",
-  "pushedCommit",
-  "feed",
-  "updatedAt",
-  "finishedAt",
-  "failureReasons",
-] as const;
+export const BUILDER_BUILD_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status"] as const;
+export const BUILDER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "pushedCommit", "feed", "updatedAt", "finishedAt", "failureReasons"] as const;
 /** The attribute names the builder may name in `PARTICIPANT#*` (UpdateItem of the `USAGE` item only): the build's tokens and cost. */
 export const BUILDER_USAGE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "participantId", "updatedAt", "inputTokens", "outputTokens", "costUsd"] as const;
 /**

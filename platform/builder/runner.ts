@@ -305,3 +305,18 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     if (workspace !== undefined) await deps.removeWorkspace(workspace).catch(() => undefined);
   }
 }
+
+/**
+ * Runs the task's work and then ends the process with its exit code (1 when it throws, after `onError`), so nothing
+ * left running (a stray child process, an open socket) keeps the Fargate task alive after the outcome is recorded.
+ */
+export async function exitWhenDone(work: () => Promise<number>, exit: (code: number) => void, onError: (error: unknown) => void): Promise<void> {
+  let code: number;
+  try {
+    code = await work();
+  } catch (error) {
+    onError(error);
+    code = 1;
+  }
+  exit(code);
+}

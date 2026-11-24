@@ -1,7 +1,7 @@
 /**
  * The builder's view of the table (ticket 2.8): its build record (with the live feed the step 3 page shows, ticket
- * 2.10) and the participant's usage totals. Every write is an UpdateItem naming only BUILDER_BUILD_ATTRIBUTES (in
- * `BUILD#*`) or BUILDER_USAGE_UPDATE_ATTRIBUTES (the `USAGE` item), both in infra/lib/config.ts, for ticket 2.9's
+ * 2.10) and the participant's usage totals. Its read is a GetItem naming only BUILDER_BUILD_READ_ATTRIBUTES; every write is an UpdateItem naming only
+ * BUILDER_BUILD_UPDATE_ATTRIBUTES (in `BUILD#*`) or BUILDER_USAGE_UPDATE_ATTRIBUTES (the `USAGE` item), both in infra/lib/config.ts, for ticket 2.9's
  * `dynamodb:Attributes` condition; no call returns attributes (ReturnValues NONE).
  *
  * The feed is one list attribute `feed` on the build item: steps, written files and commits, oldest first, each

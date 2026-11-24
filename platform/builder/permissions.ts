@@ -4,10 +4,12 @@
  * network tool, no subagent, no MCP server, and no path outside the workspace.
  *
  * `checkToolCall` is pure apart from reading the file system to resolve links (`realpath` of the nearest existing
- * part of a path), so it is unit-tested directly on temporary folders. The runner uses it twice: as a PreToolUse hook (every tool call, before
- * Claude Code's own permission rules) and as `canUseTool` (anything that would prompt). It denies by default: any
- * tool not on ALLOWED_TOOLS, any input it does not understand, any path that is absolute outside the workspace,
- * climbs out with `..`, starts with `~`, or reaches outside through a symlink.
+ * part of a path), so it is unit-tested directly on temporary folders. The agent (./agent.ts) runs it as a PreToolUse
+ * hook on every tool call, before Claude Code's own permission rules; it is the only gate (`canUseTool` is not set: the
+ * SDK never consults it for tools in `allowedTools`). It denies by default: any tool not on ALLOWED_TOOLS, any input it
+ * does not understand, any path that is absolute outside the workspace, climbs out with `..`, starts with `~`, or
+ * reaches outside through a symlink; any Glob pattern or folder with braces, brackets, `..`, a leading `/` or `~`; and
+ * any write to tool or CI configuration (CONFIG_FOLDERS, CONFIG_FILES).
  */
 import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -43,6 +45,30 @@ export const DISALLOWED_TOOLS = [
 
 /** Files the agent may read but never change (AGENTS.md says so; this makes it so). */
 export const PROTECTED_FILES = ["AGENTS.md", "SPEC.md", "workshop-data.js"] as const;
+
+/**
+ * Folders the agent may never write in, at any depth (case ignored): Git, GitHub workflows and Claude Code's own
+ * settings. A participant's app needs none of them, and a file there could change what tools or CI do later.
+ */
+export const CONFIG_FOLDERS = [".git", ".github", ".claude"] as const;
+
+/** Files the agent may never write, in any folder (case ignored): Claude Code's instructions and MCP servers, Git's attributes. */
+export const CONFIG_FILES = ["claude.md", ".mcp.json", ".gitattributes"] as const;
+
+/** True when a workspace-relative path (`/` between folders) names tool or CI configuration. */
+export function isConfigPath(path: string): boolean {
+  const parts = path.toLowerCase().split("/");
+  const name = parts[parts.length - 1] ?? "";
+  return parts.some((part) => (CONFIG_FOLDERS as readonly string[]).includes(part)) || (CONFIG_FILES as readonly string[]).includes(name);
+}
+
+/**
+ * A Glob pattern or folder the check can reason about: not empty, relative, no `~`, backslash or NUL, no `..` anywhere,
+ * and none of the expansion characters `{`, `}`, `[`, `]` (with them, `.{.,}/*` or `[.][.]/*` would climb out).
+ */
+function plainGlobText(text: string): boolean {
+  return text !== "" && !text.startsWith("/") && !text.startsWith("~") && !isAbsolute(text) && !/[{}[\]\\\0]/.test(text) && !text.includes("..");
+}
 
 export type ToolDecision = { allow: true } | { allow: false; reason: string };
 
@@ -104,7 +130,8 @@ export function workspacePath(workspace: string, path: string): string {
 
 /**
  * Allows a call only for an allowed tool whose every path stays inside `workspace`. Write and Edit may not touch
- * PROTECTED_FILES. Glob's pattern must be relative and free of `..` (it is joined to its folder).
+ * PROTECTED_FILES or tool and CI configuration (isConfigPath). Glob's pattern must be plain (plainGlobText: it is
+ * joined to its folder and expanded by Claude Code).
  */
 export function checkToolCall(workspace: string, tool: string, input: unknown): ToolDecision {
   if (!(ALLOWED_TOOLS as readonly string[]).includes(tool)) return deny(`The tool ${JSON.stringify(tool).slice(0, 60)} is not available: only Read, Write, Edit and Glob.`);
@@ -112,11 +139,14 @@ export function checkToolCall(workspace: string, tool: string, input: unknown): 
   const fields = input as Record<string, unknown>;
   if (tool === "Glob") {
     const pattern = text(fields.pattern);
-    if (pattern === undefined || pattern === "" || isAbsolute(pattern) || pattern.startsWith("~") || pattern.includes("\\") || pattern.includes("\0")) {
-      return deny("Use a relative pattern inside the app's folder.");
+    if (pattern === undefined || !plainGlobText(pattern)) {
+      return deny("Use a plain relative pattern inside the app's folder, without braces, brackets or '..'.");
     }
-    if (pattern.split("/").includes("..") || /(^|[/{,])\.\.([/},]|$)/.test(pattern)) return deny(OUTSIDE);
-    if (fields.path !== undefined && !insideWorkspace(workspace, text(fields.path) ?? "")) return deny(OUTSIDE);
+    if (fields.path !== undefined) {
+      const folder = text(fields.path) ?? "";
+      // An absolute folder is how Claude Code names the workspace itself; it must still resolve inside.
+      if (folder === "" || /[{}[\]]/.test(folder) || folder.includes("..") || folder.startsWith("~") || !insideWorkspace(workspace, folder)) return deny(OUTSIDE);
+    }
     return { allow: true };
   }
   const filePath = text(fields.file_path);
@@ -125,6 +155,7 @@ export function checkToolCall(workspace: string, tool: string, input: unknown): 
     const path = workspacePath(workspace, filePath);
     if (path === "") return deny(OUTSIDE);
     if ((PROTECTED_FILES as readonly string[]).includes(path)) return deny(`${path} must not be changed.`);
+    if (isConfigPath(path)) return deny("Tool and CI settings (.git, .github, .claude, CLAUDE.md, .mcp.json, .gitattributes) must not be written.");
   }
   return { allow: true };
 }

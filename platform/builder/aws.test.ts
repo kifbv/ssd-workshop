@@ -3,7 +3,7 @@
 import { GetItemCommand, UpdateItemCommand, type GetItemCommandInput, type UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
 import type { SendMessageCommandInput } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
-import { BUILDER_BUILD_ATTRIBUTES, BUILDER_USAGE_UPDATE_ATTRIBUTES, DEPLOY_QUEUE_NAME } from "../../infra/lib/config.js";
+import { BUILDER_BUILD_READ_ATTRIBUTES, BUILDER_BUILD_UPDATE_ATTRIBUTES, BUILDER_USAGE_UPDATE_ATTRIBUTES, DEPLOY_QUEUE_NAME } from "../../infra/lib/config.js";
 import { parseDeployJob } from "../api/deploy/deploy.js";
 import { DEPLOY_QUEUE_URL } from "../api/settings.js";
 import { deployRequest, SqsDeployQueue, type DeploySender } from "./queue.js";
@@ -30,6 +30,22 @@ function stub(answers: unknown[]) {
 /** Every attribute name an expression names (`#x` placeholders' values). */
 const namesOf = (input: { ExpressionAttributeNames?: Record<string, string> | undefined }): string[] => [...Object.values(input.ExpressionAttributeNames ?? {}), "pk", "sk"];
 
+/**
+ * Every attribute name the request's expressions actually use, parsed from their text: each `#x` placeholder resolved
+ * through ExpressionAttributeNames, each bare name (`pk` in `attribute_exists(pk)`), plus the key's names.
+ */
+function expressionNames(input: UpdateItemCommandInput | GetItemCommandInput): string[] {
+  const text = [
+    (input as UpdateItemCommandInput).UpdateExpression ?? "",
+    (input as UpdateItemCommandInput).ConditionExpression ?? "",
+    (input as GetItemCommandInput).ProjectionExpression ?? "",
+  ].join(" ");
+  const placeholders = (text.match(/#[A-Za-z]+/g) ?? []).map((placeholder) => input.ExpressionAttributeNames?.[placeholder] ?? placeholder);
+  const keywords = new Set(["SET", "REMOVE", "ADD", "DELETE", "AND", "OR", "NOT", "IN", "attribute_exists", "attribute_not_exists", "list_append", "if_not_exists"]);
+  const bare = (text.replace(/[#:][A-Za-z]+/g, " ").match(/[A-Za-z_]+/g) ?? []).filter((word) => !keywords.has(word));
+  return [...new Set([...placeholders, ...bare, ...Object.keys(input.Key ?? {})])].sort();
+}
+
 /** Every placeholder used in the expressions is defined, and every defined one is used (DynamoDB refuses either). */
 function placeholdersMatch(input: UpdateItemCommandInput | GetItemCommandInput): void {
   const text = [
@@ -46,7 +62,7 @@ function placeholdersMatch(input: UpdateItemCommandInput | GetItemCommandInput):
 const step: FeedEvent = { kind: "step", step: "preparing", at: NOW };
 
 describe("DynamoBuildRecords (ticket 2.8)", () => {
-  it("names only BUILDER_BUILD_ATTRIBUTES in BUILD# and BUILDER_USAGE_UPDATE_ATTRIBUTES in the usage item, and returns no attributes", async () => {
+  it("names exactly BUILDER_BUILD_READ_ATTRIBUTES (GetItem) and BUILDER_BUILD_UPDATE_ATTRIBUTES (UpdateItem) in BUILD#, only BUILDER_USAGE_UPDATE_ATTRIBUTES in the usage item, and returns no attributes", async () => {
     const { client, sent } = stub([{ Item: { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "queued" } } }]);
     const records = new DynamoBuildRecords(client, TABLE);
     expect(await records.read("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued" });
@@ -61,7 +77,8 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     const readInput = read?.input as GetItemCommandInput;
     expect(readInput).toMatchObject({ TableName: TABLE, Key: { pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } }, ConsistentRead: true });
     placeholdersMatch(readInput);
-    for (const name of namesOf(readInput)) expect(BUILDER_BUILD_ATTRIBUTES, name).toContain(name);
+    expect(expressionNames(readInput)).toEqual([...BUILDER_BUILD_READ_ATTRIBUTES].sort());
+    const buildNames = new Set<string>();
     for (const command of updates) {
       expect(command).toBeInstanceOf(UpdateItemCommand);
       const input = command.input as UpdateItemCommandInput;
@@ -70,9 +87,14 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
       const usage = input.Key?.pk?.S === "PARTICIPANT#p-1";
       if (usage) expect(input.Key?.sk?.S).toBe("USAGE");
       else expect(input.Key).toEqual({ pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } });
-      const allowed: readonly string[] = usage ? BUILDER_USAGE_UPDATE_ATTRIBUTES : BUILDER_BUILD_ATTRIBUTES;
+      const allowed: readonly string[] = usage ? BUILDER_USAGE_UPDATE_ATTRIBUTES : BUILDER_BUILD_UPDATE_ATTRIBUTES;
       for (const name of namesOf(input)) expect(allowed, name).toContain(name);
+      for (const name of expressionNames(input)) expect(allowed, name).toContain(name);
+      if (!usage) for (const name of expressionNames(input)) buildNames.add(name);
     }
+    // The update list is exactly what the builder's BUILD# updates name: nothing more for 2.9's role to touch.
+    expect([...buildNames].sort()).toEqual([...BUILDER_BUILD_UPDATE_ATTRIBUTES].sort());
+    expect(BUILDER_BUILD_UPDATE_ATTRIBUTES).not.toContain("participantId");
   });
 
   it("claims only an existing queued or building build of the nickname that has no pushed commit, with a new feed", async () => {
