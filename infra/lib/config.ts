@@ -104,6 +104,23 @@ export const PAGES_CONTENT_SECURITY_POLICY = [
   "form-action 'self'",
   "object-src 'none'",
 ].join("; ");
+/**
+ * Content-Security-Policy of the participants' apps under `/apps/*` (Franck, 2026-11-23, "Apps
+ * sandboxed"): scripts, forms, dialogs and new windows, but no `allow-same-origin`, so an app runs in
+ * an opaque origin, never sees the platform's cookies and has no `localStorage`.
+ * Ticket 2.3 adds loading limits (spec delta pending Franck's yes): the app loads and sends only to its
+ * own server (`'self'` still means the served address under the sandbox, tested), images also from
+ * `data:`, and no inline scripts or styles. This blocks the outside addresses that the deploy check
+ * cannot see (built from parts at run time). Ticket 2.3's Playwright test serves the template with it;
+ * ticket 2.5's headers policy sends it.
+ */
+export const APPS_CONTENT_SECURITY_POLICY = [
+  "sandbox allow-scripts allow-forms allow-modals allow-popups",
+  "default-src 'self'",
+  "connect-src 'self'",
+  "img-src 'self' data:",
+  "form-action 'self'",
+].join("; ");
 /** Lambda function, role and log group of `GET /api/health`. */
 export const HEALTH_FUNCTION_NAME = `${PREFIX}-api-health`;
 /** Lambda function, role and log group of `POST /api/sign-in/code` (ticket 1.4). */
