@@ -46,6 +46,13 @@ import {
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
   STACK_NAMES,
+  BUILDS_AVAILABILITY_ZONES,
+  BUILDS_CLUSTER_NAME,
+  BUILDS_SECURITY_GROUP_NAME,
+  BUILDS_VPC_CIDR,
+  BUILDS_VPC_NAME,
+  BUILDER_IMAGES_KEPT,
+  BUILDER_REPOSITORY_NAME,
   TABLE_NAME,
 } from "./config.js";
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
@@ -60,7 +67,7 @@ interface Resource {
   DependsOn?: string | string[];
 }
 
-const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api];
+const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api, STACK_NAMES.builds];
 
 /** Types that must carry the project tag in their own template (taggable in CloudFormation). */
 const MUST_BE_TAGGED = [
@@ -75,6 +82,13 @@ const MUST_BE_TAGGED = [
   "AWS::ApiGatewayV2::Stage",
   "AWS::SQS::Queue",
   "AWS::Lambda::EventSourceMapping",
+  "AWS::EC2::VPC",
+  "AWS::EC2::Subnet",
+  "AWS::EC2::RouteTable",
+  "AWS::EC2::InternetGateway",
+  "AWS::EC2::SecurityGroup",
+  "AWS::ECS::Cluster",
+  "AWS::ECR::Repository",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -90,6 +104,9 @@ const NOT_TAGGABLE = [
   "AWS::ApiGatewayV2::Route",
   "AWS::ApiGatewayV2::Integration",
   "AWS::Lambda::Permission",
+  "AWS::EC2::VPCGatewayAttachment",
+  "AWS::EC2::Route",
+  "AWS::EC2::SubnetRouteTableAssociation",
 ];
 
 /**
@@ -118,6 +135,14 @@ const DNS_NAME_PROPERTIES: Record<string, string[]> = {
   "AWS::Lambda::EventSourceMapping": ["FunctionName"],
 };
 
+/**
+ * Per type, nested paths whose "Name" key is a setting, not a name: an ECS cluster
+ * setting's `Name` (`containerInsights`).
+ */
+const NOT_NAME_PATHS: Record<string, RegExp[]> = {
+  "AWS::ECS::Cluster": [/^\.ClusterSettings\[\d+\]\.Name$/],
+};
+
 /** Every [path, value] under `value` whose key is a physical name ("Name" or "*Name"). */
 function physicalNames(value: unknown, path: string, skip: string[]): [string, unknown][] {
   if (Array.isArray(value)) return value.flatMap((v, i) => physicalNames(v, `${path}[${i}]`, []));
@@ -140,6 +165,9 @@ const EXPECTED_NAME_PATHS = [
   "TableName",
   "QueueName",
   "Name",
+  "GroupName",
+  "ClusterName",
+  "RepositoryName",
 ];
 
 let dir: string;
@@ -179,8 +207,9 @@ function tagsOf(r: Resource): Record<string, unknown> {
 }
 
 describe("stacks", () => {
-  it("synthesizes the assets, site and api stacks in eu-central-1 and the edge stack in us-east-1", () => {
+  it("synthesizes the assets, site, api and builds stacks in eu-central-1 and the edge stack in us-east-1", () => {
     expect(stack(STACK_NAMES.assets).environment).toMatchObject({ account: ACCOUNT, region: REGION });
+    expect(stack(STACK_NAMES.builds).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.site).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.api).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.edge).environment).toMatchObject({ account: ACCOUNT, region: EDGE_REGION });
@@ -209,13 +238,17 @@ describe("stacks", () => {
       }
     }
     // The assets stack creates the bucket and the edge stack is in another region,
-    // so both send their template inline and must have no file assets.
-    for (const name of [STACK_NAMES.assets, STACK_NAMES.edge]) {
+    // so both send their template inline and must have no file assets; the builds stack has none.
+    for (const name of [STACK_NAMES.assets, STACK_NAMES.edge, STACK_NAMES.builds]) {
       const s = stack(name);
       expect(s.stackTemplateAssetObjectUrl).toBeUndefined();
       expect(s.assets).toEqual([]);
       expect(s.template.Parameters ?? {}).toEqual({});
     }
+  });
+
+  it("needs no context lookup, so synth runs in CI without AWS credentials (ticket 2.1: fixed zones)", () => {
+    expect(assembly.manifest.missing ?? []).toEqual([]);
   });
 
   it.each(STACKS)("%s carries the project=ssd-workshop stack tag", (name) => {
@@ -254,6 +287,7 @@ describe("tags, boundary and names (criterion 3)", () => {
     const seen = new Set<string>();
     for (const [s, id, r] of allResources()) {
       for (const [path, value] of physicalNames(r.Properties, "", DNS_NAME_PROPERTIES[r.Type] ?? [])) {
+        if ((NOT_NAME_PATHS[r.Type] ?? []).some((p) => p.test(path))) continue;
         seen.add(path.slice(1));
         expect(value, `${s}/${id}${path}`).toMatch(/^ssd-workshop-/);
       }
@@ -1323,5 +1357,124 @@ describe("api stack: AI worker (ticket 1.7)", () => {
   it("bundles the handler into a self-contained index.js that skips a malformed job without any AWS call", async () => {
     const bundle = f.bundle<{ handler: (event: { Records: { body: string }[] }) => Promise<void> }>();
     await expect(quietly(() => bundle.handler({ Records: [{ body: "not json" }] }))).resolves.toBeUndefined();
+  });
+});
+
+describe("builds stack: network, cluster and image repository (ticket 2.1)", () => {
+  const buildsResources = () => resources(STACK_NAMES.builds);
+  const buildsOfType = (type: string) => buildsResources().filter(([, r]) => r.Type === type);
+  const nameTag = (r: Resource) => tagsOf(r).Name;
+
+  it("creates one VPC ssd-workshop-builds with DNS, tagged project=ssd-workshop (criterion 1)", () => {
+    const vpcs = buildsOfType("AWS::EC2::VPC");
+    expect(vpcs).toHaveLength(1);
+    const [, vpc] = vpcs[0] as [string, Resource];
+    expect(vpc.Properties).toMatchObject({ CidrBlock: BUILDS_VPC_CIDR, EnableDnsSupport: true, EnableDnsHostnames: true });
+    expect(nameTag(vpc)).toBe(BUILDS_VPC_NAME);
+    expect(tagsOf(vpc).project).toBe("ssd-workshop");
+    expect(ofType("AWS::EC2::VPC")).toHaveLength(1);
+  });
+
+  it("creates exactly two public subnets in two different zones, named ssd-workshop-* and tagged (criterion 1)", () => {
+    const subnets = buildsOfType("AWS::EC2::Subnet");
+    expect(subnets).toHaveLength(2);
+    const zones = subnets.map(([, r]) => r.Properties?.AvailabilityZone);
+    expect([...zones].sort()).toEqual([...BUILDS_AVAILABILITY_ZONES]);
+    expect(BUILDS_AVAILABILITY_ZONES).toEqual(["eu-central-1a", "eu-central-1b"]);
+    for (const [id, r] of subnets) {
+      expect(nameTag(r), id).toMatch(/^ssd-workshop-/);
+      expect(tagsOf(r).project, id).toBe("ssd-workshop");
+      // Tasks ask for a public IP in RunTask; nothing else gets one by default.
+      expect(r.Properties?.MapPublicIpOnLaunch, id).toBe(false);
+    }
+    expect(ofType("AWS::EC2::Subnet")).toHaveLength(2);
+  });
+
+  it("routes both subnets to the internet through one tagged internet gateway (public subnets)", () => {
+    const gateways = buildsOfType("AWS::EC2::InternetGateway");
+    expect(gateways).toHaveLength(1);
+    expect(nameTag(gateways[0]?.[1] as Resource)).toMatch(/^ssd-workshop-/);
+    const defaultRoutes = buildsOfType("AWS::EC2::Route").filter(
+      ([, r]) => r.Properties?.DestinationCidrBlock === "0.0.0.0/0",
+    );
+    expect(defaultRoutes).toHaveLength(2);
+    for (const [id, r] of defaultRoutes) expect(r.Properties?.GatewayId, id).toBeDefined();
+    for (const [id, r] of buildsOfType("AWS::EC2::RouteTable")) {
+      expect(nameTag(r), id).toMatch(/^ssd-workshop-/);
+      expect(tagsOf(r).project, id).toBe("ssd-workshop");
+    }
+  });
+
+  it("has no NAT gateway, Elastic IP, VPC endpoint, flow log, Lambda function or custom resource (criterion 1)", () => {
+    const types = buildsResources().map(([, r]) => r.Type);
+    expect(types).not.toContain("AWS::EC2::NatGateway");
+    expect(types).not.toContain("AWS::EC2::EIP");
+    expect(types).not.toContain("AWS::EC2::VPCEndpoint");
+    expect(types).not.toContain("AWS::EC2::FlowLog");
+    expect(types).not.toContain("AWS::Lambda::Function");
+    expect(types).not.toContain("AWS::IAM::Role");
+    expect(types.filter((t) => t.startsWith("Custom::"))).toEqual([]);
+    // CDK's restrictDefaultSecurityGroup would add a custom resource on the untagged default group.
+    expect(JSON.stringify(stack(STACK_NAMES.builds).template)).not.toContain("RestrictDefaultSecurityGroup");
+    // Nowhere in the app either.
+    expect(ofType("AWS::EC2::NatGateway")).toEqual([]);
+    expect(ofType("AWS::EC2::VPCEndpoint")).toEqual([]);
+  });
+
+  it("creates one security group ssd-workshop-builds in the VPC, tagged (criterion 1)", () => {
+    const groups = buildsOfType("AWS::EC2::SecurityGroup");
+    expect(groups).toHaveLength(1);
+    const [id, group] = groups[0] as [string, Resource];
+    expect(group.Properties?.GroupName, id).toBe(BUILDS_SECURITY_GROUP_NAME);
+    expect(tagsOf(group).project, id).toBe("ssd-workshop");
+    const [vpcId] = buildsOfType("AWS::EC2::VPC")[0] as [string, Resource];
+    expect(group.Properties?.VpcId).toEqual({ Ref: vpcId });
+  });
+
+  it("allows only outgoing TCP 443 to anywhere and nothing incoming (criterion 2)", () => {
+    const [, group] = buildsOfType("AWS::EC2::SecurityGroup")[0] as [string, Resource];
+    expect(group.Properties?.SecurityGroupEgress).toEqual([
+      { CidrIp: "0.0.0.0/0", IpProtocol: "tcp", FromPort: 443, ToPort: 443, Description: expect.any(String) },
+    ]);
+    expect(group.Properties?.SecurityGroupIngress).toBeUndefined();
+    // No rule added as a separate resource either.
+    const types = buildsResources().map(([, r]) => r.Type);
+    expect(types).not.toContain("AWS::EC2::SecurityGroupIngress");
+    expect(types).not.toContain("AWS::EC2::SecurityGroupEgress");
+  });
+
+  it("creates the ECS cluster ssd-workshop-builds without Container Insights or capacity on EC2, tagged (criterion 1)", () => {
+    const clusters = buildsOfType("AWS::ECS::Cluster");
+    expect(clusters).toHaveLength(1);
+    const [id, cluster] = clusters[0] as [string, Resource];
+    expect(cluster.Properties?.ClusterName, id).toBe(BUILDS_CLUSTER_NAME);
+    expect(tagsOf(cluster).project, id).toBe("ssd-workshop");
+    expect(cluster.Properties?.ClusterSettings).toEqual([{ Name: "containerInsights", Value: "disabled" }]);
+    const types = buildsResources().map(([, r]) => r.Type);
+    expect(types).not.toContain("AWS::ECS::CapacityProvider");
+    expect(types).not.toContain("AWS::AutoScaling::AutoScalingGroup");
+  });
+
+  it("creates the ECR repository ssd-workshop-builder, retained and tagged (criterion 1)", () => {
+    const repos = buildsOfType("AWS::ECR::Repository");
+    expect(repos).toHaveLength(1);
+    const [id, repo] = repos[0] as [string, Resource];
+    expect(repo.Properties?.RepositoryName, id).toBe(BUILDER_REPOSITORY_NAME);
+    expect(tagsOf(repo).project, id).toBe("ssd-workshop");
+    expect(repo).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+    // No repository policy: the access stack denies ecr:SetRepositoryPolicy.
+    expect(repo.Properties?.RepositoryPolicyText).toBeUndefined();
+  });
+
+  it("scans images on push and keeps at most 5 images (criterion 3)", () => {
+    const [, repo] = buildsOfType("AWS::ECR::Repository")[0] as [string, Resource];
+    expect(repo.Properties?.ImageScanningConfiguration).toEqual({ ScanOnPush: true });
+    const policy = JSON.parse((repo.Properties?.LifecyclePolicy as { LifecyclePolicyText: string }).LifecyclePolicyText) as {
+      rules: { selection: Record<string, unknown>; action: { type: string } }[];
+    };
+    expect(policy.rules).toHaveLength(1);
+    expect(policy.rules[0]?.selection).toMatchObject({ tagStatus: "any", countType: "imageCountMoreThan", countNumber: 5 });
+    expect(policy.rules[0]?.action).toEqual({ type: "expire" });
+    expect(BUILDER_IMAGES_KEPT).toBe(5);
   });
 });

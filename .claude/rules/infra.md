@@ -162,3 +162,8 @@ paths:
   Bedrock with `maxConcurrency` on the event source.
 - In tests, `expect.not.arrayContaining([a, b])` passes unless all of `a` and `b` are present: check each forbidden
   name with its own `not.toContain`.
+- A `Vpc` in a stack with an account in `env` asks AWS for the account's zones at synth time, even with
+  `availabilityZones` given (it validates them against `Stack.availabilityZones`): override the stack's
+  `availabilityZones` getter with the fixed zones from `config.ts` (ticket 2.1); the app test checks the
+  assembly lists no missing context. Set `restrictDefaultSecurityGroup: false` (the default group is untagged,
+  and the restriction is a custom-resource Lambda).
