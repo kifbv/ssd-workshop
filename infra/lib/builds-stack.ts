@@ -19,7 +19,7 @@ import { CfnSchedule } from "aws-cdk-lib/aws-scheduler";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
-import { BEDROCK_INVOKE_RESOURCES, slotReleaseStatements, workshopFunction } from "./api-stack.js";
+import { BEDROCK_INVOKE_RESOURCES, workshopFunction } from "./api-stack.js";
 import {
   ACCOUNT,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
@@ -272,8 +272,8 @@ export class BuildsStack extends Stack {
     taskRole.addToPolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [`arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}`] }),
     );
-    // Ticket 3.4: a build the runner marks failed frees its slot.
-    for (const statement of slotReleaseStatements(tableArn)) taskRole.addToPolicy(statement);
+    // Ticket 3.4: no right on the build slots (the task runs next to the AI agent): the launcher's minute check frees
+    // the slot of a build the runner marks failed.
     this.builderTask = new FargateTaskDefinition(this, "BuilderTask", {
       family: BUILDER_TASK_FAMILY,
       cpu: BUILDER_CPU,
@@ -343,10 +343,12 @@ export class BuildsStack extends Stack {
         },
       }),
     );
+    // Reads must be projected (or a count, for the line): `StringEquals` on `dynamodb:Select`, so a request without a
+    // projection (the whole item) is refused (try 2). Writes carry no Select, so they get their own statements.
     launcher.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        actions: ["dynamodb:GetItem"],
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
         resources: [tableArn],
         conditions: {
           "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_SLOTS_PARTITION], "dynamodb:Attributes": [...LAUNCHER_SLOT_ATTRIBUTES] },
@@ -357,22 +359,33 @@ export class BuildsStack extends Stack {
     launcher.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
         resources: [tableArn],
         conditions: {
           "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_SLOTS_PARTITION], "dynamodb:Attributes": [...LAUNCHER_SLOT_ATTRIBUTES] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES], "dynamodb:Select": ["SPECIFIC_ATTRIBUTES"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
         },
       }),
     );
     launcher.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+        actions: ["dynamodb:Query"],
         resources: [tableArn],
         conditions: {
           "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_QUEUE_PARTITION], "dynamodb:Attributes": [...LAUNCHER_QUEUE_ATTRIBUTES] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES], "dynamodb:Select": ["SPECIFIC_ATTRIBUTES", "COUNT"] },
+          StringEquals: { "dynamodb:Select": ["SPECIFIC_ATTRIBUTES", "COUNT"] },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_QUEUE_PARTITION], "dynamodb:Attributes": [...LAUNCHER_QUEUE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
         },
       }),
     );

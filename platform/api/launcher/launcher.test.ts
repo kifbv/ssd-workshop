@@ -4,13 +4,14 @@ import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "../gith
 import { FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../github/fakes.js";
 import { SPEC_FILE } from "../github/repository.js";
 import { loadTemplateFiles } from "../github/template.js";
-import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, QUEUE_SEEN_MS } from "../settings.js";
+import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, QUEUE_SEEN_MS, QUEUE_WAIT_MAX_MS, SLOT_REPAIR_FORCE_AFTER } from "../settings.js";
 import { runBuilds } from "../../src/builds/command.js";
 import { FakeBuildsStore, FakeLaunchQueue, FakeTaskWatch } from "../../src/builds/fakes.js";
 import { FakeBuildTable, FakeDeadLetters, FakeTasks } from "./fakes.js";
 import {
   DEPLOY_DEAD_REASON,
   QUEUED_DEAD_REASON,
+  QUEUE_TIMEOUT_REASON,
   SPEC_MISSING_REASON,
   START_FAILED_REASON,
   STOPPED_REASON,
@@ -577,6 +578,10 @@ describe("build slots: at most N builds at once (ticket 3.4)", () => {
     t.table.queue.set("2026-11-24T09:59:00.000Z#gone", { buildId: "gone", lastSeenAt: "2026-11-24T09:59:00.000Z" });
     // Seen 1 minute ago: still ahead.
     expect(await processLaunch(message(b), t.deps)).toBe("waiting");
+    // Try 2: still ahead 2.5 minutes later (a message whose 30 s visibility could not be set comes back after the
+    // queue's 150 s): a busy launcher does not let a later build pass an earlier one.
+    t.advance(150_000);
+    expect(await processLaunch(message(b), t.deps)).toBe("waiting");
     t.advance(QUEUE_SEEN_MS);
     expect(await processLaunch(message(b), t.deps)).toBe("started");
   }, 30_000);
@@ -632,7 +637,7 @@ describe("build slots: at most N builds at once (ticket 3.4)", () => {
     await runCheck(s.check);
     expect(s.table.slots.running).toBe(2);
     // The repair waits when a claim or release moved the counter between the check's two reads (its version).
-    expect(await s.table.repairSlots({ running: 2, version: s.table.slots.version - 1 }, 0)).toBe(false);
+    expect(await s.table.repairSlots({ running: 2, version: s.table.slots.version - 1, misses: 0 }, 0, false)).toBe(false);
     expect(s.table.slots.running).toBe(2);
   }, 30_000);
 
@@ -659,5 +664,119 @@ describe("build slots: at most N builds at once (ticket 3.4)", () => {
     s.advance(60_000);
     expect(await processLaunch(message(), s.deps)).toBe("waiting");
     expect(s.table.builds.get(BUILD)?.queueKey).toMatch(/^2026-11-24T10:01:01\.000Z#/);
+  }, 30_000);
+  it("try 2: WHEN the builder marks its build failed THEN it frees nothing itself, and the next minute check frees the slot", async () => {
+    const s = setup();
+    s.table.builds.delete(BUILD);
+    s.table.buildsAtOnce = 1;
+    const [first, second] = addBuilds(s, 2);
+    expect(await processLaunch(message(first), s.deps)).toBe("started");
+    // The runner's failure write: the build only (platform/builder/records.ts), the slot still held.
+    const build = s.table.builds.get(first ?? "");
+    if (build) build.status = "failed";
+    expect(s.table.slots.running).toBe(1);
+    expect(await processLaunch(message(second), s.deps)).toBe("waiting");
+    await runCheck(s.check);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", freed: 1 });
+    expect(s.table.slots.running).toBe(0);
+    expect(await processLaunch(message(second), s.deps)).toBe("started");
+  }, 30_000);
+
+  it("try 2: WHEN the counter is missing or negative THEN no build starts until the minute check sets it (unconditionally) from the holders", async () => {
+    const s = setup();
+    s.table.builds.delete(BUILD);
+    const [first, second] = addBuilds(s, 2);
+    // As before the first check after the deploy: no counter at all reads as full.
+    s.table.slots.running = undefined;
+    s.table.slots.version = 0;
+    expect(await processLaunch(message(first), s.deps)).toBe("waiting");
+    const build = s.table.builds.get(first ?? "");
+    expect(build && (await s.table.claim(first ?? "", build.nickname, build.participantId, "a", new Date().toISOString(), { cap: 15, queueKey: "q" }))).toBe("no-slot");
+    await runCheck(s.check);
+    expect(s.table.slots).toMatchObject({ running: 0, misses: 0 });
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", repaired: true, forced: true });
+    expect(await processLaunch(message(first), s.deps)).toBe("started");
+    // Negative (a release that found no counter creates it at -1): full, then reset to the holders even while the
+    // version moves, since no race can explain it.
+    s.table.slots.running = -2;
+    s.table.versionKeepsMoving = true;
+    expect(await processLaunch(message(second), s.deps)).toBe("waiting");
+    await runCheck(s.check);
+    expect(s.table.slots.running).toBe(1);
+    expect(s.logs.at(-1)).toMatchObject({ repaired: true, forced: true });
+    expect(await processLaunch(message(second), s.deps)).toBe("started");
+  }, 30_000);
+
+  it(`try 2: WHEN the counter's version keeps moving THEN the repair is forced after ${String(SLOT_REPAIR_FORCE_AFTER)} refused ones in a row`, async () => {
+    const s = setup();
+    s.table.builds.delete(BUILD);
+    const builds = addBuilds(s, 2);
+    for (const buildId of builds) expect(await processLaunch(message(buildId), s.deps)).toBe("started");
+    s.table.slots.running = 9;
+    s.table.versionKeepsMoving = true;
+    for (let i = 1; i <= SLOT_REPAIR_FORCE_AFTER; i += 1) {
+      await runCheck(s.check);
+      expect(s.table.slots).toMatchObject({ running: 9, misses: i });
+      expect(s.logs.at(-1)).toMatchObject({ repaired: false, forced: false });
+    }
+    await runCheck(s.check);
+    expect(s.table.slots).toMatchObject({ running: 2, misses: 0 });
+    expect(s.logs.at(-1)).toMatchObject({ repaired: true, forced: true });
+    // A normal race: one refused repair, then the next minute's conditional repair succeeds and clears the count.
+    s.table.slots.running = 5;
+    await runCheck(s.check);
+    expect(s.table.slots).toMatchObject({ running: 5, misses: 1 });
+    s.table.versionKeepsMoving = false;
+    await runCheck(s.check);
+    expect(s.table.slots).toMatchObject({ running: 2, misses: 0 });
+    expect(s.logs.at(-1)).toMatchObject({ repaired: true, forced: false });
+  }, 30_000);
+
+  it("try 2: WHEN a malformed item sits at a build's holder key, or a holder's build is queued again, THEN the check removes it and the build can start", async () => {
+    const s = setup();
+    s.table.builds.delete(BUILD);
+    const [blocked, requeued] = addBuilds(s, 2);
+    s.table.strays.add(`BUILD#${blocked ?? ""}`);
+    s.table.strays.add("ELSE");
+    // A holder left over from an earlier launch of a build that is queued again (its release failed, then a retry).
+    s.table.holders.set(requeued ?? "", "2026-11-24T09:00:00.000Z");
+    s.table.slots.running = 1;
+    expect(await processLaunch(message(blocked), s.deps)).toBe("waiting");
+    expect(await processLaunch(message(requeued), s.deps)).toBe("waiting");
+    await runCheck(s.check);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", strays: 2, freed: 1 });
+    expect(s.table.strays.size).toBe(0);
+    expect(s.table.holders.size).toBe(0);
+    expect(s.table.slots.running).toBe(0);
+    expect(await processLaunch(message(blocked), s.deps)).toBe("started");
+    expect(await processLaunch(message(requeued), s.deps)).toBe("started");
+  }, 30_000);
+
+  it("try 2: WHEN a build has waited in the line longer than QUEUE_WAIT_MAX_MS (waiting, or failing before its claim) THEN the minute check fails it with a plain reason", async () => {
+    const s = setup();
+    s.table.buildsAtOnce = 1;
+    const [other] = addBuilds(s, 1);
+    expect(await processLaunch(message(other), s.deps)).toBe("started");
+    // BUILD waits behind it, then its launches keep failing before the claim (a passing table error each time).
+    expect(await processLaunch(message(), s.deps)).toBe("waiting");
+    const runningBuild = s.table.builds.get(other ?? "");
+    if (runningBuild) runningBuild.status = "live";
+    await runCheck(s.check);
+    for (let i = 0; i < 3; i += 1) {
+      s.advance(QUEUE_WAIT_MAX_MS / 4);
+      s.table.failOnce.add("claim");
+      await expect(processLaunch(message(), s.deps)).rejects.toThrow(/^launch failed$/);
+      await runCheck(s.check);
+      expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    }
+    s.advance(QUEUE_WAIT_MAX_MS / 4 + 60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [QUEUE_TIMEOUT_REASON] });
+    expect(s.table.queue.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", failed: 1, unqueued: 1 });
+    // Its next delivery is a duplicate: consumed, nothing started.
+    expect(await processLaunch(message(), s.deps)).toBe("duplicate");
+    expect(s.tasks.started).toHaveLength(1);
+    assertQuietLogs(s);
   }, 30_000);
 });

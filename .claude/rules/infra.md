@@ -244,6 +244,10 @@ paths:
 - A role whose `GetItem` is limited by `dynamodb:Attributes` also needs `StringEquals` `dynamodb:Select` =
   `SPECIFIC_ATTRIBUTES`: a GetItem without a `ProjectionExpression` returns the whole item, and the attribute list alone
   may let it through (ticket 2.8, for 2.9's builder role).
+  The same holds for `Query` (ticket 3.4 try 2: `SPECIFIC_ATTRIBUTES`, or `COUNT` for a count). Writes carry no
+  `dynamodb:Select`, so a `StringEquals` on it denies them: put reads and writes of a partition in separate statements
+  (`StringEqualsIfExists` on Select may let a read without a projection through), and set `Select` explicitly on a
+  projected Query.
 - A schedule that must run a Lambda (the stuck-build check, ticket 2.9) goes EventBridge Scheduler → an
   `ssd-workshop-*` SQS queue → event source mapping: the boundary has no `lambda:InvokeFunction` for a scheduler role.
   `AWS::Scheduler::Schedule` takes no tags (it is in `NOT_TAGGABLE`).

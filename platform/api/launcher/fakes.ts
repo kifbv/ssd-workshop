@@ -3,7 +3,7 @@
 // DynamoLaunchRecords' and DynamoBuildsStore's conditions; the builder's tasks; a dead-letter queue. Ticket 3.4: the
 // build slots (counter and holders) and the waiting line, with the same conditions as the real transactions.
 import type { BuildStatus } from "../types.js";
-import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, TaskStart, TaskState } from "./launcher.js";
+import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
 
 export interface FakeBuild {
   nickname: string;
@@ -36,9 +36,16 @@ export class FakeBuildTable implements LaunchRecords {
   readonly failOnce = new Set<string>();
   /** Ticket 3.4: `buildsAtOnce` as the SETTINGS item gives it. */
   buildsAtOnce = 15;
-  /** The slot counter (`COUNT`) and the holders (build ids). */
-  readonly slots: SlotCount = { running: 0, version: 0 };
+  /**
+   * The slot counter (`COUNT`; `running` undefined: missing, as before the first check) and the holders (build ids).
+   * Starts as the first check leaves it (0 running).
+   */
+  readonly slots: SlotCount = { running: 0, version: 1, misses: 0 };
   readonly holders = new Map<string, string>();
+  /** Malformed items of the slots partition, by sort key (`BUILD#<id>` blocks that build's claim). */
+  readonly strays = new Set<string>();
+  /** Try 2: when set, every conditional repair is refused, as when another writer keeps moving the version. */
+  versionKeepsMoving = false;
   /** The waiting line: queueKey -> entry. */
   readonly queue = new Map<string, { buildId: string; lastSeenAt: string }>();
 
@@ -84,8 +91,12 @@ export class FakeBuildTable implements LaunchRecords {
     return { ...this.slots };
   }
 
-  async listSlotHolders(): Promise<string[]> {
-    return [...this.holders.keys()];
+  async listSlotHolders(): Promise<SlotItem[]> {
+    return [...[...this.holders.keys()].map((buildId) => ({ sk: `BUILD#${buildId}`, buildId })), ...[...this.strays].map((sk) => ({ sk }))];
+  }
+
+  async removeSlotItem(sk: string): Promise<void> {
+    this.strays.delete(sk);
   }
 
   /** As releaseSlotItems: only for a build that ended (or is gone) and holds a slot. */
@@ -93,16 +104,26 @@ export class FakeBuildTable implements LaunchRecords {
     const build = this.builds.get(buildId);
     if ((build !== undefined && (build.status === "building" || build.status === "deploying")) || !this.holders.has(buildId)) return false;
     this.holders.delete(buildId);
-    this.slots.running -= 1;
+    this.countDown();
+    return true;
+  }
+
+  /** A release's ADD on the counter (it creates a missing one at -1). */
+  private countDown(): void {
+    this.slots.running = (this.slots.running ?? 0) - 1;
+    this.slots.version += 1;
+  }
+
+  async repairSlots(seen: SlotCount, running: number, force: boolean): Promise<boolean> {
+    if (!force && (this.versionKeepsMoving || this.slots.version !== seen.version)) return false;
+    this.slots.running = running;
+    this.slots.misses = 0;
     this.slots.version += 1;
     return true;
   }
 
-  async repairSlots(seen: SlotCount, running: number): Promise<boolean> {
-    if (this.slots.version !== seen.version) return false;
-    this.slots.running = running;
-    this.slots.version += 1;
-    return true;
+  async noteRepairRefused(): Promise<void> {
+    this.slots.misses += 1;
   }
 
   async listQueueEntries(): Promise<{ queueKey: string; buildId: string }[]> {
@@ -139,8 +160,9 @@ export class FakeBuildTable implements LaunchRecords {
     this.maybeFail("claim");
     const build = this.builds.get(buildId);
     if (!build || build.status !== "queued" || build.nickname !== nickname || build.participantId !== participantId) return "taken";
-    if (this.slots.running >= slot.cap || this.holders.has(buildId)) return "no-slot";
-    this.slots.running += 1;
+    const running = this.slots.running;
+    if (running === undefined || running < 0 || running >= slot.cap || this.holders.has(buildId) || this.strays.has(`BUILD#${buildId}`)) return "no-slot";
+    this.slots.running = running + 1;
     this.slots.version += 1;
     this.holders.set(buildId, nowIso);
     this.queue.delete(slot.queueKey);
@@ -175,10 +197,7 @@ export class FakeBuildTable implements LaunchRecords {
     build.finishedAt = nowIso;
     build.updatedAt = nowIso;
     const buildId = [...this.builds].find(([, b]) => b === build)?.[0];
-    if (buildId !== undefined && this.holders.delete(buildId)) {
-      this.slots.running -= 1;
-      this.slots.version += 1;
-    }
+    if (buildId !== undefined && this.holders.delete(buildId)) this.countDown();
   }
 
   async failUnstarted(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {

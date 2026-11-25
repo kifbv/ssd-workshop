@@ -107,6 +107,8 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   readonly builds = new Map<string, FakeBuild>();
   /** Ticket 3.4: the waiting line (`BUILD_QUEUE`), queueKey -> when its message was last seen. */
   readonly queueEntries = new Map<string, string>();
+  /** Every countQueuedAhead call (its queueKey), so a test can prove the count was never computed. */
+  readonly countQueuedAheadCalls: string[] = [];
   /** The `SETTINGS` item as DynamoDB would return it (ticket 3.3 reads the budget from it); none: the defaults. */
   settingsItem: Record<string, AttributeValue> | undefined;
   conversationFailOn: Method | undefined;
@@ -401,6 +403,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   }
 
   async countQueuedAhead(queueKey: string, sinceIso: string): Promise<number> {
+    this.countQueuedAheadCalls.push(queueKey);
     this.fail("countQueuedAhead");
     return [...this.queueEntries].filter(([key, seen]) => key < queueKey && seen >= sinceIso).length;
   }

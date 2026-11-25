@@ -650,7 +650,8 @@ export function workshopFunction(
 }
 
 /**
- * Ticket 3.4: the rights to free a build's slot (platform/api/build/slots.ts), for every role that ends builds: check the
+ * Ticket 3.4: the rights to free a build's slot (platform/api/build/slots.ts), for the deployer (the launcher has its own
+ * wider statements; the builder task none): check the
  * build ended (ConditionCheckItem in `BUILD#*`, `status` only), delete its holder and count the counter down (in
  * `BUILD_SLOTS`, SLOT_RELEASE_ATTRIBUTES only). Transactions have no IAM action of their own: each item is authorized alone.
  */

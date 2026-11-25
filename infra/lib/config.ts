@@ -474,15 +474,19 @@ export const BUILD_SLOTS_PARTITION = "BUILD_SLOTS";
 export const BUILD_QUEUE_PARTITION = "BUILD_QUEUE";
 /**
  * The launcher's names in `BUILD_SLOTS` (GetItem, PutItem, UpdateItem, DeleteItem, Query): the counter (`running`,
- * `version`) and the holders (`type`, `buildId`, `heldSince`).
+ * `version`, and `repairMisses`, the check's refused repairs in a row, try 2) and the holders (`type`, `buildId`,
+ * `heldSince`). Its reads (GetItem, Query) must be projected (`dynamodb:Select` SPECIFIC_ATTRIBUTES).
  */
-export const LAUNCHER_SLOT_ATTRIBUTES = ["pk", "sk", "type", "buildId", "heldSince", "running", "version"] as const;
-/** The launcher's names in `BUILD_QUEUE` (PutItem, UpdateItem, DeleteItem, Query): an entry and when its message was last seen. */
+export const LAUNCHER_SLOT_ATTRIBUTES = ["pk", "sk", "type", "buildId", "heldSince", "running", "version", "repairMisses"] as const;
+/**
+ * The launcher's names in `BUILD_QUEUE` (UpdateItem, DeleteItem, Query): an entry and when its message was last seen. Its
+ * Query must be projected or a count (`dynamodb:Select` SPECIFIC_ATTRIBUTES or COUNT).
+ */
 export const LAUNCHER_QUEUE_ATTRIBUTES = ["pk", "sk", "type", "buildId", "lastSeenAt"] as const;
 /**
- * Every role that ends a build (deployer, builder task, launcher) frees its slot (platform/api/build/slots.ts): DeleteItem
- * of the holder and UpdateItem of the counter in `BUILD_SLOTS` naming only these, and ConditionCheckItem in `BUILD#*`
- * naming only SLOT_RELEASE_CHECK_ATTRIBUTES (the build must have ended).
+ * The deployer and the launcher free a build's slot when they end it (platform/api/build/slots.ts): DeleteItem of the
+ * holder and UpdateItem of the counter in `BUILD_SLOTS` naming only these, and ConditionCheckItem in `BUILD#*` naming only
+ * SLOT_RELEASE_CHECK_ATTRIBUTES (the build must have ended). The builder task has no right on the slots (try 2).
  */
 export const SLOT_RELEASE_ATTRIBUTES = ["pk", "sk", "running", "version"] as const;
 export const SLOT_RELEASE_CHECK_ATTRIBUTES = ["pk", "sk", "status"] as const;

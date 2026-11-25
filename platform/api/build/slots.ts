@@ -1,19 +1,20 @@
 /**
  * Build slots (ticket 3.4): at most `buildsAtOnce` builds hold a slot at once. The launcher's claim takes one (adds a
  * holder item and counts `running` up, in the claim's transaction, only while `running` is under the cap); this module
- * frees one. Every writer that ends a build (the deployer's live and failed, the builder's failed, the launcher's and its
- * check's failures) calls `releaseSlotQuietly` after its own terminal write: one transaction that
+ * frees one. The deployer (live and failed) and the launcher (its failures and its check's) call `releaseSlotQuietly`
+ * after their own terminal write; the builder task does not (it runs next to the AI agent and has no right on the slots:
+ * its failed builds are freed by the launcher's check within a minute). One transaction that
  *
  * - checks the build is no longer `building` or `deploying` (or gone): a late release never frees a running build's slot,
  * - deletes the build's holder item, only while it exists (so a slot is freed exactly once, whoever comes first),
  * - counts `running` down (and `version` up, so the check's repair can tell the counter moved).
  *
  * A release that finds no holder (already freed, or a build launched before ticket 3.4) changes nothing. A failed
- * release is left to the launcher's check, which every minute frees the holders of builds that ended and sets the
+ * release is left to the launcher's check, which every minute frees the holders of builds no longer running and sets the
  * counter to the number of holders left.
  *
- * Its names are SLOT_RELEASE_ATTRIBUTES and SLOT_RELEASE_CHECK_ATTRIBUTES in infra/lib/config.ts (each role that ends
- * builds has exactly these rights, checked on the synth output).
+ * Its names are SLOT_RELEASE_ATTRIBUTES and SLOT_RELEASE_CHECK_ATTRIBUTES in infra/lib/config.ts (the deployer has
+ * exactly these rights, checked on the synth output; the launcher has more).
  */
 import {
   QueryCommand,

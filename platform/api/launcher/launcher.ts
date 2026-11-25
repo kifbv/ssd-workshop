@@ -25,8 +25,10 @@
  * and marks its entry seen. A build waits (outcome `waiting`: the handler makes its message come back after
  * LAUNCH_WAIT_SECONDS) while the slots in use plus the waiting builds ahead of it (seen within QUEUE_SEEN_MS) reach the
  * cap, so builds start in their order. The claim's transaction also takes the slot: it counts `running` up only while
- * it is under the cap (two launchers can never pass it), adds the build's slot holder and removes its waiting entry.
- * Every write that ends a build frees its slot (../build/slots.ts).
+ * the counter exists and is between 0 and the cap (two launchers can never pass it; a missing or negative counter reads
+ * as full until the check repairs it), adds the build's slot holder and removes its waiting entry. The launcher's and the
+ * deployer's writes that end a build free its slot (../build/slots.ts); a build the builder task marks failed keeps it
+ * until the next check (try 2: the task runs next to the AI agent, so it has no right on the slots at all).
  *
  * Check (every minute, EventBridge Scheduler through the queue `ssd-workshop-builds-check`): a watched build whose task
  * has stopped (or is gone) while the build is still `building` without a pushed commit is marked failed; one still
@@ -34,9 +36,12 @@
  * task stopped; a claim that
  * never got a task within LAUNCH_UNSTARTED_MS is marked failed; a task running past BUILD_TASK_MAX_MS is stopped; the
  * launch queue's dead-letter messages fail their `queued` builds, and the deploy queue's fail their builds still
- * waiting for that deploy (decision "(2.5) Deploy message", "(2.7) For 2.9"). Ticket 3.4: it then frees the slots of
- * builds that ended (a writer's release that failed), sets the slot counter to the number of holders left (only if no
- * claim or release moved it meanwhile), and removes waiting entries of builds no longer waiting there.
+ * waiting for that deploy (decision "(2.5) Deploy message", "(2.7) For 2.9"). Ticket 3.4: it then deletes malformed
+ * items among the slot holders, frees the slots of builds no longer `building` or `deploying` (failed by the builder, a
+ * writer's release that failed, a build gone or queued again), sets the slot counter to the number of holders left (only
+ * if no claim or release moved it meanwhile, unless the counter is missing or negative or the last
+ * SLOT_REPAIR_FORCE_AFTER repairs were refused), fails builds waiting in the line longer than QUEUE_WAIT_MAX_MS, and
+ * removes waiting entries of builds no longer waiting there.
  *
  * Logs: one JSON line per launch or check, with an outcome, counts and an error name; never a token, nickname, build id,
  * repository name or error message.
@@ -46,7 +51,17 @@ import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/a
 import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN, newQueueKey } from "../keys.js";
-import { ACCOUNT, BUILD_TASK_MAX_MS, BUILDS_CLUSTER_NAME, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, QUEUE_SEEN_MS, REGION } from "../settings.js";
+import {
+  ACCOUNT,
+  BUILD_TASK_MAX_MS,
+  BUILDS_CLUSTER_NAME,
+  HANDED_OVER_GRACE_MS,
+  LAUNCH_UNSTARTED_MS,
+  QUEUE_SEEN_MS,
+  QUEUE_WAIT_MAX_MS,
+  REGION,
+  SLOT_REPAIR_FORCE_AFTER,
+} from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { BuildStatus } from "../types.js";
 
@@ -61,8 +76,18 @@ export interface LaunchBuild {
 
 /** The slot counter (ticket 3.4): slots in use, and a number every claim, release and repair moves up. */
 export interface SlotCount {
-  running: number;
+  /** Undefined when the counter (or its `running`) is missing or not a whole number: no claim passes then. */
+  running: number | undefined;
+  /** 0 when missing. */
   version: number;
+  /** Try 2: consecutive refused repairs (`repairMisses`, written only by the launcher's check). */
+  misses: number;
+}
+
+/** An item of the slots partition other than the counter: a holder (`buildId` set) or a malformed item (no `buildId`). */
+export interface SlotItem {
+  sk: string;
+  buildId?: string;
 }
 
 /** What a claim did: the build is now `building` with a slot; it is no longer queued (a duplicate); or no slot is free. */
@@ -93,22 +118,33 @@ export interface LaunchRecords {
   touchQueueEntry(queueKey: string, buildId: string, nowIso: string): Promise<void>;
   /** The waiting entries before `queueKey` seen at or after `sinceIso` (the builds ahead). */
   countAhead(queueKey: string, sinceIso: string): Promise<number>;
-  /** The slot counter (0 and 0 when it does not exist yet). */
+  /** The slot counter (`running` undefined when it does not exist yet). */
   readSlots(): Promise<SlotCount>;
   /**
    * One transaction: the build from `queued` to `building` under a new launch (`attemptId`, which the task's runner
    * must name in every write; only while its nickname and participant are the ones read), its watch-list entry, and
    * (ticket 3.4) a slot: the counter goes up only while under `cap`, the build's holder is added and its waiting entry
    * (`queueKey`) removed. `taken` when the build is no longer `queued` (a duplicate message), `no-slot` when the cap was
-   * reached (or another claim or release wrote the counter at the same moment).
+   * reached, the counter is missing or negative, an item already sits at the build's holder key (or another claim or
+   * release wrote the counter at the same moment).
    */
   claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string, slot: { cap: number; queueKey: string }): Promise<ClaimResult>;
-  /** The builds holding a slot. */
-  listSlotHolders(): Promise<string[]>;
+  /**
+   * Every item of the slots partition but the counter: a well-formed holder (`type` build-slot, a valid `buildId`, at
+   * `BUILD#<buildId>`) carries its `buildId`; any other item none.
+   */
+  listSlotHolders(): Promise<SlotItem[]>;
+  /** Deletes a malformed item of the slots partition (never the counter). */
+  removeSlotItem(sk: string): Promise<void>;
   /** Frees the build's slot (../build/slots.ts): false when it holds none or still runs. */
   releaseSlot(buildId: string): Promise<boolean>;
-  /** Sets the counter to `running`, only while its version is still `seen`'s. */
-  repairSlots(seen: SlotCount, running: number): Promise<boolean>;
+  /**
+   * Sets the counter to `running` (and its refused repairs to 0), only while its version is still `seen`'s, or
+   * unconditionally when `force` (creating it when missing).
+   */
+  repairSlots(seen: SlotCount, running: number, force: boolean): Promise<boolean>;
+  /** Counts a refused repair (the counter's `repairMisses` up by one). */
+  noteRepairRefused(): Promise<void>;
   /** Every waiting entry. */
   listQueueEntries(): Promise<{ queueKey: string; buildId: string }[]>;
   removeQueueEntry(queueKey: string): Promise<void>;
@@ -200,9 +236,11 @@ export interface LauncherLogEntry {
   failed?: number;
   stopped?: number;
   deadLetters?: number;
-  /** Check (ticket 3.4): slots freed, whether the counter was set, waiting entries removed. */
+  /** Check (ticket 3.4): slots freed, malformed slot items removed, whether the counter was set (and forced), waiting entries removed. */
   freed?: number;
+  strays?: number;
   repaired?: boolean;
+  forced?: boolean;
   unqueued?: number;
   durationMs: number;
 }
@@ -237,6 +275,8 @@ export const LAUNCH_SERVICE_REASON = "The build could not be started because of 
 export const STOPPED_REASON = "The build stopped before it was finished.";
 export const UNSTARTED_REASON = "The build did not start in time.";
 export const QUEUED_DEAD_REASON = "The build could not be started after several tries.";
+/** Try 2: a build that waited in the line longer than QUEUE_WAIT_MAX_MS. */
+export const QUEUE_TIMEOUT_REASON = "The build waited too long in the queue and did not start. Your facilitator can restart it.";
 export const DEPLOY_DEAD_REASON = "The app could not be published because of a problem on the workshop's side.";
 
 /** The build id of a launch message: exactly `{"buildId": "<id>"}`, else undefined. */
@@ -328,7 +368,8 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
     await deps.records.touchQueueEntry(queueKey, buildId, deps.now().toISOString());
     const since = new Date(deps.now().getTime() - QUEUE_SEEN_MS).toISOString();
     const [slots, ahead] = await Promise.all([deps.records.readSlots(), deps.records.countAhead(queueKey, since)]);
-    if (Math.max(0, slots.running) + ahead >= cap) {
+    // A missing or negative counter reads as full (the claim would refuse it too) until the check repairs it.
+    if (slots.running === undefined || slots.running < 0 || slots.running + ahead >= cap) {
       log("waiting");
       return "waiting";
     }
@@ -408,7 +449,9 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
   let stopped = 0;
   let deadLetters = 0;
   let freed = 0;
+  let strays = 0;
   let repaired = false;
+  let forced = false;
   let unqueued = 0;
   try {
     const launches: LaunchEntry[] = [];
@@ -464,21 +507,41 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
       const job = parseDeployJob(body);
       if (job !== undefined && (await deps.records.failDeploy(job.buildId, job.nickname, job.commit, [DEPLOY_DEAD_REASON], nowIso()))) failed += 1;
     });
-    // Ticket 3.4: slots. Free the slots of builds that ended (their writer's release failed, or the build is gone), then
-    // set the counter to the number of holders left: the builds `building` or `deploying`. The repair is conditional on
-    // the counter's version, so a claim or release between the two reads makes it wait for the next minute.
-    for (const buildId of await deps.records.listSlotHolders()) {
-      const build = await deps.records.readBuild(buildId);
+    // Ticket 3.4: slots. Delete malformed items (one at a build's holder key would block its claim forever), free the
+    // slots of builds no longer running (failed by the builder, their writer's release failed, gone, or queued again),
+    // then set the counter to the number of holders left: the builds `building` or `deploying`.
+    for (const item of await deps.records.listSlotHolders()) {
+      if (item.buildId === undefined) {
+        await deps.records.removeSlotItem(item.sk);
+        strays += 1;
+        continue;
+      }
+      const build = await deps.records.readBuild(item.buildId);
       if (build?.status === "building" || build?.status === "deploying") continue;
-      if (await deps.records.releaseSlot(buildId)) freed += 1;
+      if (await deps.records.releaseSlot(item.buildId)) freed += 1;
     }
+    // The repair is conditional on the counter's version, so a claim or release between the two reads makes it wait for
+    // the next minute. It is forced (unconditional) when no race can explain the value (the counter is missing or
+    // negative: no claim can pass then) or after SLOT_REPAIR_FORCE_AFTER refused repairs in a row: a writer that keeps
+    // moving the version cannot keep a wrong counter. A forced write can miss a claim or release made in the same
+    // instant; the next minute's repair corrects that.
     const seen = await deps.records.readSlots();
-    const holders = (await deps.records.listSlotHolders()).length;
-    if (seen.running !== holders) repaired = await deps.records.repairSlots(seen, holders);
-    // The waiting line keeps only builds still waiting at that place (a retry gives a build a new place).
+    const holders = (await deps.records.listSlotHolders()).filter((item) => item.buildId !== undefined).length;
+    if (seen.running !== holders || seen.misses > 0) {
+      forced = seen.running === undefined || seen.running < 0 || seen.misses >= SLOT_REPAIR_FORCE_AFTER;
+      repaired = await deps.records.repairSlots(seen, holders, forced);
+      if (!repaired) await deps.records.noteRepairRefused();
+    }
+    // The waiting line keeps only builds still waiting at that place (a retry gives a build a new place); a build waiting
+    // there longer than QUEUE_WAIT_MAX_MS (its place's time) is failed, so a launch that keeps failing before its claim
+    // ends in hours, not after the launch queue's 1,000 deliveries.
     for (const entry of await deps.records.listQueueEntries()) {
       const build = await deps.records.readBuild(entry.buildId);
-      if (build?.status === "queued" && build.queueKey === entry.queueKey) continue;
+      if (build?.status === "queued" && build.queueKey === entry.queueKey) {
+        const placedAt = Date.parse(entry.queueKey.slice(0, entry.queueKey.indexOf("#")));
+        if (!(started - placedAt > QUEUE_WAIT_MAX_MS)) continue;
+        if (await deps.records.failQueued(entry.buildId, [QUEUE_TIMEOUT_REASON], nowIso())) failed += 1;
+      }
       await deps.records.removeQueueEntry(entry.queueKey);
       unqueued += 1;
     }
@@ -491,12 +554,14 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
       stopped,
       deadLetters,
       freed,
+      strays,
       repaired,
+      forced,
       unqueued,
       durationMs: Math.max(0, deps.now().getTime() - started),
     });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
     throw new Error("check failed");
   }
-  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, repaired, unqueued, durationMs: Math.max(0, deps.now().getTime() - started) });
+  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, durationMs: Math.max(0, deps.now().getTime() - started) });
 }

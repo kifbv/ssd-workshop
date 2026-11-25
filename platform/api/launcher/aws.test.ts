@@ -107,10 +107,13 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);
     await records.touchQueueEntry(QUEUE_KEY, "b-1", NOW);
     expect(await records.countAhead(QUEUE_KEY, NOW)).toBe(0);
-    expect(await records.readSlots()).toEqual({ running: 0, version: 0 });
+    expect(await records.readSlots()).toEqual({ running: undefined, version: 0, misses: 0 });
     expect(await records.listSlotHolders()).toEqual([]);
+    await records.removeSlotItem("BUILD#odd");
     expect(await records.releaseSlot("b-1")).toBe(true);
-    expect(await records.repairSlots({ running: 3, version: 4 }, 2)).toBe(true);
+    expect(await records.repairSlots({ running: 3, version: 4, misses: 0 }, 2, false)).toBe(true);
+    expect(await records.repairSlots({ running: -1, version: 4, misses: 0 }, 2, true)).toBe(true);
+    await records.noteRepairRefused();
     expect(await records.listQueueEntries()).toEqual([]);
     await records.removeQueueEntry(QUEUE_KEY);
     expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).toBe("claimed");
@@ -161,7 +164,15 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
           if (item.ConditionCheck) writes.push(item.ConditionCheck as Named);
         }
       }
-      if (command instanceof QueryCommand) writes.push(command.input as Named);
+      if (command instanceof QueryCommand) {
+        writes.push(command.input as Named);
+        // Try 2: IAM requires a projection (or a count, for the line) on every read of the slots and the line.
+        const input = command.input as QueryCommandInput;
+        const pk = pkOf(input as Named);
+        if (pk === BUILD_SLOTS_PK) expect(input.Select).toBe("SPECIFIC_ATTRIBUTES");
+        if (pk === BUILD_QUEUE_PK) expect(["SPECIFIC_ATTRIBUTES", "COUNT"]).toContain(input.Select);
+        if (input.Select === "SPECIFIC_ATTRIBUTES") expect(input.ProjectionExpression).toBeTruthy();
+      }
     }
     const names: Record<string, Set<string>> = { build: new Set(), [LAUNCHES_PK]: new Set(), [BUILD_SLOTS_PK]: new Set(), [BUILD_QUEUE_PK]: new Set() };
     for (const input of writes) {
@@ -216,9 +227,10 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(results).toEqual(["claimed", "no-slot", "no-slot"]);
     for (const command of sent) {
       const count = (command as TransactWriteItemsCommand).input.TransactItems?.[2]?.Update;
-      expect(count?.ConditionExpression).toBe("attribute_not_exists(#running) OR #running < :cap");
+      // Try 2: the counter must exist and be sane: a missing or negative counter is full until the check repairs it.
+      expect(count?.ConditionExpression).toBe("attribute_exists(#running) AND #running >= :zero AND #running < :cap");
       expect(count?.UpdateExpression).toBe("ADD #running :delta, #version :one");
-      expect(count?.ExpressionAttributeValues).toEqual({ ":delta": { N: "1" }, ":one": { N: "1" }, ":cap": { N: "15" } });
+      expect(count?.ExpressionAttributeValues).toEqual({ ":delta": { N: "1" }, ":one": { N: "1" }, ":zero": { N: "0" }, ":cap": { N: "15" } });
     }
     // An earlier holder of the same build not freed yet: also no slot (the check frees it within a minute).
     const held = stub([cancelled("None", "None", "None", "ConditionalCheckFailed", "None")]);
@@ -244,16 +256,63 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     const twice = new DynamoLaunchRecords(freed.client, TABLE);
     expect(await twice.failQueued("b-1", ["x"], NOW)).toBe(true);
     expect(await twice.failQueued("b-1", ["x"], NOW)).toBe(true);
-    // The repair: SET only while the version is the one read.
-    const repair = stub([{}, Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" })]);
+    // The repair: SET only while the version is the one read (refused repairs back to 0); forced: no condition (it creates
+    // a missing counter); a refused repair is counted.
+    const repair = stub([{}, Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" }), {}, {}]);
     const r = new DynamoLaunchRecords(repair.client, TABLE);
-    expect(await r.repairSlots({ running: 9, version: 7 }, 2)).toBe(true);
-    expect(await r.repairSlots({ running: 0, version: 0 }, 2)).toBe(false);
-    const [set, first] = repair.sent.map((command) => command.input as UpdateItemCommandInput);
-    expect(set?.UpdateExpression).toBe("SET #running = :running, #version = :next");
+    expect(await r.repairSlots({ running: 9, version: 7, misses: 1 }, 2, false)).toBe(true);
+    expect(await r.repairSlots({ running: 0, version: 0, misses: 0 }, 2, false)).toBe(false);
+    expect(await r.repairSlots({ running: undefined, version: 0, misses: 0 }, 2, true)).toBe(true);
+    await r.noteRepairRefused();
+    const [set, first, forced, missed] = repair.sent.map((command) => command.input as UpdateItemCommandInput);
+    for (const input of [set, first, forced, missed]) {
+      expect(input?.Key).toEqual({ pk: { S: "BUILD_SLOTS" }, sk: { S: "COUNT" } });
+      expect(input?.ReturnValues).toBe("NONE");
+      placeholdersMatch(input as Named);
+    }
+    expect(set?.UpdateExpression).toBe("SET #running = :running, #repairMisses = :zero ADD #version :one");
     expect(set?.ConditionExpression).toBe("#version = :seen");
-    expect(set?.ExpressionAttributeValues).toEqual({ ":running": { N: "2" }, ":next": { N: "8" }, ":seen": { N: "7" } });
+    expect(set?.ExpressionAttributeValues).toEqual({ ":running": { N: "2" }, ":zero": { N: "0" }, ":one": { N: "1" }, ":seen": { N: "7" } });
     expect(first?.ConditionExpression).toBe("attribute_not_exists(#version)");
+    expect(forced?.UpdateExpression).toBe(set?.UpdateExpression);
+    expect(forced?.ConditionExpression).toBeUndefined();
+    expect(missed?.UpdateExpression).toBe("ADD #repairMisses :one");
+    expect(missed?.ConditionExpression).toBeUndefined();
+  });
+
+  it("try 2: reads the counter as missing (no claim) when it or its running is absent or not a whole number, and lists malformed slot items without a build id", async () => {
+    const { client } = stub([
+      {},
+      { Item: { version: { N: "3" } } },
+      { Item: { running: { N: "1.5" }, version: { N: "3" }, repairMisses: { N: "2" } } },
+      { Item: { running: { N: "-2" }, version: { N: "4" } } },
+      {
+        Items: [
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "COUNT" } },
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-1" }, type: { S: "build-slot" }, buildId: { S: "b-1" } },
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-2" } },
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-3" }, type: { S: "other" }, buildId: { S: "b-3" } },
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-4" }, type: { S: "build-slot" }, buildId: { S: "b-5" } },
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#../x" }, type: { S: "build-slot" }, buildId: { S: "../x" } },
+          { pk: { S: "BUILD_SLOTS" }, sk: { S: "ELSE" }, running: { N: "1" } },
+        ],
+      },
+    ]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.readSlots()).toEqual({ running: undefined, version: 0, misses: 0 });
+    expect(await records.readSlots()).toEqual({ running: undefined, version: 3, misses: 0 });
+    expect(await records.readSlots()).toEqual({ running: undefined, version: 3, misses: 2 });
+    expect(await records.readSlots()).toEqual({ running: -2, version: 4, misses: 0 });
+    expect(await records.listSlotHolders()).toEqual([
+      { sk: "BUILD#b-1", buildId: "b-1" },
+      { sk: "BUILD#b-2" },
+      { sk: "BUILD#b-3" },
+      { sk: "BUILD#b-4" },
+      { sk: "BUILD#../x" },
+      { sk: "ELSE" },
+    ]);
+    // The counter itself is never removed as a malformed item.
+    await expect(records.removeSlotItem("COUNT")).rejects.toThrow();
   });
 
   it("places a queued build once, counts only entries ahead seen since the cutoff, and makes a waiting message come back after 30 seconds", async () => {

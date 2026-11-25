@@ -1,16 +1,9 @@
 // Ticket 2.8: the builder's DynamoDB and SQS requests, checked against the attribute lists ticket 2.9's task role will
 // be limited to (infra/lib/config.ts) and against the deployer's message format.
-import { GetItemCommand, TransactWriteItemsCommand, UpdateItemCommand, type GetItemCommandInput, type UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
+import { GetItemCommand, UpdateItemCommand, type GetItemCommandInput, type UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
 import type { SendMessageCommandInput } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
-import {
-  BUILDER_BUILD_READ_ATTRIBUTES,
-  BUILDER_BUILD_UPDATE_ATTRIBUTES,
-  BUILDER_USAGE_UPDATE_ATTRIBUTES,
-  DEPLOY_QUEUE_NAME,
-  SLOT_RELEASE_ATTRIBUTES,
-  SLOT_RELEASE_CHECK_ATTRIBUTES,
-} from "../../infra/lib/config.js";
+import { BUILDER_BUILD_READ_ATTRIBUTES, BUILDER_BUILD_UPDATE_ATTRIBUTES, BUILDER_USAGE_UPDATE_ATTRIBUTES, DEPLOY_QUEUE_NAME } from "../../infra/lib/config.js";
 import { parseDeployJob } from "../api/deploy/deploy.js";
 import { DEPLOY_QUEUE_URL } from "../api/settings.js";
 import { deployRequest, SqsDeployQueue, type DeploySender } from "./queue.js";
@@ -23,9 +16,9 @@ const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const ATTEMPT = "6f1c2a9e-1111-4222-8333-444455556666";
 
 function stub(answers: unknown[]) {
-  const sent: (GetItemCommand | UpdateItemCommand | TransactWriteItemsCommand)[] = [];
+  const sent: (GetItemCommand | UpdateItemCommand)[] = [];
   const client = {
-    send: async (command: GetItemCommand | UpdateItemCommand | TransactWriteItemsCommand) => {
+    send: async (command: GetItemCommand | UpdateItemCommand) => {
       sent.push(command);
       const answer = answers.shift();
       if (answer instanceof Error) throw answer;
@@ -70,19 +63,14 @@ function placeholdersMatch(input: UpdateItemCommandInput | GetItemCommandInput):
 const step: FeedEvent = { kind: "step", step: "preparing", at: NOW };
 
 describe("DynamoBuildRecords (ticket 2.8)", () => {
-  it("ticket 3.4 criterion 3: WHEN the builder marks its build failed THEN it frees the build's slot (one transaction naming only the release's attributes); a refused failure frees nothing", async () => {
-    const { client, sent } = stub([{}, {}]);
+  it("ticket 3.4 try 2: WHEN the builder marks its build failed THEN it writes only the build (one UpdateItem): it never touches the build slots, which the launcher's minute check frees", async () => {
+    const { client, sent } = stub([{}]);
     const records = new DynamoBuildRecords(client, TABLE);
     expect(await records.markFailed("b-1", ATTEMPT, ["x"], NOW)).toBe(true);
-    expect(sent[1]).toBeInstanceOf(TransactWriteItemsCommand);
-    const [check, holder, count] = (sent[1] as TransactWriteItemsCommand).input.TransactItems ?? [];
-    expect(check?.ConditionCheck?.Key).toEqual({ pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } });
-    expect(Object.values(check?.ConditionCheck?.ExpressionAttributeNames ?? {})).toEqual(SLOT_RELEASE_CHECK_ATTRIBUTES.filter((n) => n !== "pk" && n !== "sk"));
-    expect(holder?.Delete?.Key).toEqual({ pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-1" } });
-    expect(Object.values(count?.Update?.ExpressionAttributeNames ?? {})).toEqual(SLOT_RELEASE_ATTRIBUTES.filter((n) => n !== "pk" && n !== "sk"));
-    const refused = stub([Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" })]);
-    expect(await new DynamoBuildRecords(refused.client, TABLE).markFailed("b-1", ATTEMPT, ["x"], NOW)).toBe(false);
-    expect(refused.sent).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBeInstanceOf(UpdateItemCommand);
+    expect((sent[0]?.input as UpdateItemCommandInput).Key).toEqual({ pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } });
+    expect(JSON.stringify(sent.map((command) => command.input))).not.toContain("BUILD_SLOTS");
   });
 
   it("names exactly BUILDER_BUILD_READ_ATTRIBUTES (GetItem) and BUILDER_BUILD_UPDATE_ATTRIBUTES (UpdateItem) in BUILD#, only BUILDER_USAGE_UPDATE_ATTRIBUTES in the usage item, and returns no attributes", async () => {
@@ -94,10 +82,8 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     expect(await records.handOver("b-1", ATTEMPT, COMMIT, [{ kind: "step", step: "deploying", at: NOW }], NOW)).toBe(true);
     expect(await records.markFailed("b-1", ATTEMPT, ["The build took too long."], NOW)).toBe(true);
     await records.addUsage("p-1", { inputTokens: 10, outputTokens: 2, costUsd: 0.01 }, NOW);
-    // The failure is followed by its slot release (ticket 3.4, tested below).
-    expect(sent).toHaveLength(7);
-    expect(sent[5]).toBeInstanceOf(TransactWriteItemsCommand);
-    const [read, ...updates] = sent.filter((command) => !(command instanceof TransactWriteItemsCommand));
+    expect(sent).toHaveLength(6);
+    const [read, ...updates] = sent;
     expect(read).toBeInstanceOf(GetItemCommand);
     const readInput = read?.input as GetItemCommandInput;
     expect(readInput).toMatchObject({ TableName: TABLE, Key: { pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } }, ConsistentRead: true });

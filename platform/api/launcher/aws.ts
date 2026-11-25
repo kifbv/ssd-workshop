@@ -37,6 +37,7 @@ import {
 } from "@aws-sdk/client-sqs";
 import { cancellationCodes, countQueuedAhead, releaseSlot, releaseSlotQuietly, slotCountChange } from "../build/slots.js";
 import {
+  BUILD_ID_PATTERN,
   BUILD_QUEUE_PK,
   BUILD_SLOTS_PK,
   buildKey,
@@ -53,7 +54,7 @@ import {
 import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
-import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, TaskStart, TaskState } from "./launcher.js";
+import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
 
 const str = (value: string): AttributeValue => ({ S: value });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
@@ -169,33 +170,62 @@ export class DynamoLaunchRecords implements LaunchRecords {
   }
 
   async readSlots(): Promise<SlotCount> {
-    const item = await this.get(slotCountKey(), ["running", "version"]);
-    const number = (value: AttributeValue | undefined): number => {
-      const n = Number(value?.N ?? "0");
-      return Number.isFinite(n) ? n : 0;
+    const item = await this.get(slotCountKey(), ["running", "version", "repairMisses"]);
+    const whole = (value: AttributeValue | undefined): number | undefined => {
+      const n = value?.N === undefined ? Number.NaN : Number(value.N);
+      return Number.isSafeInteger(n) ? n : undefined;
     };
-    return { running: number(item?.running), version: number(item?.version) };
+    return { running: whole(item?.running), version: whole(item?.version) ?? 0, misses: Math.max(0, whole(item?.repairMisses) ?? 0) };
   }
 
-  async listSlotHolders(): Promise<string[]> {
-    return (await this.queryAll(BUILD_SLOTS_PK, ["buildId"])).flatMap((item) => (item.sk?.S?.startsWith("BUILD#") && item.buildId?.S !== undefined ? [item.buildId.S] : []));
+  async listSlotHolders(): Promise<SlotItem[]> {
+    return (await this.queryAll(BUILD_SLOTS_PK, ["type", "buildId"])).flatMap((item): SlotItem[] => {
+      const sk = item.sk?.S;
+      if (sk === undefined || sk === slotCountKey().sk) return [];
+      const buildId = item.buildId?.S;
+      const wellFormed = item.type?.S === "build-slot" && buildId !== undefined && BUILD_ID_PATTERN.test(buildId) && slotHolderKey(buildId).sk === sk;
+      return [wellFormed ? { sk, buildId } : { sk }];
+    });
+  }
+
+  async removeSlotItem(sk: string): Promise<void> {
+    if (sk === slotCountKey().sk) throw Object.assign(new Error("not a slot item"), { name: "NotASlotItem" });
+    await this.client.send(new DeleteItemCommand({ TableName: this.table, Key: keyOf({ pk: BUILD_SLOTS_PK, sk }), ReturnValues: "NONE" }));
   }
 
   releaseSlot(buildId: string): Promise<boolean> {
     return releaseSlot(this.client, this.table, buildId);
   }
 
-  repairSlots(seen: SlotCount, running: number): Promise<boolean> {
+  async repairSlots(seen: SlotCount, running: number, force: boolean): Promise<boolean> {
+    const expression = "SET #running = :running, #repairMisses = :zero ADD #version :one";
+    const names = { "#running": "running", "#repairMisses": "repairMisses", "#version": "version" };
+    const values = { ":running": { N: String(running) }, ":zero": { N: "0" }, ":one": { N: "1" } };
+    if (force) {
+      await this.client.send(
+        new UpdateItemCommand({ TableName: this.table, Key: keyOf(slotCountKey()), UpdateExpression: expression, ExpressionAttributeNames: names, ExpressionAttributeValues: values, ReturnValues: "NONE" }),
+      );
+      return true;
+    }
     return this.update(
       slotCountKey(),
-      "SET #running = :running, #version = :next",
+      expression,
       seen.version === 0 ? "attribute_not_exists(#version)" : "#version = :seen",
-      { "#running": "running", "#version": "version" },
-      {
-        ":running": { N: String(running) },
-        ":next": { N: String(seen.version + 1) },
-        ...(seen.version === 0 ? {} : { ":seen": { N: String(seen.version) } }),
-      },
+      names,
+      { ...values, ...(seen.version === 0 ? {} : { ":seen": { N: String(seen.version) } }) },
+    );
+  }
+
+  async noteRepairRefused(): Promise<void> {
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.table,
+        Key: keyOf(slotCountKey()),
+        UpdateExpression: "ADD #repairMisses :one",
+        ExpressionAttributeNames: { "#repairMisses": "repairMisses" },
+        ExpressionAttributeValues: { ":one": { N: "1" } },
+        ReturnValues: "NONE",
+      }),
     );
   }
 
@@ -209,7 +239,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
     await this.client.send(new DeleteItemCommand({ TableName: this.table, Key: keyOf(queueEntryKey(queueKey)), ReturnValues: "NONE" }));
   }
 
-  /** Every item of a partition (consistent), with the key and `names`. */
+  /** Every item of a partition (consistent), with the key and `names` (a projection: `Select` SPECIFIC_ATTRIBUTES, which IAM requires). */
   private async queryAll(pk: string, names: readonly string[]): Promise<Record<string, AttributeValue>[]> {
     const items: Record<string, AttributeValue>[] = [];
     let start: Record<string, AttributeValue> | undefined;
@@ -221,6 +251,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
           ProjectionExpression: ["pk", "sk", ...names].map((name) => `#${name}`).join(", "),
           ExpressionAttributeNames: Object.fromEntries(["pk", "sk", ...names].map((name) => [`#${name}`, name])),
           ExpressionAttributeValues: { ":pk": str(pk) },
+          Select: "SPECIFIC_ATTRIBUTES",
           ConsistentRead: true,
           ...(start === undefined ? {} : { ExclusiveStartKey: start }),
         }),
@@ -296,14 +327,15 @@ export class DynamoLaunchRecords implements LaunchRecords {
                 Item: { ...keyOf(launch), type: str("launch"), buildId: str(buildId), claimedAt: str(nowIso) },
               },
             },
-            // Ticket 3.4: the slot. The counter goes up only while under the cap (a missing counter is 0).
+            // Ticket 3.4: the slot. The counter goes up only while it exists and is between 0 and the cap: a missing or
+            // negative counter is full until the minute check repairs it (try 2).
             {
               Update: {
                 TableName: this.table,
                 Key: keyOf(slotCountKey()),
                 ...slotCountChange(1),
-                ConditionExpression: "attribute_not_exists(#running) OR #running < :cap",
-                ExpressionAttributeValues: { ...slotCountChange(1).ExpressionAttributeValues, ":cap": { N: String(slot.cap) } },
+                ConditionExpression: "attribute_exists(#running) AND #running >= :zero AND #running < :cap",
+                ExpressionAttributeValues: { ...slotCountChange(1).ExpressionAttributeValues, ":zero": { N: "0" }, ":cap": { N: String(slot.cap) } },
               },
             },
             {
@@ -321,8 +353,9 @@ export class DynamoLaunchRecords implements LaunchRecords {
     } catch (error) {
       const codes = cancellationCodes(error);
       if (codes === undefined) throw error;
-      // The build is no longer queued (or changed): a duplicate. Otherwise the counter was at the cap, another write to
-      // it won the race (TransactionConflict), or an earlier holder of this build is not freed yet: wait for a slot.
+      // The build is no longer queued (or changed): a duplicate. Otherwise the counter was at the cap (or missing or
+      // negative), another write to it won the race (TransactionConflict), or an item at this build's holder key (an
+      // earlier holder not freed yet, or a malformed item) is still there: wait for a slot; the check clears the last two.
       if (codes[0] === "ConditionalCheckFailed") return "taken";
       if (codes.every((code) => code === undefined || code === "None" || code === "ConditionalCheckFailed" || code === "TransactionConflict")) return "no-slot";
       throw error;

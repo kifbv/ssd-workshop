@@ -431,6 +431,28 @@ describe("ticket 3.4: GET /api/build tells a queued build how many builds are ah
   });
 });
 
+describe("ticket 3.4 try 2: another participant's queued build", () => {
+  it("WHEN a participant asks for another participant's queued build THEN the answer is 404 and the builds ahead are never counted", async () => {
+    const s = setup();
+    await s.call(approve(1));
+    s.model.push(readinessReply("ready"));
+    await s.drain();
+    const buildId = must([...s.table.builds.keys()][0]);
+    const place = `${s.deps.now().toISOString()}#${buildId}`;
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), queueKey: place });
+    s.table.queueEntries.set("2026-01-01T00:00:00.000Z#a", s.deps.now().toISOString());
+    // Even a conversation that names Ada's queued build.
+    s.table.conversations.set("other-2", { ...must(s.table.conversations.get("other-2")), buildId });
+    const theirs = await s.call(buildOf(THEIRS));
+    expect(theirs.statusCode).toBe(404);
+    expect(json(theirs)).toEqual({ message: "Not found." });
+    expect(s.table.countQueuedAheadCalls).toEqual([]);
+    // Ada's own call counts (once, from her build's place).
+    expect(json(await s.call(buildOf()))).toMatchObject({ buildId, status: "queued", ahead: 1 });
+    expect(s.table.countQueuedAheadCalls).toEqual([place]);
+  });
+});
+
 describe("ticket 2.10: GET /api/build carries the feed and the links the step 3 page needs", () => {
   const SHA = "0123456789abcdef0123456789abcdef01234567";
   const FEED = [
