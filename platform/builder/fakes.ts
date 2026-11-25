@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { addUsage } from "../api/conversation/model.js";
 import type { BuildStatus, TokenUsage } from "../api/types.js";
-import type { AgentResult, AgentRun, CodingAgent } from "./agent.js";
+import type { AgentResult, AgentRun, CodingAgent, WebFetchMiss } from "./agent.js";
 import type { BuildRecords, BuildToRun, FeedEvent } from "./records.js";
 import type { DeployMessage, DeployQueue } from "./runner.js";
 import { NO_TOKENS, type AgentTokens } from "./usage.js";
@@ -106,7 +106,7 @@ export class FakeDeployQueue implements DeployQueue {
  * One step of a scripted agent: write a file (relative path), read a page with WebFetch (its host), spend tokens, wait
  * until aborted, or run `call` (a test's hook).
  */
-export type AgentStep = { write: string; content: string } | { fetch: string } | { tokens: AgentTokens } | { hang: true } | { fail: true } | { call: () => void | Promise<void> };
+export type AgentStep = { write: string; content: string } | { fetch: string } | { miss: WebFetchMiss } | { tokens: AgentTokens } | { hang: true } | { fail: true } | { call: () => void | Promise<void> };
 
 /** A coding agent that follows a script, writing into the workspace as the real one would. */
 export class FakeAgent implements CodingAgent {
@@ -126,6 +126,8 @@ export class FakeAgent implements CodingAgent {
         run.onFileWritten(step.write);
       } else if ("fetch" in step) {
         run.onWebFetch(step.fetch);
+      } else if ("miss" in step) {
+        run.onWebFetchMiss(step.miss);
       } else if ("tokens" in step) {
         tokens = step.tokens;
         run.onTokens(tokens);

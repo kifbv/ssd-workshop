@@ -38,9 +38,17 @@ export interface AgentRun {
   onFileWritten: (path: string) => void;
   /** The host (only the host) of a page the agent read with WebFetch, after the page answered 2xx (ticket 2.15). */
   onWebFetch: (host: string) => void;
+  /**
+   * A WebFetch call that read no page: `refused` by the hook (address or budget), `error` (the tool failed: no
+   * connection, DNS, time-out) or the page's non-2xx status. Never the address: only this, for the log.
+   */
+  onWebFetchMiss: (miss: WebFetchMiss) => void;
   /** The tokens so far (cumulative), whenever they change: kept even when the run is cut off. */
   onTokens: (tokens: AgentTokens) => void;
 }
+
+/** Why a WebFetch call read no page (see `AgentRun.onWebFetchMiss`). */
+export type WebFetchMiss = "refused" | "error" | number;
 
 /** `done`: the agent finished its turn; `error`: it stopped on an error (Bedrock, the SDK, a limit). */
 export interface AgentResult {
@@ -152,6 +160,13 @@ export function fetchSucceeded(response: unknown): boolean {
   return typeof code === "number" && Number.isInteger(code) && code >= 200 && code <= 299;
 }
 
+/** The status of a WebFetch answer that is not a 2xx page (a whole number from 100 to 599), else `error`. */
+export function missCode(response: unknown): WebFetchMiss {
+  if (response === null || typeof response !== "object" || Array.isArray(response)) return "error";
+  const code = (response as { code?: unknown }).code;
+  return typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599 ? code : "error";
+}
+
 /** The workspace-relative path a successful Write or Edit touched, or undefined. */
 export function writtenPath(workspace: string, toolName: unknown, toolInput: unknown): string | undefined {
   if (toolName !== "Write" && toolName !== "Edit") return undefined;
@@ -201,8 +216,15 @@ export function agentOptions(run: Omit<AgentRun, "prompt" | "onTokens">, abortCo
           hooks: [
             async (input) => {
               const output = preToolUse(run.workspace, toolName(input), toolInput(input));
-              if (toolName(input) !== "WebFetch" || "hookSpecificOutput" in output) return output;
-              if (webFetches >= MAX_WEB_FETCHES) return denied(WEB_FETCH_BUDGET_SPENT);
+              if (toolName(input) !== "WebFetch") return output;
+              if ("hookSpecificOutput" in output) {
+                run.onWebFetchMiss("refused");
+                return output;
+              }
+              if (webFetches >= MAX_WEB_FETCHES) {
+                run.onWebFetchMiss("refused");
+                return denied(WEB_FETCH_BUDGET_SPENT);
+              }
               webFetches += 1;
               return output;
             },
@@ -215,8 +237,22 @@ export function agentOptions(run: Omit<AgentRun, "prompt" | "onTokens">, abortCo
             async (input) => {
               const path = writtenPath(run.workspace, toolName(input), toolInput(input));
               if (path !== undefined) run.onFileWritten(path);
-              const host = toolName(input) === "WebFetch" && fetchSucceeded(toolResponse(input)) ? fetchedHost(toolInput(input)) : undefined;
+              if (toolName(input) !== "WebFetch") return {};
+              const response = toolResponse(input);
+              const host = fetchSucceeded(response) ? fetchedHost(toolInput(input)) : undefined;
               if (host !== undefined) run.onWebFetch(host);
+              else run.onWebFetchMiss(missCode(response));
+              return {};
+            },
+          ],
+        },
+      ],
+      // A tool that threw (WebFetch: no connection, DNS, time-out, a refused redirect) fires this, not PostToolUse.
+      PostToolUseFailure: [
+        {
+          hooks: [
+            async (input) => {
+              if (toolName(input) === "WebFetch") run.onWebFetchMiss("error");
               return {};
             },
           ],

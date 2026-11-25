@@ -18,6 +18,7 @@ import {
   MAIN_MOVED_REASON,
   NOTHING_CHANGED_REASON,
   TIME_UP_REASON,
+  MAX_LOGGED_FETCH_CODES,
   exitWhenDone,
   runBuild,
   type BuilderLogEntry,
@@ -203,6 +204,24 @@ describe("ticket 2.15: each web fetch shows in the feed as a step, with the host
     ]);
     for (const event of feed.filter((e) => e.kind === "fetch")) expect(Object.keys(event).sort()).toEqual(["at", "host", "kind"]);
     expect(t.logs).toContainEqual(expect.objectContaining({ event: "builder", phase: "writing", outcome: "ok", files: 1, fetches: 3 }));
+  });
+
+  it("logs WebFetch calls that read no page (refused, failed, non-2xx statuses) as counts and statuses only, never in the feed", async () => {
+    const misses: AgentStep[] = [{ miss: "refused" }, { miss: "error" }, { miss: 404 }, { miss: 404 }, { miss: 301 }, { miss: "refused" }];
+    const t = await setup([...misses, { fetch: "en.wikipedia.org" }, { write: "index.html", content: PAGE }]);
+    expect(await runBuild(jobFor(t), t.deps)).toBe("handed-over");
+    expect((t.records.builds.get(BUILD)?.feed ?? []).filter((event) => event.kind === "fetch")).toHaveLength(1);
+    expect(t.logs).toContainEqual(
+      expect.objectContaining({ phase: "writing", outcome: "ok", fetches: 1, fetchesRefused: 2, fetchesFailed: 4, fetchCodes: [301, 404] }),
+    );
+  });
+
+  it("logs at most MAX_LOGGED_FETCH_CODES distinct statuses", async () => {
+    const t = await setup([...Array.from({ length: 30 }, (_, i): AgentStep => ({ miss: 400 + i })), { write: "index.html", content: PAGE }]);
+    expect(await runBuild(jobFor(t), t.deps)).toBe("handed-over");
+    const line = t.logs.find((entry): entry is BuilderLogEntry => entry.event === "builder" && entry.phase === "writing");
+    expect(line?.fetchesFailed).toBe(30);
+    expect(line?.fetchCodes).toHaveLength(MAX_LOGGED_FETCH_CODES);
   });
 
   it("keeps at most MAX_FEED_FETCHES fetch events but counts every fetch", async () => {
