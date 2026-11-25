@@ -4,7 +4,7 @@
 // is tested against in-memory fakes; ./main.ts wires in the real ones. Nothing it prints holds a
 // message text, an id or an email address (an error shows only its name).
 import { STALE_PENDING_SECONDS } from "../../api/conversation/state.js";
-import type { ResetStore } from "./store.js";
+import type { ResetState, ResetStore } from "./store.js";
 
 export const USAGE = `Usage: npm run conversation -- reset <nickname> [--yes]
 
@@ -45,13 +45,22 @@ export interface ConversationDeps {
   err: (line: string) => void;
 }
 
-const STEP_NAMES: Record<string, string> = {
+export const STEP_NAMES: Record<string, string> = {
   clarify: "step 1 (Clarify)",
   spec: "step 2 (Spec)",
   approved: "step 2 (Spec, approved)",
   building: "step 3 (Build)",
 };
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+export const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * True while the AI is answering (a message pending for at most STALE_PENDING_SECONDS; a flagged message waiting for
+ * a facilitator is not being answered): a reset then refuses, as the worker would write into the reset conversation.
+ */
+export function aiAnswering(state: ResetState, now: Date): boolean {
+  const nowSeconds = Math.floor(now.getTime() / 1000);
+  return state.pendingId !== undefined && state.state !== "waiting" && nowSeconds - (state.pendingSince ?? 0) <= STALE_PENDING_SECONDS;
+}
 
 async function reset(command: ResetCommand, deps: ConversationDeps, store: ResetStore): Promise<number> {
   const { nickname } = command;
@@ -67,10 +76,7 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
     return 1;
   }
   const state = await store.getResetState(participantId);
-  const nowSeconds = Math.floor(deps.now().getTime() / 1000);
-  const answering =
-    state.pendingId !== undefined && state.state !== "waiting" && nowSeconds - (state.pendingSince ?? 0) <= STALE_PENDING_SECONDS;
-  if (answering) {
+  if (aiAnswering(state, deps.now())) {
     deps.err(`The AI is still answering ${nickname}'s last message; try again in a minute (after a crash, up to 20 minutes). Nothing changed.`);
     return 1;
   }
@@ -95,7 +101,7 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
 }
 
 /** Only the error's name: an AWS error message can quote a key (a participant id) or an item. */
-function errorName(error: unknown): string {
+export function errorName(error: unknown): string {
   return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name) ? error.name : "Error";
 }
 

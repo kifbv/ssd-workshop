@@ -164,3 +164,6 @@ paths:
 - Claude Code on Bedrock puts the model id in the path unencoded (`/model/<id with :>/invoke`), while the AWS SDK
   encodes it (`%3A`): anything matching Bedrock paths must accept both. Its default extended thinking roughly
   triples a coding agent's time and doubles its cost on Sonnet 4.6; the builder turns it off (`thinking: disabled`).
+- A stub interface for an SDK client (`ResetSender`) lists `send` once per command; an interface that extends it to add a
+  command must restate every overload, or its own `send` replaces them and typecheck fails (ticket 2.13,
+  `ParticipantResetSender`).

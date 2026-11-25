@@ -689,6 +689,35 @@ conversation state are deleted, and their step goes back to Clarify; their profi
 AI usage totals stay. A reload of their page shows an empty step 1. Errors print only the AWS error's name, never a key or a text. The command refuses while the AI is
 answering their last message (try again a minute later; after a worker crash, up to 20 minutes); a message waiting for a facilitator is cleared
 too. If it stops part way (an AWS error), run it again: the second run finishes.
+To also delete the app's data, live marker and GitHub repository, use the full reset below.
+
+## Reset a test participant (ticket 2.13)
+
+To take a test participant through the whole workshop again with the same sign-in, with Franck's own AWS
+credentials (it reads the GitHub App's key from `ssd-workshop-github` and deletes items in `ssd-workshop-data`,
+which Claude sessions may not). Run it from your own machine: the GitHub calls do not go through `HTTPS_PROXY`.
+
+```sh
+AWS_PROFILE=franck npm run participant -- reset <nickname>
+# expect: "<nickname> is at step ..., with N messages and replies and M spec versions.",
+#         "App: ... stored values ..., live marker present, repository ssd-workshop-apps/ssd-<nickname> exists." and "Nothing changed. ..."
+AWS_PROFILE=franck npm run participant -- reset <nickname> --yes
+# expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify).", "Deleted ... and the live marker.",
+#         "Repository ssd-workshop-apps/ssd-<nickname> deleted." (or "was already gone.")
+```
+
+Deleted: the participant's messages, the AI's replies, every spec version and the conversation state (so the
+approved version and the build link), the app's data (`APPDATA#<nickname>`), its live marker
+(`APP#<nickname>`/`LIVE`) and its GitHub repository; the step goes back to Clarify. Kept: the allow-list entry,
+the nickname, sessions, AI usage totals and build records. The app's published files stay online until the next
+build's deploy replaces them (decision "(2.13) Reset keeps app files"). It refuses, changing nothing, while their
+build is queued, building or deploying, or while the AI is answering. If it stops part way (an AWS or GitHub
+error), run the same command again: the second run finishes. Errors print the error's name (and a GitHub problem's
+plain reason), never a key, an address, a token or a text.
+
+Live check (criterion 6, Franck): reset your test participant with `--yes`, reload the workshop page: it shows
+step 1 with an empty conversation. Talk it through to an approved spec: the build creates a new repository
+`ssd-workshop-apps/ssd-<nickname>` and goes live.
 
 ## Builds: builder task and launcher (ticket 2.9)
 

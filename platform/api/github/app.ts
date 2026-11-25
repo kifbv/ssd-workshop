@@ -24,6 +24,7 @@ export type GitHubStep =
   | "installation-token"
   | "create-repository"
   | "get-repository"
+  | "delete-repository"
   | "get-branch"
   | "get-commit"
   | "get-tree"
@@ -131,7 +132,7 @@ export interface GitHubAnswer {
 export async function githubCall(
   deps: GitHubDeps,
   step: GitHubStep,
-  method: "GET" | "POST" | "PUT" | "PATCH",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   bearer: string,
   body?: unknown,

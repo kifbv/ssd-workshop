@@ -25,6 +25,8 @@ export interface ResetState {
   updatedAt?: string;
   /** Whether the conversation item exists (a participant who never wrote has none). */
   exists: boolean;
+  /** The build the readiness check started (ticket 2.7), if any: the full reset (ticket 2.13) checks its status. */
+  buildId?: string;
 }
 
 /** The items a reset deletes: sort keys of the participant's messages, replies and spec versions. */
@@ -95,12 +97,12 @@ export function unchangedSince(seen: ResetState): {
 
 export class DynamoResetStore implements ResetStore {
   constructor(
-    private readonly sender: ResetSender,
-    private readonly table: string,
+    protected readonly sender: ResetSender,
+    protected readonly table: string,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
-  private async getAttributes(key: { pk: string; sk: string }, names: string[]): Promise<Record<string, AttributeValue> | undefined> {
+  protected async getAttributes(key: { pk: string; sk: string }, names: string[]): Promise<Record<string, AttributeValue> | undefined> {
     const output = await this.sender.send(
       new GetItemCommand({
         TableName: this.table,
@@ -122,17 +124,19 @@ export class DynamoResetStore implements ResetStore {
   }
 
   async getResetState(participantId: string): Promise<ResetState> {
-    const item = await this.getAttributes(conversationKey(participantId), ["pk", "pendingId", "pendingSince", "state", "updatedAt"]);
+    const item = await this.getAttributes(conversationKey(participantId), ["pk", "pendingId", "pendingSince", "state", "updatedAt", "buildId"]);
     const pendingId = item?.["pendingId"]?.S;
     const pendingSince = item?.["pendingSince"]?.N;
     const state = item?.["state"]?.S;
     const updatedAt = item?.["updatedAt"]?.S;
+    const buildId = item?.["buildId"]?.S;
     return {
       exists: item?.["pk"] !== undefined,
       ...(pendingId === undefined ? {} : { pendingId }),
       ...(pendingSince === undefined ? {} : { pendingSince: Number(pendingSince) }),
       ...(state === undefined ? {} : { state }),
       ...(updatedAt === undefined ? {} : { updatedAt }),
+      ...(buildId === undefined ? {} : { buildId }),
     };
   }
 
@@ -191,7 +195,11 @@ export class DynamoResetStore implements ResetStore {
   }
 
   async deleteItems(participantId: string, sortKeys: readonly string[]): Promise<void> {
-    const pk = conversationKey(participantId).pk;
+    await this.deleteKeys(conversationKey(participantId).pk, sortKeys);
+  }
+
+  /** Deletes the given sort keys of one partition, in batches of 25, retrying what DynamoDB leaves unprocessed. */
+  protected async deleteKeys(pk: string, sortKeys: readonly string[]): Promise<void> {
     for (let i = 0; i < sortKeys.length; i += BATCH_SIZE) {
       let requests: { DeleteRequest: { Key: Record<string, AttributeValue> } }[] = sortKeys.slice(i, i + BATCH_SIZE).map((sk) => ({ DeleteRequest: { Key: { pk: str(pk), sk: str(sk) } } }));
       for (let attempt = 1; requests.length > 0; attempt++) {
