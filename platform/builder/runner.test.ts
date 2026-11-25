@@ -10,7 +10,7 @@ import { downloadArchive } from "../api/deploy/github.js";
 import { loadTemplateFiles } from "../api/github/template.js";
 import { settle } from "../api/sign-in/fakes.js";
 import { FakeAgent, FakeBuildRecords, FakeDeployQueue, type AgentStep } from "./fakes.js";
-import { BUILD_STEPS, type FeedEvent } from "./records.js";
+import { BUILD_STEPS, MAX_FEED_FETCHES, type FeedEvent } from "./records.js";
 import { BEHAVIOUR_COMMIT_MESSAGE, PAGE_COMMIT_MESSAGE, SINGLE_COMMIT_MESSAGE, planCommits } from "./repository.js";
 import {
   AGENT_FAILED_REASON,
@@ -187,6 +187,29 @@ describe("criterion 3: the feed holds the steps in order and every written file,
     expect(await runBuild(jobFor(t), t.deps)).toBe("failed");
     expect(t.records.builds.get(BUILD)?.failureReasons).toEqual(['GitHub: GitHub answered 404 to the step "get-branch".']);
     expect(t.agent.runs).toEqual([]);
+  });
+});
+
+describe("ticket 2.15: each web fetch shows in the feed as a step, with the host only", () => {
+  it("adds a fetch event with the host, in order with the files, and counts fetches in the writing log line", async () => {
+    const t = await setup([{ fetch: "en.wikipedia.org" }, { write: "index.html", content: PAGE }, { fetch: "en.wikipedia.org" }, { fetch: "upload.wikimedia.org" }]);
+    expect(await runBuild(jobFor(t), t.deps)).toBe("handed-over");
+    const feed = t.records.builds.get(BUILD)?.feed ?? [];
+    expect(feed.filter((event) => event.kind === "fetch" || event.kind === "file").map((event) => (event.kind === "fetch" ? `fetch ${event.host}` : event.kind === "file" ? `file ${event.path}` : ""))).toEqual([
+      "fetch en.wikipedia.org",
+      "file index.html",
+      "fetch en.wikipedia.org",
+      "fetch upload.wikimedia.org",
+    ]);
+    for (const event of feed.filter((e) => e.kind === "fetch")) expect(Object.keys(event).sort()).toEqual(["at", "host", "kind"]);
+    expect(t.logs).toContainEqual(expect.objectContaining({ event: "builder", phase: "writing", outcome: "ok", files: 1, fetches: 3 }));
+  });
+
+  it("keeps at most MAX_FEED_FETCHES fetch events but counts every fetch", async () => {
+    const t = await setup([...Array.from({ length: MAX_FEED_FETCHES + 5 }, (): AgentStep => ({ fetch: "api.tvmaze.com" })), { write: "index.html", content: PAGE }]);
+    expect(await runBuild(jobFor(t), t.deps)).toBe("handed-over");
+    expect((t.records.builds.get(BUILD)?.feed ?? []).filter((event) => event.kind === "fetch")).toHaveLength(MAX_FEED_FETCHES);
+    expect(t.logs).toContainEqual(expect.objectContaining({ phase: "writing", fetches: MAX_FEED_FETCHES + 5 }));
   });
 });
 

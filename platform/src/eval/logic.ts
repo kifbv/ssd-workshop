@@ -615,6 +615,10 @@ export interface BuildEvalOutcome {
   missing: string[];
   /** Hosts other than the app's own that the page asked for (ticket 2.14: free outside services), sorted. */
   outsideHosts: string[];
+  /** Pages the coding agent read with WebFetch while building (ticket 2.15), from the build feed. */
+  fetches: number;
+  /** The hosts it read them from, each once, sorted. */
+  fetchHosts: string[];
   durationMs: number;
   usage: TokenUsage;
 }
@@ -626,9 +630,22 @@ export interface BuildEvalResult extends ClarifyScore {
 
 const STEPS_IN_ORDER = ["preparing", "writing", "checking", "committing", "deploying"];
 
-/** Scores one build: handed over, steps in order, at least one commit, check passed, no console error, no overflow, every screen found. */
-export function scoreBuild(outcome: BuildEvalOutcome): ClarifyScore {
+/** The services AGENTS.md lists (ticket 2.14): a spec that names one makes the agent check it with WebFetch (2.15). */
+export const NAMED_SERVICES = ["Wikipedia", "Open Library", "Open-Meteo", "Frankfurter", "TVMaze", "REST Countries"] as const;
+
+/** True when an example spec names an outside service, so its build must have fetched at least one page (ticket 2.15). */
+export function expectsWebFetch(spec: string): boolean {
+  const text = spec.toLowerCase();
+  return NAMED_SERVICES.some((service) => text.includes(service.toLowerCase()));
+}
+
+/**
+ * Scores one build: handed over, steps in order, at least one commit, check passed, no console error, no overflow, every
+ * screen found, and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
+ */
+export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): ClarifyScore {
   const problems: string[] = [];
+  if (mustFetch && outcome.fetches < 1) problems.push("no web fetch, though the spec names an outside service");
   if (outcome.outcome !== "handed-over") {
     problems.push(`build ${outcome.outcome}${outcome.failureReasons.length > 0 ? `: ${outcome.failureReasons.join(" | ")}` : ""}`);
   } else {
@@ -644,7 +661,7 @@ export function scoreBuild(outcome: BuildEvalOutcome): ClarifyScore {
         pass: true,
         detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown${
           outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
-        }`,
+        }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}`,
       }
     : { pass: false, detail: problems.join("; ") };
 }
@@ -655,7 +672,8 @@ export function formatBuildResult(result: BuildEvalResult, index: number): strin
   const head = `${result.pass ? "PASS" : "FAIL"} ${String(index + 1).padStart(2)} ${result.example.name}: ${result.detail}`;
   const o = result.outcome;
   if (o === undefined) return head;
-  return `${head}\n     | ${minutes(o.durationMs)}, ${o.usage.inputTokens} tokens in, ${o.usage.outputTokens} out, cost $${o.usage.costUsd.toFixed(4)}`;
+  const fetches = `${o.fetches} web ${o.fetches === 1 ? "fetch" : "fetches"}${o.fetchHosts.length > 0 ? ` (${o.fetchHosts.join(", ")})` : ""}`;
+  return `${head}\n     | ${minutes(o.durationMs)}, ${fetches}, ${o.usage.inputTokens} tokens in, ${o.usage.outputTokens} out, cost $${o.usage.costUsd.toFixed(4)}`;
 }
 
 export function formatBuildSummary(results: readonly BuildEvalResult[]): string[] {

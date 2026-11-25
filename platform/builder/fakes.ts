@@ -102,8 +102,11 @@ export class FakeDeployQueue implements DeployQueue {
   }
 }
 
-/** One step of a scripted agent: write a file (relative path), spend tokens, wait until aborted, or run `call` (a test's hook). */
-export type AgentStep = { write: string; content: string } | { tokens: AgentTokens } | { hang: true } | { fail: true } | { call: () => void | Promise<void> };
+/**
+ * One step of a scripted agent: write a file (relative path), read a page with WebFetch (its host), spend tokens, wait
+ * until aborted, or run `call` (a test's hook).
+ */
+export type AgentStep = { write: string; content: string } | { fetch: string } | { tokens: AgentTokens } | { hang: true } | { fail: true } | { call: () => void | Promise<void> };
 
 /** A coding agent that follows a script, writing into the workspace as the real one would. */
 export class FakeAgent implements CodingAgent {
@@ -121,6 +124,8 @@ export class FakeAgent implements CodingAgent {
         await mkdir(dirname(target), { recursive: true });
         await writeFile(target, step.content);
         run.onFileWritten(step.write);
+      } else if ("fetch" in step) {
+        run.onWebFetch(step.fetch);
       } else if ("tokens" in step) {
         tokens = step.tokens;
         run.onTokens(tokens);

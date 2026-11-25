@@ -4,9 +4,9 @@
  * BUILDER_BUILD_UPDATE_ATTRIBUTES (in `BUILD#*`) or BUILDER_USAGE_UPDATE_ATTRIBUTES (the `USAGE` item), both in infra/lib/config.ts, for ticket 2.9's
  * `dynamodb:Attributes` condition; no call returns attributes (ReturnValues NONE).
  *
- * The feed is one list attribute `feed` on the build item: steps, written files and commits, oldest first, each
- * with its time. It stays small (at most MAX_FEED_FILES file events; paths and commit lines are capped), far under
- * DynamoDB's 400 KB item limit.
+ * The feed is one list attribute `feed` on the build item: steps, written files, web fetches (the host only, ticket
+ * 2.15) and commits, oldest first, each with its time. It stays small (at most MAX_FEED_FILES file events and
+ * MAX_FEED_FETCHES fetch events; paths and commit lines are capped), far under DynamoDB's 400 KB item limit.
  */
 import {
   ConditionalCheckFailedException,
@@ -27,10 +27,14 @@ export type BuildStep = (typeof BUILD_STEPS)[number];
 export type FeedEvent =
   | { kind: "step"; step: BuildStep; at: string }
   | { kind: "file"; path: string; at: string }
+  | { kind: "fetch"; host: string; at: string }
   | { kind: "commit"; sha: string; message: string; at: string };
 
 /** At most this many file events are kept (the first write of each path); a bigger app is still built. */
 export const MAX_FEED_FILES = 200;
+
+/** At most this many web fetch events are kept (ticket 2.15); later fetches still happen but are not shown. */
+export const MAX_FEED_FETCHES = 50;
 
 /** What the builder reads of its build. */
 export interface BuildToRun {
@@ -70,6 +74,7 @@ export function feedValue(event: FeedEvent): AttributeValue {
   const fields: Record<string, AttributeValue> = { kind: str(event.kind), at: str(event.at) };
   if (event.kind === "step") fields.step = str(event.step);
   if (event.kind === "file") fields.path = str(event.path);
+  if (event.kind === "fetch") fields.host = str(event.host);
   if (event.kind === "commit") {
     fields.sha = str(event.sha);
     fields.message = str(event.message);

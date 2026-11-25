@@ -179,3 +179,11 @@ paths:
 - Fake keys in tests are built at run time (`["FAKE", "test", ...].join("")`, `FAKE_KEY` in `build/check.test.ts`), never
   written as one literal: GitHub push protection refuses a push whose commits hold a 32-hex "OpenWeather key", and the
   GitGuardian check fails the PR on any high-entropy or `AIza...` literal, also in comments and docs (ticket 2.14).
+- Claude Code's WebFetch (ticket 2.15): the hook gets `{ url, prompt, offset? }`; check the raw text before `new URL()`
+  (which repairs `127.1`, `0x7f000001`, trailing dots, `%6c`, backslashes) and require the parsed host to equal the raw
+  one. It summarises with `ANTHROPIC_SMALL_FAST_MODEL` (set it, with every other model name, to the build model or the
+  local Bedrock proxy refuses it), first asks `api.anthropic.com/api/web/domain_info` unless the flag setting
+  `skipWebFetchPreflight` is passed (SDK `settings`, loaded even with `settingSources: []`), and is deferrable: set
+  `ENABLE_TOOL_SEARCH=false` when the agent has no ToolSearch tool. WebSearch is off on Bedrock (`isEnabled()` false for
+  `bedrock`). `options.env` holds no proxy, so a local run behind a session proxy must pass `HTTPS_PROXY`, `NO_PROXY`
+  (127.0.0.1) and `NODE_EXTRA_CA_CERTS` itself (`webProxyEnvironment`, eval only).

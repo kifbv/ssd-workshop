@@ -20,7 +20,7 @@ is the same picture at twice the size, for phones.
   profiles).
 - **Build (phase 2).** After the readiness check, the launcher creates the participant's repository
   in the `ssd-workshop-apps` organization and starts a Fargate builder task. The coding agent has
-  file tools only; the runner commits to GitHub, writes feed events and hands the commit to the
+  file tools and reads public https pages (WebFetch, ticket 2.15), with no shell and no credentials; the runner commits to GitHub, writes feed events and hands the commit to the
   deployer, which checks it and publishes it to the apps bucket. Only the deployer writes there.
 - **Advanced (phase 4 and 6).** A k3s cluster on one EC2 instance, switched on by Franck. Each
   participant's repository CI builds an image to the GitHub container registry, and Flux deploys
