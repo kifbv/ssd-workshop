@@ -63,7 +63,7 @@ const text = (v: unknown): v is string => typeof v === "string";
 /** A commit id GitHub gave: 40 lower-case hex characters, the only form that goes into a link. */
 export const COMMIT_SHA = /^[0-9a-f]{40}$/;
 /** A participant's repository: `https://github.com/<owner>/ssd-<lower-cased nickname>` (ticket 2.6). */
-const REPOSITORY_URL = /^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\/ssd-[a-z0-9-]{3,20}$/;
+const REPOSITORY_URL = /^https:\/\/github\.com\/ssd-workshop-apps\/ssd-[a-z0-9-]{3,20}$/;
 /** A live app's address on the workshop's own site (ticket 2.5). */
 const APP_URL = /^https:\/\/workshop\.rankly\.games\/apps\/[a-z0-9-]{3,20}\/$/;
 
