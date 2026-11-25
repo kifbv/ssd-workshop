@@ -174,3 +174,6 @@ paths:
 - A stub interface for an SDK client (`ResetSender`) lists `send` once per command; an interface that extends it to add a
   command must restate every overload, or its own `send` replaces them and typecheck fails (ticket 2.13,
   `ParticipantResetSender`).
+- Fake keys in tests must not look like a real provider's key (32 hex characters is an OpenWeather key to GitHub's
+  push protection, which then refuses the push of every commit holding it): use values such as
+  `FAKEtestKEY0123456789notREAL` (ticket 2.14).
