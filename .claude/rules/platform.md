@@ -187,3 +187,6 @@ paths:
   `ENABLE_TOOL_SEARCH=false` when the agent has no ToolSearch tool. WebSearch is off on Bedrock (`isEnabled()` false for
   `bedrock`). `options.env` holds no proxy, so a local run behind a session proxy must pass `HTTPS_PROXY`, `NO_PROXY`
   (127.0.0.1) and `NODE_EXTRA_CA_CERTS` itself (`webProxyEnvironment`, eval only).
+  A cloud session's network policy may refuse the services' hosts ("proxy refused the connection" in the tool result, 0
+  fetches in the eval): the session environment must allow them (now allowed: en.wikipedia.org, upload.wikimedia.org,
+  openlibrary.org, covers.openlibrary.org, api.open-meteo.com, api.frankfurter.app, api.tvmaze.com, restcountries.com).

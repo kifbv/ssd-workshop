@@ -36,7 +36,7 @@ export interface AgentRun {
   signal: AbortSignal;
   /** A file the agent wrote or edited (workspace-relative, `/` between folders), after the tool succeeded. */
   onFileWritten: (path: string) => void;
-  /** The host (only the host) of a page the agent read with WebFetch, after the tool succeeded (ticket 2.15). */
+  /** The host (only the host) of a page the agent read with WebFetch, after the page answered 2xx (ticket 2.15). */
   onWebFetch: (host: string) => void;
   /** The tokens so far (cumulative), whenever they change: kept even when the run is cut off. */
   onTokens: (tokens: AgentTokens) => void;
@@ -124,11 +124,32 @@ export function webProxyEnvironment(source: Readonly<Record<string, string | und
 
 type HookOutput = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } } | Record<string, never>;
 
+const denied = (reason: string): HookOutput => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
+
 /** The PreToolUse hook: deny (with the reason, which the agent sees) whatever `checkToolCall` refuses. */
 export function preToolUse(workspace: string, toolName: unknown, toolInput: unknown): HookOutput {
   const decision = checkToolCall(workspace, typeof toolName === "string" ? toolName : "", toolInput);
-  if (decision.allow) return {};
-  return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } };
+  return decision.allow ? {} : denied(decision.reason);
+}
+
+/**
+ * At most this many WebFetch calls are allowed in one agent run (ticket 2.15 try 2, decision "(2.15) Prompt
+ * injection accepted"): part of the accepted full-web risk. Calls the hook refuses for their address do not count.
+ */
+export const MAX_WEB_FETCHES = 20;
+
+/** What the agent is told once the run's WebFetch budget is spent. */
+export const WEB_FETCH_BUDGET_SPENT = `This build has used its ${MAX_WEB_FETCHES} web reads; carry on with what you know.`;
+
+/**
+ * True when WebFetch's tool answer says the page answered 2xx (its `code`, SDK `WebFetchOutput`). Anything else (no
+ * answer, a redirect reply the agent must follow itself, 4xx, 5xx) is not a fetch: not fed, not counted (decision
+ * "(2.15) A fetch").
+ */
+export function fetchSucceeded(response: unknown): boolean {
+  if (response === null || typeof response !== "object" || Array.isArray(response)) return false;
+  const code = (response as { code?: unknown }).code;
+  return typeof code === "number" && Number.isInteger(code) && code >= 200 && code <= 299;
 }
 
 /** The workspace-relative path a successful Write or Edit touched, or undefined. */
@@ -149,6 +170,9 @@ export const AGENT_SETTINGS = { skipWebFetchPreflight: true } as const;
 export function agentOptions(run: Omit<AgentRun, "prompt" | "onTokens">, abortController: AbortController, env: Record<string, string>): Options {
   const toolName = (input: unknown): unknown => (input as { tool_name?: unknown }).tool_name;
   const toolInput = (input: unknown): unknown => (input as { tool_input?: unknown }).tool_input;
+  const toolResponse = (input: unknown): unknown => (input as { tool_response?: unknown }).tool_response;
+  // This run's WebFetch calls the hook allowed (MAX_WEB_FETCHES): one counter per run, never shared between builds.
+  let webFetches = 0;
   return {
     cwd: run.workspace,
     model: run.modelId,
@@ -171,14 +195,27 @@ export function agentOptions(run: Omit<AgentRun, "prompt" | "onTokens">, abortCo
     env,
     abortController,
     hooks: {
-      PreToolUse: [{ onFailure: "block", hooks: [async (input) => preToolUse(run.workspace, toolName(input), toolInput(input))] }],
+      PreToolUse: [
+        {
+          onFailure: "block",
+          hooks: [
+            async (input) => {
+              const output = preToolUse(run.workspace, toolName(input), toolInput(input));
+              if (toolName(input) !== "WebFetch" || "hookSpecificOutput" in output) return output;
+              if (webFetches >= MAX_WEB_FETCHES) return denied(WEB_FETCH_BUDGET_SPENT);
+              webFetches += 1;
+              return output;
+            },
+          ],
+        },
+      ],
       PostToolUse: [
         {
           hooks: [
             async (input) => {
               const path = writtenPath(run.workspace, toolName(input), toolInput(input));
               if (path !== undefined) run.onFileWritten(path);
-              const host = toolName(input) === "WebFetch" ? fetchedHost(toolInput(input)) : undefined;
+              const host = toolName(input) === "WebFetch" && fetchSucceeded(toolResponse(input)) ? fetchedHost(toolInput(input)) : undefined;
               if (host !== undefined) run.onWebFetch(host);
               return {};
             },
@@ -250,6 +287,11 @@ export class ClaudeAgent implements CodingAgent {
     private readonly webProxy: Readonly<Record<string, string>> = {},
   ) {}
 
+  /** The agent process's whole environment for one run: agentEnvironment plus, in local runs only, the web proxy settings. */
+  environment(modelId: string, home: string, bedrockUrl: string): Record<string, string> {
+    return { ...agentEnvironment(this.source, modelId, home, bedrockUrl), ...this.webProxy };
+  }
+
   async run(run: AgentRun): Promise<AgentResult> {
     const tracker = new TokenTracker();
     const controller = new AbortController();
@@ -265,7 +307,7 @@ export class ClaudeAgent implements CodingAgent {
         ...(this.bedrock.agent === undefined ? {} : { agent: this.bedrock.agent }),
         ...(this.bedrock.log === undefined ? {} : { log: this.bedrock.log }),
       });
-      const env = { ...agentEnvironment(this.source, run.modelId, await this.makeHome(), proxy.url), ...this.webProxy };
+      const env = this.environment(run.modelId, await this.makeHome(), proxy.url);
       for await (const message of query({ prompt: run.prompt, options: agentOptions(run, controller, env) })) {
         if (tracker.see(message)) run.onTokens(tracker.total);
         if (message.type === "result") outcome = message.subtype === "success" && !message.is_error ? "done" : "error";

@@ -19,26 +19,18 @@
  * Output: one JSON line per phase (./runner.ts), never a token, nickname, build id, path or error message.
  */
 import { mkdtemp, rm } from "node:fs/promises";
-import { Agent, type AgentOptions } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { downloadArchive } from "../api/deploy/github.js";
 import { DEPLOY_QUEUE_URL, MODELS, REGION, TABLE_NAME } from "../api/settings.js";
 import { errorName } from "../api/sign-in/code-request.js";
-import { ClaudeAgent } from "./agent.js";
 import { SqsDeployQueue } from "./queue.js";
+import { builderAgent, proxyAgent } from "./production.js";
 import { DynamoBuildRecords } from "./records.js";
 import { exitWhenDone, jobFromEnvironment, runBuild, type RunnerDeps } from "./runner.js";
-
-/** The session's HTTPS proxy agent when one is set (local runs); none on Fargate. */
-function proxyAgent(): Agent | undefined {
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-  return proxy ? new Agent({ proxyEnv: process.env } as AgentOptions) : undefined;
-}
 
 /** AWS clients: explicit region, bounded tries, and the session's proxy when one is set (local runs). */
 function awsSettings() {
@@ -56,18 +48,14 @@ async function main(): Promise<number> {
     console.error(JSON.stringify({ event: "builder", phase: "start", outcome: "error", error: job.error }));
     return 1;
   }
-  const upstreamAgent = proxyAgent();
   const deps: RunnerDeps = {
     records: new DynamoBuildRecords(new DynamoDBClient(awsSettings()), TABLE_NAME),
     github: { fetch: (url, init) => fetch(url, init), now: () => new Date(), log: (entry) => console.log(JSON.stringify(entry)) },
     download: (url) => downloadArchive(url),
-    agent: new ClaudeAgent(process.env, () => mkdtemp(join(tmpdir(), "ssd-agent-home-")), {
-      credentials: defaultProvider(),
-      ...(upstreamAgent === undefined ? {} : { agent: upstreamAgent }),
-      // Only what the proxy refused or could not forward (a path's shape and a status), never a header or body.
-      log: (entry) => {
-        if (entry.outcome !== "forwarded") console.log(JSON.stringify(entry));
-      },
+    // No web proxy settings for the agent (./production.ts). The Bedrock proxy logs only what it refused or could not
+    // forward (a path's shape and a status), never a header or body.
+    agent: builderAgent(process.env, (entry) => {
+      if (entry.outcome !== "forwarded") console.log(JSON.stringify(entry));
     }),
     queue: new SqsDeployQueue(new SQSClient(awsSettings()), DEPLOY_QUEUE_URL),
     makeWorkspace: () => mkdtemp(join(tmpdir(), "ssd-build-")),

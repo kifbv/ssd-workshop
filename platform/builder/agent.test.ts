@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, fetchSucceeded, MAX_WEB_FETCHES, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
 writeFileSync(join(ws, "index.html"), "x");
@@ -66,16 +66,64 @@ describe("the agent's settings (criterion 2)", () => {
   it("reports each successful WebFetch's host only, never its path or query, and nothing for a refused address (ticket 2.15)", async () => {
     const hook = options.hooks?.PostToolUse?.[0]?.hooks[0];
     const signal = new AbortController().signal;
-    const post = (tool_name: string, tool_input: unknown) =>
-      hook?.({ hook_event_name: "PostToolUse", tool_name, tool_input, tool_response: {}, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal });
+    const ok = { bytes: 10, code: 200, codeText: "OK", result: "x", durationMs: 1, url: "https://en.wikipedia.org/" };
+    const post = (tool_name: string, tool_input: unknown, tool_response: unknown = ok) =>
+      hook?.({ hook_event_name: "PostToolUse", tool_name, tool_input, tool_response, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal });
     written.length = 0;
     fetched.length = 0;
     await post("WebFetch", { url: "https://en.wikipedia.org/api/rest_v1/page/summary/Inception?x=1", prompt: "x" });
     await post("WebFetch", { url: "http://169.254.170.2/", prompt: "x" });
     await post("Read", { url: "https://en.wikipedia.org/" });
-    await post("Write", { file_path: join(ws, "app.js"), content: "x" });
+    await post("Write", { file_path: join(ws, "app.js"), content: "x" }, {});
     expect(fetched).toEqual(["en.wikipedia.org"]);
     expect(written).toEqual(["app.js"]);
+  });
+
+  it("counts and feeds a WebFetch only when the page answered 2xx: not a redirect reply, 4xx, 5xx or a missing answer (ticket 2.15 try 2)", async () => {
+    const hook = options.hooks?.PostToolUse?.[0]?.hooks[0];
+    const signal = new AbortController().signal;
+    const post = (tool_response: unknown) =>
+      hook?.(
+        { hook_event_name: "PostToolUse", tool_name: "WebFetch", tool_input: { url: "https://api.tvmaze.com/shows/1", prompt: "x" }, tool_response, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws },
+        "t",
+        { signal },
+      );
+    fetched.length = 0;
+    for (const response of [undefined, null, "fetched", [], {}, { code: "200" }, { code: 301, codeText: "Moved Permanently" }, { code: 302 }, { code: 404 }, { code: 429 }, { code: 500 }, { code: 199 }, { code: 300 }, { code: 200.5 }]) {
+      await post(response);
+    }
+    expect(fetched).toEqual([]);
+    await post({ bytes: 5, code: 200, codeText: "OK" });
+    await post({ bytes: 0, code: 204, codeText: "No Content" });
+    await post({ bytes: 5, code: 299, codeText: "" });
+    expect(fetched).toEqual(["api.tvmaze.com", "api.tvmaze.com", "api.tvmaze.com"]);
+    expect(fetchSucceeded({ code: 200 })).toBe(true);
+    expect(fetchSucceeded({ code: 304 })).toBe(false);
+    expect(fetchSucceeded(undefined)).toBe(false);
+  });
+
+  it(`refuses WebFetch once ${MAX_WEB_FETCHES} calls were allowed in the same run; refused calls do not use the budget, and each run has its own (ticket 2.15 try 2)`, async () => {
+    expect(MAX_WEB_FETCHES).toBe(20);
+    const signal = new AbortController().signal;
+    const fresh = agentOptions(run, new AbortController(), { PATH: "/bin" });
+    const hook = fresh.hooks?.PreToolUse?.[0]?.hooks[0];
+    const pre = (tool_name: string, tool_input: unknown) =>
+      hook?.({ hook_event_name: "PreToolUse", tool_name, tool_input, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal });
+    const good = { url: "https://en.wikipedia.org/wiki/Inception", prompt: "x" };
+    // Refused addresses and other tools never count.
+    for (let i = 0; i < 30; i += 1) expect(await pre("WebFetch", { url: "http://169.254.170.2/", prompt: "x" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    for (let i = 0; i < 30; i += 1) expect(await pre("Read", { file_path: join(ws, "index.html") })).toEqual({});
+    for (let i = 0; i < MAX_WEB_FETCHES; i += 1) expect(await pre("WebFetch", good), `call ${i + 1}`).toEqual({});
+    const refused = await pre("WebFetch", good);
+    expect(refused).toEqual({
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "This build has used its 20 web reads; carry on with what you know." },
+    });
+    expect(await pre("WebFetch", good)).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    // Files still work after the budget is spent.
+    expect(await pre("Read", { file_path: join(ws, "index.html") })).toEqual({});
+    // Another run (new options) starts with a full budget.
+    const other = agentOptions(run, new AbortController(), { PATH: "/bin" }).hooks?.PreToolUse?.[0]?.hooks[0];
+    expect(await other?.({ hook_event_name: "PreToolUse", tool_name: "WebFetch", tool_input: good, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal })).toEqual({});
   });
 
   it("reports files written or edited inside the workspace only", () => {
