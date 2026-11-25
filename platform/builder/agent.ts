@@ -128,6 +128,9 @@ export function agentOptions(run: Omit<AgentRun, "prompt" | "onTokens">, abortCo
     plugins: [],
     agents: {},
     persistSession: false,
+    // No extended thinking: on Sonnet 4.6 it tripled a build's time and doubled its cost (4 to 8 minutes, $0.80 to
+    // $1.76 on a four-screen spec, against about 2 minutes and $0.50 without) for no better app (benchmark 2026-11-25).
+    thinking: { type: "disabled" },
     maxTurns: MAX_AGENT_TURNS,
     env,
     abortController,

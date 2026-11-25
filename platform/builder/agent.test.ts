@@ -27,6 +27,7 @@ describe("the agent's settings (criterion 2)", () => {
     expect(options.skills).toEqual([]);
     expect(options.plugins).toEqual([]);
     expect(options.agents).toEqual({});
+    expect(options.thinking).toEqual({ type: "disabled" });
     expect(options.persistSession).toBe(false);
     expect(options.cwd).toBe(ws);
     expect(options.model).toBe(MODEL);
