@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, fetchSucceeded, MAX_WEB_FETCHES, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, fetchSucceeded, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
 writeFileSync(join(ws, "index.html"), "x");
@@ -15,7 +16,15 @@ const MODEL = "eu.anthropic.claude-sonnet-4-6";
 describe("the agent's settings (criterion 2)", () => {
   const written: string[] = [];
   const fetched: string[] = [];
-  const run = { workspace: ws, modelId: MODEL, signal: new AbortController().signal, onFileWritten: (path: string) => written.push(path), onWebFetch: (host: string) => fetched.push(host) };
+  const missed: WebFetchMiss[] = [];
+  const run = {
+    workspace: ws,
+    modelId: MODEL,
+    signal: new AbortController().signal,
+    onFileWritten: (path: string) => written.push(path),
+    onWebFetch: (host: string) => fetched.push(host),
+    onWebFetchMiss: (miss: WebFetchMiss) => missed.push(miss),
+  };
   const options = agentOptions(run, new AbortController(), { PATH: "/bin" });
 
   it("gives file tools and WebFetch only (ticket 2.15 criterion 1), never asks, loads no settings, MCP servers, skills, plugins or subagents, and saves nothing", () => {
@@ -89,14 +98,19 @@ describe("the agent's settings (criterion 2)", () => {
         { signal },
       );
     fetched.length = 0;
+    missed.length = 0;
     for (const response of [undefined, null, "fetched", [], {}, { code: "200" }, { code: 301, codeText: "Moved Permanently" }, { code: 302 }, { code: 404 }, { code: 429 }, { code: 500 }, { code: 199 }, { code: 300 }, { code: 200.5 }]) {
       await post(response);
     }
     expect(fetched).toEqual([]);
+    // Each miss is reported as its status, or "error" when the answer holds none (never the address).
+    expect(missed).toEqual(["error", "error", "error", "error", "error", "error", 301, 302, 404, 429, 500, 199, 300, "error"]);
+    expect(missCode({ code: 600 })).toBe("error");
     await post({ bytes: 5, code: 200, codeText: "OK" });
     await post({ bytes: 0, code: 204, codeText: "No Content" });
     await post({ bytes: 5, code: 299, codeText: "" });
     expect(fetched).toEqual(["api.tvmaze.com", "api.tvmaze.com", "api.tvmaze.com"]);
+    expect(missed).toHaveLength(14);
     expect(fetchSucceeded({ code: 200 })).toBe(true);
     expect(fetchSucceeded({ code: 304 })).toBe(false);
     expect(fetchSucceeded(undefined)).toBe(false);
@@ -110,6 +124,7 @@ describe("the agent's settings (criterion 2)", () => {
     const pre = (tool_name: string, tool_input: unknown) =>
       hook?.({ hook_event_name: "PreToolUse", tool_name, tool_input, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal });
     const good = { url: "https://en.wikipedia.org/wiki/Inception", prompt: "x" };
+    missed.length = 0;
     // Refused addresses and other tools never count.
     for (let i = 0; i < 30; i += 1) expect(await pre("WebFetch", { url: "http://169.254.170.2/", prompt: "x" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
     for (let i = 0; i < 30; i += 1) expect(await pre("Read", { file_path: join(ws, "index.html") })).toEqual({});
@@ -119,11 +134,25 @@ describe("the agent's settings (criterion 2)", () => {
       hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "This build has used its 20 web reads; carry on with what you know." },
     });
     expect(await pre("WebFetch", good)).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    // 30 refused addresses and 2 calls over the budget are reported as refused; allowed calls and Reads are not.
+    expect(missed).toEqual(Array.from({ length: 32 }, () => "refused"));
     // Files still work after the budget is spent.
     expect(await pre("Read", { file_path: join(ws, "index.html") })).toEqual({});
     // Another run (new options) starts with a full budget.
     const other = agentOptions(run, new AbortController(), { PATH: "/bin" }).hooks?.PreToolUse?.[0]?.hooks[0];
     expect(await other?.({ hook_event_name: "PreToolUse", tool_name: "WebFetch", tool_input: good, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal })).toEqual({});
+  });
+
+  it("reports a WebFetch that threw (no connection, DNS, time-out) as an error, and no other tool's failure (PostToolUseFailure)", async () => {
+    const hook = options.hooks?.PostToolUseFailure?.[0]?.hooks[0];
+    const signal = new AbortController().signal;
+    missed.length = 0;
+    for (const tool_name of ["WebFetch", "Read", "Write"]) {
+      expect(
+        await hook?.({ hook_event_name: "PostToolUseFailure", tool_name, tool_input: {}, tool_use_id: "t", error: "proxy refused the connection", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal }),
+      ).toEqual({});
+    }
+    expect(missed).toEqual(["error"]);
   });
 
   it("reports files written or edited inside the workspace only", () => {

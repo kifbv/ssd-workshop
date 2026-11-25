@@ -38,6 +38,9 @@ import { MAX_FEED_FETCHES, MAX_FEED_FILES, type BuildRecords, type BuildStep, ty
 import { planCommits, pushCommits, readMain } from "./repository.js";
 import { NO_TOKENS, usageOfTokens, type AgentTokens } from "./usage.js";
 
+/** At most this many distinct non-2xx WebFetch statuses go into the writing log line. */
+export const MAX_LOGGED_FETCH_CODES = 10;
+
 /** The deploy message, exactly as the deployer reads it (decision "(2.5) Deploy message"). */
 export interface DeployMessage {
   buildId: string;
@@ -59,6 +62,11 @@ export interface BuilderLogEntry {
   files?: number;
   /** Web fetches the agent made (ticket 2.15). */
   fetches?: number;
+  /** WebFetch calls that read no page: refused by the hook, failed in the tool, or answered non-2xx. */
+  fetchesRefused?: number;
+  fetchesFailed?: number;
+  /** The distinct non-2xx statuses those answers had (at most MAX_LOGGED_FETCH_CODES), never an address. */
+  fetchCodes?: number[];
   commits?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -223,6 +231,9 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     await feed(step("writing"));
     const written = new Set<string>();
     let fetches = 0;
+    let fetchesRefused = 0;
+    let fetchesFailed = 0;
+    const fetchCodes = new Set<number>();
     const fileWrites: Promise<void>[] = [];
     let tokens: AgentTokens = NO_TOKENS;
     const controller = new AbortController();
@@ -273,6 +284,11 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
             if (fetches > MAX_FEED_FETCHES) return;
             fileWrites.push(feedDuringWriting({ kind: "fetch", host: feedPath(host), at: nowIso() }));
           },
+          onWebFetchMiss: (miss) => {
+            if (miss === "refused") fetchesRefused += 1;
+            else fetchesFailed += 1;
+            if (typeof miss === "number" && fetchCodes.size < MAX_LOGGED_FETCH_CODES) fetchCodes.add(miss);
+          },
           onTokens: (total) => {
             tokens = total;
           },
@@ -288,7 +304,13 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     if (result !== "timeout" && result !== "gone") tokens = result.tokens;
     await Promise.all(fileWrites);
     const usage: TokenUsage = usageOfTokens(tokens, deps.model.price);
-    if (!gone) log("writing", timedOut ? "timeout" : result === "timeout" || result === "gone" || result.outcome !== "done" ? "error" : "ok", { files: written.size, fetches });
+    if (!gone) log("writing", timedOut ? "timeout" : result === "timeout" || result === "gone" || result.outcome !== "done" ? "error" : "ok", {
+        files: written.size,
+        fetches,
+        fetchesRefused,
+        fetchesFailed,
+        fetchCodes: [...fetchCodes].sort((a, b) => a - b),
+      });
     try {
       await deps.records.addUsage(participantId, usage, nowIso());
       log("usage", "ok", { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd });
