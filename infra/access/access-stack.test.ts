@@ -7,6 +7,7 @@ import { parse, type Scalar, type ScalarTag, type CollectionTag, type YAMLSeq } 
 import {
   ACCOUNT,
   AI_WORKER_FUNCTION_NAME,
+  APPS_BUCKET_NAME,
   ASSETS_BUCKET_NAME,
   BUILD_CHECK_QUEUE_NAME,
   BUILD_CHECK_SCHEDULE_NAME,
@@ -25,6 +26,10 @@ import {
   DEPLOYER_FUNCTION_NAME,
   IAM_PATH,
   REGION,
+  SIGN_IN_CODE_FUNCTION_NAME,
+  SITE_BUCKET_NAME,
+  STACK_NAMES,
+  TABLE_NAME,
 } from "../lib/config.js";
 
 // CloudFormation short-form intrinsics, turned into their long form ({ "Fn::Sub": ... }).
@@ -64,7 +69,7 @@ interface Resource {
   Properties: Record<string, unknown>;
 }
 interface Template {
-  Parameters: Record<string, { Default?: unknown }>;
+  Parameters: Record<string, { Type?: string; Default?: unknown; NoEcho?: boolean }>;
   Resources: Record<string, Resource>;
 }
 
@@ -91,8 +96,12 @@ function statements(t: Template, logicalId: string): Statement[] {
   return props.PolicyDocument.Statement;
 }
 const DEPLOY_POLICIES = ["DeployPolicy", "DeployPolicyEdge", "DeployPolicyEc2", "DeployPolicyRead"];
-const ALL_POLICIES = ["BoundaryPolicy", ...DEPLOY_POLICIES];
+// The Claude user's policies since ticket 2.12: the deploy reads (with the session denies) and the
+// session policy, never the deploy writes.
+const CLAUDE_POLICIES = ["DeployPolicyRead", "SessionPolicy"];
+const ALL_POLICIES = ["BoundaryPolicy", ...DEPLOY_POLICIES, "SessionPolicy"];
 const deployStatements = (t: Template) => DEPLOY_POLICIES.flatMap((id) => statements(t, id));
+const claudeStatements = (t: Template) => CLAUDE_POLICIES.flatMap((id) => statements(t, id));
 const boundaryStatements = (t: Template) => statements(t, "BoundaryPolicy");
 // A copy of the template with every occurrence of a piece of text replaced.
 function withAll(oldText: string, newText: string): Template {
@@ -146,11 +155,17 @@ const ACTION_ALLOW_LIST: Record<string, string> = {
 };
 const DEPLOY_EXCEPTIONS: Record<string, string> = {
   ...ACTION_ALLOW_LIST,
+  "CertificatesThroughCloudFormation/acm:RequestCertificate": "authorizes no existing resource; only through CloudFormation, which tags it in the same create (TagOnCreateThroughCloudFormation); domains limited by acm:DomainNames (acmDomainGaps)",
+};
+// The only Allow actions of the Claude user that are not reads (ticket 2.12), keyed "Sid/action".
+// Everything else the user may do must be a read (isRead), so sessions change nothing live.
+const SESSION_EXCEPTIONS: Record<string, string> = {
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
-  "CertificatesThroughCloudFormation/acm:RequestCertificate": "authorizes no existing resource; only through CloudFormation, which tags it in the same create (TagOnCreateThroughCloudFormation); domains limited by acm:DomainNames (acmDomainGaps)",
-  "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop-email configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
-  "SesForTesting/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop-email configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
+  "SesForTesting/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop-email configuration set only, sender pinned by ses:FromAddress (sesScopeGaps), recipients limited to SessionTestRecipients (try 3)",
+  "WorkshopLogReads/logs:FilterLogEvents": "a read of workshop log groups only (its name has no read prefix)",
+  "WorkshopLogReads/logs:StartQuery": "a Logs Insights query over workshop log groups only; it reads, and changes nothing",
+  "WorkshopLogReads/logs:StartLiveTail": "a live tail of workshop log groups only; it reads, and changes nothing",
 };
 // The boundary's own exceptions (same rules as the deploy policies).
 const BOUNDARY_ALLOW_LIST: Record<string, string> = {
@@ -372,6 +387,7 @@ const PROTECTED_IDENTITIES = [
   "policy/ssd-workshop-deploy-edge",
   "policy/ssd-workshop-deploy-ec2",
   "policy/ssd-workshop-deploy-read",
+  "policy/ssd-workshop-session",
 ].map((p) => `arn:aws:iam::\${AWS::AccountId}:${p}`);
 const IAM_WRITES = [
   "iam:UpdateAssumeRolePolicy", "iam:PassRole", "iam:AttachRolePolicy", "iam:DetachRolePolicy",
@@ -446,6 +462,8 @@ const SAMPLE: Record<string, string> = {
   "AWS::Region": "eu-central-1",
   HostedZoneId: "Z".repeat(32),
   GitHubRepo: "kifbv@7999713/ssd-workshop@1467373954",
+  // Room for four test addresses of 40 characters with their quotes and commas (Franck enters them at apply time).
+  SessionTestRecipients: "x".repeat(4 * 43),
 };
 function resolve(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(resolve);
@@ -608,12 +626,19 @@ const workflowFiles = (): Record<string, string> =>
 // know make it throw, so a new condition is never silently read as true or false.
 type Ctx = Record<string, string | string[]>;
 const LIVE: Record<string, string> = { "AWS::AccountId": ACCOUNT, "AWS::Region": REGION };
+// A Ref to a CommaDelimitedList parameter (SessionTestRecipients) stands for its default values.
+const TEMPLATE_PARAMETERS = loadTemplate().Parameters;
+const expandList = (v: unknown): unknown[] => {
+  const ref = typeof v === "object" && v !== null && "Ref" in v ? String((v as { Ref: unknown }).Ref) : undefined;
+  const p = ref === undefined ? undefined : TEMPLATE_PARAMETERS[ref];
+  return p?.Type === "CommaDelimitedList" ? String(p.Default).split(",").map((x) => x.trim()) : [v];
+};
 const live = (v: unknown): string =>
   typeof v === "string" ? v : text(v as Value).replace(/\$\{([^}]+)\}/g, (_, k: string) => LIVE[k] ?? k);
 function conditionHolds(c: Cond | undefined, ctx: Ctx): boolean {
   return Object.entries(c ?? {}).every(([op, keys]) =>
     Object.entries(keys).every(([key, raw]) => {
-      const want = list(raw as unknown).map(live);
+      const want = list(raw as unknown).flatMap(expandList).map(live);
       const got = key in ctx ? list(ctx[key]) : undefined;
       const base = op.replace(/^ForAnyValue:|^ForAllValues:/, "");
       const one = (v: string): boolean => {
@@ -671,6 +696,7 @@ describe("access stack: deploy policies (criterion 2)", () => {
     expect(Object.keys(BOUNDARY_ALLOW_LIST).filter((k) => !used(boundaryStatements(template)).includes(k))).toEqual([]);
     expect(Object.keys(REQUEST_TAG_ON_ANY).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
     expect(Object.keys(ACCEPTED_SECRET_READS).filter((k) => !used(deployStatements(template)).includes(k))).toEqual([]);
+    expect(Object.keys(SESSION_EXCEPTIONS).filter((k) => !used(claudeStatements(template)).includes(k))).toEqual([]);
   });
 
   it("fails when a write is loosened to Resource *", () => {
@@ -1016,10 +1042,10 @@ describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
   });
 
   it("sends mail only through the workshop sender's identities", () => {
-    expect(sesScopeGaps(deployStatements(template))).toEqual([]);
+    expect(sesScopeGaps(claudeStatements(template))).toEqual([]);
     expect(sesScopeGaps(boundaryStatements(template))).toEqual([]);
     const old = withAll("              - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games\n", '              - "*"\n');
-    expect(sesScopeGaps(deployStatements(old))).toEqual(["SesForTesting"]);
+    expect(sesScopeGaps(claudeStatements(old))).toEqual(["SesForTesting"]);
     expect(sesScopeGaps(boundaryStatements(old))).toEqual(["SendCodes"]);
   });
 
@@ -1031,7 +1057,7 @@ describe("access stack: ECS, EventBridge, ACM and SES (try 4)", () => {
       "              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/ssd-workshop-email\n",
       "              - !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/*\n",
     );
-    expect(sesScopeGaps(deployStatements(otherSet))).toEqual(["SesForTesting"]);
+    expect(sesScopeGaps(claudeStatements(otherSet))).toEqual(["SesForTesting"]);
     expect(sesScopeGaps(boundaryStatements(otherSet))).toEqual(["SendCodes"]);
   });
 });
@@ -1170,6 +1196,8 @@ describe("access stack: S3 in this account only (L1)", () => {
     const old = withAll("              StringEquals: {aws:ResourceAccount: !Ref AWS::AccountId}\n", "              StringEquals: {aws:ResourceAccount: \"*\"}\n");
     expect(s3AccountGaps(deployStatements(old))).toEqual(["WorkshopBuckets"]);
     expect(s3AccountGaps(boundaryStatements(old))).toEqual(["WorkshopBuckets"]);
+    expect(s3AccountGaps(claudeStatements(template))).toEqual([]);
+    expect(s3AccountGaps(claudeStatements(old))).toEqual(["WorkshopBucketReads"]);
   });
 });
 
@@ -1246,23 +1274,23 @@ describe("access stack: self-protection (criterion 3)", () => {
     }
   });
 
-  it("attaches the same four deploy policies to the deploy role and the Claude user", () => {
+  it("attaches exactly the four deploy policies to the deploy role (ticket 2.12)", () => {
     expect(statements(template, "DeployPolicy")).toContain(deny);
-    for (const id of ["DeployRole", "ClaudeUser"]) {
-      expect(template.Resources[id]?.Properties.ManagedPolicyArns, id).toEqual(DEPLOY_POLICIES.map((p) => ({ Ref: p })));
-    }
+    expect(template.Resources.DeployRole?.Properties.ManagedPolicyArns).toEqual(DEPLOY_POLICIES.map((p) => ({ Ref: p })));
     expect(DEPLOY_POLICIES.map((id) => template.Resources[id]?.Properties.ManagedPolicyName)).toEqual([
       "ssd-workshop-deploy", "ssd-workshop-deploy-edge", "ssd-workshop-deploy-ec2", "ssd-workshop-deploy-read",
     ]);
   });
 
-  it("explicitly denies IAM writes on the deploy role, the Claude user and the five managed policies", () => {
+  it("explicitly denies IAM writes on the deploy role, the Claude user and the six managed policies", () => {
     expect(identityGaps(deployStatements(template))).toEqual([]);
     // Old pattern: without the deny, role/ssd-workshop-* housekeeping reached the deploy role.
     const without = deployStatements(template).filter((s) => s.Sid !== "ProtectAccessIdentities");
     expect(identityGaps(without)).toContain("arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-deploy/iam:UpdateAssumeRolePolicy");
     const noRead = withText("              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-read\n", "");
     expect(identityGaps(deployStatements(noRead))).toContain("arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-deploy-read/iam:DeletePolicy");
+    const noSession = withText("              - !Sub arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-session\n", "");
+    expect(identityGaps(deployStatements(noSession))).toContain("arn:aws:iam::${AWS::AccountId}:policy/ssd-workshop-session/iam:DeletePolicy");
   });
 
   it("keeps every role right on the /ssd-workshop/ path, so no Allow reaches the deploy role (H4)", () => {
@@ -1374,7 +1402,514 @@ describe("policy sizes", () => {
   it("prints the size of each managed policy", () => {
     const sizes = Object.fromEntries(ALL_POLICIES.map((id) => [id, policySize(template, id)]));
     console.log(`policy sizes (limit 6144): ${JSON.stringify(sizes)}`);
-    expect(Object.keys(sizes)).toHaveLength(5);
+    expect(Object.keys(sizes)).toHaveLength(6);
+  });
+});
+
+// Ticket 2.12 (Franck's choice, 2026-11-24): Claude sessions are read-only plus Bedrock, test emails and log
+// queries, so only deploys from main change live apps.
+// Reads a session must never get: table items (participants' email addresses), stream records, queue messages,
+// secret values and parameters; nor invoking a function (it runs with the function's rights). Nor (try 2) the
+// "Get" actions that return credentials or secrets although isRead counts them as reads: registry and package
+// login tokens, temporary AWS credentials, S3 Access Grants credentials, Windows passwords and instance consoles.
+const SESSION_FORBIDDEN = [
+  "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:PartiQLSelect",
+  "dynamodb:ExportTableToPointInTime", "dynamodb:GetRecords", "dynamodb:GetShardIterator",
+  "sqs:ReceiveMessage", "secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue",
+  "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory",
+  "lambda:InvokeFunction",
+  "ecr:GetAuthorizationToken", "ecr-public:GetAuthorizationToken", "codeartifact:GetAuthorizationToken",
+  "sts:GetFederationToken", "sts:GetSessionToken", "sso:GetRoleCredentials", "s3:GetDataAccess",
+  "ec2:GetPasswordData", "ec2:GetConsoleOutput", "ec2:GetConsoleScreenshot",
+  // Try 3: launch template data (user data), instance access details, cluster credentials, identity pool credentials.
+  "ec2:GetLaunchTemplateData", "lightsail:GetInstanceAccessDetails", "redshift:GetClusterCredentials",
+  "redshift:GetClusterCredentialsWithIAM", "cognito-identity:GetCredentialsForIdentity", "cognito-identity:GetOpenIdToken",
+];
+// True when a Deny statement of the set applies to the request (whatever the Allows say).
+const deniedBy = (stmts: Statement[], action: string, resource: string, ctx: Ctx = {}) =>
+  stmts.some((s) => s.Effect === "Deny" && statementApplies(s, action, resource, ctx));
+// Every Allow action of a set of statements that is neither a read nor a listed exception, as "Sid/action".
+function sessionWrites(stmts: Statement[]): string[] {
+  return stmts
+    .filter((s) => s.Effect === "Allow")
+    .flatMap((s) =>
+      s.NotAction !== undefined || s.NotResource !== undefined
+        ? [`${s.Sid}/NotAction-or-NotResource`]
+        : list(s.Action).filter((a) => !isRead(a) && !(`${s.Sid}/${a}` in SESSION_EXCEPTIONS)).map((a) => `${s.Sid}/${a}`),
+    );
+}
+// Every forbidden read an Allow grants (any resource, wildcards included), as "Sid/action".
+function sessionForbiddenReads(stmts: Statement[]): string[] {
+  return stmts
+    .filter((s) => s.Effect === "Allow")
+    .flatMap((s) => SESSION_FORBIDDEN.filter((f) => list(s.Action).some((p) => matches(p, f))).map((f) => `${s.Sid}/${f}`));
+}
+// Session statements not limited to workshop names (or a workshop function ARN), Bedrock and SES aside (own tests).
+function sessionScopeGaps(t: Template): string[] {
+  return statements(t, "SessionPolicy")
+    .filter((s) => s.Effect === "Allow" && !["Bedrock", "SesForTesting"].includes(s.Sid))
+    .filter((s) => {
+      const sc = scopeOf(s, t);
+      return !(sc.names || sc.functionArn);
+    })
+    .map((s) => s.Sid);
+}
+
+describe("access stack: Claude sessions read-only (ticket 2.12)", () => {
+  const claude = claudeStatements(template);
+  const CLAUDE = { "aws:ResourceAccount": "Ref:AWS::AccountId", "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:user/ssd-workshop-claude` };
+  const fn = (name: string) => `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${name}`;
+  const TABLE = `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`;
+  const API_STACK = `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${STACK_NAMES.api}/1234abcd`;
+
+  it("attaches only ssd-workshop-deploy-read and ssd-workshop-session to the Claude user, never a deploy write policy", () => {
+    const arns = template.Resources.ClaudeUser?.Properties.ManagedPolicyArns;
+    expect(arns).toEqual(CLAUDE_POLICIES.map((p) => ({ Ref: p })));
+    for (const id of ["DeployPolicy", "DeployPolicyEdge", "DeployPolicyEc2"]) expect(arns, id).not.toContainEqual({ Ref: id });
+    expect(template.Resources.SessionPolicy?.Properties.ManagedPolicyName).toBe("ssd-workshop-session");
+    // No other identity carries the session policy.
+    const holders = Object.entries(template.Resources)
+      .filter(([, r]) => list(r.Properties.ManagedPolicyArns as unknown).some((a) => JSON.stringify(a) === '{"Ref":"SessionPolicy"}'))
+      .map(([id]) => id);
+    expect(holders).toEqual(["ClaudeUser"]);
+  });
+
+  it("allows the Claude user only reads, Bedrock invoke, SES send from the workshop sender and log queries", () => {
+    expect(sessionWrites(claude)).toEqual([]);
+    const put = withText("\"s3:Get*Configuration\", \"s3:List*\"]\n", "\"s3:Get*Configuration\", \"s3:List*\", s3:PutObject]\n");
+    expect(sessionWrites(claudeStatements(put))).toEqual(["WorkshopBucketReads/s3:PutObject"]);
+    const wildcard = withText("              - lambda:GetFunction\n", "              - lambda:*\n");
+    expect(sessionWrites(claudeStatements(wildcard))).toEqual(["WorkshopResourceReads/lambda:*"]);
+    // An exception counts only in its own statement.
+    const moved = withText("              - lambda:GetFunction\n", "              - logs:StartQuery\n");
+    expect(sessionWrites(claudeStatements(moved))).toEqual(["WorkshopResourceReads/logs:StartQuery"]);
+    // The deploy rule's scope check agrees (Bedrock and SES are the user's only unscoped non-reads).
+    expect(unscopedWrites(template, claude, SESSION_EXCEPTIONS)).toEqual([]);
+  });
+
+  it("grants the Claude user no table item, stream record, queue message, secret value or parameter read", () => {
+    expect(sessionForbiddenReads(claude)).toEqual([]);
+    const items = withText("              - dynamodb:DescribeTable\n", "              - dynamodb:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(items))).toEqual(["WorkshopResourceReads/dynamodb:GetItem", "WorkshopResourceReads/dynamodb:GetRecords", "WorkshopResourceReads/dynamodb:GetShardIterator"]);
+    const receive = withText("              - sqs:GetQueueAttributes\n", "              - sqs:ReceiveMessage\n");
+    expect(sessionForbiddenReads(claudeStatements(receive))).toEqual(["WorkshopResourceReads/sqs:ReceiveMessage"]);
+    const secret = withText("              - dynamodb:ListTagsOfResource\n              - secretsmanager:DescribeSecret\n", "              - dynamodb:ListTagsOfResource\n              - secretsmanager:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(secret))).toEqual(["WorkshopResourceReads/secretsmanager:GetSecretValue"]);
+    expect(secretReadGaps(template, claude)).toEqual([]);
+  });
+
+  it("grants the Claude user no credential-returning read, also through a wildcard (try 2)", () => {
+    expect(sessionForbiddenReads(claude)).toEqual([]);
+    const ecr = withText("              - ecr:DescribeRepositories\n", "              - ecr:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(ecr))).toEqual(["WorkshopResourceReads/ecr:GetAuthorizationToken"]);
+    // The old bucket read s3:Get* also named S3 Access Grants' credentials.
+    const s3 = withText("[\"s3:GetObject*\", \"s3:GetBucket*\", \"s3:Get*Configuration\", \"s3:List*\"]", "[\"s3:Get*\", \"s3:List*\"]");
+    expect(sessionForbiddenReads(claudeStatements(s3))).toEqual(["WorkshopBucketReads/s3:GetDataAccess"]);
+    const sts = withText("              - ecr:DescribeRepositories\n", "              - sts:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(sts))).toEqual(["WorkshopResourceReads/sts:GetFederationToken", "WorkshopResourceReads/sts:GetSessionToken"]);
+    const ec2 = withText("              - ec2:Describe*\n", "              - ec2:Describe*\n              - ec2:Get*\n");
+    expect(sessionForbiddenReads(claudeStatements(ec2))).toEqual(["ReadsWithoutSecrets/ec2:GetPasswordData", "ReadsWithoutSecrets/ec2:GetConsoleOutput", "ReadsWithoutSecrets/ec2:GetConsoleScreenshot", "ReadsWithoutSecrets/ec2:GetLaunchTemplateData"]);
+    // The bucket reads still cover objects, bucket settings and listings.
+    const OBJECT = `arn:aws:s3:::${APPS_BUCKET_NAME}/apps/someone/index.html`;
+    for (const action of ["s3:GetObject", "s3:GetObjectTagging", "s3:GetBucketPolicy", "s3:GetLifecycleConfiguration", "s3:GetEncryptionConfiguration", "s3:ListBucket"]) {
+      expect(allowedBy(claude, action, action.includes("Object") ? OBJECT : `arn:aws:s3:::${APPS_BUCKET_NAME}`, CLAUDE), action).toBe(true);
+    }
+  });
+
+  it("denies the Claude user assuming any role or getting federation tokens, even if a trust policy names it (try 2)", () => {
+    const ROLE_NAMING_THE_USER = `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-left-over`;
+    const OTHER_ROLE = `arn:aws:iam::${ACCOUNT}:role/letters-admin`;
+    const FED = `arn:aws:sts::${ACCOUNT}:federated-user/x`;
+    for (const [action, resource] of [
+      ["sts:AssumeRole", ROLE_NAMING_THE_USER], ["sts:AssumeRole", OTHER_ROLE], ["sts:AssumeRole", "*"],
+      ["sts:TagSession", ROLE_NAMING_THE_USER], ["sts:SetSourceIdentity", ROLE_NAMING_THE_USER],
+      ["sts:GetFederationToken", FED], ["sts:GetFederationToken", "*"],
+    ] as const) expect(deniedBy(claude, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+    // An explicit deny, so a trust policy naming the user (no identity allow needed in-account) cannot override it,
+    // nor a later Allow on the session policy.
+    const loose = withText("          - Sid: WorkshopEventSourceMappingReads\n", "          - Sid: Assume\n            Effect: Allow\n            Action: [\"sts:*\"]\n            Resource: \"*\"\n          - Sid: WorkshopEventSourceMappingReads\n");
+    expect(allowedBy(claudeStatements(loose), "sts:AssumeRole", ROLE_NAMING_THE_USER, CLAUDE)).toBe(false);
+    expect(allowedBy(claudeStatements(loose), "sts:GetFederationToken", FED, CLAUDE)).toBe(false);
+    // Without it (and try 3's catch-all, which denies it too) nothing on the user would deny it (the deploy policies'
+    // NoSelfAssume is not attached).
+    for (const sid of ["NoAssumeForSessions", "OnlyReadsForSessions"]) {
+      const only = claude.filter((s) => s.Sid === sid);
+      expect(deniedBy(only, "sts:AssumeRole", ROLE_NAMING_THE_USER, CLAUDE), sid).toBe(true);
+      expect(deniedBy(only, "sts:GetFederationToken", FED, CLAUDE), sid).toBe(true);
+    }
+    const without = claude.filter((s) => s.Sid !== "NoAssumeForSessions" && s.Sid !== "OnlyReadsForSessions");
+    expect(deniedBy(without, "sts:AssumeRole", ROLE_NAMING_THE_USER, CLAUDE)).toBe(false);
+    expect(deniedBy(without, "sts:GetFederationToken", FED, CLAUDE)).toBe(false);
+  });
+
+  it("denies the Claude user project-tagged instances' user data and launch template versions (try 2)", () => {
+    const TAGGED = { ...CLAUDE, "aws:ResourceTag/project": "ssd-workshop" };
+    const INSTANCE = `arn:aws:ec2:${REGION}:${ACCOUNT}:instance/i-0abc`;
+    const TEMPLATE = `arn:aws:ec2:${REGION}:${ACCOUNT}:launch-template/lt-0abc`;
+    for (const [action, resource] of [
+      ["ec2:DescribeInstanceAttribute", INSTANCE], ["ec2:DescribeLaunchTemplateVersions", TEMPLATE],
+      ["ec2:DescribeSpotFleetRequests", "*"], ["ec2:DescribeSpotInstanceRequests", "*"],
+    ] as const) {
+      expect(allowedBy(claude, action, resource, TAGGED), action).toBe(false);
+      // NoUserDataReads alone lets the project's own ones through.
+      expect(allowedBy(statements(template, "DeployPolicyRead"), action, resource, TAGGED), action).toBe(true);
+    }
+    expect(allowedBy(claude, "ec2:DescribeInstances", "*", TAGGED)).toBe(true);
+  });
+
+  it("limits the session reads to workshop names", () => {
+    expect(sessionScopeGaps(template)).toEqual([]);
+    const loose = withText("              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/ssd-workshop-*\n          - Sid: WorkshopResourceReads", "              - \"*\"\n          - Sid: WorkshopResourceReads");
+    expect(sessionScopeGaps(loose)).toEqual(["WorkshopLogReads"]);
+    // Any provider's foundation model, any region (Franck, 2026-11-25: benchmarks of other models for the builder,
+    // global profiles route anywhere); inference profiles only eu.* or global.* (an us.* or apac.* profile is refused).
+    const model = (region: string) => `arn:aws:bedrock:${region}::foundation-model/anthropic.claude-sonnet-4-6`;
+    for (const region of ["eu-central-1", "us-east-1"]) expect(allowedBy(claude, "bedrock:InvokeModel", model(region), CLAUDE), region).toBe(true);
+    const profile = (id: string) => `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/${id}`;
+    for (const id of ["eu.anthropic.claude-sonnet-4-6", "global.anthropic.claude-sonnet-4-6", "eu.amazon.nova-pro-v1:0"]) expect(allowedBy(claude, "bedrock:InvokeModel", profile(id), CLAUDE), id).toBe(true);
+    for (const id of ["us.anthropic.claude-sonnet-4-6", "apac.anthropic.claude-sonnet-4-6"]) expect(allowedBy(claude, "bedrock:InvokeModel", profile(id), CLAUDE), id).toBe(false);
+    const bedrock = statements(template, "SessionPolicy").find((s) => s.Sid === "Bedrock");
+    expect(list(bedrock?.Resource).map(text)).toEqual([
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.*",
+      "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/global.*",
+    ]);
+  });
+
+  it("moves Bedrock and SES from the deploy policies to the session policy", () => {
+    const grants = (stmts: Statement[], service: string) =>
+      stmts.filter((s) => s.Effect === "Allow" && list(s.Action).some((a) => a.startsWith(service))).map((s) => s.Sid);
+    expect(grants(deployStatements(template), "bedrock:Invoke")).toEqual([]);
+    expect(grants(deployStatements(template), "ses:Send")).toEqual([]);
+    expect(grants(statements(template, "SessionPolicy"), "bedrock:Invoke")).toEqual(["Bedrock"]);
+    expect(grants(statements(template, "SessionPolicy"), "ses:Send")).toEqual(["SesForTesting"]);
+  });
+
+  it("keeps the 2.6 and 2.9 session denies on the Claude user, and adds the 2.12 ones", () => {
+    const denies = claude.filter((s) => s.Effect === "Deny").map((s) => s.Sid);
+    for (const sid of [
+      "NoLauncherForSessions", "NoBuildQueueForSessions", "NoBuildTasksForSessions", "NoEventSourcesForSessions",
+      "NoBuildCheckScheduleForSessions", "NoBuildsClusterTasksForSessions", "NoBuildsClusterServicesForSessions", "NoGitHubKey",
+      "NoAssumeForSessions", "NoUserDataForSessions",
+      "OnlyReadsForSessions", "NoAccessStackEventsForSessions", "NoVerifiedAccessForSessions",
+    ]) expect(denies, sid).toContain(sid);
+  });
+
+  it("hides the budget address from DescribeStacks, which sessions may call on ssd-workshop-access (try 2)", () => {
+    expect(template.Parameters.BudgetEmail?.NoEcho).toBe(true);
+    // The session's stack reads do reach the access stack.
+    expect(allowedBy(claude, "cloudformation:DescribeStacks", `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/ssd-workshop-access/1234abcd`, CLAUDE)).toBe(true);
+  });
+
+  it("names all six managed policies in ProtectAccessIdentities", () => {
+    const protect = statements(template, "DeployPolicy").find((s) => s.Sid === "ProtectAccessIdentities");
+    const policies = list(protect?.Resource).map(text).filter((r) => r.includes(":policy/"));
+    expect(policies).toEqual(ALL_POLICIES.map((id) => `arn:aws:iam::\${AWS::AccountId}:policy/${String(template.Resources[id]?.Properties.ManagedPolicyName)}`));
+    expect(policies).toHaveLength(6);
+  });
+
+  it("refuses the session the live writes of the README check, and allows its reads (request by request)", () => {
+    const refused: [string, string][] = [
+      ["lambda:UpdateFunctionConfiguration", fn(SIGN_IN_CODE_FUNCTION_NAME)],
+      ["lambda:UpdateFunctionCode", fn(SIGN_IN_CODE_FUNCTION_NAME)],
+      ["lambda:InvokeFunction", fn(SIGN_IN_CODE_FUNCTION_NAME)],
+      ["s3:PutObject", `arn:aws:s3:::${APPS_BUCKET_NAME}/apps/someone/index.html`],
+      ["s3:PutBucketPolicy", `arn:aws:s3:::${APPS_BUCKET_NAME}`],
+      ["dynamodb:Scan", TABLE],
+      ["dynamodb:PutItem", TABLE],
+      ["cloudformation:UpdateStack", API_STACK],
+      ["cloudformation:DescribeStacks", `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/letters/1234abcd`],
+      ["sqs:SendMessage", `arn:aws:sqs:${REGION}:${ACCOUNT}:ssd-workshop-api-ai.fifo`],
+      ["iam:PassRole", `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-api-sign-in-code`],
+      ["ecs:RunTask", `arn:aws:ecs:${REGION}:${ACCOUNT}:task-definition/ssd-workshop-builder:3`],
+      ["ecs:DescribeTaskDefinition", "*"],
+      ["ecs:DescribeTasks", `arn:aws:ecs:${REGION}:${ACCOUNT}:task/ssd-workshop-builds/abc`],
+      ["cloudfront:UpdateDistribution", `arn:aws:cloudfront::${ACCOUNT}:distribution/E2TOZV0ERAXKZ9`],
+    ];
+    for (const [action, resource] of refused) expect(allowedBy(claude, action, resource, CLAUDE), `${action} ${resource}`).toBe(false);
+    const allowed: [string, string][] = [
+      ["cloudformation:DescribeStacks", API_STACK],
+      ["cloudformation:GetTemplate", API_STACK],
+      ["logs:FilterLogEvents", `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/aws/lambda/${SIGN_IN_CODE_FUNCTION_NAME}:*`],
+      ["logs:GetLogEvents", `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:${SIGN_IN_CODE_FUNCTION_NAME}:log-stream:2026/11/24/abc`],
+      ["logs:StartLiveTail", `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/ecs/ssd-workshop-builder`],
+      ["lambda:GetFunctionConfiguration", fn(SIGN_IN_CODE_FUNCTION_NAME)],
+      ["dynamodb:DescribeTable", TABLE],
+      ["s3:GetObject", `arn:aws:s3:::${APPS_BUCKET_NAME}/apps/someone/index.html`],
+      ["bedrock:InvokeModel", `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/eu.anthropic.claude-sonnet-4-6`],
+    ];
+    for (const [action, resource] of allowed) expect(allowedBy(claude, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+    // The deploy role keeps its writes.
+    const DEPLOY = { ...CLAUDE, "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-deploy` };
+    expect(allowedBy(deployStatements(template), "lambda:UpdateFunctionConfiguration", fn(SIGN_IN_CODE_FUNCTION_NAME), DEPLOY)).toBe(true);
+    expect(allowedBy(deployStatements(template), "cloudformation:UpdateStack", API_STACK, DEPLOY)).toBe(true);
+  });
+});
+
+// Ticket 2.12 try 3 (access review). The wildcard Allows the Claude user holds today, keyed "Sid/action": a new
+// wildcard (an `ec2:Get*` would name ec2:GetPasswordData) must be added here on purpose, after a look at what it expands to.
+const SESSION_WILDCARDS = [
+  "ReadsWithoutSecrets/ec2:Describe*", "ReadsWithoutSecrets/ecs:List*", "ReadsWithoutSecrets/route53:ListHostedZones*",
+  "ReadsWithoutSecrets/servicequotas:Get*", "ReadsWithoutSecrets/servicequotas:List*",
+  "WorkshopIamReads/iam:Get*", "WorkshopIamReads/iam:List*", "WorkshopDistributionReads/cloudfront:GetDistribution*",
+  "WorkshopStackReads/cloudformation:Describe*", "WorkshopStackReads/cloudformation:Get*", "WorkshopStackReads/cloudformation:List*",
+  "WorkshopBucketReads/s3:GetObject*", "WorkshopBucketReads/s3:GetBucket*", "WorkshopBucketReads/s3:Get*Configuration",
+  "WorkshopBucketReads/s3:List*",
+];
+function unpinnedSessionWildcards(stmts: Statement[]): string[] {
+  return stmts
+    .filter((s) => s.Effect === "Allow")
+    .flatMap((s) => list(s.Action).filter((a) => /[*?]/.test(a)).map((a) => `${s.Sid}/${a}`))
+    .filter((k) => !SESSION_WILDCARDS.includes(k));
+}
+// Allows on the user that OnlyReadsForSessions denies on purpose (try 3): the budget (its subscribers hold Franck's
+// address) and SES identity reads (other projects' identities; the smoke test does not use them).
+const DENIED_BY_THE_CATCH_ALL = [
+  "ReadsWithoutSecrets/ses:GetEmailIdentity", "ReadsWithoutSecrets/ses:ListEmailIdentities", "WorkshopBudgetRead/budgets:ViewBudget",
+];
+const READ_VERB = /^(Describe|List|Get|View|Validate)/;
+// What is wrong with the catch-all deny: missing, conditional or not on Resource "*"; a NotAction entry that is not a
+// service:action pattern; a wildcard whose fixed part does not start with a read verb (so it could name a write); an
+// exact entry that is neither a read nor a session exception; an entry naming a forbidden read.
+function catchAllGaps(stmts: Statement[]): string[] {
+  const deny = stmts.find((s) => s.Sid === "OnlyReadsForSessions");
+  if (deny?.Effect !== "Deny" || deny.Action !== undefined || deny.Condition !== undefined || list(deny.Resource).map(text).join() !== "*") {
+    return ["OnlyReadsForSessions/not-a-catch-all"];
+  }
+  const exceptions = Object.keys(SESSION_EXCEPTIONS).map((k) => k.split("/")[1]);
+  return list(deny.NotAction).flatMap((p) => {
+    const [service = "", name = "", ...rest] = p.split(":");
+    if (!/^[a-z0-9-]+$/.test(service) || !/^[A-Za-z*?]+$/.test(name) || rest.length > 0) return [`${p}/not-an-action-pattern`];
+    const fixed = name.split(/[*?]/)[0] ?? "";
+    const wildcard = fixed !== name;
+    const gaps: string[] = [];
+    if (wildcard ? !READ_VERB.test(fixed) : !isRead(p) && !exceptions.includes(p)) gaps.push(`${p}/not-a-read`);
+    for (const f of SESSION_FORBIDDEN) if (matches(p, f)) gaps.push(`${p}/${f}`);
+    return gaps;
+  });
+}
+// Allow actions of the user that no NotAction entry covers (so the catch-all denies them), as "Sid/action".
+function uncoveredAllows(stmts: Statement[]): string[] {
+  const notAction = list(stmts.find((s) => s.Sid === "OnlyReadsForSessions")?.NotAction);
+  return stmts
+    .filter((s) => s.Effect === "Allow")
+    .flatMap((s) => list(s.Action).filter((a) => !notAction.some((p) => matches(p, a))).map((a) => `${s.Sid}/${a}`));
+}
+// IAM resources that could give the user rights besides its two managed policies (try 3).
+const IAM_RESOURCES: Record<string, string[]> = {
+  "AWS::IAM::ManagedPolicy": ALL_POLICIES,
+  "AWS::IAM::Role": ["DeployRole"],
+  "AWS::IAM::User": ["ClaudeUser"],
+  "AWS::IAM::OIDCProvider": ["GitHubOidcProvider"],
+};
+function iamShapeGaps(t: Template): string[] {
+  const gaps: string[] = [];
+  const keys = Object.keys(t.Resources.ClaudeUser?.Properties ?? {}).sort();
+  if (keys.join() !== "ManagedPolicyArns,Tags,UserName") gaps.push(`ClaudeUser/${keys.join("+")}`);
+  for (const [id, r] of Object.entries(t.Resources)) {
+    if (r.Type === "AWS::IAM::ManagedPolicy") for (const k of ["Users", "Groups", "Roles"]) if (k in r.Properties) gaps.push(`${id}/${k}`);
+  }
+  const iam = Object.entries(t.Resources).filter(([, r]) => r.Type.startsWith("AWS::IAM::"));
+  for (const type of new Set(iam.map(([, r]) => r.Type))) {
+    const ids = iam.filter(([, r]) => r.Type === type).map(([id]) => id).sort();
+    if (ids.join() !== [...(IAM_RESOURCES[type] ?? [])].sort().join()) gaps.push(`${type}/${ids.join("+")}`);
+  }
+  return gaps;
+}
+
+describe("access stack: Claude sessions read-only, access review (ticket 2.12 try 3)", () => {
+  const claude = claudeStatements(template);
+  const RECIPIENTS = ["success@simulator.amazonses.com"];
+  const CLAUDE = {
+    "aws:ResourceAccount": "Ref:AWS::AccountId",
+    "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:user/ssd-workshop-claude`,
+    "aws:ResourceTag/project": "ssd-workshop",
+    "ses:FromAddress": "ssd-workshop@rankly.games",
+    "ses:Recipients": RECIPIENTS,
+  };
+  const fn = (name: string) => `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${name}`;
+  const stack = (name: string) => `arn:aws:cloudformation:${REGION}:${ACCOUNT}:stack/${name}/1234abcd`;
+  const ACCESS_STACK = stack("ssd-workshop-access");
+  const LOG_GROUP = `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/aws/lambda/${SIGN_IN_CODE_FUNCTION_NAME}`;
+  const SES_RESOURCES = [
+    `arn:aws:ses:${REGION}:${ACCOUNT}:identity/ssd-workshop@rankly.games`,
+    `arn:aws:ses:${REGION}:${ACCOUNT}:identity/rankly.games`,
+    `arn:aws:ses:${REGION}:${ACCOUNT}:configuration-set/ssd-workshop-email`,
+  ];
+  const BUDGET = `arn:aws:budgets::${ACCOUNT}:budget/ssd-workshop-monthly`;
+  // A loose Allow on the user, standing for a resource policy left by an earlier session (no identity Allow needed).
+  const LOOSE_ALLOW = "          - Sid: Anything\n            Effect: Allow\n            Action: \"*\"\n            Resource: \"*\"\n";
+  const withLooseAllow = (t = templateText) =>
+    claudeStatements(loadTemplate(t.replace("          - Sid: WorkshopEventSourceMappingReads\n", `${LOOSE_ALLOW}          - Sid: WorkshopEventSourceMappingReads\n`)));
+  const loose = withLooseAllow();
+
+  // Every AWS call of `npm run smoke -- bedrock|quota|ses` and `npm run eval` (platform/src/smoke/main.ts,
+  // platform/src/eval/main.ts and build.ts through the builder's Bedrock proxy), and the reads a session uses.
+  const NEEDED: [string, string][] = [
+    ["bedrock:InvokeModel", `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/eu.anthropic.claude-sonnet-4-6`],
+    ["bedrock:InvokeModel", "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-sonnet-4-6"],
+    ["bedrock:InvokeModelWithResponseStream", `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/eu.anthropic.claude-sonnet-4-6`],
+    ...SES_RESOURCES.map((r): [string, string] => ["ses:SendEmail", r]),
+    ["servicequotas:ListServiceQuotas", "*"], ["servicequotas:ListAWSDefaultServiceQuotas", "*"], ["servicequotas:GetServiceQuota", "*"],
+    ["cloudformation:DescribeStacks", stack(STACK_NAMES.api)], ["cloudformation:DescribeStacks", ACCESS_STACK],
+    ["cloudformation:DescribeStackEvents", stack(STACK_NAMES.api)], ["cloudformation:ListStacks", "*"],
+    ["logs:FilterLogEvents", LOG_GROUP], ["logs:StartLiveTail", LOG_GROUP], ["logs:StartQuery", LOG_GROUP],
+    ["logs:GetQueryResults", LOG_GROUP], ["logs:DescribeLogGroups", "*"],
+    ["s3:GetObject", `arn:aws:s3:::${SITE_BUCKET_NAME}/index.html`], ["s3:ListBucket", `arn:aws:s3:::${APPS_BUCKET_NAME}`],
+    ["ec2:DescribeSubnets", "*"],
+    ["route53:ListResourceRecordSets", "arn:aws:route53:::hostedzone/HostedZoneId"],
+    ["cloudfront:ListInvalidations", `arn:aws:cloudfront::${ACCOUNT}:distribution/E2TOZV0ERAXKZ9`],
+    ["apigateway:GET", `arn:aws:apigateway:${REGION}::/apis/abc123`],
+    ["dynamodb:DescribeTable", `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`],
+    ["iam:GetRole", `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-api-sign-in-code`],
+    ["iam:ListAttachedRolePolicies", `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-api-sign-in-code`],
+    ["ce:GetCostAndUsage", "*"], ["ce:GetCostForecast", "*"],
+    ["lambda:GetFunctionConfiguration", fn(SIGN_IN_CODE_FUNCTION_NAME)], ["ecs:ListClusters", "*"],
+    ["acm:ListCertificates", "*"], ["ses:GetSendQuota", "*"], ["bedrock:ListInferenceProfiles", "*"],
+  ];
+  const WRITES: [string, string][] = [
+    ["s3:PutObject", `arn:aws:s3:::${SITE_BUCKET_NAME}/index.html`],
+    ["sqs:SendMessage", `arn:aws:sqs:${REGION}:${ACCOUNT}:ssd-workshop-api-ai.fifo`],
+    ["sns:Publish", `arn:aws:sns:${REGION}:${ACCOUNT}:ssd-workshop-alerts`],
+    ["lambda:UpdateFunctionCode", fn(SIGN_IN_CODE_FUNCTION_NAME)],
+    ["lambda:InvokeFunction", fn(SIGN_IN_CODE_FUNCTION_NAME)],
+    ["iam:PassRole", `arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-api-sign-in-code`],
+    ["dynamodb:PutItem", `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`],
+    ["ses:SendRawEmail", SES_RESOURCES[0] ?? ""],
+    ["kms:Decrypt", "*"],
+  ];
+
+  it("denies the user everything but its reads and exceptions, even if a resource policy grants it (finding 1)", () => {
+    expect(catchAllGaps(claude)).toEqual([]);
+    for (const [action, resource] of WRITES) {
+      expect(allowedBy(loose, action, resource, CLAUDE), `${action} ${resource}`).toBe(false);
+      expect(deniedBy(claude, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+    }
+    // So are the credential-returning and item reads, whatever grants them.
+    for (const action of SESSION_FORBIDDEN) expect(allowedBy(loose, action, "*", CLAUDE), action).toBe(false);
+    // Without the catch-all, the loose Allow would let them through.
+    const without = loose.filter((s) => s.Sid !== "OnlyReadsForSessions");
+    for (const [action, resource] of WRITES) expect(allowedBy(without, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+  });
+
+  it("still allows every call of the smoke test, the eval and the session reads (finding 1)", () => {
+    for (const [action, resource] of NEEDED) {
+      expect(allowedBy(claude, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+      expect(allowedBy(loose, action, resource, CLAUDE), `${action} ${resource}`).toBe(true);
+    }
+    // The catch-all covers every Allow of the user but the ones denied on purpose.
+    expect(uncoveredAllows(claude)).toEqual(DENIED_BY_THE_CATCH_ALL);
+  });
+
+  it("lets the catch-all spare only reads and the session exceptions (each NotAction entry checked)", () => {
+    expect(catchAllGaps(claude)).toEqual([]);
+    const mutate = (from: string, to: string) => catchAllGaps(claudeStatements(withText(from, to)));
+    // A wildcard that could name a write, a forbidden read, a write by name, a malformed pattern.
+    expect(mutate("\"sqs:Get*\", \"sqs:List*\"", "\"sqs:*\", \"sqs:List*\"")).toEqual(["sqs:*/not-a-read", "sqs:*/sqs:ReceiveMessage"]);
+    expect(mutate("\"ec2:Describe*\", \"ecs:Describe*\"", "\"ec2:Describe*\", \"ec2:Get*\", \"ecs:Describe*\"")).toEqual([
+      "ec2:Get*/ec2:GetPasswordData", "ec2:Get*/ec2:GetConsoleOutput", "ec2:Get*/ec2:GetConsoleScreenshot", "ec2:Get*/ec2:GetLaunchTemplateData",
+    ]);
+    expect(mutate("\"dynamodb:Describe*\", \"dynamodb:List*\"", "\"dynamodb:Describe*\", \"dynamodb:Get*\"")).toEqual(["dynamodb:Get*/dynamodb:GetItem", "dynamodb:Get*/dynamodb:GetRecords", "dynamodb:Get*/dynamodb:GetShardIterator"]);
+    expect(mutate("ses:GetSendQuota, ses:SendEmail,", "ses:GetSendQuota, ses:SendEmail, ses:SendRawEmail,")).toEqual(["ses:SendRawEmail/not-a-read"]);
+    expect(mutate("\"sqs:Get*\", \"sqs:List*\"", "\"sqs:Get*\", \"sqs:List*\", \"S*\"")).toEqual(["S*/not-an-action-pattern"]);
+    expect(mutate("\"ce:GetCost*\"", "\"ce:G*\"")).toEqual(["ce:G*/not-a-read"]);
+    // A condition or a narrower resource would let the rest through.
+    expect(mutate("              \"dynamodb:Describe*\", \"dynamodb:List*\", \"scheduler:Get*\", \"scheduler:List*\"]\n            Resource: \"*\"\n",
+      "              \"dynamodb:Describe*\", \"dynamodb:List*\", \"scheduler:Get*\", \"scheduler:List*\"]\n            Resource: arn:aws:s3:::x\n")).toEqual(["OnlyReadsForSessions/not-a-catch-all"]);
+  });
+
+  it("refuses any new wildcard Allow on the user, so a future ec2:Get* fails (finding 2)", () => {
+    expect(unpinnedSessionWildcards(claude)).toEqual([]);
+    const ec2 = withText("              - ec2:Describe*\n", "              - ec2:Describe*\n              - ec2:Get*\n");
+    expect(unpinnedSessionWildcards(claudeStatements(ec2))).toEqual(["ReadsWithoutSecrets/ec2:Get*"]);
+    const lambda = withText("              - lambda:GetFunction\n", "              - lambda:Get*\n");
+    expect(unpinnedSessionWildcards(claudeStatements(lambda))).toEqual(["WorkshopResourceReads/lambda:Get*"]);
+    // The new forbidden entries are caught through a wildcard too.
+    expect(sessionForbiddenReads(claudeStatements(ec2))).toContain("ReadsWithoutSecrets/ec2:GetLaunchTemplateData");
+  });
+
+  it("gives the user rights only through its two managed policies (finding 2)", () => {
+    expect(iamShapeGaps(template)).toEqual([]);
+    const user = "      UserName: ssd-workshop-claude\n";
+    const userWith = (line: string) => iamShapeGaps(withText(user, `${user}${line}`));
+    expect(userWith("      Policies: [{PolicyName: x, PolicyDocument: {Version: \"2012-10-17\", Statement: []}}]\n")).toEqual(["ClaudeUser/ManagedPolicyArns+Policies+Tags+UserName"]);
+    expect(userWith("      Groups: [admins]\n")).toEqual(["ClaudeUser/Groups+ManagedPolicyArns+Tags+UserName"]);
+    expect(userWith("      PermissionsBoundary: arn:aws:iam::aws:policy/AdministratorAccess\n")).toEqual(["ClaudeUser/ManagedPolicyArns+PermissionsBoundary+Tags+UserName"]);
+    const policyWith = (name: string, line: string) => {
+      const anchor = `      ManagedPolicyName: ${name}\n`;
+      return iamShapeGaps(withText(anchor, `${anchor}${line}`));
+    };
+    expect(policyWith("ssd-workshop-session", "      Users: [ssd-workshop-claude]\n")).toEqual(["SessionPolicy/Users"]);
+    expect(policyWith("ssd-workshop-deploy", "      Users: [ssd-workshop-claude]\n")).toEqual(["DeployPolicy/Users"]);
+    expect(policyWith("ssd-workshop-deploy-edge", "      Groups: [admins]\n")).toEqual(["DeployPolicyEdge/Groups"]);
+    expect(policyWith("ssd-workshop-deploy-ec2", "      Roles: [some-role]\n")).toEqual(["DeployPolicyEc2/Roles"]);
+    const anchor = "  SesConfigurationSet:\n";
+    const withResource = (type: string, props: string) => iamShapeGaps(withText(anchor, `  Extra:\n    Type: ${type}\n    Properties: ${props}\n${anchor}`));
+    expect(withResource("AWS::IAM::Policy", "{PolicyName: x, Users: [ssd-workshop-claude], PolicyDocument: {}}")).toEqual(["AWS::IAM::Policy/Extra"]);
+    expect(withResource("AWS::IAM::UserPolicy", "{UserName: ssd-workshop-claude, PolicyName: x, PolicyDocument: {}}")).toEqual(["AWS::IAM::UserPolicy/Extra"]);
+    expect(withResource("AWS::IAM::Group", "{GroupName: x}")).toEqual(["AWS::IAM::Group/Extra"]);
+    expect(withResource("AWS::IAM::UserToGroupAddition", "{GroupName: x, Users: [ssd-workshop-claude]}")).toEqual(["AWS::IAM::UserToGroupAddition/Extra"]);
+    expect(withResource("AWS::IAM::ManagedPolicy", "{PolicyDocument: {}}")).toEqual([`AWS::IAM::ManagedPolicy/${[...ALL_POLICIES, "Extra"].sort().join("+")}`]);
+    expect(withResource("AWS::IAM::Role", "{AssumeRolePolicyDocument: {}}")).toEqual(["AWS::IAM::Role/DeployRole+Extra"]);
+  });
+
+  it("keeps the budget address from sessions: no budget read, no access stack events (finding 3)", () => {
+    expect(allowedBy(claude, "budgets:ViewBudget", BUDGET, CLAUDE)).toBe(false);
+    expect(allowedBy(loose, "budgets:ViewBudget", BUDGET, CLAUDE)).toBe(false);
+    // The deploy role keeps it (deploy-read alone).
+    expect(allowedBy(statements(template, "DeployPolicyRead"), "budgets:ViewBudget", BUDGET, CLAUDE)).toBe(true);
+    for (const action of ["cloudformation:DescribeStackEvents", "cloudformation:DescribeEvents", "cloudformation:DescribeStackResourceDrifts"]) {
+      expect(allowedBy(claude, action, ACCESS_STACK, CLAUDE), action).toBe(false);
+      expect(allowedBy(claude, action, stack(STACK_NAMES.api), CLAUDE), action).toBe(true);
+    }
+    expect(allowedBy(claude, "cloudformation:DescribeEvents", `arn:aws:cloudformation:${REGION}:${ACCOUNT}:changeSet/cdk-deploy/abc`, CLAUDE)).toBe(false);
+    // Without the deny the access stack's events were readable.
+    const without = claude.filter((s) => s.Sid !== "NoAccessStackEventsForSessions");
+    expect(allowedBy(without, "cloudformation:DescribeStackEvents", ACCESS_STACK, CLAUDE)).toBe(true);
+  });
+
+  it("sends test emails only with SendEmail and only to SessionTestRecipients, which defaults to the SES simulator (finding 4)", () => {
+    const parameter = template.Parameters.SessionTestRecipients;
+    expect(parameter?.Type).toBe("CommaDelimitedList");
+    expect(parameter?.Default).toBe("success@simulator.amazonses.com");
+    const ses = statements(template, "SessionPolicy").find((s) => s.Sid === "SesForTesting");
+    expect(list(ses?.Action)).toEqual(["ses:SendEmail"]);
+    expect(ses?.Condition?.["ForAllValues:StringLike"]?.["ses:Recipients"]).toEqual({ Ref: "SessionTestRecipients" });
+    expect(ses?.Condition?.Null?.["ses:Recipients"]).toBe("false");
+    expect(sesScopeGaps(claude)).toEqual([]);
+    const noRecipients: Ctx = Object.fromEntries(Object.entries(CLAUDE).filter(([k]) => k !== "ses:Recipients"));
+    for (const r of SES_RESOURCES) {
+      expect(allowedBy(claude, "ses:SendEmail", r, CLAUDE), r).toBe(true);
+      expect(allowedBy(claude, "ses:SendEmail", r, { ...CLAUDE, "ses:Recipients": ["someone@example.com"] }), r).toBe(false);
+      expect(allowedBy(claude, "ses:SendEmail", r, { ...CLAUDE, "ses:Recipients": [...RECIPIENTS, "someone@example.com"] }), r).toBe(false);
+      expect(allowedBy(claude, "ses:SendEmail", r, noRecipients), r).toBe(false);
+      expect(allowedBy(claude, "ses:SendRawEmail", r, CLAUDE), r).toBe(false);
+    }
+    // Without the Null guard a send without recipients would pass ForAllValues.
+    const noNull = withText("              \"Null\": {ses:Recipients: \"false\"}\n", "");
+    expect(allowedBy(claudeStatements(noNull), "ses:SendEmail", SES_RESOURCES[0] ?? "", noRecipients)).toBe(true);
+    // The repository holds no address but the simulator's in the stack (Franck enters his at apply time).
+    const addresses = (templateText.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}/g) ?? []).filter((a) => a !== "ssd-workshop@rankly.games");
+    expect([...new Set(addresses)]).toEqual(["success@simulator.amazonses.com"]);
+  });
+
+  it("denies the user other projects' Verified Access settings and SES identities (finding 5)", () => {
+    for (const action of ["ec2:DescribeVerifiedAccessTrustProviders", "ec2:DescribeVerifiedAccessInstances", "ec2:DescribeVerifiedAccessEndpoints"]) {
+      expect(allowedBy(claude, action, "*", CLAUDE), action).toBe(false);
+    }
+    expect(allowedBy(claude.filter((s) => s.Sid !== "NoVerifiedAccessForSessions"), "ec2:DescribeVerifiedAccessTrustProviders", "*", CLAUDE)).toBe(true);
+    for (const action of ["ses:ListEmailIdentities", "ses:GetEmailIdentity"]) {
+      expect(allowedBy(claude, action, "*", CLAUDE), action).toBe(false);
+      expect(allowedBy(statements(template, "DeployPolicyRead"), action, "*", CLAUDE), action).toBe(true);
+    }
+    // Accepted: costs, the rankly.games zone and the other EC2 describes stay readable.
+    for (const [action, resource] of [["ce:GetCostAndUsage", "*"], ["route53:ListResourceRecordSets", "arn:aws:route53:::hostedzone/HostedZoneId"], ["ec2:DescribeVpcs", "*"]] as const) {
+      expect(allowedBy(claude, action, resource, CLAUDE), action).toBe(true);
+    }
+  });
+
+  it("keeps the session policy under 6,144 characters", () => {
+    expect(policySize(template, "SessionPolicy")).toBeLessThanOrEqual(6144);
   });
 });
 
@@ -1445,6 +1980,10 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${BUILD_LAUNCHER_FUNCTION_NAME}:live`,
     ];
     const ASSET = `arn:aws:s3:::${ASSETS_BUCKET_NAME}/abc123.zip`;
+    // Since 2.12 the build-task denies sit on ssd-workshop-session (the user's own policy, no principal condition).
+    // Checked here against the deploy rights plus those denies: the worst case of a user that still held deploy rights.
+    const BUILD_DENIES = ["NoBuildTasksForSessions", "NoBuildsClusterTasksForSessions", "NoBuildsClusterServicesForSessions"];
+    const asClaude = [...deploy, ...statements(template, "SessionPolicy").filter((s) => BUILD_DENIES.includes(s.Sid ?? ""))];
     const ROLE_WRITES = [
       "iam:CreateRole", "iam:PassRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:AttachRolePolicy",
       "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:UpdateRole", "iam:TagRole", "iam:DeleteRole",
@@ -1523,16 +2062,16 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
     it("denies the Claude user reading, starting or stopping build tasks (the token is in the task's override)", () => {
       // ExecuteCommand too: a shell in the task would show its environment (the launcher never enables it; belt and braces).
       for (const action of ["ecs:DescribeTasks", "ecs:StopTask", "ecs:ExecuteCommand"]) {
-        expect(allowedBy(deploy, action, BUILD_TASK, CLAUDE), action).toBe(false);
+        expect(allowedBy(asClaude, action, BUILD_TASK, CLAUDE), action).toBe(false);
         expect(allowedBy(deploy, action, BUILD_TASK, DEPLOY), action).toBe(true);
         // Without the deny a session could (ecs:* on task/ssd-workshop-*/*).
-        expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildTasksForSessions"), action, BUILD_TASK, CLAUDE), action).toBe(true);
+        expect(allowedBy(asClaude.filter((s) => s.Sid !== "NoBuildTasksForSessions"), action, BUILD_TASK, CLAUDE), action).toBe(true);
       }
       const run = { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER };
-      expect(allowedBy(deploy, "ecs:RunTask", BUILDER_DEFINITION, run)).toBe(false);
+      expect(allowedBy(asClaude, "ecs:RunTask", BUILDER_DEFINITION, run)).toBe(false);
       expect(allowedBy(deploy, "ecs:RunTask", BUILDER_DEFINITION, { ...run, "aws:PrincipalArn": DEPLOY["aws:PrincipalArn"] })).toBe(true);
       // Tasks of other workshop clusters (none yet) stay readable.
-      expect(allowedBy(deploy, "ecs:DescribeTasks", `${ECS_ARN}:task/ssd-workshop-apps/0123`, CLAUDE)).toBe(true);
+      expect(allowedBy(asClaude, "ecs:DescribeTasks", `${ECS_ARN}:task/ssd-workshop-apps/0123`, CLAUDE)).toBe(true);
     });
 
     it("denies the Claude user sending to the deploy queue (a deploy message publishes pushedCommit)", () => {
@@ -1661,28 +2200,29 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
 
     it("denies the Claude user running any task on the builds cluster, whatever its task definition", () => {
       const own = `${ECS_ARN}:task-definition/ssd-workshop-session-own:1`;
-      expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(false);
-      expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildsClusterTasksForSessions"), "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
+      expect(allowedBy(asClaude, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(false);
+      expect(allowedBy(asClaude.filter((s) => s.Sid !== "NoBuildsClusterTasksForSessions"), "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
       expect(allowedBy(deploy, "ecs:RunTask", own, { ...DEPLOY, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
-      expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": `${ECS_ARN}:cluster/ssd-workshop-other` })).toBe(true);
+      expect(allowedBy(asClaude, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": `${ECS_ARN}:cluster/ssd-workshop-other` })).toBe(true);
     });
 
     it("denies the Claude user creating or updating a service or task set on the builds cluster (access review)", () => {
       const service = (cluster: string) => `${ECS_ARN}:service/${cluster}/ssd-workshop-session-own`;
       const taskSet = (cluster: string) => `${ECS_ARN}:task-set/${cluster}/ssd-workshop-session-own/ecs-svc-0123`;
-      const withoutDeny = deploy.filter((s) => s.Sid !== "NoBuildsClusterServicesForSessions");
+      const withoutDeny = asClaude.filter((s) => s.Sid !== "NoBuildsClusterServicesForSessions");
       for (const action of ["ecs:CreateService", "ecs:UpdateService"]) {
-        expect(allowedBy(deploy, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(false);
+        expect(allowedBy(asClaude, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(false);
         expect(allowedBy(withoutDeny, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(true);
         expect(allowedBy(deploy, action, service("ssd-workshop-builds"), DEPLOY), action).toBe(true);
-        expect(allowedBy(deploy, action, service("ssd-workshop-other"), CLAUDE), action).toBe(true);
+        expect(allowedBy(asClaude, action, service("ssd-workshop-other"), CLAUDE), action).toBe(true);
       }
       // No deploy policy grants task sets today; the deny keeps the builds cluster's closed if one ever does.
-      expect(allowedBy(deploy, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(false);
-      const deny = deploy.find((s) => s.Sid === "NoBuildsClusterServicesForSessions");
+      expect(allowedBy(asClaude, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(false);
+      const deny = asClaude.find((s) => s.Sid === "NoBuildsClusterServicesForSessions");
       expect(deny && statementApplies(deny, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(true);
       expect(deny && statementApplies(deny, "ecs:CreateTaskSet", taskSet("ssd-workshop-other"), CLAUDE)).toBe(false);
-      expect(deny && statementApplies(deny, "ecs:CreateService", service("ssd-workshop-builds"), DEPLOY)).toBe(false);
+      // The deny reaches only the user: it sits on ssd-workshop-session, which no deploy policy is.
+      expect(deploy.some((s) => s.Sid === "NoBuildsClusterServicesForSessions")).toBe(false);
     });
 
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {
@@ -1770,15 +2310,14 @@ describe("access stack: ECR Public login for the deploy workflow (ticket 2.9 fol
     }
   });
 
-  it("puts both in the -deploy-ec2 policy (attached to both principals) and not in the boundary", () => {
+  it("puts both in the -deploy-ec2 policy (the deploy role's only, since 2.12) and not in the boundary", () => {
     const sids = statements(template, "DeployPolicyEc2").map((s) => s.Sid);
     expect(sids).toContain("EcrPublicLogin");
     expect(sids).toContain("EcrPublicBearerToken");
     for (const action of ["ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken"]) {
       expect(boundary.some((s) => s.Effect === "Allow" && list(s.Action).some((p) => matches(p, action))), action).toBe(false);
     }
-    for (const id of ["DeployRole", "ClaudeUser"]) {
-      expect(JSON.stringify(template.Resources[id]?.Properties.ManagedPolicyArns), id).toContain("DeployPolicyEc2");
-    }
+    expect(JSON.stringify(template.Resources.DeployRole?.Properties.ManagedPolicyArns)).toContain("DeployPolicyEc2");
+    expect(JSON.stringify(template.Resources.ClaudeUser?.Properties.ManagedPolicyArns)).not.toContain("DeployPolicyEc2");
   });
 });

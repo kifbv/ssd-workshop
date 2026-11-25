@@ -197,14 +197,15 @@ curl -sS -w '\n%{http_code}\n' "$ENDPOINT/api/health"
 The table `ssd-workshop-data` is retained and has deletion protection, so a failed first deploy
 of `ssd-workshop-api` rolls back everything except the table, and the next deploy fails with
 "already exists". Only while the table is still empty (nothing has written to it yet), Franck
-removes it, then re-runs the deploy:
+removes it with his own credentials (Claude sessions may neither read items nor change the table
+since ticket 2.12), then re-runs the deploy:
 
 ```sh
-aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
+AWS_PROFILE=franck aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
 # expect: "Count": 0
-aws dynamodb update-table --region eu-central-1 --table-name ssd-workshop-data \
+AWS_PROFILE=franck aws dynamodb update-table --region eu-central-1 --table-name ssd-workshop-data \
   --no-deletion-protection-enabled
-aws dynamodb delete-table --region eu-central-1 --table-name ssd-workshop-data
+AWS_PROFILE=franck aws dynamodb delete-table --region eu-central-1 --table-name ssd-workshop-data
 ```
 
 Criteria 1, 2 and 4 (names, tags, role path and boundary, no account-wide CloudWatch role,
@@ -320,17 +321,18 @@ curl -sS -b "$JAR" -w '\n%{http_code}\n' "https://workshop.rankly.games/api/conv
 # expect: {"message":"Not found."} and 404
 ```
 
-Then, with Franck's own AWS credentials, the guardrail eval against the live model (about $0.05):
+Then the guardrail eval against the live model (about $0.05; Bedrock only, so a session may run it too), and,
+with Franck's own AWS credentials (it reads table items), the flags:
 
 ```sh
 npm run eval -- guardrails
 # expect: one PASS line per example, "Guardrails: 20/20 passed", exit code 0
-npm run flags -- list
+AWS_PROFILE=franck npm run flags -- list
 # expect: "Waiting for a decision: 0" (or each flagged participant's nickname, message and the guardrail's reason)
 ```
 
 A flagged message (e.g. "an app that tells people which medicine to take") shows `"status":"flagged"`;
-`npm run flags -- approve <nickname>` lets it through to the AI, `npm run flags -- reject <nickname>`
+`AWS_PROFILE=franck npm run flags -- approve <nickname>` lets it through to the AI, `AWS_PROFILE=franck npm run flags -- reject <nickname>`
 declines it politely; either way the participant can write again.
 
 On a failure, the log groups `ssd-workshop-api-conversation` and `ssd-workshop-api-ai-worker` have one
@@ -481,16 +483,17 @@ flowchart LR
 
 Nothing sends to the deploy queue until ticket 2.8. To publish an app by hand, create a public repository
 `ssd-workshop-apps/ssd-<nickname>` from `templates/basic/`, create a build item and send one message (FIFO: message
-group = lower-cased nickname, deduplication id = build id):
+group = lower-cased nickname, deduplication id = build id), with Franck's credentials (a session may neither write
+nor read table items, nor send to the deploy queue):
 
 ```sh
-aws dynamodb put-item --region eu-central-1 --table-name ssd-workshop-data \
+AWS_PROFILE=franck aws dynamodb put-item --region eu-central-1 --table-name ssd-workshop-data \
   --item '{"pk":{"S":"BUILD#manual-1"},"sk":{"S":"BUILD"},"type":{"S":"build"},"buildId":{"S":"manual-1"},"nickname":{"S":"<nickname>"},"status":{"S":"building"},"updatedAt":{"S":"2026-11-24T00:00:00Z"}}'
-aws sqs send-message --region eu-central-1 \
+AWS_PROFILE=franck aws sqs send-message --region eu-central-1 \
   --queue-url https://sqs.eu-central-1.amazonaws.com/<account>/ssd-workshop-deploys.fifo \
   --message-group-id <nickname, lower-cased> --message-deduplication-id manual-1 \
   --message-body '{"buildId":"manual-1","nickname":"<nickname>","commit":"<40-hex commit>"}'
-aws dynamodb get-item --region eu-central-1 --table-name ssd-workshop-data \
+AWS_PROFILE=franck aws dynamodb get-item --region eu-central-1 --table-name ssd-workshop-data \
   --key '{"pk":{"S":"BUILD#manual-1"},"sk":{"S":"BUILD"}}' --query 'Item.[status.S, deployedCommit.S, failureReasons]'
 # expect within a minute: ["live", "<commit>", null]; the log group ssd-workshop-apps-deployer has one line
 #         {"event":"deployer","outcome":"live","files":N,"bytes":N,"removed":0,"durationMs":N}
@@ -527,17 +530,18 @@ curl -sS -i https://workshop.rankly.games/apps/<nickname>/missing.js | sed -n '1
 # expect: HTTP/2 404
 ```
 
-Only the deployer writes app files (criterion 4, bucket policy `OnlyTheDeployerWritesApps`). With the Claude user's
-(or the deploy role's) credentials:
+Only the deployer writes app files (criterion 4, bucket policy `OnlyTheDeployerWritesApps`). With credentials that may
+otherwise write the bucket (Franck's, or the deploy role's):
 
 ```sh
 echo x > /tmp/x.txt
-aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
+AWS_PROFILE=franck aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
 # expect: An error occurred (AccessDenied) when calling the PutObject operation ... with an explicit deny in a resource-based policy
 ```
 
-The refusal names the deny `OnlyTheDeployerWritesApps`, so the `aws:PrincipalArn` form used by the deny is checked
-from both sides: the Claude user is refused, and the first successful deploy (the deployer's puts pass) proves that
+(From a Claude session the same command is refused since ticket 2.12 by the explicit deny `OnlyReadsForSessions` in an
+identity-based policy, or by this bucket policy's deny: the user has no write at all.) The refusal names the deny `OnlyTheDeployerWritesApps`, so
+the `aws:PrincipalArn` form used by the deny is checked from both sides: other principals are refused, and the first successful deploy (the deployer's puts pass) proves that
 `aws:PrincipalArn` matches the deployer's role (the policy names it with and without its path). If the first deploy
 fails with `AccessDenied` on `PutObject` "with an explicit deny in a resource-based policy", the key carries a form
 that neither ARN matches: look up `userIdentity.sessionContext.sessionIssuer.arn` in CloudTrail and fix
@@ -671,12 +675,12 @@ pinned properties in CDK then needs Franck (the synth test pins them so that nev
 ## Start a participant's conversation over
 
 For tests and dry runs, with Franck's own AWS credentials (it reads and deletes items of one participant
-in `ssd-workshop-data`):
+in `ssd-workshop-data`, which Claude sessions may not):
 
 ```sh
-npm run conversation -- reset <nickname>
+AWS_PROFILE=franck npm run conversation -- reset <nickname>
 # expect: "<nickname> is at step ..., with N messages and replies and M spec versions." and "Nothing changed. ..."
-npm run conversation -- reset <nickname> --yes
+AWS_PROFILE=franck npm run conversation -- reset <nickname> --yes
 # expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify). AI usage totals kept."
 ```
 
@@ -772,3 +776,120 @@ on the same repository `ssd-<nickname>`.
      --query 'taskDefinition.containerDefinitions[0].[environment,secrets]'
    # expect: [null, null] (or [[], []])
    ```
+
+## After applying ticket 2.12's access stack: Claude sessions read-only
+
+Since ticket 2.12 the user `ssd-workshop-claude` carries only `ssd-workshop-deploy-read` and `ssd-workshop-session`
+(`infra/access/README.md`): reads of the workshop's own resources, Bedrock and test emails, no deploy rights and no
+table items. Only deploys from `main` change live apps; Franck's commands (`builds`, `conversation`, `flags`,
+`allowlist`, the GitHub secret) run as `AWS_PROFILE=franck` and are unaffected.
+
+```mermaid
+flowchart LR
+  S([Claude session]) -->|smoke bedrock, evals| B[Bedrock]
+  S -->|describe-stacks, logs tail,<br/>describe-table| R[workshop resources: read]
+  S -->|smoke ses, only to<br/>SessionTestRecipients| E[SES]
+  S -.->|update-function, s3 cp,<br/>scan, put-item| X[refused:<br/>explicit deny OnlyReadsForSessions]
+  M([merge to main]) -->|deploy role| L[live apps]
+```
+
+From a Claude session, after Franck applied the stack:
+
+```sh
+npm run smoke -- bedrock
+# expect: the model's short answer, as before
+aws cloudformation describe-stacks --region eu-central-1 --stack-name ssd-workshop-api --query 'Stacks[0].StackStatus'
+# expect: "UPDATE_COMPLETE" (or another *_COMPLETE status)
+aws logs tail ssd-workshop-api-health --region eu-central-1 --since 1h
+# expect: log lines (or nothing if the function was not called), no AccessDenied
+aws lambda update-function-configuration --region eu-central-1 --function-name ssd-workshop-api-health --description x
+# expect: AccessDeniedException ... with an explicit deny in an identity-based policy (OnlyReadsForSessions, ticket 2.12 try 3)
+echo x > /tmp/x.txt
+aws s3 cp /tmp/x.txt s3://ssd-workshop-apps-<account>/apps/<nickname>/x.txt
+# expect: AccessDenied ... with an explicit deny in an identity-based policy (or in a resource-based policy: the
+#         bucket's OnlyTheDeployerWritesApps denies it too)
+aws dynamodb scan --region eu-central-1 --table-name ssd-workshop-data --select COUNT
+# expect: AccessDeniedException ... with an explicit deny in an identity-based policy
+npm run -s smoke -- ses success@simulator.amazonses.com
+# expect: "Sent from ssd-workshop@rankly.games to ..." and a MessageId (the SES mailbox simulator)
+```
+
+Test emails go only to the addresses in the access stack's parameter `SessionTestRecipients` (default: the SES
+mailbox simulator `success@simulator.amazonses.com`; ticket 2.12 try 3). To test with a real inbox, Franck adds
+that address to the parameter (CloudFormation, `ssd-workshop-access`, Update, Use current template, change only
+`SessionTestRecipients`; see `infra/access/README.md`); any other recipient gets `AccessDenied` on `ses:SendEmail`.
+Sessions can read the parameter's addresses (in the policy), so put only test addresses there.
+
+The log group `ssd-workshop-api-health` (named like its function) is an example: any `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` or
+`/ecs/ssd-workshop-*` group works. Franck can also check the user's rights without a session (expect `explicitDeny`
+for the three writes and `allowed` for the read):
+
+```sh
+AWS_PROFILE=franck aws iam simulate-principal-policy \
+  --policy-source-arn arn:aws:iam::<account>:user/ssd-workshop-claude \
+  --action-names lambda:UpdateFunctionConfiguration s3:PutObject dynamodb:Scan cloudformation:DescribeStacks \
+  --resource-arns arn:aws:lambda:eu-central-1:<account>:function:ssd-workshop-api-health \
+    arn:aws:s3:::ssd-workshop-apps-<account>/apps/x.txt arn:aws:dynamodb:eu-central-1:<account>:table/ssd-workshop-data \
+    'arn:aws:cloudformation:eu-central-1:<account>:stack/ssd-workshop-api/*' \
+  --query 'EvaluationResults[].[EvalActionName,EvalResourceName,EvalDecision]' --output text
+# expect: explicitDeny for each write on every resource (OnlyReadsForSessions); implicitDeny for the read on the
+# other resources; allowed for cloudformation:DescribeStacks on the stack
+```
+
+`cdk diff` from a session cannot create a change set (a write): it falls back to a template diff, or run it with
+`--method template`.
+
+### One-time audit: what sessions with deploy rights may have left (Franck)
+
+Before ticket 2.12 the user held deploy rights, so a session could have written a resource policy or a role trust
+naming `ssd-workshop-claude` (by name, by its unique id `AIDA...`, or as any principal `"*"` / `{"AWS": "*"}`), or
+left a resource no stack owns. Since try 3 the user's `OnlyReadsForSessions` denies every write such a policy could
+grant, but a leftover should still go. Run once after applying, from Franck's machine; every command only reads:
+
+```sh
+export AWS_PROFILE=franck
+U=ssd-workshop-claude
+ID=$(aws iam get-user --user-name $U --query User.UserId --output text)   # AIDA...
+P="$U|$ID|\"(Principal|AWS)\" *: *(\[[^]]*)?\"\*\""   # the user, its id, or any principal
+owned() { for r in eu-central-1 us-east-1; do
+  aws cloudformation describe-stack-resources --region $r --physical-resource-id "$1" >/dev/null 2>&1 && return; done
+  echo "no stack owns: $1"; }
+aws iam list-groups-for-user --user-name $U --query 'Groups[].GroupName'
+# expect: []
+aws iam list-user-policies --user-name $U --query PolicyNames
+# expect: []
+aws iam list-attached-user-policies --user-name $U --query 'AttachedPolicies[].PolicyName'
+# expect: ["ssd-workshop-deploy-read", "ssd-workshop-session"] (in any order)
+aws iam list-roles --query 'Roles[].[Arn, to_string(AssumeRolePolicyDocument)]' --output text | grep -E "$P" | cut -f1
+# expect: no output (no role in the account trusts the user, its id or any principal)
+for b in $(aws s3api list-buckets --query 'Buckets[].Name' --output text); do
+  aws s3api get-bucket-policy --bucket "$b" --query Policy --output text 2>/dev/null | grep -Eq "$P" && echo "bucket: $b"
+done
+for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do   # every enabled region
+  for q in $(aws sqs list-queues --region $r --query 'QueueUrls[]' --output text); do
+    aws sqs get-queue-attributes --region $r --queue-url "$q" --attribute-names Policy --query Attributes.Policy \
+      --output text 2>/dev/null | grep -Eq "$P" && echo "queue: $q"
+  done
+done
+# expect: no output (a public website bucket of another project would show here: not a session's, but tell Claude)
+aws sns list-topics --region eu-central-1 --output text | grep ssd-workshop-
+aws events list-event-buses --region eu-central-1 --name-prefix ssd-workshop- --query 'EventBuses[].Name'
+# expect: no output, then [] (no workshop stack uses SNS topics or custom event buses; any found is a leftover)
+for r in eu-central-1 us-east-1; do
+  for f in $(aws lambda list-functions --region $r --query "Functions[?starts_with(FunctionName, 'ssd-workshop-')].FunctionName" --output text); do owned "$f"; done
+done
+for c in $(aws ecs list-clusters --region eu-central-1 --query 'clusterArns[?contains(@, `/ssd-workshop-`)]' --output text); do
+  for x in $(aws ecs list-services --region eu-central-1 --cluster "$c" --query 'serviceArns[]' --output text); do owned "$x"; done
+done
+for i in $(aws ec2 describe-instances --region eu-central-1 --filters Name=tag:project,Values=ssd-workshop \
+  --query 'Reservations[].Instances[?State.Name!=`terminated`].InstanceId[]' --output text); do owned "$i"; done
+for n in $(aws scheduler list-schedules --region eu-central-1 --name-prefix ssd-workshop- --query 'Schedules[].Name' --output text); do owned "$n"; done
+for n in $(aws events list-rules --region eu-central-1 --name-prefix ssd-workshop- --query 'Rules[].Name' --output text); do owned "$n"; done
+for n in $(aws iam list-roles --path-prefix /ssd-workshop/ --query 'Roles[].RoleName' --output text); do owned "$n"; done
+# expect: no output
+```
+
+Anything reported: tell Claude in a thread (names only), and remove it yourself in the console after a look.
+Lambda, ECR, secret, table, parameter and log group policies need no check: the deploy policies already denied
+writing them (`NoExternalSharing`, `InvokePermissionsForServicesOnly`); queues could take a policy through
+`sqs:SetQueueAttributes`, hence the queue loop.

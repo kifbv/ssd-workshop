@@ -31,8 +31,8 @@ credentials (default credential chain; they need `dynamodb:UpdateItem` and `dyna
 `ssd-workshop-data` table in `eu-central-1`):
 
 ```
-npm run -s allowlist -- import /path/outside/the/repo/people.csv
-npm run -s allowlist -- list
+AWS_PROFILE=franck npm run -s allowlist -- import /path/outside/the/repo/people.csv
+AWS_PROFILE=franck npm run -s allowlist -- list
 ```
 
 - The CSV starts with the header `email,group,role`; one person per line, no quoted fields. Role is

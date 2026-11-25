@@ -3,11 +3,14 @@
 `access-stack.yaml` gives the workshop the least AWS access it needs in the rankly.games account,
 which it shares with other projects (rankly.games, www, play, letters). Franck applies and
 updates it by hand in the CloudFormation console. CI and Claude sessions never apply it, and the
-deploy rights it grants cannot change it, the deploy role, the Claude user or the five managed
+deploy rights it grants cannot change it, the deploy role, the Claude user or the six managed
 policies (explicit denies `ProtectThisStack` and `ProtectAccessIdentities`; every role the deploy
 rights may touch lives under the IAM path `/ssd-workshop/`, which the deploy role, on path `/`, is
-not). The deploy principals are the deploy role (GitHub Actions on `main`) and the user
-`ssd-workshop-claude`. Participants get no AWS keys of their own, but code they write for the
+not). Only the deploy role (GitHub Actions on `main`) deploys. Since ticket 2.12 the user
+`ssd-workshop-claude` (Claude's cloud sessions) carries no deploy rights: `ssd-workshop-deploy-read`
+(reads, with the session denies of tickets 2.6 and 2.9) and `ssd-workshop-session` (reads of the
+workshop's own resources, Bedrock, test emails from the workshop sender), so only deploys from
+`main` change live apps. Participants get no AWS keys of their own, but code they write for the
 advanced track runs under workshop roles (ECS tasks, k3s nodes) and can use those roles'
 credentials, within the boundary (accepted risk 10). What IAM cannot close is listed under
 [Accepted risks](#accepted-risks).
@@ -16,17 +19,21 @@ credentials, within the boundary (accepted risk 10). What IAM cannot close is li
 flowchart LR
   Franck([Franck, admin]) -- applies and updates --> Stack[[stack ssd-workshop-access]]
   Stack --> Boundary[ssd-workshop-boundary<br/>permissions boundary]
-  Stack --> Deploy[ssd-workshop-deploy<br/>+ ssd-workshop-deploy-edge<br/>+ ssd-workshop-deploy-ec2<br/>+ ssd-workshop-deploy-read<br/>deploy policies]
+  Stack --> Deploy[ssd-workshop-deploy<br/>+ ssd-workshop-deploy-edge<br/>+ ssd-workshop-deploy-ec2<br/>deploy writes]
+  Stack --> Read[ssd-workshop-deploy-read<br/>reads + session denies]
+  Stack --> Session[ssd-workshop-session<br/>workshop reads, Bedrock, SES]
   Stack --> Role[role ssd-workshop-deploy]
   Stack --> User[user ssd-workshop-claude]
   Stack --> Budget[budget ssd-workshop-monthly]
   Stack --> ConfigSet[SES configuration set<br/>ssd-workshop-email]
   Deploy --> Role
-  Deploy --> User
+  Read --> Role
+  Read --> User
+  Session --> User
   GHA([GitHub Actions on main]) -- OIDC --> Role
   Claude([Claude cloud sessions]) -- access key --> User
   Role -- deploys --> WS[ssd-workshop-* stacks]
-  User -- deploys --> WS
+  User -. reads only, no deploys .-> WS
   WS -- every role they create<br/>path /ssd-workshop/, carries --> Boundary
 ```
 
@@ -46,6 +53,7 @@ flowchart LR
    | `GitHubRepo` | keep `kifbv@7999713/ssd-workshop@1467373954` (the ID form GitHub sends for this repository) |
    | `BudgetEmail` | the address that should get budget alerts |
    | `MonthlyBudgetUsd` | keep `100` |
+   | `SessionTestRecipients` | the only addresses Claude sessions may send test emails to, comma-separated: keep `success@simulator.amazonses.com` (the SES mailbox simulator) and add your own test inbox if you want real test mails. Sessions can read these addresses (in `ssd-workshop-session`), so enter only test addresses, never a participant's |
 
 5. Tick "I acknowledge that AWS CloudFormation might create IAM resources with custom names",
    then Submit and wait for `CREATE_COMPLETE`.
@@ -64,14 +72,20 @@ flowchart LR
 
 ## Update it
 
-1. A Claude session hits `AccessDenied` and reports the missing permission (action and resource).
+1. A deploy from `main` (or a Claude session's read) hits `AccessDenied`, and Claude reports the
+   missing permission (action and resource). A deploy right goes on the deploy policies (deploy
+   role only); a session gets only reads (on `ssd-workshop-deploy-read` or `ssd-workshop-session`),
+   never a write.
 2. Claude changes `access-stack.yaml` in a pull request, keeping the new right scoped to
    `ssd-workshop-*` names, the `project=ssd-workshop` tag or `workshop.rankly.games`, and
    explains it in the table below. The tests in `access-stack.test.ts` fail if a new write is not
    scoped or listed as an exception.
 3. Franck reviews and merges.
 4. Franck opens the `ssd-workshop-access` stack in the console, Update, Replace existing template,
-   uploads the merged `access-stack.yaml`, keeps the parameters, and submits.
+   uploads the merged `access-stack.yaml`, keeps the parameters, and submits. `BudgetEmail` is hidden
+   (`NoEcho`, since ticket 2.12) and shows as `****`: leave it as it is (the existing value is kept);
+   type the address again only to change it. `SessionTestRecipients` keeps its current value; to let sessions send
+   a test email to another inbox, Update, Use current template, and change only that parameter (ticket 2.12 try 3).
 
 ## Why each statement exists
 
@@ -117,7 +131,7 @@ flowchart LR
 | `WorkshopRolesWithBoundaryOnly` | Create roles on the path `/ssd-workshop/` and change their policies only when the role carries `ssd-workshop-boundary`. |
 | `WorkshopRolesHousekeeping` | Delete, tag, update (also the trust policy, which CloudFormation changes in place) and wire instance profiles for roles and instance profiles on `/ssd-workshop/`. |
 | `PassWorkshopRolesToWorkshopServices` | Hand `/ssd-workshop/` roles only to Lambda, ECS tasks, EC2, Step Functions, EventBridge Scheduler and EventBridge (`iam:PassedToService`). |
-| `ProtectAccessIdentities` | Deny: every IAM action except `Get*`/`List*` on the role `ssd-workshop-deploy`, the user `ssd-workshop-claude` and the five managed policies. |
+| `ProtectAccessIdentities` | Deny: every IAM action except `Get*`/`List*` on the role `ssd-workshop-deploy`, the user `ssd-workshop-claude` and the six managed policies (named one by one; `ssd-workshop-session` added in ticket 2.12). |
 | `WorkshopServiceLinkedRoles` | Let ECS create its AWS-defined service-linked role the first time it is used (`iam:AWSServiceName` `ecs.amazonaws.com` only). |
 | `NoBoundaryEscape` | Deny removing or replacing a boundary, creating users or access keys, and rewriting managed policies. |
 | `NoSelfAssume` | Deny `sts:AssumeRole`, `TagSession` and `SetSourceIdentity`: a role elsewhere in the account whose trust policy names the account or these principals cannot be assumed. |
@@ -127,7 +141,7 @@ flowchart LR
 | `RulesOnWorkshopSourcesOnly` | Deny `events:PutRule` when the event pattern names a source other than `ssd-workshop.*` (`events:source`): a rule on the default bus could otherwise match other projects' events (ECS task state changes carry environment variables). |
 | `RulesNeedASource` | Deny `events:PutRule` without a source (`Null` `events:source`): a pattern that filters only on `detail` or `account` matches every project's events. Schedules use EventBridge Scheduler, not schedule rules. |
 
-**`ssd-workshop-deploy-edge`** (deploy rights, part 2: CloudFront, certificates, API Gateway, DNS, Bedrock, SES, and the denies that keep workshop data in the account):
+**`ssd-workshop-deploy-edge`** (deploy rights, part 2: CloudFront, certificates, API Gateway, DNS, and the denies that keep workshop data in the account; Bedrock and SES moved to `ssd-workshop-session` in ticket 2.12):
 
 | Sid | Why |
 | --- | --- |
@@ -144,8 +158,6 @@ flowchart LR
 | `ApiGatewayTagOnCreateThroughCloudFormation` | `POST`/`PUT` on the API Gateway tags endpoint (`/tags/*`), which CloudFormation's API Gateway v2 handler calls when it creates an API or stage with tags. Only with the project tag in the request and only through CloudFormation (`aws:CalledVia`), whose resource import is denied (`NoResourceImport`), so only APIs a workshop stack created itself. The tags resource has no resource-tag key, so there is no `Null` guard as in `TagOnCreateThroughCloudFormation`. |
 | `ApiGatewayTagStagesOnCreate` | `apigateway:TagResource` on `/apis/*`, which AWS also checks when CloudFormation creates a tagged stage (not yet in the Service Authorization Reference). Only with the project tag in the request, on an API already tagged with the project (stages inherit it), and only through CloudFormation. |
 | `DnsOnlyWorkshopSubdomain` | Change records in rankly.games only for `workshop.rankly.games` and names under it, only `A`, `AAAA` and `CNAME` (alias and certificate validation), with a `Null` guard because `ForAllValues` is true when a key is missing. |
-| `Bedrock` | Claude sessions test the platform's Bedrock calls and benchmark other models for the builder: any provider's foundation model, and inference profiles only with EU (`eu.*`) or global (`global.*`) routing. The platform's own roles stay on Claude (the boundary's `Bedrock` statement is unchanged). |
-| `SesForTesting` | Claude sessions test code emails, only through the identities `ssd-workshop@rankly.games` and `rankly.games`, only from `ssd-workshop@rankly.games`. |
 | `NoExternalSharing` | Deny S3 ACLs, bucket logging, inventory, analytics export, replication and notifications, Secrets Manager, ECR, DynamoDB, SSM and CloudWatch Logs resource policies, Lambda function URLs and layer sharing, SQS and SNS `AddPermission`, DynamoDB exports, log subscription filters and log export tasks: none is needed by this spec, each could send workshop data to another account, and none can be pinned to this account by a condition key. |
 | `InvokePermissionsForServicesOnly` | Deny `lambda:AddPermission` unless the principal is API Gateway, EventBridge, SNS or S3, so no account or the public can be allowed to invoke a function. |
 | `EventTargetsInAccount` | Deny EventBridge targets outside this account (`events:TargetArn`). |
@@ -191,11 +203,8 @@ flowchart LR
 | `ReadEventSourceMappings` | 2.9 follow-up: `lambda:GetEventSourceMapping` on `*` (CloudFormation reads a mapping by UUID, which Lambda checks on `*` without a function ARN). Read only. |
 | `ChangeTaggedEventSourceMappings` | 2.9 follow-up: delete or update an event source mapping tagged `project=ssd-workshop` (rollbacks and updates by UUID). Sessions stay denied (`NoEventSourcesForSessions`). |
 | `EcrPublicBearerToken` | Ticket 2.9 follow-up: `sts:GetServiceBearerToken`, which the ECR Public login needs, without a condition: with `sts:AWSServiceName` `ecr-public.amazonaws.com` the live login was denied (2026-11-24); a bearer token alone grants nothing (actions per the Service Authorization Reference, ecr-public.json and sts.json, read 2026-11-24). Not in the boundary. |
-| `NoBuildTasksForSessions` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24; moved here from `-deploy-read` after 2.9 for its size). For the Claude user only: deny `ecs:DescribeTasks`, `ecs:RunTask`, `ecs:StopTask` and `ecs:ExecuteCommand` on `task/ssd-workshop-builds/*` and `task-definition/ssd-workshop-builder:*`. A running build's task override holds its GitHub token (accepted risk 16); with it and the table rights a session could push, write `pushedCommit` and (before `NoBuildQueueForSessions` covered the deploy queue) send a deploy message, so the live app would change. `ecs:ListTasks` (no override) stays allowed. |
-| `NoBuildsClusterTasksForSessions` | Ticket 2.9 try 3 (Franck's yes, 2026-11-24). For the Claude user only: deny `ecs:RunTask` of any task definition where `ecs:cluster` is `cluster/ssd-workshop-builds` (the builder's own definition is already denied by `NoBuildTasksForSessions`). |
-| `NoBuildsClusterServicesForSessions` | Access review follow-up to ticket 2.9 (Franck's yes, 2026-11-24). For the Claude user only: deny `ecs:CreateService`, `ecs:UpdateService` and `ecs:CreateTaskSet` on `service/ssd-workshop-builds/*` and `task-set/ssd-workshop-builds/*`, so a session cannot run tasks on the builds cluster through a service or task set either (no deploy policy grants task sets today). |
 
-**`ssd-workshop-deploy-read`** (deploy rights, part 4: reads):
+**`ssd-workshop-deploy-read`** (deploy rights, part 4: reads; carried by the deploy role and the Claude user):
 
 | Sid | Why |
 | --- | --- |
@@ -213,6 +222,51 @@ flowchart LR
 | `NoUserDataReads` | Deny instance attributes, launch template versions and spot requests (they hold user data) outside the project tag. Launch template versions and spot requests have no resource tag in IAM, so they are denied for every resource. |
 | `NoApiKeyReads` | Deny reading API Gateway keys. |
 | `NoVpnKeyReads` | Deny `ec2:DescribeVpnConnections` everywhere: it returns the VPN pre-shared keys. |
+
+**`ssd-workshop-session`** (ticket 2.12, the Claude user only: reads of the workshop's own resources, Bedrock and
+test emails; no deploy rights). Every Allow is a read except Bedrock invoke, SES `SendEmail` and the log reads
+`FilterLogEvents`, `StartQuery` and `StartLiveTail` (tested, with a mutation). Its denies need no principal
+condition (only the Claude user carries it). Since try 3 the catch-all `OnlyReadsForSessions` denies the user every
+action but those reads and exceptions, so a resource policy left from the sessions that had deploy rights cannot
+grant a write either. Reads name `${AWS::Region}` (eu-central-1), except stacks (the edge stack is in us-east-1).
+
+```mermaid
+flowchart LR
+  S([Claude session]) --> U[user ssd-workshop-claude]
+  U --> R[ssd-workshop-deploy-read<br/>account reads without secrets<br/>+ session denies 2.6/2.9]
+  U --> P[ssd-workshop-session]
+  P -->|read| W[ssd-workshop-* stacks, logs, functions,<br/>queues, cluster, repositories,<br/>table settings, buckets, secret metadata]
+  P -->|invoke| B[Bedrock: any provider's models,<br/>eu.* and global.* profiles]
+  P -->|send| E[SES from ssd-workshop@rankly.games<br/>to SessionTestRecipients only]
+  RP[resource policy left<br/>by an earlier session] -.->|grant| U
+  U -.->|refused: denied by OnlyReadsForSessions<br/>whatever grants it| X[deploys, function or bucket writes,<br/>table items, queue messages, secret values,<br/>credentials, role assumption, user data,<br/>budget, access stack events]
+```
+
+| Sid | Why |
+| --- | --- |
+| `Bedrock` | Sessions test the platform's Bedrock calls (`npm run smoke -- bedrock`, the evals) and benchmark other models for the builder (Franck, 2026-11-25): any provider's foundation model, and inference profiles only with EU (`eu.*`) or global (`global.*`) routing. The platform's own roles stay on Claude (the boundary's `Bedrock` statement is unchanged). |
+| `SesForTesting` | Sessions test code emails (`npm run -s smoke -- ses <address>`), only `ses:SendEmail` (SESv2 `SendEmail` with simple content, as the smoke test and the mailer send; no `SendRawEmail`, whose `From:` header is free), only through the identities `ssd-workshop@rankly.games` and `rankly.games`, only from `ssd-workshop@rankly.games` (`ses:FromAddress`), with the configuration set `ssd-workshop-email`, and only to the addresses of the parameter `SessionTestRecipients` (`ForAllValues:StringLike` on `ses:Recipients`, which holds To, Cc and Bcc, plus a `Null` guard so a send without the key is refused; try 3). |
+| `WorkshopStackReads` | `cloudformation:Describe*`, `Get*`, `List*` on `stack/ssd-workshop-*/*` (outputs, events, templates; `cdk diff` falls back to a template diff, since creating a change set is a write). |
+| `WorkshopLogReads` | Read the log groups `ssd-workshop-*`, `/aws/lambda/ssd-workshop-*` and `/ecs/ssd-workshop-*`: streams, events, filters, Logs Insights queries (`StartQuery`, `GetQueryResults`) and live tails (`StartLiveTail`). `StopQuery` (Resource `*` only) is not granted. |
+| `WorkshopResourceReads` | Settings, never data: Lambda function configuration, policy, aliases, versions and tags (no `lambda:List*`, no invoke); SQS attributes, URL, tags and dead-letter sources (never `ReceiveMessage`); ECS clusters, services and tasks (build tasks stay denied by `NoBuildTasksForSessions`); ECR repositories and image lists (no pulls); DynamoDB table description, backups, TTL and tags (never an item: the table holds participants' email addresses); Secrets Manager description and version ids (never a value); Scheduler schedules and groups. All on `ssd-workshop-*` names. |
+| `WorkshopEventSourceMappingReads` | `lambda:GetEventSourceMapping` for `ssd-workshop-*` functions (`lambda:FunctionArn`; mapping ids are generated). |
+| `WorkshopBucketReads` | `s3:GetObject*`, `GetBucket*`, `Get*Configuration` and `List*` on `ssd-workshop-*` buckets and their objects, in this account only (`aws:ResourceAccount`). The site and apps files are public anyway; the assets bucket holds deploy code. Not `s3:Get*`, which would also name `s3:GetDataAccess` (S3 Access Grants credentials; tested). |
+| `NoAssumeForSessions` | Deny `sts:AssumeRole`, `TagSession`, `SetSourceIdentity` and `GetFederationToken` on every resource. The user no longer carries `ssd-workshop-deploy`'s `NoSelfAssume`, and in the same account a role whose trust policy names `user/ssd-workshop-claude` needs no identity-based Allow: a role an earlier session (with deploy rights) left behind could otherwise still be assumed. |
+| `OnlyReadsForSessions` | Deny every action not in its `NotAction` list, on every resource (try 3). The list holds the user's reads as wildcard groups per service (`cloudformation:Describe*`, `logs:Get*`, `s3:GetObject*`, ...: each fixed part starts with `Describe`, `Get`, `List`, `View` or `Validate`, so no write fits; each checked against the Service Authorization Reference, 2026-11-24) and the exceptions by name (`bedrock:InvokeModel`, `InvokeModelWithResponseStream`, `ses:SendEmail`, `logs:FilterLogEvents`, `StartQuery`, `StartLiveTail`). In the same account a resource policy (bucket, queue, topic, function, role trust) naming the user needs no identity Allow; this deny wins over it. Left out on purpose, so denied although `-deploy-read` allows them: `budgets:ViewBudget` (its subscribers hold the budget address) and `ses:GetEmailIdentity`/`ListEmailIdentities` (other projects' identities; no session code uses them). No credential-returning read fits a pattern (tested). |
+| `NoAccessStackEventsForSessions` | Deny `cloudformation:DescribeStackEvents`, `DescribeEvents` and `DescribeStackResourceDrifts` on `stack/ssd-workshop-access/*` (old events and drift results may show the budget address) and on every `changeSet/*` (a change set's ARN does not name its stack). `DescribeStacks` stays (the address parameter is `NoEcho`). |
+| `NoVerifiedAccessForSessions` | Deny `ec2:DescribeVerifiedAccess*`: `ec2:Describe*` (on `-deploy-read`) also covers Verified Access trust providers, which may hold other projects' OIDC client secrets. |
+| `NoUserDataForSessions` | Deny `ec2:DescribeInstanceAttribute`, `DescribeLaunchTemplateVersions`, `DescribeSpotFleetRequests` and `DescribeSpotInstanceRequests` on every resource: `ec2:Describe*` (on `-deploy-read`) would return the project's own instances' user data and launch template versions (`NoUserDataReads` there denies them only outside the project tag). Sessions do not need them; the deploy role keeps them on project-tagged resources. |
+| `NoBuildTasksForSessions` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24; moved to `-deploy-ec2` after 2.9 for its size, and to `ssd-workshop-session`, the user's own policy, in 2.12). deny `ecs:DescribeTasks`, `ecs:RunTask`, `ecs:StopTask` and `ecs:ExecuteCommand` on `task/ssd-workshop-builds/*` and `task-definition/ssd-workshop-builder:*`. A running build's task override holds its GitHub token (accepted risk 16); with it and the table rights a session could push, write `pushedCommit` and (before `NoBuildQueueForSessions` covered the deploy queue) send a deploy message, so the live app would change. `ecs:ListTasks` (no override) stays allowed. |
+| `NoBuildsClusterTasksForSessions` | Ticket 2.9 try 3 (Franck's yes, 2026-11-24). deny `ecs:RunTask` of any task definition where `ecs:cluster` is `cluster/ssd-workshop-builds` (the builder's own definition is already denied by `NoBuildTasksForSessions`). |
+| `NoBuildsClusterServicesForSessions` | Access review follow-up to ticket 2.9 (Franck's yes, 2026-11-24). deny `ecs:CreateService`, `ecs:UpdateService` and `ecs:CreateTaskSet` on `service/ssd-workshop-builds/*` and `task-set/ssd-workshop-builds/*`, so a session cannot run tasks on the builds cluster through a service or task set either (no deploy policy grants task sets today). |
+
+Not granted to sessions on purpose (ticket 2.12): every deploy right, `ecs:DescribeTaskDefinition`,
+`ecr:GetAuthorizationToken` and the other credential-returning reads (`sts:GetFederationToken`/`GetSessionToken`,
+`sso:GetRoleCredentials`, `s3:GetDataAccess`, `ec2:GetPasswordData`/`GetConsoleOutput`/`GetConsoleScreenshot`/`GetLaunchTemplateData`,
+`lightsail:GetInstanceAccessDetails`, `redshift:GetClusterCredentials`/`GetClusterCredentialsWithIAM`,
+`cognito-identity:GetCredentialsForIdentity`/`GetOpenIdToken`, package login tokens; tested, wildcards expanded,
+and a new wildcard Allow on the user fails the tests until it is pinned in `SESSION_WILDCARDS`), `dynamodb:GetItem`/`BatchGetItem`/`Query`/`Scan`/`PartiQLSelect`/exports/stream
+records, `sqs:ReceiveMessage`, `secretsmanager:GetSecretValue`, `ssm:GetParameter*`, `lambda:InvokeFunction`.
 
 Not granted on purpose: `lambda:List*` (returns every function's environment variables),
 `cloudformation:Describe*`, `GetTemplate` and `ListExports` on other
@@ -246,23 +300,24 @@ follow-up.
      end
      subgraph Open["still open: no subnet key on RunTask"]
        L[launcher role] -->|RunTask, any subnet| T[workshop task]
-       D[deploy role, Claude user] -->|RunTask, any subnet| T
+       D[deploy role] -->|RunTask, any subnet| T
      end
      T -.->|could sit in| O[another project's subnet<br/>and reach its private endpoints]
    ```
 
    Closed: services, Express Gateway services included, only in the two workshop subnets
-   (`ServicesInWorkshopSubnetsOnly`, deploy policies and boundary); `StartTask` denied for both principals and in the boundary
+   (`ServicesInWorkshopSubnetsOnly`, deploy policies and boundary); `StartTask` denied for the deploy role (the Claude user has no `ecs` write since ticket 2.12) and in the boundary
    (`NoStartTask`); under the boundary only the build launcher role starts tasks, and only from
    `ssd-workshop-*` task definitions on `ssd-workshop-*` clusters (`RunBuilds`), so participant code
-   running under a task role cannot start any. Open: the launcher role and the two deploy principals
+   running under a task role cannot start any, and since ticket 2.12 Claude sessions have no
+   `RunTask` at all. Open: the launcher role and the deploy role
    can still start a workshop task in another project's subnet with `RunTask`. Impact: that task
    could reach the other project's private endpoints. Mitigation: the launcher names the two subnets
    from `BUILDS_SUBNET_IDS` (tested in ticket 2.9). For ticket 2.9: the launcher-only `RunTask`
    rule does not stop a confused deputy, so task roles get no write access to the launcher's
    trigger, the launcher validates what it runs, and the launcher role trusts only
    `lambda.amazonaws.com`. Check (run by Franck as admin; event history keeps 90 days), in every
-   enabled region, since nothing limits the deploy principals to eu-central-1 (they can create
+   enabled region, since nothing limits the deploy role to eu-central-1 (it can create
    `ssd-workshop-*` clusters anywhere), every `RunTask` whose subnets are not the workshop's two,
    or that names none:
 
@@ -295,21 +350,31 @@ follow-up.
    every resource** (AWS offers no resource scope). Impact: the deploy rights could delete another
    project's vended log delivery (its API Gateway or Step Functions logs stop) or mark another
    project's task definition revision inactive (running tasks and services keep it; new launches of
-   that revision fail until it is registered again). Check: CloudTrail for these calls by the two
-   workshop principals.
-4. **Long-lived access key of `ssd-workshop-claude`.** Impact: a leaked key carries all deploy rights
-   until it is deactivated. Mitigation: it lives only as a network secret of the cloud
+   that revision fail until it is registered again). Check: CloudTrail for these calls by the
+   deploy role (since ticket 2.12 the Claude user has none of them).
+4. **Long-lived access key of `ssd-workshop-claude`.** Impact: a leaked key carries the user's
+   rights until it is deactivated: since ticket 2.12 reads (with the account-wide reads of risk 6),
+   Bedrock calls (cost), Logs Insights queries and live tails on workshop log groups (cost per GB
+   scanned and per minute) and emails from the workshop sender (risk 5); no deploy rights, no role
+   assumption or federation token (`NoAssumeForSessions`), and since try 3 no write through a resource policy
+   (`OnlyReadsForSessions`). What IAM cannot undo: resources an earlier session (with deploy rights) may have
+   left, and resource policies naming the user (reads they grant are still possible); `infra/README.md`
+   ("After applying ticket 2.12's access stack") has Franck's one-time audit. Mitigation: it lives only as a network secret of the cloud
    environment; rotate it every 90 days and after any suspected leak (IAM, Users, Security
    credentials).
-5. **SES sends from `ssd-workshop@rankly.games` to any recipient.** Participants' addresses are not
+5. **SES sends from `ssd-workshop@rankly.games` to any recipient (workload roles).** Participants' addresses are not
    known to IAM, and `ses:FromAddress` checks the envelope sender: with `SendRawEmail` the
-   message's `From:` header can show another name or address. Impact: misuse could send mail in
+   message's `From:` header can show another name or address. Since ticket 2.12 try 3 the Claude user
+   may send only `SendEmail` and only to `SessionTestRecipients`; the sign-in code role (boundary `SendCodes`)
+   still sends to anyone, as it must. Impact: misuse could send mail in
    rankly.games' name and hurt the sending reputation that the other rankly.games projects share.
    Check: SES sending statistics and bounce/complaint rates; follow-up: a workshop configuration
    set with event publishing when the platform sends real codes.
 6. **Account-wide reads without secrets.** EC2 and ECS listings (network layout, instance and
    cluster names of other projects), stack names, certificates, the hosted zone, service quotas
-   and costs are readable account-wide.
+   and costs are readable account-wide. Since ticket 2.12 they are readable by Claude sessions too (through
+   `-deploy-read`); accepted in try 3: costs, the rankly.games zone and the other EC2 describes. Not for sessions:
+   Verified Access (`NoVerifiedAccessForSessions`), SES identities and the budget (`OnlyReadsForSessions`).
 7. **CloudFront parts without tags.** The deploy rights can create origin access controls and cache,
    origin-request and response-headers policies without limit (account quotas are shared with the
    other distributions), and cannot change or delete them: a stack update that would change one
@@ -354,8 +419,8 @@ follow-up.
     Analyzer reports function policies open to other accounts.
 15. **`ecs:DescribeTaskDefinition` on every resource** (Franck, 2026-11-23). AWS offers it only on
     `Resource *`, and CloudFormation calls it with the caller's rights for every task definition a
-    workshop stack manages (ticket 2.9). Impact: the two deploy principals can read every task
-    definition in the account, other projects' included, with their container environment
+    workshop stack manages (ticket 2.9). Impact: the deploy role (since ticket 2.12 no longer the
+    Claude user) can read every task definition in the account, other projects' included, with their container environment
     variables (secrets passed as plain environment values would show). The boundary does not grant
     it, so no workload role can. Check (run by Franck as admin), in every enabled region, since
     the grant has no region limit, every call by a workshop principal on a task definition that is
@@ -383,7 +448,8 @@ follow-up.
 
     Who can still read it: Franck, and admins of the shared account (other projects' principals)
     with `ecs:DescribeTasks` on the builds cluster or `cloudtrail:LookupEvents` (RunTask
-    `requestParameters`). Claude sessions cannot: `NoBuildTasksForSessions` denies the Claude user
+    `requestParameters`). Claude sessions cannot: since ticket 2.12 the Claude user has no deploy rights
+    at all (below), and `NoBuildTasksForSessions` still denies it
     `DescribeTasks`, `RunTask` and `StopTask` on build tasks, the user has no CloudTrail rights,
     under the boundary only the launcher role may describe build tasks (`WatchBuildsLauncherOnly`),
     and a session cannot borrow the launcher's role (`NoLauncherForSessions`). Try 2 stated this
@@ -397,22 +463,26 @@ follow-up.
     prepared (`BUILDER_BASE_COMMIT`; a `main` that moved fails the build), its writes hold only
     under its launch's `attemptId`, and the deployer publishes only the commit stored as
     `pushedCommit` and named in a deploy message. Changing the live app also needs writing
-    `pushedCommit` on the build AND sending a deploy message. The Claude user may write the table
-    (its deploy rights) but may not send to `ssd-workshop-deploys*` (`NoBuildQueueForSessions`);
+    `pushedCommit` on the build AND sending a deploy message. Since ticket 2.12 the Claude user may
+    neither write nor read the table's items, and before it the user could write it but not send to `ssd-workshop-deploys*` (`NoBuildQueueForSessions`);
     under the boundary only the builder's task role may (`DeploysFromTheBuilderOnly`), and since try
     3 a session can neither pass that role nor run any task on the builds cluster
     (`NoBuildsClusterTasksForSessions`, and through a service or task set
     `NoBuildsClusterServicesForSessions`), nor map a queue to a function (`NoEventSourcesForSessions`),
     nor change the check's schedule (`NoBuildCheckScheduleForSessions`). An account admin with both
-    table and SQS rights could. Sessions can still change served files outside the pipeline (see
-    below).
+    table and SQS rights could. Sessions could still change served files outside the pipeline until
+    ticket 2.12 (see below).
 
-    What sessions still can (residual after try 3, by design or for lack of boundary room):
+    **(2.9) live-app residual, closed for sessions by ticket 2.12** (once Franck applied it): the
+    Claude user now holds no write at all (only reads, Bedrock invoke, SES send from the workshop
+    sender and log queries, tested), so none of the paths below is open to a session any more. They
+    stay listed as history, and as what the deploy role (trusted: Franck reviews what merges) can do.
+    What sessions still could after try 3 (by design or for lack of boundary room):
     - Change what is served without the build pipeline, through their deploy rights: the apps
       bucket's policy (then a plain `PutObject`), the CloudFront distribution or the apps-index
-      function. Franck's choice (2026-11-24): accepted for now; a follow-up access ticket cuts
-      Claude sessions to read-only plus narrow rights, so only deploys from `main` change live
-      apps. Until then the denies above only close the build pipeline's own paths.
+      function. Franck's choice (2026-11-24): accepted for now; a follow-up access ticket (2.12)
+      cuts Claude sessions to read-only plus narrow rights, so only deploys from `main` change live
+      apps. Done by 2.12.
     - Write the workshop table directly. Through the build pipeline alone that changes no live
       app (it needs a deploy message, which no session can send or make a borrowed role send).
     - Drive the normal pipeline as a participant could: records a session writes plus a message
@@ -463,7 +533,15 @@ Not granted, so a later ticket brings it to Franck before it is needed:
 ## What the tests prove, and what only AWS can
 
 `access-stack.test.ts` (run by `npm test`) parses the template and checks the four deploy
-policies and the boundary with the same rules: every write is scoped by a resource name that
+policies and the boundary with the same rules (and, since ticket 2.12, that the Claude user carries
+only `ssd-workshop-deploy-read` and `ssd-workshop-session` and no other IAM resource could give it rights (no
+inline policy, group, `Users`/`Groups`/`Roles` on a managed policy, and no IAM resource types besides the six
+policies, the deploy role, the user and the OIDC provider), every Allow of it a read or one of six
+listed exceptions (Bedrock invoke, SES `SendEmail`, three log reads), no table item, queue message, secret value,
+parameter or credential read, no new wildcard Allow, no role assumption, the session reads named `ssd-workshop-*`,
+the catch-all deny sparing only reads and those exceptions (checked per `NotAction` entry, and per request with a
+loose `Allow *` standing for a resource policy), test emails only to `SessionTestRecipients`, and no budget or
+access stack events): every write is scoped by a resource name that
 starts with `ssd-workshop-` (with the dash), the project resource tag, the workshop DNS names
 (with record types and a `Null` guard) or an `ssd-workshop-*` function, or is on a commented
 exception list. A request tag alone counts only for creates: never for a tag-adding action, never
@@ -478,11 +556,12 @@ explicit deny keeps it to the project tag; CloudFront parts without tags are cre
 snapshots are denied; tasks run only on `ssd-workshop-*` clusters, `StartTask` is denied,
 services only in the two workshop subnets (the same ids as `infra/lib/config.ts`), and under the
 boundary only the launcher role starts tasks (a small evaluator checks these per request);
-`ecs:DescribeTaskDefinition` is granted only on its own, to the deploy principals; EventBridge rules need an
+`ecs:DescribeTaskDefinition` is granted only on its own, to the deploy role; EventBridge rules need an
 `ssd-workshop.*` source; certificates only for workshop names; SES only through the workshop
 sender's identities; every bucket grant needs this account; the sharing and egress denies,
-`NoSelfAssume` and the identity denies cover both principals, and the sharing denies also the
-boundary; no IAM write reaches the deploy role; `iam:PassRole` names its services; roles can only
+`NoSelfAssume` and the identity denies cover the deploy role (the Claude user holds no write they
+would limit, and its own `NoAssumeForSessions` denies role assumption and federation tokens, since a
+trust policy naming the user needs no Allow), and the sharing denies also the boundary; no IAM write reaches the deploy role; `iam:PassRole` names its services; roles can only
 be created with the boundary; the boundary cannot be removed; the deploy role trusts only this
 repository's `main`; only `deploy.yml`, on push to `main`, may request an OIDC token; each
 managed policy stays under 6,144 characters. Each check also runs against the old, loose pattern
