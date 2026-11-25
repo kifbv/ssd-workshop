@@ -10,7 +10,7 @@ import {
   type QueryCommandOutput,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { conversationKey, MESSAGE_PREFIX, nicknameKey, participantKey, SPEC_PREFIX } from "../../api/keys.js";
+import { buildKey, conversationKey, MESSAGE_PREFIX, nicknameKey, participantKey, SPEC_PREFIX } from "../../api/keys.js";
 import { conditionFailed } from "../../api/conversation/store.js";
 
 /** What the command needs to know before it resets anything. */
@@ -25,7 +25,7 @@ export interface ResetState {
   updatedAt?: string;
   /** Whether the conversation item exists (a participant who never wrote has none). */
   exists: boolean;
-  /** The build the readiness check started (ticket 2.7), if any: the full reset (ticket 2.13) checks its status. */
+  /** The build the readiness check started (ticket 2.7), if any: both resets check its status (ticket 2.13). */
   buildId?: string;
 }
 
@@ -41,6 +41,8 @@ export interface ResetStore {
   /** The participant's step, or undefined when there is no profile. */
   getStep(participantId: string): Promise<string | undefined>;
   getResetState(participantId: string): Promise<ResetState>;
+  /** The build's status (`queued`, `building`, `deploying`, `live`, `failed`), or undefined when there is no such build. */
+  getBuildStatus(buildId: string): Promise<string | undefined>;
   listResetItems(participantId: string): Promise<ResetItems>;
   /**
    * Deletes the conversation item and puts the step back to clarify, in one transaction, on condition
@@ -138,6 +140,10 @@ export class DynamoResetStore implements ResetStore {
       ...(updatedAt === undefined ? {} : { updatedAt }),
       ...(buildId === undefined ? {} : { buildId }),
     };
+  }
+
+  async getBuildStatus(buildId: string): Promise<string | undefined> {
+    return (await this.getAttributes(buildKey(buildId), ["status"]))?.["status"]?.S;
   }
 
   async listResetItems(participantId: string): Promise<ResetItems> {

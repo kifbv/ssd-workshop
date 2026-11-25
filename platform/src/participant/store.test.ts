@@ -65,13 +65,18 @@ describe("DynamoParticipantResetStore", () => {
     expect(waits).toEqual([200]);
   });
 
-  it("reads and deletes the live marker at APP#<lower-cased nickname> / LIVE", async () => {
-    const { store, sent } = stub([{ Item: { pk: { S: "APP#ada" } } }, {}, {}]);
+  it("reads and deletes the live marker at APP#<lower-cased nickname> / LIVE, saying whether this call deleted it", async () => {
+    const { store, sent } = stub([{ Item: { pk: { S: "APP#ada" } } }, {}, { Attributes: { pk: { S: "APP#ada" } } }, {}]);
     await expect(store.hasLiveMarker("Ada")).resolves.toBe(true);
     await expect(store.hasLiveMarker("Ada")).resolves.toBe(false);
-    await store.deleteLiveMarker("Ada");
+    await expect(store.deleteLiveMarker("Ada")).resolves.toBe(true);
+    await expect(store.deleteLiveMarker("Ada")).resolves.toBe(false);
     expect((sent[0] as GetItemCommand).input.Key).toEqual({ pk: { S: "APP#ada" }, sk: { S: "LIVE" } });
     expect(sent[2]).toBeInstanceOf(DeleteItemCommand);
-    expect((sent[2] as DeleteItemCommand).input).toEqual({ TableName: "ssd-workshop-data", Key: { pk: { S: "APP#ada" }, sk: { S: "LIVE" } } });
+    expect((sent[2] as DeleteItemCommand).input).toEqual({
+      TableName: "ssd-workshop-data",
+      Key: { pk: { S: "APP#ada" }, sk: { S: "LIVE" } },
+      ReturnValues: "ALL_OLD",
+    });
   });
 });

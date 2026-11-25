@@ -10,7 +10,16 @@
 import { GitHubProblem } from "../../api/github/app.js";
 import type { RepositoryAdmin } from "../../api/github/repository.js";
 import { APPS_GITHUB_OWNER, appRepositoryName } from "../../api/settings.js";
-import { aiAnswering, errorName, parseConversationArgs, plural, STEP_NAMES, type ResetCommand } from "../conversation/command.js";
+import {
+  aiAnswering,
+  buildRunningMessage,
+  errorName,
+  parseConversationArgs,
+  plural,
+  runningBuild,
+  STEP_NAMES,
+  type ResetCommand,
+} from "../conversation/command.js";
 import type { ParticipantResetStore } from "./store.js";
 
 export const USAGE = `Usage: npm run participant -- reset <nickname> [--yes]
@@ -32,12 +41,18 @@ export interface ParticipantDeps {
   /** Reads the GitHub App's secret and mints the administration token; called before anything changes. */
   openGitHub: () => Promise<RepositoryAdmin>;
   now: () => Date;
+  /** Waits between the two passes over the app's data (see SETTLE_MS); injected so tests do not wait. */
+  sleep: (ms: number) => Promise<void>;
   out: (line: string) => void;
   err: (line: string) => void;
 }
 
-/** Build statuses during which a reset would pull the repository or the data from under a running build. */
-export const RUNNING_BUILD = new Set(["queued", "building", "deploying"]);
+/**
+ * How long the reset waits after deleting the app's data before listing it again. The data API (ticket 2.4) reads the
+ * live marker apart from its write transaction, so a write that read the marker just before the reset deleted it can
+ * still commit afterwards; such a write normally lands within this pause and the second pass deletes it.
+ */
+export const SETTLE_MS = 2000;
 
 const KEPT = "Kept: allow-list entry, nickname, sessions, AI usage totals and build records.";
 
@@ -69,12 +84,10 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
     deps.err(`The AI is still answering ${nickname}'s last message; try again in a minute (after a crash, up to 20 minutes). Nothing changed.`);
     return 1;
   }
-  if (state.buildId !== undefined) {
-    const status = await store.getBuildStatus(state.buildId);
-    if (status !== undefined && RUNNING_BUILD.has(status)) {
-      deps.err(`${nickname}'s build is ${status}; try again once it is live or failed. Nothing changed.`);
-      return 1;
-    }
+  const running = await runningBuild(store, state);
+  if (running !== undefined) {
+    deps.err(buildRunningMessage(nickname, running));
+    return 1;
   }
   const items = stepName === undefined ? { messages: [], specs: [] } : await store.listResetItems(participantId);
   const appData = await store.listAppData(nickname);
@@ -109,11 +122,18 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
       `Reset ${nickname}: deleted ${plural(items.messages.length, "message or reply", "messages and replies")} and ${plural(items.specs.length, "spec version", "spec versions")}; back at step 1 (Clarify).`,
     );
   }
-  // The live marker before the data: without it the data API answers 404, so no new value lands while the data goes.
-  await store.deleteLiveMarker(nickname);
-  const leftData = await store.listAppData(nickname);
-  await store.deleteAppData(nickname, leftData);
-  deps.out(`Deleted ${describeAppData(leftData)} and the live marker${live ? "" : " (there was none)"}.`);
+  // The live marker before the data: without it the data API answers 404 to every new request. A request that read the
+  // marker just before it went can still commit its write after the first listing (the API does not re-check the
+  // marker inside its transaction), so after a pause the data is listed and deleted once more; a write held up longer
+  // than SETTLE_MS could still land afterwards (decision "(2.13) Reset order").
+  const markerDeleted = await store.deleteLiveMarker(nickname);
+  const firstPass = await store.listAppData(nickname);
+  await store.deleteAppData(nickname, firstPass);
+  await deps.sleep(SETTLE_MS);
+  const secondPass = await store.listAppData(nickname);
+  await store.deleteAppData(nickname, secondPass);
+  const deletedData = [...new Set([...firstPass, ...secondPass])];
+  deps.out(`Deleted ${describeAppData(deletedData)}; ${markerDeleted ? "deleted the live marker" : "the live marker was already gone"}.`);
   const removed = await github.remove(nickname);
   deps.out(removed ? `Repository ${repository} deleted.` : `Repository ${repository} was already gone.`);
   deps.out(KEPT);

@@ -28,6 +28,7 @@ runParticipant(process.argv.slice(2), {
     return openRepositoryAdmin(parseGitHubSecret(secret.SecretString), { fetch: (url, init) => fetch(url, init), now: () => new Date(), log: () => undefined });
   },
   now: () => new Date(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   out: (line) => console.log(line),
   err: (line) => console.error(line),
 }).then((code) => {

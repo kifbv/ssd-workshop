@@ -26,6 +26,9 @@ export class FakeResetStore implements ResetStore {
       ...(c?.buildId === undefined ? {} : { buildId: c.buildId }),
     };
   }
+  async getBuildStatus(buildId: string) {
+    return this.t.builds.get(buildId)?.status;
+  }
   async listResetItems(id: string): Promise<ResetItems> {
     const ids = [...(this.t.messages.get(id)?.keys() ?? [])];
     const replies = [...(this.t.replies.get(id)?.keys() ?? [])].map((m) => `MSG#${m}-r`);

@@ -9,7 +9,8 @@ import { openRepositoryAdmin } from "../../api/github/repository.js";
 import { STALE_PENDING_SECONDS } from "../../api/conversation/state.js";
 import type { BuildStatus, Step } from "../../api/types.js";
 import { FakeResetStore } from "../conversation/fakes.js";
-import { runParticipant, USAGE, type ParticipantDeps } from "./command.js";
+import { runConversation, type ConversationDeps } from "../conversation/command.js";
+import { runParticipant, SETTLE_MS, USAGE, type ParticipantDeps } from "./command.js";
 import type { ParticipantResetStore } from "./store.js";
 
 const NOW = new Date("2026-11-25T10:00:00.000Z");
@@ -59,9 +60,6 @@ class FakeParticipantResetStore extends FakeResetStore implements ParticipantRes
     }
   }
 
-  async getBuildStatus(buildId: string) {
-    return this.table.builds.get(buildId)?.status;
-  }
   async listAppData(nickname: string) {
     const lower = nickname.toLowerCase();
     const values = [...this.apps.values.keys()].filter((id) => id.startsWith(`${lower}/`)).map((id) => `DATA#${id.slice(lower.length + 1)}`);
@@ -78,7 +76,7 @@ class FakeParticipantResetStore extends FakeResetStore implements ParticipantRes
     return this.apps.live.has(nickname.toLowerCase());
   }
   async deleteLiveMarker(nickname: string) {
-    this.apps.live.delete(nickname.toLowerCase());
+    return this.apps.live.delete(nickname.toLowerCase());
   }
 }
 
@@ -123,6 +121,7 @@ function setup(options: { step?: Step; buildStatus?: BuildStatus } = {}) {
   const out: string[] = [];
   const err: string[] = [];
   let githubOpened = 0;
+  const waits: number[] = [];
   const githubDeps: GitHubDeps = { fetch: github.fetch, now: () => NOW, log: () => undefined };
   const deps: ParticipantDeps = {
     createStore: () => store,
@@ -131,12 +130,13 @@ function setup(options: { step?: Step; buildStatus?: BuildStatus } = {}) {
       return openRepositoryAdmin(parseGitHubSecret(TEST_SECRET_TEXT), githubDeps);
     },
     now: () => NOW,
+    sleep: async (ms) => void waits.push(ms),
     out: (l) => out.push(l),
     err: (l) => err.push(l),
   };
   const run = (...args: string[]) => runParticipant(args, deps);
   const printed = () => [...out, ...err].join("\n");
-  return { table, apps, github, store, deps, out, err, run, printed, githubOpened: () => githubOpened };
+  return { table, apps, github, store, deps, out, err, run, printed, waits, githubOpened: () => githubOpened };
 }
 
 type Setup = ReturnType<typeof setup>;
@@ -282,7 +282,7 @@ describe("AC2: reset --yes at any step", () => {
       expect(s.err).toEqual([]);
       expect(s.out).toEqual([
         "Reset Ada: deleted 2 messages and replies and 2 spec versions; back at step 1 (Clarify).",
-        "Deleted 2 stored values and the app's data totals and the live marker.",
+        "Deleted 2 stored values and the app's data totals; deleted the live marker.",
         "Repository ssd-workshop-apps/ssd-ada deleted.",
         "Kept: allow-list entry, nickname, sessions, AI usage totals and build records.",
         "The app's published files stay online until the next build's deploy replaces them.",
@@ -309,7 +309,7 @@ describe("AC2: reset --yes at any step", () => {
     expect(s.apps.live.has("ada")).toBe(false);
     expect(s.apps.usage.has("ada")).toBe(false);
     expect(s.github.repositories.has("ssd-ada")).toBe(false);
-    expect(s.out[0]).toBe("Deleted 2 stored values and the app's data totals and the live marker.");
+    expect(s.out[0]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
     expectBobUntouched(s);
   });
 });
@@ -414,21 +414,22 @@ describe("AC4: retries", () => {
     expect(snapshot(s)).toBe(after);
     expect(s.out.slice(0, 3)).toEqual([
       "Reset Ada: deleted 0 messages and replies and 0 spec versions; back at step 1 (Clarify).",
-      "Deleted no app data and the live marker (there was none).",
+      "Deleted no app data; the live marker was already gone.",
       "Repository ssd-workshop-apps/ssd-ada was already gone.",
     ]);
   });
 
-  for (const stop of ["restart", "deleteItems", "deleteLiveMarker", "listAppData", "deleteAppData"] as const) {
+  for (const stop of ["restart", "deleteItems", "deleteLiveMarker", "listAppData", "listAppData after the pause", "deleteAppData"] as const) {
     it(`AC4 WHEN a first run stopped at ${stop} THEN a second run finishes without error`, async () => {
       const s = setup();
       const kept = keptOf(s);
-      // listAppData is read twice (plan, then before deleting): fail the second read.
-      if (stop === "listAppData") {
+      // listAppData is read three times (plan, first pass, second pass after the pause): fail the second or third read.
+      if (stop === "listAppData" || stop === "listAppData after the pause") {
         const original = s.store.listAppData.bind(s.store);
+        const failAt = stop === "listAppData" ? 2 : 3;
         let reads = 0;
         s.store.listAppData = async (nickname) => {
-          if (++reads === 2) throw s.store.failure;
+          if (++reads === failAt) throw s.store.failure;
           return original(nickname);
         };
       } else s.store.failOnce = stop;
@@ -459,6 +460,69 @@ describe("AC4: retries", () => {
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
     expectAdaReset(s, kept);
     expectNothingPrivate(s);
+  });
+});
+
+describe("AC2: data written while the reset runs", () => {
+  it("AC2 WHEN the data API commits a value during the first delete THEN the second pass after the pause deletes it", async () => {
+    const s = setup();
+    const kept = keptOf(s);
+    const original = s.store.deleteAppData.bind(s.store);
+    let passes = 0;
+    s.store.deleteAppData = async (nickname, sortKeys) => {
+      await original(nickname, sortKeys);
+      // A write that read the live marker before the reset deleted it commits now (the API does not re-check it).
+      if (++passes === 1) {
+        s.apps.values.set("ada/late", { json: "1", bytes: 1 });
+        s.apps.usage.set("ada", { bytes: 1, keys: 1 });
+      }
+    };
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    expect(passes).toBe(2);
+    expect(s.waits).toEqual([SETTLE_MS]);
+    expect(SETTLE_MS).toBe(2000);
+    expect(s.apps.values.has("ada/late")).toBe(false);
+    expectAdaReset(s, kept);
+    expectBobUntouched(s);
+    expect(s.out[1]).toBe("Deleted 3 stored values and the app's data totals; deleted the live marker.");
+  });
+
+  it("AC2 WHEN nothing is written meanwhile THEN the second pass finds nothing and deletes nothing more", async () => {
+    const s = setup();
+    const deleted: string[][] = [];
+    const original = s.store.deleteAppData.bind(s.store);
+    s.store.deleteAppData = async (nickname, sortKeys) => {
+      deleted.push([...sortKeys]);
+      await original(nickname, sortKeys);
+    };
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    expect(deleted.map((keys) => keys.length)).toEqual([3, 0]);
+    expect(s.waits).toEqual([SETTLE_MS]);
+  });
+});
+
+describe("AC3: the conversation reset and a running build", () => {
+  it("AC3 WHEN the conversation reset runs during a running build and the full reset follows THEN both refuse, the build link stays, and no build is orphaned", async () => {
+    const s = setup({ buildStatus: "building" });
+    const conversationDeps: ConversationDeps = { createStore: () => s.store, now: () => NOW, out: (l) => s.out.push(l), err: (l) => s.err.push(l) };
+    const before = snapshot(s);
+    // Try 1's hole: the conversation reset deleted the item (and its build link) here, so the full reset saw no build.
+    await expect(runConversation(["reset", "Ada", "--yes"], conversationDeps)).resolves.toBe(1);
+    expect(s.err).toEqual(["Ada's build is building; try again once it is live or failed. Nothing changed."]);
+    expect(s.table.conversations.get(ADA_ID)?.buildId).toBe("build-ada");
+    expect(snapshot(s)).toBe(before);
+    // The full reset still finds the running build through the link and refuses too.
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(1);
+    expect(s.err[1]).toBe("Ada's build is building; try again once it is live or failed. Nothing changed.");
+    expect(snapshot(s)).toBe(before);
+    // Once the build is live, the full reset goes ahead and removes what the build made.
+    const build = s.table.builds.get("build-ada");
+    if (build !== undefined) build.status = "live";
+    const kept = keptOf(s);
+    s.err.length = 0;
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    expect(s.err).toEqual([]);
+    expectAdaReset(s, kept);
   });
 });
 

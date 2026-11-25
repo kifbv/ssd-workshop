@@ -687,7 +687,8 @@ AWS_PROFILE=franck npm run conversation -- reset <nickname> --yes
 The participant's messages, the AI's replies, every spec version (an approved one included) and the
 conversation state are deleted, and their step goes back to Clarify; their profile, nickname, sign-in and
 AI usage totals stay. A reload of their page shows an empty step 1. Errors print only the AWS error's name, never a key or a text. The command refuses while the AI is
-answering their last message (try again a minute later; after a worker crash, up to 20 minutes); a message waiting for a facilitator is cleared
+answering their last message (try again a minute later; after a worker crash, up to 20 minutes), and while their
+build is queued, building or deploying (try again once it is live or failed); a message waiting for a facilitator is cleared
 too. If it stops part way (an AWS error), run it again: the second run finishes.
 To also delete the app's data, live marker and GitHub repository, use the full reset below.
 
@@ -702,7 +703,7 @@ AWS_PROFILE=franck npm run participant -- reset <nickname>
 # expect: "<nickname> is at step ..., with N messages and replies and M spec versions.",
 #         "App: ... stored values ..., live marker present, repository ssd-workshop-apps/ssd-<nickname> exists." and "Nothing changed. ..."
 AWS_PROFILE=franck npm run participant -- reset <nickname> --yes
-# expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify).", "Deleted ... and the live marker.",
+# expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify).", "Deleted ...; deleted the live marker." (after a 2 s pause),
 #         "Repository ssd-workshop-apps/ssd-<nickname> deleted." (or "was already gone.")
 ```
 

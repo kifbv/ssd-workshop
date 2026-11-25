@@ -13,6 +13,9 @@ export const USAGE = `Usage: npm run conversation -- reset <nickname> [--yes]
                            and send them back to step 1 (Clarify); their AI usage totals and any build
                            record are kept
 
+It refuses while the AI is answering or while the participant's build is queued, building or deploying.
+To also delete the app's data, its live marker and its GitHub repository: npm run participant -- reset <nickname>
+
 Runs with your own AWS credentials (AWS_PROFILE).`;
 
 export interface ResetCommand {
@@ -62,6 +65,23 @@ export function aiAnswering(state: ResetState, now: Date): boolean {
   return state.pendingId !== undefined && state.state !== "waiting" && nowSeconds - (state.pendingSince ?? 0) <= STALE_PENDING_SECONDS;
 }
 
+/** Build statuses during which a reset would pull the conversation, the repository or the data from under a running build. */
+export const RUNNING_BUILD: ReadonlySet<string> = new Set(["queued", "building", "deploying"]);
+
+/**
+ * The status of the build the conversation links to (`buildId`, ticket 2.7) when that build is still running, else
+ * undefined. Both resets refuse then (decision "(2.13) Running build found through the build link"): deleting the
+ * conversation item would drop the link while the build goes on to recreate the repository and the live marker, so a
+ * later full reset would no longer see it. A link to a missing build record does not block.
+ */
+export async function runningBuild(store: ResetStore, state: ResetState): Promise<string | undefined> {
+  if (state.buildId === undefined) return undefined;
+  const status = await store.getBuildStatus(state.buildId);
+  return status !== undefined && RUNNING_BUILD.has(status) ? status : undefined;
+}
+
+export const buildRunningMessage = (nickname: string, status: string) => `${nickname}'s build is ${status}; try again once it is live or failed. Nothing changed.`;
+
 async function reset(command: ResetCommand, deps: ConversationDeps, store: ResetStore): Promise<number> {
   const { nickname } = command;
   const participantId = await store.findParticipantId(nickname);
@@ -80,6 +100,11 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
     deps.err(`The AI is still answering ${nickname}'s last message; try again in a minute (after a crash, up to 20 minutes). Nothing changed.`);
     return 1;
   }
+  const running = await runningBuild(store, state);
+  if (running !== undefined) {
+    deps.err(buildRunningMessage(nickname, running));
+    return 1;
+  }
   const items = await store.listResetItems(participantId);
   const found = `${plural(items.messages.length, "message or reply", "messages and replies")} and ${plural(items.specs.length, "spec version", "spec versions")}`;
   if (!command.confirmed) {
@@ -93,8 +118,8 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
   }
   await store.deleteItems(participantId, [...items.messages, ...items.specs]);
   deps.out(`Reset ${nickname}: deleted ${found}; back at step 1 (Clarify). AI usage totals kept.`);
-  // Ticket 2.7: the build record is not the conversation's; it stays (the launcher acts on it only while it is
-  // queued). The next approved spec makes a new build, and the repository is reused (ticket 2.6).
+  // Ticket 2.7: the build record is not the conversation's; it stays (it is live or failed: a running build refused the
+  // reset above). The next approved spec makes a new build, and the repository is reused (ticket 2.6).
   if (step === "building") deps.out(`${nickname}'s earlier build stays on record; a new approved spec starts a new build.`);
   deps.out(`${nickname} sees an empty conversation after reloading the page.`);
   return 0;

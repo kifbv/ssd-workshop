@@ -1,5 +1,5 @@
-// The full reset's table access (ticket 2.13): the conversation reset store (../conversation/store.ts) plus the
-// build's status, the app's data partition and its live marker. It runs with the owner's own AWS credentials.
+// The full reset's table access (ticket 2.13): the conversation reset store (../conversation/store.ts, which also
+// reads the build's status) plus the app's data partition and its live marker. It runs with the owner's own AWS credentials.
 import {
   DeleteItemCommand,
   QueryCommand,
@@ -13,20 +13,18 @@ import {
   type TransactWriteItemsCommand,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { appDataUsageKey, appLiveKey, buildKey } from "../../api/keys.js";
+import { appDataUsageKey, appLiveKey } from "../../api/keys.js";
 import { DynamoResetStore, type ResetSender, type ResetStore } from "../conversation/store.js";
 
 export interface ParticipantResetStore extends ResetStore {
-  /** The build's status (`queued`, `building`, `deploying`, `live`, `failed`), or undefined when there is no such build. */
-  getBuildStatus(buildId: string): Promise<string | undefined>;
   /** Sort keys of every item in the app's data partition `APPDATA#<lower-cased nickname>` (`DATA#*`, `DATA_USAGE`). */
   listAppData(nickname: string): Promise<string[]>;
   /** Deletes the given sort keys of the app's data partition. */
   deleteAppData(nickname: string, sortKeys: readonly string[]): Promise<void>;
   /** Whether the app's live marker `APP#<lower-cased nickname>` / `LIVE` exists. */
   hasLiveMarker(nickname: string): Promise<boolean>;
-  /** Deletes the live marker (no error when it is gone). */
-  deleteLiveMarker(nickname: string): Promise<void>;
+  /** Deletes the live marker; true when this call deleted it, false when it was already gone. */
+  deleteLiveMarker(nickname: string): Promise<boolean>;
 }
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -47,10 +45,6 @@ export class DynamoParticipantResetStore extends DynamoResetStore implements Par
     sleep?: (ms: number) => Promise<void>,
   ) {
     super(client, table, sleep);
-  }
-
-  async getBuildStatus(buildId: string): Promise<string | undefined> {
-    return (await this.getAttributes(buildKey(buildId), ["status"]))?.["status"]?.S;
   }
 
   async listAppData(nickname: string): Promise<string[]> {
@@ -86,8 +80,11 @@ export class DynamoParticipantResetStore extends DynamoResetStore implements Par
     return (await this.getAttributes(appLiveKey(nickname), ["pk"]))?.["pk"] !== undefined;
   }
 
-  async deleteLiveMarker(nickname: string): Promise<void> {
+  async deleteLiveMarker(nickname: string): Promise<boolean> {
     const key = appLiveKey(nickname);
-    await this.client.send(new DeleteItemCommand({ TableName: this.table, Key: { pk: str(key.pk), sk: str(key.sk) } }));
+    const output = await this.client.send(
+      new DeleteItemCommand({ TableName: this.table, Key: { pk: str(key.pk), sk: str(key.sk) }, ReturnValues: "ALL_OLD" }),
+    );
+    return output.Attributes !== undefined;
   }
 }

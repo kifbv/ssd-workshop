@@ -85,6 +85,8 @@ describe("parseConversationArgs", () => {
     expect(code).toBe(1);
     expect(created).toBe(false);
     expect(err.join("\n")).toContain("Usage: npm run conversation -- reset <nickname> [--yes]");
+    expect(err.join("\n")).toContain("To also delete the app's data, its live marker and its GitHub repository: npm run participant -- reset <nickname>");
+    expect(err.join("\n")).toContain("It refuses while the AI is answering or while the participant's build is queued, building or deploying.");
   });
 });
 
@@ -134,10 +136,10 @@ describe("npm run conversation -- reset <nickname>", () => {
     expect((await send("hello")).statusCode).toBe(202);
   });
 
-  it("WHEN the participant is at step 3 (building) THEN a reset sends them back to step 1, keeps the build record, and a new approval can start a new build (ticket 2.7)", async () => {
+  it("WHEN the participant is at step 3 (building) and the build is live THEN a reset sends them back to step 1, keeps the build record, and a new approval can start a new build (ticket 2.7)", async () => {
     const { deps, out, table, send } = setup("building");
     table.conversations.set("p-ada", { state: "open", latestSpecVersion: 2, approvedSpecVersion: 2, buildId: "b-1" });
-    table.builds.set("b-1", { buildId: "b-1", nickname: "Ada", participantId: "p-ada", status: "queued", createdAt: "x", updatedAt: "x" });
+    table.builds.set("b-1", { buildId: "b-1", nickname: "Ada", participantId: "p-ada", status: "live", createdAt: "x", updatedAt: "x" });
     expect(await runConversation(["reset", "Ada"], deps)).toBe(0);
     expect(out[0]).toBe("Ada is at step 3 (Build), with 2 messages and replies and 2 spec versions.");
     expect(await runConversation(["reset", "Ada", "--yes"], deps)).toBe(0);
@@ -147,6 +149,37 @@ describe("npm run conversation -- reset <nickname>", () => {
     expect(table.builds.has("b-1")).toBe(true);
     expect((await send("hello")).statusCode).toBe(202);
   });
+
+  for (const status of ["queued", "building", "deploying"] as const) {
+    it(`WHEN the linked build is ${status} THEN the reset refuses, with or without --yes, and nothing changes (ticket 2.13)`, async () => {
+      const { deps, err, out, table, store } = setup("building");
+      table.conversations.set("p-ada", { state: "open", latestSpecVersion: 2, approvedSpecVersion: 2, buildId: "b-1" });
+      table.builds.set("b-1", { buildId: "b-1", nickname: "Ada", participantId: "p-ada", status, createdAt: "x", updatedAt: "x" });
+      for (const args of [["reset", "Ada", "--yes"], ["reset", "Ada"]]) {
+        err.length = 0;
+        expect(await runConversation(args, deps)).toBe(1);
+        expect(err).toEqual([`Ada's build is ${status}; try again once it is live or failed. Nothing changed.`]);
+      }
+      expect(out).toEqual([]);
+      expect(store.restarts).toBe(0);
+      expect(table.conversations.get("p-ada")?.buildId).toBe("b-1");
+      expect(table.messages.get("p-ada")?.size).toBe(1);
+      expect(table.specs.get("p-ada")).toHaveLength(2);
+      expect(table.profiles.get("p-ada")?.step).toBe("building");
+    });
+  }
+
+  for (const status of ["live", "failed", "missing record"] as const) {
+    it(`WHEN the linked build is ${status} THEN the reset goes ahead (ticket 2.13)`, async () => {
+      const { deps, err, table } = setup("building");
+      table.conversations.set("p-ada", { state: "open", latestSpecVersion: 2, approvedSpecVersion: 2, buildId: "b-1" });
+      if (status !== "missing record") table.builds.set("b-1", { buildId: "b-1", nickname: "Ada", participantId: "p-ada", status, createdAt: "x", updatedAt: "x" });
+      expect(await runConversation(["reset", "Ada", "--yes"], deps)).toBe(0);
+      expect(err).toEqual([]);
+      expect(table.conversations.has("p-ada")).toBe(false);
+      expect(table.profiles.get("p-ada")?.step).toBe("clarify");
+    });
+  }
 
   it("WHEN a message waits for a facilitator THEN the reset clears it too", async () => {
     const { deps, table } = setup("clarify");
