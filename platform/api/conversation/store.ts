@@ -49,6 +49,7 @@ import {
   type ReadinessFinish,
   type ReadinessRequestResult,
   type StoredBuild,
+  type BuildFeedEvent,
 } from "./state.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -132,6 +133,42 @@ function specOf(item: Record<string, AttributeValue> | undefined): StoredSpec | 
 
 const BUILD_STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "live", "failed"];
 const isBuildStatus = (v: unknown): v is BuildStatus => typeof v === "string" && (BUILD_STATUSES as string[]).includes(v);
+
+type FeedStep = Extract<BuildFeedEvent, { kind: "step" }>["step"];
+const FEED_STEPS: readonly FeedStep[] = ["preparing", "writing", "checking", "committing", "deploying"];
+const isFeedStep = (v: string | undefined): v is FeedStep => (FEED_STEPS as readonly (string | undefined)[]).includes(v);
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * A build's feed as stored (ticket 2.8) in the shape the step 3 page reads (ticket 2.10), oldest first. Only
+ * well-formed events pass: a known step, a file path or a host as a string, a commit whose id is 40 hex
+ * characters (the page puts it into a link); anything else is left out. Paths and hosts are anyone's text: the
+ * page shows them with `textContent` only.
+ */
+export function readFeed(list: readonly AttributeValue[] | undefined): BuildFeedEvent[] {
+  const events: BuildFeedEvent[] = [];
+  for (const value of list ?? []) {
+    const m = value.M;
+    const kind = m?.["kind"]?.S;
+    const at = m?.["at"]?.S;
+    if (m === undefined || at === undefined) continue;
+    if (kind === "step") {
+      const step = m["step"]?.S;
+      if (isFeedStep(step)) events.push({ kind, step, at });
+    } else if (kind === "file") {
+      const path = m["path"]?.S;
+      if (path !== undefined) events.push({ kind, path, at });
+    } else if (kind === "fetch") {
+      const host = m["host"]?.S;
+      if (host !== undefined) events.push({ kind, host, at });
+    } else if (kind === "commit") {
+      const sha = m["sha"]?.S;
+      const message = m["message"]?.S;
+      if (sha !== undefined && COMMIT_SHA.test(sha) && message !== undefined) events.push({ kind, sha, message, at });
+    }
+  }
+  return events;
+}
 
 const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure" } as const;
 
@@ -592,8 +629,16 @@ export class DynamoConversationStore implements ConversationStore {
         TableName: this.tableName,
         Key: keyOf(buildKey(buildId)),
         ConsistentRead: true,
-        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons",
-        ExpressionAttributeNames: { "#type": "type", "#buildId": "buildId", "#participantId": "participantId", "#status": "status", "#failureReasons": "failureReasons" },
+        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed",
+        ExpressionAttributeNames: {
+          "#type": "type",
+          "#buildId": "buildId",
+          "#participantId": "participantId",
+          "#status": "status",
+          "#failureReasons": "failureReasons",
+          "#nickname": "nickname",
+          "#feed": "feed",
+        },
       }),
     );
     const item = output.Item;
@@ -601,7 +646,15 @@ export class DynamoConversationStore implements ConversationStore {
     const status = item?.["status"]?.S;
     if (item?.["type"]?.S !== "build" || item["buildId"]?.S !== buildId || participantId === undefined || !isBuildStatus(status)) return undefined;
     const reasons = item["failureReasons"]?.L?.flatMap((r) => (r.S === undefined ? [] : [r.S]));
-    return { buildId, participantId, status, ...(reasons === undefined ? {} : { failureReasons: reasons }) };
+    const nickname = item["nickname"]?.S;
+    return {
+      buildId,
+      participantId,
+      status,
+      ...(nickname === undefined ? {} : { nickname }),
+      feed: readFeed(item["feed"]?.L),
+      ...(reasons === undefined ? {} : { failureReasons: reasons }),
+    };
   }
 
   async finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean> {

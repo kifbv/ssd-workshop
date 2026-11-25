@@ -69,6 +69,8 @@ paths:
   `pollAfter` in `pages.test.ts`).
   Pause at the page's time plus 1 s, not plus 1 ms: real time passes between reading the page's clock and
   pausing, and a loaded full run fails with "Cannot fast-forward to the past".
+  A page that polls at once on load (step 3's `GET /api/build`, ticket 2.10) sets its timer before the test could
+  pause: install with a fixed `time` and `pauseAt` it before `page.goto` (`openPaused` in `pages.test.ts`).
 - A model's machine-readable signal (clarify's `[READY_FOR_SPEC]`) is a marker line the worker strips before storing
   the text, so it never shows on the page or goes back to the model as history (ticket 1.8).
 - Mermaid under the pages' CSP (`style-src 'self'`): draw off-screen with `setAttribute("style")` turned into CSSOM

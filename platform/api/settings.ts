@@ -70,6 +70,12 @@ export const DISTRIBUTION_ID = "E2TOZV0ERAXKZ9";
 export const APPS_GITHUB_OWNER = "ssd-workshop-apps";
 /** A participant's repository: `ssd-<lower-cased nickname>` in APPS_GITHUB_OWNER. */
 export const appRepositoryName = (nickname: string): string => `ssd-${nickname.toLowerCase()}`;
+/** The workshop's own address (infra's DOMAIN): apps are served from it at `/apps/<lower-cased nickname>/`. */
+export const SITE_DOMAIN = "workshop.rankly.games";
+/** A live app's address (ticket 2.10's step 4): `https://workshop.rankly.games/apps/<lower-cased nickname>/`. */
+export const appAddress = (nickname: string): string => `https://${SITE_DOMAIN}/apps/${nickname.toLowerCase()}/`;
+/** A participant's public repository on GitHub (ticket 2.10: the step 3 page links each commit under it). */
+export const appRepositoryUrl = (nickname: string): string => `https://github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}`;
 /** GitHub's tarball of a repository at one commit (public repositories, downloaded without a token). */
 export const appArchiveUrl = (nickname: string, commit: string): string =>
   `https://codeload.github.com/${APPS_GITHUB_OWNER}/${appRepositoryName(nickname)}/tar.gz/${commit}`;

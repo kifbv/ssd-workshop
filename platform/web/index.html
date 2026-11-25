@@ -150,6 +150,50 @@
           <button id="approve-spec-button" type="button" data-busy-label="Approving…">Approve spec</button>
         </div>
       </section>
+
+      <!-- Step 3, Build (ticket 2.10): the build's stages, then what the AI wrote, read and saved, as it happens. -->
+      <section id="screen-build" class="card" data-screen aria-labelledby="build-heading" hidden>
+        <h2 id="build-heading" tabindex="-1">Step 3: Build</h2>
+        <p>Hi <strong id="build-nickname"></strong>. The AI is turning your spec into your app. This page follows the build as it happens; it takes a few minutes.</p>
+
+        <ol id="build-stages" class="stages" aria-label="Build stages">
+          <li data-stage="preparing" data-state="todo">Preparing</li>
+          <li data-stage="writing" data-state="todo">Writing</li>
+          <li data-stage="checking" data-state="todo">Checking</li>
+          <li data-stage="committing" data-state="todo">Saving</li>
+          <li data-stage="deploying" data-state="todo">Publishing</li>
+          <li data-stage="live" data-state="todo">Live</li>
+        </ol>
+        <p id="build-now" class="notice" role="status" aria-live="polite"></p>
+        <ul id="build-reasons" class="reasons" aria-label="What went wrong" hidden></ul>
+
+        <aside id="build-behind" class="behind" aria-labelledby="build-behind-heading">
+          <h3 id="build-behind-heading">Behind the scenes</h3>
+          <ol id="build-behind-flow" class="flow">
+            <li data-part="check">Readiness check</li>
+            <li data-part="launcher">Build launcher</li>
+            <li data-part="builder">Builder container</li>
+            <li data-part="agent">Claude coding agent</li>
+            <li data-part="github">GitHub repository</li>
+            <li data-part="deployer">Deployer</li>
+            <li data-part="app">Your app online</li>
+          </ol>
+          <p class="help">Your spec passed the readiness check, so the build launcher created your public GitHub repository and started a builder: a container on AWS. In it, Claude, the coding agent running on Amazon Bedrock, writes your app's files from the workshop's template. It can only work on files in its own folder and read public web pages; it holds no AWS keys. The builder checks the files and saves them to your repository in a few commits. Then the deployer checks them again and publishes exactly what GitHub holds on the workshop's site. This page asks for news every 2 seconds.</p>
+        </aside>
+
+        <h3 id="build-feed-heading">What the AI did</h3>
+        <ol id="build-feed" class="feed" aria-labelledby="build-feed-heading"></ol>
+        <p id="build-feed-empty" class="help">Nothing yet: files and commits appear here as the AI writes them.</p>
+        <p id="message-build" class="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <!-- Step 4, Live (ticket 2.10 shows it; ticket 2.11 adds the QR code, the repository link and its explanation). -->
+      <section id="screen-live" class="card" data-screen aria-labelledby="live-heading" hidden>
+        <h2 id="live-heading" tabindex="-1">Step 4: Live</h2>
+        <p class="live-title"><strong>Your app is live</strong></p>
+        <p id="live-address" hidden>Open it at <a id="live-link" rel="noopener" target="_blank"></a></p>
+        <p id="message-live" class="message" role="status" aria-live="polite"></p>
+      </section>
     </main>
   </body>
 </html>

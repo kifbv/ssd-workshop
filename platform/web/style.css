@@ -390,3 +390,94 @@ main:has(#screen-spec:not([hidden])) {
 #spec-approved:focus {
   outline: none;
 }
+
+/* Step 3, Build (ticket 2.10): the row of stages, the current one highlighted, and the feed. */
+.stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+}
+.stages li {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  color: var(--muted);
+}
+.stages li[data-state="done"] {
+  color: var(--fg);
+}
+.stages li[data-state="done"]::before {
+  content: "✓ ";
+}
+.stages li[data-state="current"] {
+  border-color: var(--accent);
+  background: var(--highlight);
+  color: var(--fg);
+  font-weight: 600;
+}
+.stages li[data-state="current"][data-failed="true"] {
+  border-color: var(--error);
+  color: var(--error);
+}
+#build-now[data-tone="error"] {
+  border-left-color: var(--error);
+  color: var(--error);
+  font-weight: 600;
+}
+.flow li[data-current="true"] {
+  border-color: var(--accent);
+  background: var(--highlight);
+  font-weight: 600;
+}
+.reasons {
+  margin: 0 0 1rem;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+.feed {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.95rem;
+}
+.feed:empty {
+  display: none;
+}
+.feed li {
+  padding: 0.35rem 0.6rem;
+  border-left: 3px solid var(--border);
+  background: var(--bg);
+}
+.feed li[data-kind="commit"] {
+  border-left-color: var(--accent);
+}
+.feed .label {
+  margin-right: 0.35rem;
+  color: var(--muted);
+}
+.feed code {
+  font-size: 0.9rem;
+}
+.feed a {
+  margin-left: 0.35rem;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+#build-heading:focus,
+#live-heading:focus {
+  outline: none;
+}
+.live-title {
+  font-size: 1.2rem;
+}
+#live-link {
+  color: var(--accent);
+  font-weight: 600;
+}

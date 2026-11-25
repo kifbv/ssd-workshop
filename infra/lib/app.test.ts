@@ -129,6 +129,7 @@ import {
   DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
   GITHUB_SECRET_NAME as PLATFORM_GITHUB_SECRET_NAME,
   HANDED_OVER_GRACE_MS,
+  SITE_DOMAIN as PLATFORM_SITE_DOMAIN,
 } from "../../platform/api/settings.js";
 
 function must<T>(value: T | undefined): T {
@@ -2502,6 +2503,7 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
   it("keeps the platform's settings equal to the infrastructure's (bucket, distribution, queue, deliveries)", () => {
     expect(PLATFORM_APPS_BUCKET_NAME).toBe(APPS_BUCKET_NAME);
     expect(PLATFORM_DISTRIBUTION_ID).toBe(DISTRIBUTION_ID);
+    expect(PLATFORM_SITE_DOMAIN).toBe(DOMAIN);
     expect(PLATFORM_DEPLOY_QUEUE_NAME).toBe(DEPLOY_QUEUE_NAME);
     expect(PLATFORM_DEPLOY_MAX_RECEIVES).toBe(DEPLOY_QUEUE_MAX_RECEIVES);
   });

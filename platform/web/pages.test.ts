@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
+import { BUILD_TEXTS } from "./src/build-view.js";
 
 const PHONE = { width: 375, height: 667 };
 const EMAIL = "ada@example.com";
@@ -888,15 +889,14 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
     expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
     expect(await page.locator("#spec-approve").isVisible()).toBe(false);
 
-    // The check passes: the page picks it up by its polling and says the build is starting.
+    // The check passes: the page picks it up by its polling and moves to step 3, which follows the build (ticket 2.10;
+    // until then step 2 said "the build is starting").
     api.check("Your spec is ready to build. The build is starting now: the AI turns your spec into your app.", true);
-    await expect.poll(() => page.locator("#spec-approved").textContent(), { timeout: 10_000 }).toBe(
-      "Your spec is ready and the build is starting: the AI now turns your spec into your app.",
-    );
-    expect(await specBubbles()).toContain("Your spec is ready to build. The build is starting now: the AI turns your spec into your app.");
-    expect(await page.locator("#spec-typing").isVisible()).toBe(false);
-    expect(await page.locator("#spec-chat-form").isVisible()).toBe(false);
-    expect(await page.locator("#spec-approve").isVisible()).toBe(false);
+    await expect.poll(() => screen("build").isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await screen("spec").isVisible()).toBe(false);
+    expect(await page.locator("#build-heading").textContent()).toBe("Step 3: Build");
+    await expect.poll(() => calls.some((c) => c.method === "GET" && c.path === "/api/build")).toBe(true);
+    expect(await page.locator("#build-now").textContent()).toBe(BUILD_TEXTS.now.queued);
     await expectNoSideScroll();
   }, 40_000);
 
@@ -960,6 +960,205 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
       return pictures.length;
     }, source);
     expect(drawn).toBe(3);
+  }, 30_000);
+});
+
+// Ticket 2.10: step 3 (Build) and the start of step 4 (Live) against a mocked GET /api/build.
+const SHA_1 = "1111111111111111111111111111111111111111";
+const SHA_2 = "2222222222222222222222222222222222222222";
+const REPOSITORY_URL = "https://github.com/ssd-workshop-apps/ssd-ada-l";
+const APP_URL = "https://workshop.rankly.games/apps/ada-l/";
+type FeedEvent = Record<string, string>;
+const stepEvent = (step: string): FeedEvent => ({ kind: "step", step, at: "2026-11-25T10:00:00.000Z" });
+const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-11-25T10:00:01.000Z" });
+
+/** A participant at step building and their build, which the test moves on; every GET /api/build is counted. */
+function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html")]) {
+  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined };
+  const handlers: Record<string, Handler> = {
+    "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
+    "GET /api/build": () => {
+      state.polls++;
+      if (state.answer !== undefined) return state.answer;
+      return {
+        status: 200,
+        body: {
+          buildId: "b-1",
+          status: state.status,
+          feed: state.feed,
+          repositoryUrl: REPOSITORY_URL,
+          appUrl: APP_URL,
+          ...(state.failureReasons === undefined ? {} : { failureReasons: state.failureReasons }),
+        },
+      };
+    },
+  };
+  return { state, handlers };
+}
+
+/** Like pollAfter, for the build: moves page time by `ms`, which must fire one GET /api/build, and lets the page handle it. */
+async function buildPollAfter(ms: number): Promise<void> {
+  const answered = page.waitForResponse((r) => r.url().endsWith("/api/build"));
+  await page.clock.runFor(ms);
+  await answered;
+  await settle();
+}
+
+/**
+ * Opens the page with its clock paused from the start, so the first poll (sent at once) and every later one
+ * happen only when the test moves time.
+ */
+async function openPaused(): Promise<void> {
+  await page.clock.install({ time: new Date("2026-11-25T10:00:00.000Z") });
+  await page.clock.pauseAt(new Date("2026-11-25T10:00:01.000Z"));
+  await page.goto(origin);
+  await expect.poll(() => screen("build").isVisible()).toBe(true);
+}
+
+const stageStatesOnPage = () =>
+  page.locator("#build-stages li").evaluateAll((items) => items.map((item) => `${item.textContent ?? ""}:${(item as HTMLElement).dataset["state"] ?? ""}`));
+const feedOnPage = () => page.locator("#build-feed li").allTextContents();
+
+describe("step 3: Build (ticket 2.10)", () => {
+  it("WHEN a build is running THEN the page shows its stages, files and commits, and polls every 2 seconds (criteria 1, 4 and 5)", async () => {
+    const api = fakeBuildApi();
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    expect(await page.locator("#build-heading").textContent()).toBe("Step 3: Build");
+    expect(await page.locator("#build-nickname").textContent()).toBe("ada-l");
+    await expect.poll(stageStatesOnPage).toEqual(["Preparing:done", "Writing:current", "Checking:todo", "Saving:todo", "Publishing:todo", "Live:todo"]);
+    expect(await page.locator("#build-stages li[aria-current=step]").textContent()).toBe("Writing");
+    expect(await page.locator("#build-now").textContent()).toBe(BUILD_TEXTS.now.writing);
+    expect(await feedOnPage()).toEqual(["Wroteindex.html"]);
+    // Behind the scenes: the brief's flow, diagram first, the coding agent working now.
+    expect(await page.locator("#build-behind-flow li").allTextContents()).toEqual([
+      "Readiness check",
+      "Build launcher",
+      "Builder container",
+      "Claude coding agent",
+      "GitHub repository",
+      "Deployer",
+      "Your app online",
+    ]);
+    expect(await page.locator("#build-behind-flow li[data-current=true]").textContent()).toBe("Claude coding agent");
+    await expectNoSideScroll();
+
+    // No poll before 2 seconds, then one every 2 seconds, each showing what arrived meanwhile.
+    await page.clock.runFor(1900);
+    await settle();
+    expect(api.state.polls).toBe(1);
+    const longName = `${"very-long-folder-name-without-spaces/".repeat(6)}app.js`;
+    api.state.feed.push(fileEvent("<img src=x>.js"), fileEvent(longName), { kind: "fetch", host: "en.wikipedia.org", at: "x" });
+    api.state.feed.push(stepEvent("committing"), { kind: "commit", sha: SHA_1, message: "Add the home screen", at: "x" });
+    await buildPollAfter(100);
+    expect(api.state.polls).toBe(2);
+    await expect.poll(feedOnPage).toEqual([
+      "Wroteindex.html",
+      "Wrote<img src=x>.js",
+      `Wrote${longName}`,
+      "Readen.wikipedia.org",
+      "SavedAdd the home screen1111111",
+    ]);
+    // Names are text, never markup.
+    expect(await page.locator("#build-feed img").count()).toBe(0);
+    // Criterion 5: the commit links to it on GitHub.
+    const link = page.locator("#build-feed li[data-kind=commit] a");
+    expect(await link.getAttribute("href")).toBe(`https://github.com/ssd-workshop-apps/ssd-ada-l/commit/${SHA_1}`);
+    expect(await page.locator("#build-stages li[aria-current=step]").textContent()).toBe("Saving");
+    expect(await page.locator("#build-behind-flow li[data-current=true]").textContent()).toBe("GitHub repository");
+    // Criterion 4: 375 px, a long file name included, and nothing scrolls sideways.
+    await expectNoSideScroll();
+
+    api.state.feed.push({ kind: "commit", sha: SHA_2, message: "Add the weekly total", at: "x" });
+    await buildPollAfter(2000);
+    expect(api.state.polls).toBe(3);
+    await expect.poll(() => page.locator("#build-feed li[data-kind=commit] a").count()).toBe(2);
+    expect(await page.locator("#build-feed li[data-kind=commit] a").nth(1).getAttribute("href")).toBe(`${REPOSITORY_URL}/commit/${SHA_2}`);
+    await page.clock.runFor(1000);
+    await settle();
+    expect(api.state.polls).toBe(3);
+  }, 30_000);
+
+  it("WHEN the build is live THEN polling stops and the page moves to step 4 with the app's address (criterion 2)", async () => {
+    const api = fakeBuildApi("building", [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html"), stepEvent("checking"), stepEvent("committing"), stepEvent("deploying")]);
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    await expect.poll(() => page.locator("#build-stages li[aria-current=step]").textContent()).toBe("Publishing");
+    api.state.status = "deploying";
+    await buildPollAfter(2000);
+    expect(await screen("build").isVisible()).toBe(true);
+    expect(await page.locator("#build-behind-flow li[data-current=true]").textContent()).toBe("Deployer");
+
+    api.state.status = "live";
+    await buildPollAfter(2000);
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    expect(await screen("build").isVisible()).toBe(false);
+    expect(await page.locator("#live-heading").textContent()).toBe("Step 4: Live");
+    expect(await screen("live").textContent()).toContain("Your app is live");
+    const link = page.getByRole("link", { name: APP_URL });
+    expect(await link.getAttribute("href")).toBe(APP_URL);
+    await expectNoSideScroll();
+    // No more polls.
+    const polls = api.state.polls;
+    await page.clock.runFor(20_000);
+    await settle();
+    expect(api.state.polls).toBe(polls);
+  }, 30_000);
+
+  it("WHEN the page is reloaded mid-build THEN the feed so far is shown again (criterion 3)", async () => {
+    const api = fakeBuildApi("building", [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html"), fileEvent("app.js"), { kind: "fetch", host: "openlibrary.org", at: "x" }]);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(feedOnPage).toEqual(["Wroteindex.html", "Wroteapp.js", "Readopenlibrary.org"]);
+    api.state.feed.push(fileEvent("style.css"));
+    await page.reload();
+    await expect.poll(() => screen("build").isVisible()).toBe(true);
+    await expect.poll(feedOnPage).toEqual(["Wroteindex.html", "Wroteapp.js", "Readopenlibrary.org", "Wrotestyle.css"]);
+    expect(await page.locator("#build-stages li[aria-current=step]").textContent()).toBe("Writing");
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN the build failed THEN the page says so, shows the reasons as text and stops polling", async () => {
+    const api = fakeBuildApi("failed", [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html"), stepEvent("checking")]);
+    api.state.failureReasons = ["index.html, line 3: <b>an outside address</b>"];
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => page.locator("#build-now").textContent()).toBe("Something went wrong with your build. Your facilitator can restart it.");
+    expect(await page.locator("#build-reasons li").allTextContents()).toEqual(["index.html, line 3: <b>an outside address</b>"]);
+    expect(await page.locator("#build-reasons b").count()).toBe(0);
+    expect(await page.locator("#build-stages li[aria-current=step]").getAttribute("data-failed")).toBe("true");
+    expect(await page.locator("#build-behind-flow li[data-current=true]").count()).toBe(0);
+    await expectNoSideScroll();
+    const polls = api.state.polls;
+    await page.clock.runFor(20_000);
+    await settle();
+    expect(api.state.polls).toBe(polls);
+  }, 30_000);
+
+  it("WHEN the build is not there yet or the API fails THEN the page keeps asking every 2 seconds", async () => {
+    const api = fakeBuildApi("queued", []);
+    api.state.answer = { status: 404, body: { message: "Not found." } };
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    expect(await page.locator("#build-now").textContent()).toBe(BUILD_TEXTS.now.queued);
+    expect(await page.locator("#build-feed-empty").isVisible()).toBe(true);
+    api.state.answer = { status: 500, body: { message: "Something went wrong." } };
+    await buildPollAfter(2000);
+    expect(await page.locator("#message-build").textContent()).toBe(MESSAGES.failed);
+    api.state.answer = undefined;
+    await buildPollAfter(2000);
+    expect(api.state.polls).toBe(3);
+    await expect.poll(() => page.locator("#message-build").textContent()).toBe("");
+    expect(await page.locator("#build-now").textContent()).toBe(BUILD_TEXTS.now.queued);
+    expect(await page.locator("#build-behind-flow li[data-current=true]").textContent()).toBe("Build launcher");
+    await buildPollAfter(2000);
+    expect(api.state.polls).toBe(4);
   }, 30_000);
 });
 

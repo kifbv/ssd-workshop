@@ -18,6 +18,7 @@ import {
   type ReadinessFinish,
   type ReadinessRequestResult,
   type StoredBuild,
+  type BuildFeedEvent,
   type CreateResult,
   type Finish,
   type ListedItem,
@@ -67,6 +68,7 @@ export interface FakeBuild {
   createdAt: string;
   updatedAt: string;
   failureReasons?: string[];
+  feed?: BuildFeedEvent[];
 }
 
 export interface FakeSpec {
@@ -375,7 +377,16 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   async getBuild(buildId: string): Promise<StoredBuild | undefined> {
     this.fail("getBuild");
     const b = this.builds.get(buildId);
-    return b && { buildId: b.buildId, participantId: b.participantId, status: b.status, ...(b.failureReasons === undefined ? {} : { failureReasons: [...b.failureReasons] }) };
+    return (
+      b && {
+        buildId: b.buildId,
+        participantId: b.participantId,
+        status: b.status,
+        nickname: b.nickname,
+        feed: (b.feed ?? []).map((e) => ({ ...e })),
+        ...(b.failureReasons === undefined ? {} : { failureReasons: [...b.failureReasons] }),
+      }
+    );
   }
 
   async addUsage(participantId: string, usage: TokenUsage): Promise<void> {
