@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ALLOWED_TOOLS, DISALLOWED_TOOLS, checkToolCall, insideWorkspace, workspacePath } from "./permissions.js";
+import { ALLOWED_TOOLS, BLOCKED_NAME_ENDINGS, DISALLOWED_TOOLS, checkToolCall, checkWebAddress, fetchedHost, insideWorkspace, workspacePath } from "./permissions.js";
 
 let base: string;
 let ws: string;
@@ -27,7 +27,7 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const allowed = { allow: true };
 
-describe("criterion 2: the permission hook refuses anything outside the workspace, any command and any fetch", () => {
+describe("criterion 2: the permission hook refuses anything outside the workspace and any command", () => {
   it("allows reading, writing and editing files inside the workspace, absolute or relative, existing or new", () => {
     expect(checkToolCall(ws, "Read", { file_path: join(ws, "index.html") })).toEqual(allowed);
     expect(checkToolCall(ws, "Read", { file_path: "index.html" })).toEqual(allowed);
@@ -114,12 +114,12 @@ describe("criterion 2: the permission hook refuses anything outside the workspac
     expect(checkToolCall(ws, "Write", { file_path: "images/claude.md.png", content: "x" })).toEqual(allowed);
   });
 
-  it("refuses running a command, fetching an address, searching the web, subagents, notebooks and any unknown tool", () => {
+  it("refuses running a command, searching the web (not offered on Bedrock), subagents, notebooks and any unknown tool", () => {
     const calls: [string, Record<string, unknown>][] = [
       ["Bash", { command: "ls" }],
       ["Bash", { command: "curl https://example.org" }],
-      ["WebFetch", { url: "https://example.org", prompt: "x" }],
       ["WebSearch", { query: "x" }],
+      ["webfetch", { url: "https://example.org/", prompt: "x" }],
       ["Task", { prompt: "x", description: "x", subagent_type: "general-purpose" }],
       ["Agent", { prompt: "x" }],
       ["NotebookEdit", { notebook_path: join(ws, "a.ipynb"), new_source: "x" }],
@@ -146,9 +146,9 @@ describe("criterion 2: the permission hook refuses anything outside the workspac
     }
   });
 
-  it("allows exactly the file tools, and lists the shell, network and agent tools as disallowed", () => {
-    expect([...ALLOWED_TOOLS]).toEqual(["Read", "Write", "Edit", "Glob"]);
-    for (const tool of ["Bash", "WebFetch", "WebSearch", "Task", "Agent", "NotebookEdit"]) expect(DISALLOWED_TOOLS).toContain(tool);
+  it("allows exactly the file tools and WebFetch (ticket 2.15), and lists the shell, web search and agent tools as disallowed", () => {
+    expect([...ALLOWED_TOOLS]).toEqual(["Read", "Write", "Edit", "Glob", "WebFetch"]);
+    for (const tool of ["Bash", "WebSearch", "Task", "Agent", "NotebookEdit"]) expect(DISALLOWED_TOOLS).toContain(tool);
     for (const tool of ALLOWED_TOOLS) expect(DISALLOWED_TOOLS).not.toContain(tool);
   });
 
@@ -156,5 +156,188 @@ describe("criterion 2: the permission hook refuses anything outside the workspac
     expect(insideWorkspace(ws, join(ws, "images", "a.svg"))).toBe(true);
     expect(workspacePath(ws, join(ws, "images", "a.svg"))).toBe("images/a.svg");
     expect(workspacePath(ws, "pictures/a.svg")).toBe("images/a.svg");
+  });
+});
+
+// Ticket 2.15: WebFetch only for an https address of a named public host.
+describe("ticket 2.15: WebFetch is allowed only for https addresses with a named public host", () => {
+  const fetchCall = (url: unknown, extra: Record<string, unknown> = {}) => checkToolCall(ws, "WebFetch", { url, prompt: "What fields does the answer hold?", ...extra });
+
+  it("criterion 2: allows an https address of a named public host, with or without a path, query or fragment", () => {
+    const urls = [
+      "https://en.wikipedia.org/api/rest_v1/page/summary/Inception",
+      "https://en.wikipedia.org",
+      "https://en.wikipedia.org/",
+      "https://openlibrary.org/search.json?q=the+hobbit",
+      "https://api.open-meteo.com/v1/forecast?latitude=52.5&longitude=13.4&current=temperature_2m",
+      "https://api.frankfurter.app/latest#top",
+      "https://API.TVMaze.com/search/shows?q=girls",
+      "https://xn--bcher-kva.example.com/",
+      "https://my-site.github.io/docs/",
+      "https://en.wikipedia.org/wiki/Am%C3%A9lie",
+      "https://1password.com/",
+    ];
+    for (const url of urls) expect(fetchCall(url), url).toEqual(allowed);
+    expect(fetchCall("https://en.wikipedia.org/", { offset: 2000 })).toEqual(allowed);
+  });
+
+  it("criterion 3: refuses http and every other scheme", () => {
+    const urls = [
+      "http://en.wikipedia.org/",
+      "HTTP://en.wikipedia.org/",
+      "ftp://example.com/",
+      "file:///etc/passwd",
+      "data:text/plain,hi",
+      "javascript:alert(1)",
+      "ws://example.com/",
+      "wss://example.com/",
+      "gopher://example.com/",
+      "//en.wikipedia.org/",
+      "en.wikipedia.org/",
+      "https:en.wikipedia.org/",
+      "https:/en.wikipedia.org/",
+      "https:///en.wikipedia.org/",
+      "https:\\\\en.wikipedia.org\\",
+      "HTTPS://en.wikipedia.org/",
+      " https://en.wikipedia.org/",
+      "https://en.wikipedia.org/ ",
+    ];
+    for (const url of urls) expect(fetchCall(url).allow, url).toBe(false);
+  });
+
+  it("criterion 3: refuses an IPv4 address in any notation: dotted, decimal, hex, octal and short forms", () => {
+    const hosts = [
+      "169.254.170.2",
+      "169.254.169.254",
+      "127.0.0.1",
+      "10.0.0.1",
+      "0.0.0.0",
+      "8.8.8.8",
+      "2130706433",
+      "0x7f000001",
+      "0X7F000001",
+      "017700000001",
+      "0177.0.0.1",
+      "0x7f.0.0.1",
+      "0x7f.1",
+      "127.1",
+      "127.0.1",
+      "169.254.43518",
+      "0",
+      "1.1.1.1.",
+      "4294967295",
+    ];
+    for (const host of hosts) {
+      expect(fetchCall(`https://${host}/`).allow, host).toBe(false);
+      expect(fetchCall(`https://${host}/latest/meta-data/`).allow, host).toBe(false);
+    }
+  });
+
+  it("criterion 3: refuses an IPv6 address in brackets, mapped IPv4 included", () => {
+    const hosts = ["[::1]", "[::]", "[::ffff:169.254.170.2]", "[::ffff:a9fe:aa02]", "[fd00:ec2::254]", "[fe80::1%25eth0]", "[2001:db8::1]", "::1"];
+    for (const host of hosts) expect(fetchCall(`https://${host}/`).allow, host).toBe(false);
+  });
+
+  it("criterion 3: refuses localhost, single-label names and internal or local names", () => {
+    const hosts = [
+      "localhost",
+      "LOCALHOST",
+      "api.localhost",
+      "intranet",
+      "metadata",
+      "printer.local",
+      "db.internal",
+      "metadata.google.internal",
+      "ip-10-0-0-1.eu-central-1.compute.internal",
+      "router.lan",
+      "nas.home.arpa",
+      "wiki.intranet",
+      "app.corp",
+      "box.home",
+      "box.localdomain",
+      "x.test",
+      "x.invalid",
+      "x.example",
+      "abc.onion",
+      "2.170.254.169.in-addr.arpa",
+      "x.private",
+    ];
+    for (const host of hosts) expect(fetchCall(`https://${host}/`).allow, host).toBe(false);
+    for (const ending of BLOCKED_NAME_ENDINGS) expect(fetchCall(`https://name.${ending}/`).allow, ending).toBe(false);
+  });
+
+  it("criterion 3: refuses a user name, a password or any port, explicit default port included", () => {
+    const urls = [
+      "https://user@en.wikipedia.org/",
+      "https://user:pass@en.wikipedia.org/",
+      "https://:pass@en.wikipedia.org/",
+      "https://@en.wikipedia.org/",
+      "https://en.wikipedia.org@169.254.170.2/",
+      "https://en.wikipedia.org:443/",
+      "https://en.wikipedia.org:8443/",
+      "https://en.wikipedia.org:/",
+      "https://en.wikipedia.org:0x1bb/",
+    ];
+    for (const url of urls) expect(fetchCall(url).allow, url).toBe(false);
+  });
+
+  it("refuses trailing-dot, empty-label, percent-encoded, backslash and non-ASCII hosts and other parser tricks", () => {
+    const urls = [
+      "https://en.wikipedia.org./",
+      "https://localhost./",
+      "https://.en.wikipedia.org/",
+      "https://en..wikipedia.org/",
+      "https://%6c%6f%63%61%6c%68%6f%73%74/",
+      "https://en.wikipedia%2eorg/",
+      "https://127%2e0%2e0%2e1/",
+      "https://en.wikipedia.org\\@169.254.170.2/",
+      "https://en.wikipedia.org\\.evil/",
+      "https://b\u00fccher.example.com/",
+      "https://ｌｏｃａｌｈｏｓｔ/",
+      "https://en.wikipedia.org\t/",
+      "https://en.wiki\npedia.org/",
+      "https://en.wikipedia.org/\u0000",
+      "https://-bad.example.com/",
+      "https://bad-.example.com/",
+      "https://under_score.example.com/",
+      "https://en.wikipedia.org;x/",
+      "https://en.wikipedia.org,x/",
+      "https://*.example.com/",
+      "https:// en.wikipedia.org/",
+      "https://en.wikipedia.123/",
+      "https://en.wikipedia.0x1/",
+      `https://${"a".repeat(64)}.com/`,
+      `https://en.wikipedia.org/${"a".repeat(3000)}`,
+      "https://",
+      "https:",
+      "",
+    ];
+    for (const url of urls) expect(fetchCall(url).allow, JSON.stringify(url)).toBe(false);
+  });
+
+  it("refuses inputs that are not what WebFetch takes", () => {
+    expect(checkToolCall(ws, "WebFetch", { url: "https://en.wikipedia.org/" }).allow).toBe(false);
+    expect(checkToolCall(ws, "WebFetch", { url: "https://en.wikipedia.org/", prompt: 42 }).allow).toBe(false);
+    expect(checkToolCall(ws, "WebFetch", { url: "https://en.wikipedia.org/", prompt: "" }).allow).toBe(false);
+    expect(checkToolCall(ws, "WebFetch", { url: "https://en.wikipedia.org/", prompt: "x".repeat(20_001) }).allow).toBe(false);
+    expect(checkToolCall(ws, "WebFetch", { url: ["https://en.wikipedia.org/"], prompt: "x" }).allow).toBe(false);
+    expect(checkToolCall(ws, "WebFetch", { url: 42, prompt: "x" }).allow).toBe(false);
+    expect(checkToolCall(ws, "WebFetch", null).allow).toBe(false);
+    expect(fetchCall("https://en.wikipedia.org/", { offset: -1 }).allow).toBe(false);
+    expect(fetchCall("https://en.wikipedia.org/", { offset: 1.5 }).allow).toBe(false);
+    expect(fetchCall("https://en.wikipedia.org/", { offset: "10" }).allow).toBe(false);
+    expect(fetchCall("https://en.wikipedia.org/", { headers: { authorization: "x" } }).allow).toBe(false);
+    expect(fetchCall("https://en.wikipedia.org/", { file_path: "index.html" }).allow).toBe(false);
+  });
+
+  it("checkWebAddress gives a reason the agent can act on, and fetchedHost gives only the host of an allowed address", () => {
+    const refused = checkWebAddress("http://169.254.170.2/v2/credentials");
+    expect(refused.allow).toBe(false);
+    if (!refused.allow) expect(refused.reason).toMatch(/https/);
+    expect(fetchedHost({ url: "https://en.wikipedia.org/api/rest_v1/page/summary/Inception?redirect=true" })).toBe("en.wikipedia.org");
+    expect(fetchedHost({ url: "https://API.TVMaze.com/search/shows?q=x" })).toBe("api.tvmaze.com");
+    expect(fetchedHost({ url: "http://169.254.170.2/" })).toBeUndefined();
+    expect(fetchedHost({ url: 42 })).toBeUndefined();
+    expect(fetchedHost(null)).toBeUndefined();
   });
 });

@@ -68,7 +68,7 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     const records = new DynamoBuildRecords(client, TABLE);
     expect(await records.read("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued" });
     expect(await records.claim("b-1", ATTEMPT, "Ada", step, NOW)).toBe(true);
-    expect(await records.addFeed("b-1", ATTEMPT, [{ kind: "file", path: "index.html", at: NOW }], NOW)).toBe(true);
+    expect(await records.addFeed("b-1", ATTEMPT, [{ kind: "file", path: "index.html", at: NOW }, { kind: "fetch", host: "en.wikipedia.org", at: NOW }], NOW)).toBe(true);
     expect(await records.handOver("b-1", ATTEMPT, COMMIT, [{ kind: "step", step: "deploying", at: NOW }], NOW)).toBe(true);
     expect(await records.markFailed("b-1", ATTEMPT, ["The build took too long."], NOW)).toBe(true);
     await records.addUsage("p-1", { inputTokens: 10, outputTokens: 2, costUsd: 0.01 }, NOW);
@@ -96,6 +96,10 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     // The update list is exactly what the builder's BUILD# updates name: nothing more for 2.9's role to touch.
     expect([...buildNames].sort()).toEqual([...BUILDER_BUILD_UPDATE_ATTRIBUTES].sort());
     expect(BUILDER_BUILD_UPDATE_ATTRIBUTES).not.toContain("participantId");
+    // Ticket 2.15: a web fetch is stored with its host only.
+    expect((updates[1]?.input as UpdateItemCommandInput).ExpressionAttributeValues?.[":events"]).toEqual({
+      L: [{ M: { kind: { S: "file" }, at: { S: NOW }, path: { S: "index.html" } } }, { M: { kind: { S: "fetch" }, at: { S: NOW }, host: { S: "en.wikipedia.org" } } }],
+    });
   });
 
   it("claims only an existing build of the nickname, building under this launch, that has no pushed commit, with a new feed", async () => {

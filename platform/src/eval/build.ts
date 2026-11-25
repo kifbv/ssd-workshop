@@ -5,6 +5,8 @@
 // Playwright's Chromium at 375 px, served under the apps' sandbox CSP with an in-memory data API.
 // Ticket 2.14: the network stays open (only the app's own origin is routed), so an app that reads a free outside service
 // reaches it; behind a session's HTTPS proxy, Chromium is sent through it (see `launchBrowser`).
+// Ticket 2.15: the agent may read pages with WebFetch; the outcome counts them from the feed (hosts only). Behind a
+// session's proxy the agent gets that proxy for its fetches (`webProxyEnvironment`); the builder task never does.
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
@@ -21,7 +23,7 @@ import { FAKE_TOKEN_PREFIX, FakeGitHub } from "../../api/github/fakes.js";
 import { FIRST_COMMIT_MESSAGE, withSpec } from "../../api/github/repository.js";
 import { loadTemplateFiles } from "../../api/github/template.js";
 import { appArchiveUrl, type ModelSetting } from "../../api/settings.js";
-import { ClaudeAgent } from "../../builder/agent.js";
+import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
@@ -146,6 +148,8 @@ export async function evalBuild(
             ...(process.env.HTTPS_PROXY || process.env.https_proxy ? { agent: new Agent({ proxyEnv: process.env } as AgentOptions) } : {}),
             log,
           },
+          // In a session, the agent's web fetches must go through the session's proxy (the builder task fetches directly).
+          webProxyEnvironment(process.env),
         ),
         queue,
         makeWorkspace: () => mkdtemp(join(tmpdir(), "ssd-eval-build-")),
@@ -164,6 +168,8 @@ export async function evalBuild(
       steps: feed.flatMap((event) => (event.kind === "step" ? [event.step] : [])),
       files: feed.filter((event) => event.kind === "file").length,
       commits: feed.filter((event) => event.kind === "commit").length,
+      fetches: feed.filter((event) => event.kind === "fetch").length,
+      fetchHosts: [...new Set(feed.flatMap((event) => (event.kind === "fetch" ? [event.host] : [])))].sort(),
       checkPassed: false,
       consoleErrors: [],
       overflow: 0,

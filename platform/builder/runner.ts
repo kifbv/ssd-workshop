@@ -7,7 +7,8 @@
  *    holder of the build's token could otherwise slip files in between the launch and this read, ticket 2.9 try 2), and
  *    downloads the repository at that commit into a fresh workspace folder;
  * 3. writing: runs the coding agent (./agent.ts) with AGENTS.md and SPEC.md, at most BUILD_AGENT_TIMEOUT_MS (12
- *    minutes); every file it writes goes into the feed; its tokens and their cost go to the participant's usage;
+ *    minutes); every file it writes and every page it reads with WebFetch (the host only, ticket 2.15) goes into the
+ *    feed; its tokens and their cost go to the participant's usage;
  * 4. checking: the deploy check (../api/build/check.ts) on the workspace;
  * 5. committing: the agent's work as a few commits (./repository.ts), each in the feed with its id and message;
  * 6. deploying: stores the pushed commit on the build (`pushedCommit`, which the deployer's start condition requires)
@@ -33,7 +34,7 @@ import { appArchiveUrl, BUILD_AGENT_TIMEOUT_MS, type ModelSetting } from "../api
 import { errorName } from "../api/sign-in/code-request.js";
 import type { TokenUsage } from "../api/types.js";
 import { buildPrompt, type CodingAgent } from "./agent.js";
-import { MAX_FEED_FILES, type BuildRecords, type BuildStep, type FeedEvent } from "./records.js";
+import { MAX_FEED_FETCHES, MAX_FEED_FILES, type BuildRecords, type BuildStep, type FeedEvent } from "./records.js";
 import { planCommits, pushCommits, readMain } from "./repository.js";
 import { NO_TOKENS, usageOfTokens, type AgentTokens } from "./usage.js";
 
@@ -56,6 +57,8 @@ export interface BuilderLogEntry {
   phase: BuilderPhase;
   outcome: "ok" | "no-build" | "failed" | "timeout" | "error";
   files?: number;
+  /** Web fetches the agent made (ticket 2.15). */
+  fetches?: number;
   commits?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -219,6 +222,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     phase = "writing";
     await feed(step("writing"));
     const written = new Set<string>();
+    let fetches = 0;
     const fileWrites: Promise<void>[] = [];
     let tokens: AgentTokens = NO_TOKENS;
     const controller = new AbortController();
@@ -238,6 +242,18 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
         resolve("timeout");
       }, limit);
     });
+    // A file or fetch event while the agent works: a refused write (the build was finished elsewhere) stops the run.
+    const feedDuringWriting = (event: FeedEvent): Promise<void> =>
+      feed(event).catch((error: unknown) => {
+        if (!(error instanceof BuildGone)) {
+          // The build goes on without this event in its feed: say so (error name only, no path or host).
+          log("writing", "error", { error: errorName(error) });
+          return;
+        }
+        gone = true;
+        controller.abort();
+        stopGone?.();
+      });
     const ws = workspace;
     const result = await Promise.race([
       deps.agent
@@ -249,18 +265,13 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
           onFileWritten: (path) => {
             if (written.has(path) || written.size >= MAX_FEED_FILES || controller.signal.aborted) return;
             written.add(path);
-            fileWrites.push(
-              feed({ kind: "file", path: feedPath(path), at: nowIso() }).catch((error: unknown) => {
-                if (!(error instanceof BuildGone)) {
-                  // The build goes on without this file in its feed: say so (error name only, no path).
-                  log("writing", "error", { error: errorName(error) });
-                  return;
-                }
-                gone = true;
-                controller.abort();
-                stopGone?.();
-              }),
-            );
+            fileWrites.push(feedDuringWriting({ kind: "file", path: feedPath(path), at: nowIso() }));
+          },
+          onWebFetch: (host) => {
+            if (controller.signal.aborted) return;
+            fetches += 1;
+            if (fetches > MAX_FEED_FETCHES) return;
+            fileWrites.push(feedDuringWriting({ kind: "fetch", host: feedPath(host), at: nowIso() }));
           },
           onTokens: (total) => {
             tokens = total;
@@ -277,7 +288,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     if (result !== "timeout" && result !== "gone") tokens = result.tokens;
     await Promise.all(fileWrites);
     const usage: TokenUsage = usageOfTokens(tokens, deps.model.price);
-    if (!gone) log("writing", timedOut ? "timeout" : result === "timeout" || result === "gone" || result.outcome !== "done" ? "error" : "ok", { files: written.size });
+    if (!gone) log("writing", timedOut ? "timeout" : result === "timeout" || result === "gone" || result.outcome !== "done" ? "error" : "ok", { files: written.size, fetches });
     try {
       await deps.records.addUsage(participantId, usage, nowIso());
       log("usage", "ok", { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, costUsd: usage.costUsd });

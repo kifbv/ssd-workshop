@@ -4,6 +4,7 @@ import { usageOf } from "../../api/conversation/model.js";
 import { answerMessage } from "../../api/conversation/answer.js";
 import { FakeModel } from "../../api/conversation/fakes.js";
 import {
+  expectsWebFetch,
   formatBuildResult,
   formatBuildSummary,
   missingScreens,
@@ -447,6 +448,8 @@ describe("scoreBuild", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
+    fetches: 0,
+    fetchHosts: [],
     durationMs: 185_000,
     usage: { inputTokens: 600_000, outputTokens: 20_000, costUsd: 0.75 },
   };
@@ -461,6 +464,26 @@ describe("scoreBuild", () => {
     expect(result).toEqual({ pass: true, detail: expect.stringMatching(/, outside services: en\.wikipedia\.org, upload\.wikimedia\.org$/) as unknown });
   });
 
+  it("ticket 2.15: requires a web fetch when the spec names an outside service, and reports the fetches on every result line", () => {
+    expect(scoreBuild(ok, true)).toEqual({ pass: false, detail: "no web fetch, though the spec names an outside service" });
+    expect(scoreBuild(ok).pass).toBe(true);
+    const fetched = { ...ok, fetches: 3, fetchHosts: ["en.wikipedia.org"] };
+    expect(scoreBuild(fetched, true)).toEqual({ pass: true, detail: expect.stringMatching(/, fetched en\.wikipedia\.org$/) as unknown });
+    const example = { name: "movie watchlist with posters from Wikipedia (example)", category: "example", expected: "ready" as const, spec: "", keywords: [] };
+    expect(formatBuildResult({ example, outcome: fetched, ...scoreBuild(fetched, true) }, 3)).toContain("3m05s, 3 web fetches (en.wikipedia.org), ");
+    expect(formatBuildResult({ example, outcome: { ...fetched, fetches: 1 }, ...scoreBuild(fetched, true) }, 3)).toContain(", 1 web fetch (en.wikipedia.org), ");
+  });
+
+  it("ticket 2.15: expects a fetch for a spec naming a listed service, such as the Wikipedia watchlist example (example 4), and not otherwise", () => {
+    const all = parseReadinessExamples(readFileSync(new URL("../../api/eval/readiness.json", import.meta.url), "utf8"));
+    if ("error" in all) throw new Error(all.error);
+    const examples = all.filter((example) => example.category === "example");
+    expect(examples[3]?.name).toMatch(/Wikipedia/);
+    expect(examples.map((example) => expectsWebFetch(example.spec))).toEqual([false, false, false, true]);
+    expect(expectsWebFetch("Weather from open-meteo for my city")).toBe(true);
+    expect(expectsWebFetch("A list of my runs")).toBe(false);
+  });
+
   it("names each problem", () => {
     expect(scoreBuild({ ...ok, outcome: "failed", failureReasons: ["The build took too long."] })).toEqual({ pass: false, detail: "build failed: The build took too long." });
     const bad = scoreBuild({ ...ok, steps: ["preparing", "writing"], commits: 0, checkPassed: false, consoleErrors: ["boom"], overflow: 12, missing: ["Watched"] });
@@ -473,7 +496,7 @@ describe("scoreBuild", () => {
   it("prints the duration, tokens and cost of each build and of all", () => {
     const example = { name: "fitness tracker (example)", category: "example", expected: "ready" as const, spec: "", keywords: [] };
     const result = { example, outcome: ok, ...scoreBuild(ok) };
-    expect(formatBuildResult(result, 0)).toContain("3m05s, 600000 tokens in, 20000 out, cost $0.7500");
+    expect(formatBuildResult(result, 0)).toContain("3m05s, 0 web fetches, 600000 tokens in, 20000 out, cost $0.7500");
     expect(formatBuildSummary([result, { example, pass: false, detail: "eval failed" }])).toEqual([
       "Build: 1/2 passed",
       "Duration: 3m05s in all; tokens: 600000 in, 20000 out, cost $0.7500",

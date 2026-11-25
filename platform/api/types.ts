@@ -373,12 +373,13 @@ export interface BuildItem extends Keyed {
   pushedCommit?: string;
   /**
    * The build's live feed (ticket 2.8, shown by ticket 2.10): the steps (`preparing`, `writing`, `checking`,
-   * `committing`, `deploying`), each file the agent wrote and each commit (id and fixed message), oldest first, each
-   * with its ISO time. File names are the agent's (anyone's text: pages render them with `textContent` only).
+   * `committing`, `deploying`), each file the agent wrote, each page it read with WebFetch (the host only, never the
+   * path or query; ticket 2.15) and each commit (id and fixed message), oldest first, each with its ISO time. File names are the agent's (anyone's text: pages render them with `textContent` only).
    */
   feed?: (
     | { kind: "step"; step: "preparing" | "writing" | "checking" | "committing" | "deploying"; at: string }
     | { kind: "file"; path: string; at: string }
+    | { kind: "fetch"; host: string; at: string }
     | { kind: "commit"; sha: string; message: string; at: string }
   )[];
   /** The commit the deployer published (status `live`). */

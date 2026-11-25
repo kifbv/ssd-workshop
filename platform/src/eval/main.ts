@@ -20,6 +20,7 @@ import {
   exitCode,
   formatBuildResult,
   formatBuildSummary,
+  expectsWebFetch,
   scoreBuild,
   formatClarifyResult,
   formatClarifySummary,
@@ -65,7 +66,7 @@ async function runBuildSuite(modelId: string | undefined, only: number | undefin
       let result: BuildEvalResult;
       try {
         const outcome = await evalBuild(example.spec, model, browser, (entry) => console.log(`     . ${JSON.stringify(entry)}`));
-        result = { example, outcome, ...scoreBuild(outcome) };
+        result = { example, outcome, ...scoreBuild(outcome, expectsWebFetch(example.spec)) };
       } catch (error) {
         result = { example, pass: false, detail: `eval failed: ${redactError(error instanceof Error ? `${error.name}: ${error.message}` : String(error))}` };
       }
