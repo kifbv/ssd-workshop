@@ -514,7 +514,11 @@ export function addSessionCheckRights(fn: NodejsFunction, table: Table): void {
       effect: Effect.ALLOW,
       actions: ["dynamodb:DeleteItem"],
       resources: [table.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] } },
+      // The store's delete returns nothing (ticket 3.1 try 2): never the old session item (`ALL_OLD`).
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+        StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+      },
     }),
   );
 }

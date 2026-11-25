@@ -160,7 +160,7 @@ export function signInRequiredResponse(): HttpResponse {
  * The one session check of every protected route: the caller's own participant record, with role
  * and group as the allow-list has them now (ticket 3.1), or a 401 for no cookie, a malformed or unknown
  * (forged) token, an expired session (DynamoDB's TTL deletes late, so the clock decides) or a session
- * whose participant is gone. A session whose allow-list entry is gone, or no longer linked to its
+ * whose participant is gone (that session is deleted too). A session whose allow-list entry is gone, or no longer linked to its
  * participant (or that has no sealed link, from before ticket 3.1), is deleted and answered 401: a
  * removed person is signed out at their next call. Table errors are thrown to the caller (a failure
  * is not a reason to sign someone out). The address is never logged or returned.
@@ -182,7 +182,11 @@ export async function requireSession(request: HttpRequest, deps: SessionDeps): P
     await deps.sessions.deleteSession(tokenHash);
     return refused("removed");
   }
-  if (participant === undefined) return refused("no-session");
+  if (participant === undefined) {
+    // No profile behind a valid entry: nothing can use this session, so it is not left behind (try 2).
+    await deps.sessions.deleteSession(tokenHash);
+    return refused("no-session");
+  }
   const current = { ...participant, role: entry.role, group: entry.group };
   return { ok: true, participant: current, role: entry.role, tokenHash };
 }

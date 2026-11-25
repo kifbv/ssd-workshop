@@ -4,6 +4,7 @@ import {
   TABLE_NAME,
   formatImportReport,
   formatListReport,
+  formatRemoveReport,
   isInside,
   isValidEmail,
   parseArgs,
@@ -29,6 +30,35 @@ describe("parseArgs", () => {
     expect(parseArgs(["import"])).toEqual({ error: "import needs a CSV file" });
     expect(parseArgs(["import", "a.csv", "b.csv"])).toEqual({ error: "import takes exactly one file" });
     expect(parseArgs(["list", "x"])).toEqual({ error: "list takes no arguments" });
+  });
+
+  it("accepts remove with one address, normalized, and --yes before or after it (ticket 3.1)", () => {
+    expect(parseArgs(["remove", " Jane.Doe@Example.COM "])).toEqual({ command: "remove", email: "jane.doe@example.com", confirmed: false });
+    expect(parseArgs(["remove", "jane@example.com", "--yes"])).toEqual({ command: "remove", email: "jane@example.com", confirmed: true });
+    expect(parseArgs(["remove", "--yes", "jane@example.com"])).toEqual({ command: "remove", email: "jane@example.com", confirmed: true });
+  });
+
+  it("refuses remove without one valid address, never repeating what was typed (ticket 3.1)", () => {
+    const cases: [string[], string][] = [
+      [["remove"], "remove needs an email address"],
+      [["remove", "--yes"], "remove needs an email address"],
+      [["remove", " "], "remove needs an email address"],
+      [["remove", "jane"], "remove needs a valid email address"],
+      [["remove", "ja#ne@example.com"], "remove needs a valid email address"],
+      [["remove", "a@example.com", "b@example.com"], "remove takes one email address and optionally --yes"],
+      [["remove", "a@example.com", "-y"], "remove takes one email address and optionally --yes"],
+      [["remove", "a@example.com", "--yes", "--yes"], "remove takes --yes once"],
+    ];
+    for (const [args, error] of cases) expect(parseArgs(args), args.join(" ")).toEqual({ error });
+  });
+});
+
+describe("formatRemoveReport (ticket 3.1)", () => {
+  it("speaks of this address only, never an address", () => {
+    for (const result of ["found", "absent", "removed"] as const) {
+      expect(formatRemoveReport(result)).toMatch(/this address/i);
+      expect(formatRemoveReport(result)).not.toContain("@");
+    }
   });
 });
 

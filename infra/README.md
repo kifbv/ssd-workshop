@@ -588,6 +588,63 @@ Then (Franck, on a phone): build an app whose spec reads an outside service (for
 "movie watchlist with posters from Wikipedia" example) and open it at `/apps/<nickname>/`. Expect: the posters and
 summaries show; with the phone offline (or the service down) the page shows its friendly message instead.
 
+## Check after the sign-out deploy (ticket 3.1)
+
+```mermaid
+flowchart LR
+  cookie[Session cookie] --> check[Session check]
+  check -->|reads| entry[Allow-list entry]
+  entry -->|there| ok[200, role and group from the entry]
+  entry -->|gone| out[401, session deleted]
+  signout[Sign out] -->|deletes session, clears cookie| out
+```
+
+Run by Franck on his own machine: the sign-in steps send his address and a code, and the removal step reads and
+deletes a table item, so it runs as `AWS_PROFILE=franck` (Claude sessions are read-only and never run it). Use a
+test address of his own that is on the allow-list and that he may take off and put back.
+
+1. On a phone, open https://workshop.rankly.games/, sign in, and press **Sign out** (under the title, on the right).
+   Expect the email screen with "You're signed out."; reloading the page stays on the email screen. The code screen
+   shows "No code after a minute? Check your Junk or Spam folder."
+2. The same with `curl`, signed in as in the 1.5 check (same `JAR` cookie jar and `verify` function), to see the
+   answers:
+
+```sh
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"id":"...","role":"<role from the allow-list>","group":"<group>",...} and 200
+cp "$JAR" "$JAR.old"   # keep the old cookie to try it after signing out
+curl -sS -b "$JAR" -c "$JAR" -H 'content-type: application/json' --data '{}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/sign-out
+# expect: {"message":"You're signed out."} and 200
+curl -sS -b "$JAR.old" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"message":"Please sign in."} and 401 (the old cookie no longer opens a session)
+rm -f "$JAR.old"
+```
+
+3. Removal: sign in again (`verify` after a new code), then take the test address off the list. The command asks for
+   the address and prints only "this address", never an address; without `--yes` it only looks.
+
+```sh
+verify
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: 200
+AWS_PROFILE=franck npm run -s allowlist -- remove "$ADDRESS"
+# expect: "This address has an allow-list entry. Nothing was changed: run again with --yes to remove it."
+AWS_PROFILE=franck npm run -s allowlist -- remove "$ADDRESS" --yes
+# expect: "Removed the allow-list entry for this address. ..."
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"message":"Please sign in."} and 401 (signed out at this call; the session item is deleted)
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation
+# expect: {"message":"Please sign in."} and 401
+rm -f "$JAR"
+```
+
+Put the address back with `AWS_PROFILE=franck npm run -s allowlist -- import /absolute/path/outside/the/repo.csv`.
+Re-adding creates a new entry without a participant link, so the next sign-in starts a new participant (nickname
+screen); the old profile and app stay in the table (decision "(3.1) Removal command"). The log groups
+`ssd-workshop-api-participant` and `ssd-workshop-api-conversation` show `"outcome":"signed-out"`, `"removed"` and
+`"unauthorized"` lines and never an address.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

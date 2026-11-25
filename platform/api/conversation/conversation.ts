@@ -69,6 +69,7 @@ export type ConversationOutcome =
   | "accepted"
   | "ok"
   | "unauthorized"
+  | "removed"
   | "not-found"
   | "invalid-request"
   | "unsupported-media-type"
@@ -390,7 +391,8 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
   let result: Result;
   try {
     const session = await requireSession(request, { sessions: deps.sessions, now: deps.now });
-    if (!session.ok) result = { outcome: "unauthorized", response: session.response };
+    // A person taken off the allow-list is told apart in the logs (ticket 3.1), as on the participant routes.
+    if (!session.ok) result = { outcome: session.reason === "removed" ? "removed" : "unauthorized", response: session.response };
     else if (route === "send") result = await send(request, session.participant, deps);
     else if (route === "poll") result = await poll(request, session.participant, deps);
     else if (route === "history") result = await history(session.participant, deps);

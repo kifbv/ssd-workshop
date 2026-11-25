@@ -475,6 +475,9 @@ describe("the conversation routes follow the allow-list (ticket 3.1)", () => {
     expect(s.table.sessions.has(hashToken(MINE))).toBe(false);
     expect(s.table.sessions.has(hashToken(THEIRS))).toBe(true);
     expect(s.queue.sent).toEqual([]);
+    // Logged as `removed` (try 2), like the participant routes; the next call finds no session at all.
+    expect(s.logs.at(-1)?.outcome).toBe("removed");
+    expect((await handleConversationRequest(send("A plant watering app"), s.deps)).statusCode).toBe(401);
     expect(s.logs.at(-1)?.outcome).toBe("unauthorized");
   });
 });

@@ -181,4 +181,18 @@ describe("requireSession follows the allow-list (ticket 3.1)", () => {
       expect(s.table.sessions.has(hashToken(TOKEN)), label).toBe(false);
     }
   });
+
+  it("deletes the session when the allow-list entry is valid but the profile is missing (try 2: no session is left behind)", async () => {
+    const { table, deps } = signedIn();
+    table.profiles.delete("p-1");
+    const check = await requireSession(withCookie, deps);
+    expect(check.ok).toBe(false);
+    if (!check.ok) {
+      expect(check.reason).toBe("no-session");
+      expect(check.response.statusCode).toBe(401);
+    }
+    expect(table.sessions.has(hashToken(TOKEN))).toBe(false);
+    // The entry itself is untouched: signing in again recreates the profile.
+    expect(table.allow.get(EMAIL)).toEqual({ role: "participant", group: "blue", participantId: "p-1" });
+  });
 });

@@ -1337,7 +1337,11 @@ function sessionCheckStatements(tableArn: unknown): unknown[] {
       Effect: "Allow",
       Action: "dynamodb:DeleteItem",
       Resource: tableArn,
-      Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] } },
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+        // Try 2: the old session item never comes back.
+        StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+      },
     },
   ];
 }

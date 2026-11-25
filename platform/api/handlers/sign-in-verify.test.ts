@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FakeConversationTable, FakeQueue } from "../conversation/fakes.js";
 import { FakeTable } from "../fakes.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { ANSWER_AFTER_MS, CODE_TTL_SECONDS, hashCode } from "../sign-in/code-request.js";
 import { settle } from "../sign-in/fakes.js";
 import type { VerifyDeps } from "../sign-in/verify.js";
+import { createHandler as createConversationHandler, logEntry as conversationLogEntry } from "./conversation.js";
 import { createHandler as createParticipantHandler, logEntry as participantLogEntry } from "./participant.js";
 import { createHandler, handler, logEntry } from "./sign-in-verify.js";
 
@@ -152,7 +154,8 @@ describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
   });
 
   it("criterion 5: WHEN the API logs a refused or signed-out call THEN no email address is in the log line", async () => {
-    const table = new FakeTable();
+    // The conversation table holds the participant table's items too: one table behind both functions.
+    const table = new FakeConversationTable();
     table.allow.set(LISTED, { group: "blue", role: "participant" });
     let n = 0;
     const deps: VerifyDeps = {
@@ -184,6 +187,15 @@ describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
     };
     const participant = createParticipantHandler({ store: table, now: () => START, log: participantLogEntry });
     const me = (cookie: string): HttpRequest => ({ routeKey: "GET /api/me", cookies: [cookie] });
+    const conversation = createConversationHandler({
+      sessions: table,
+      store: table,
+      queue: new FakeQueue(),
+      now: () => START,
+      randomBytes: (size) => Buffer.alloc(size, 9),
+      log: conversationLogEntry,
+    });
+    const history = (cookie: string): HttpRequest => ({ routeKey: "GET /api/conversation", cookies: [cookie] });
     const signOut = (cookie: string): HttpRequest => ({
       routeKey: "POST /api/sign-out",
       cookies: [cookie],
@@ -205,18 +217,25 @@ describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
     expect(out.statusCode).toBe(200);
     expect((await participant(me(first))).statusCode).toBe(401);
     expect((await participant(signOut(first))).statusCode).toBe(401);
-    // Signed in again, then taken off the list: removed at the next call.
+    // Signed in twice more, then taken off the list: removed at the next call, on either function.
     const second = await signIn();
+    const third = await signIn();
+    expect((await conversation(history(third))).statusCode).toBe(200);
     table.allow.delete(LISTED);
     expect((await participant(me(second))).statusCode).toBe(401);
+    expect((await conversation(history(third))).statusCode).toBe(401);
     expect(table.sessions.size).toBe(0);
     expect((await participant(me(second))).statusCode).toBe(401);
+    expect((await conversation(history(third))).statusCode).toBe(401);
 
     const lines = captured.filter((line) => line.includes('"event":"participant"'));
     for (const outcome of ["signed-out", "removed", "unauthorized"]) expect(lines.join("\n"), outcome).toContain(`"outcome":"${outcome}"`);
+    const conversationLines = captured.filter((line) => line.includes('"event":"conversation"')).join("\n");
+    for (const outcome of ["ok", "removed", "unauthorized"]) expect(conversationLines, outcome).toContain(`"outcome":"${outcome}"`);
     const logs = captured.join("\n").toLowerCase();
     expect(logs).not.toContain("@");
-    for (const secret of [LISTED, "franck.tester", "example.com", first.split("=")[1] ?? "?", second.split("=")[1] ?? "?"]) {
+    const tokens = [first, second, third].map((cookie) => cookie.split("=")[1] ?? "?");
+    for (const secret of [LISTED, "franck.tester", "example.com", ...tokens]) {
       expect(logs, secret).not.toContain(secret.toLowerCase());
     }
   });

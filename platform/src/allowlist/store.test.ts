@@ -1,17 +1,29 @@
-import type { ScanCommand, ScanCommandOutput, UpdateItemCommand, UpdateItemCommandOutput } from "@aws-sdk/client-dynamodb";
+import {
+  ConditionalCheckFailedException,
+  type DeleteItemCommand,
+  type DeleteItemCommandOutput,
+  type GetItemCommand,
+  type GetItemCommandOutput,
+  type ScanCommand,
+  type ScanCommandOutput,
+  type UpdateItemCommand,
+  type UpdateItemCommandOutput,
+} from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
 import { DynamoAllowListStore, type DynamoSender } from "./store.js";
 
-type Sent = UpdateItemCommand | ScanCommand;
+type Sent = UpdateItemCommand | ScanCommand | GetItemCommand | DeleteItemCommand;
+type Answer = UpdateItemCommandOutput | ScanCommandOutput | GetItemCommandOutput | DeleteItemCommandOutput | Error;
 
-/** A stand-in for DynamoDBClient: records each command and answers from a list. */
-function stubClient(answers: (UpdateItemCommandOutput | ScanCommandOutput)[]): { client: DynamoSender; sent: Sent[] } {
+/** A stand-in for DynamoDBClient: records each command and answers from a list (an Error is thrown). */
+function stubClient(answers: Answer[]): { client: DynamoSender; sent: Sent[] } {
   const sent: Sent[] = [];
   const client = {
     send: async (command: Sent) => {
       sent.push(command);
       const answer = answers.shift();
       if (answer === undefined) throw new Error("unexpected call");
+      if (answer instanceof Error) throw answer;
       return answer;
     },
   } as DynamoSender;
@@ -66,5 +78,41 @@ describe("DynamoAllowListStore.listAll", () => {
     expect(first?.ProjectionExpression).toBe("#group, #role");
     expect(first?.ExclusiveStartKey).toBeUndefined();
     expect(second?.ExclusiveStartKey).toEqual({ pk: { S: "k" } });
+  });
+});
+
+describe("DynamoAllowListStore.exists and remove (ticket 3.1)", () => {
+  const KEY = { pk: { S: "EMAIL#jane@example.com" }, sk: { S: "ALLOW" } };
+
+  it("looks the entry up by its key with a consistent read of the key only", async () => {
+    const { client, sent } = stubClient([{ ...meta, Item: { pk: KEY.pk } }, meta]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.exists("jane@example.com")).resolves.toBe(true);
+    await expect(store.exists("jane@example.com")).resolves.toBe(false);
+    expect((sent[0] as GetItemCommand).input).toEqual({
+      TableName: "ssd-workshop-data",
+      Key: KEY,
+      ProjectionExpression: "pk",
+      ConsistentRead: true,
+    });
+  });
+
+  it("criterion 1: deletes only the EMAIL#/ALLOW item, conditional on it existing, and returns no old values", async () => {
+    const { client, sent } = stubClient([meta]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).resolves.toBe(true);
+    expect((sent[0] as DeleteItemCommand).input).toEqual({
+      TableName: "ssd-workshop-data",
+      Key: KEY,
+      ConditionExpression: "attribute_exists(pk)",
+    });
+  });
+
+  it("says false when there was no entry, and passes other errors on", async () => {
+    const missing = new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} });
+    const { client } = stubClient([missing, Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).resolves.toBe(false);
+    await expect(store.remove("jane@example.com")).rejects.toThrow("denied");
   });
 });
