@@ -24,6 +24,7 @@ import {
   CHAT_TEXTS,
   POLL_INTERVAL_MS,
   WAITING_POLL_INTERVAL_MS,
+  budgetLeftText,
   canWriteSpec,
   conversationResult,
   pollResult,
@@ -145,10 +146,12 @@ interface View {
   flow: string;
   form: string;
   input: string;
+  /** Ticket 3.3: the AI budget left, under the form. */
+  budget: string;
 }
 
 const VIEWS: Record<"step" | "spec", View> = {
-  step: { screen: "step", chat: "chat", typing: "typing", waitingNotice: "waiting-notice", send: "chat-send", flow: "behind-flow", form: "chat-form", input: "chat-input" },
+  step: { screen: "step", chat: "chat", typing: "typing", waitingNotice: "waiting-notice", send: "chat-send", flow: "behind-flow", form: "chat-form", input: "chat-input", budget: "chat-budget" },
   spec: {
     screen: "spec",
     chat: "spec-chat",
@@ -158,6 +161,7 @@ const VIEWS: Record<"step" | "spec", View> = {
     flow: "spec-behind-flow",
     form: "spec-chat-form",
     input: "spec-chat-input",
+    budget: "spec-chat-budget",
   },
 };
 
@@ -188,6 +192,8 @@ let localVersion = 0;
 
 /** Step 2 (ticket 1.9): the newest and approved versions, and the version on the page. */
 let specInfo: { latest?: number; approved?: number; atApproved: boolean } = { atApproved: false };
+/** Ticket 3.3: the AI budget left from the last conversation read (dollars), if the answer had it. */
+let budgetLeft: number | undefined;
 let shownSpec: SpecVersion | null = null;
 
 function stopPolling(): void {
@@ -223,6 +229,9 @@ function render(): void {
   byId(view.waitingNotice).hidden = waiting?.mode !== "flagged";
   byId(view.flow).dataset["stage"] = stageOf(waiting?.mode ?? "none", messages);
   byId<HTMLButtonElement>(view.send).disabled = waiting !== null;
+  const budget = byId(view.budget);
+  budget.hidden = budgetLeft === undefined;
+  budget.textContent = budgetLeft === undefined ? "" : budgetLeftText(budgetLeft);
   if (view.screen === "step") renderStepOne();
   else renderStepTwo();
 }
@@ -340,6 +349,7 @@ async function loadConversation(): Promise<void> {
     ...(conversation.approvedSpecVersion === undefined ? {} : { approved: conversation.approvedSpecVersion }),
     atApproved: conversation.step === "approved",
   };
+  budgetLeft = conversation.budgetLeft;
   stopPolling();
   const pending = conversation.pendingId;
   if (pending !== undefined) startPolling(pending, conversation.state === "waiting" ? "flagged" : "pending");

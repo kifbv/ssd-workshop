@@ -2,11 +2,15 @@
 // tests (not bundled: no handler imports it). The table follows the DynamoDB adapter's conditions:
 // a message is created only when the conversation has none in flight, and every status change
 // names the status it expects and the message in flight, all or nothing.
+import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 import { FakeTable } from "../fakes.js";
+import type { BudgetFacts } from "../workshop/budget.js";
+import { limitsFromItem, settingsFromItem } from "../workshop/settings.js";
 import type { BuildStatus, ConversationState, MessageStatus, ReplyKind, Step, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 import type { ModelClient, ModelReply, ModelRequest } from "./model.js";
 import {
+  finishStatus,
   STALE_PENDING_SECONDS,
   textHash,
   type AiJob,
@@ -100,6 +104,8 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   readonly specs = new Map<string, FakeSpec[]>();
   /** Build records by build id (ticket 2.7). */
   readonly builds = new Map<string, FakeBuild>();
+  /** The `SETTINGS` item as DynamoDB would return it (ticket 3.3 reads the budget from it); none: the defaults. */
+  settingsItem: Record<string, AttributeValue> | undefined;
   conversationFailOn: Method | undefined;
   /** How many calls of `conversationFailOn` fail before it works again (undefined: every call). */
   conversationFailTimes: number | undefined;
@@ -200,7 +206,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     const specs = this.specs.get(participantId) ?? [];
     if (spec !== undefined && specs.some((v) => v.version === spec.version)) return false;
 
-    const status: MessageStatus = outcome.kind;
+    const status: MessageStatus = finishStatus(outcome.kind);
     const guardrail = outcome.guardrail;
     this.messagesOf(participantId).set(messageId, {
       ...message,
@@ -217,7 +223,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
         text: outcome.reply,
         ...(outcome.kind === "done" && outcome.offersSpec === true ? { offersSpec: true } : {}),
         ...(spec === undefined ? {} : { specVersion: spec.version }),
-        kind: outcome.kind === "done" ? "answer" : outcome.kind === "declined" ? "decline" : "failure",
+        kind: outcome.kind === "done" ? "answer" : outcome.kind === "declined" ? "decline" : outcome.kind === "over-budget" ? "budget" : "failure",
         createdAt: nowIso,
         ...(answer === undefined
           ? {}
@@ -336,11 +342,12 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     if (profile?.step !== "approved") return false;
     if (outcome.kind === "ready" && this.builds.has(outcome.build.buildId)) return false;
 
-    const answer = outcome.kind === "failed" ? undefined : outcome.answer;
-    this.messagesOf(participantId).set(messageId, { ...message, status: outcome.kind === "failed" ? "failed" : "done" });
+    const answered = outcome.kind === "ready" || outcome.kind === "not-ready";
+    const answer = answered ? outcome.answer : undefined;
+    this.messagesOf(participantId).set(messageId, { ...message, status: answered ? "done" : "failed" });
     this.repliesOf(participantId).set(messageId, {
       text: outcome.reply,
-      kind: outcome.kind === "failed" ? "failure" : "answer",
+      kind: answered ? "answer" : outcome.kind === "over-budget" ? "budget" : "failure",
       createdAt: nowIso,
       ...(answer === undefined
         ? {}
@@ -363,7 +370,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       this.conversations.set(participantId, { ...rest, state: "open" });
       this.profiles.set(participantId, { ...profile, step: "spec", stepSince: nowIso });
     }
-    const spent = outcome.kind === "failed" ? outcome.usage : outcome.answer.usage;
+    const spent = answered ? outcome.answer.usage : outcome.usage;
     if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) this.add(participantId, spent);
     return true;
   }
@@ -392,6 +399,16 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   async addUsage(participantId: string, usage: TokenUsage): Promise<void> {
     this.fail("addUsage");
     if (usage.inputTokens + usage.outputTokens > 0) this.add(participantId, usage);
+  }
+
+  async getBudgetFacts(participantId: string): Promise<BudgetFacts> {
+    this.fail("getBudgetFacts");
+    const extraBudget = this.profiles.get(participantId)?.extraBudget;
+    return {
+      settings: settingsFromItem(this.settingsItem),
+      limits: limitsFromItem(extraBudget === undefined ? undefined : { extraBudget: { N: String(extraBudget) } }),
+      spentUsd: this.usage.get(participantId)?.costUsd ?? 0,
+    };
   }
 
   private add(participantId: string, u: TokenUsage): void {

@@ -2,6 +2,7 @@
 // the flags command (ticket 1.7). The DynamoDB adapter is ./store.ts; tests use ./fakes.ts.
 import { createHash } from "node:crypto";
 import type { BuildItem, BuildStatus, ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
+import type { BudgetFacts } from "../workshop/budget.js";
 import type { Exchange } from "./answer.js";
 
 /**
@@ -77,12 +78,22 @@ export interface AnswerRecord {
   usage: TokenUsage;
 }
 
-/** How a message ends (or, for `flagged`, pauses). */
+/**
+ * How a message ends (or, for `flagged`, pauses). `over-budget` (ticket 3.3): the participant's AI budget is used, so
+ * the (next) AI call was not made; the message ends `failed` (they can send again once a facilitator added budget)
+ * with the budget text as a reply of kind `budget`.
+ */
 export type Finish =
   | { kind: "done"; reply: string; answer: AnswerRecord; guardrail?: GuardrailRecord; offersSpec?: boolean; spec?: NewSpec }
   | { kind: "declined"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "failed"; reply: string; guardrail?: GuardrailRecord }
+  | { kind: "over-budget"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "flagged"; guardrail: GuardrailRecord };
+
+/** The message status each way of ending stores (`over-budget` ends as `failed`: the participant may send again). */
+export function finishStatus(kind: Finish["kind"]): MessageStatus {
+  return kind === "over-budget" ? "failed" : kind;
+}
 
 /** A new spec version an answer made (ticket 1.9), stored with the answer in one transaction. */
 export interface NewSpec {
@@ -187,6 +198,11 @@ export interface ConversationStore {
    * failed for good, so tokens already spent are still counted.
    */
   addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void>;
+  /**
+   * Ticket 3.3: what the AI budget check reads, all consistent: the workshop settings, the participant's own limit
+   * fields (`extraBudget`) and their spend so far (`costUsd` of their `USAGE` item; none yet reads as 0).
+   */
+  getBudgetFacts(participantId: string): Promise<BudgetFacts>;
 }
 
 /** What the AI worker reads of a profile for the readiness check (ticket 2.7). */
@@ -219,7 +235,9 @@ export interface StoredBuild {
 export type ReadinessFinish =
   | { kind: "ready"; reply: string; version: number; answer: AnswerRecord; build: { buildId: string; nickname: string } }
   | { kind: "not-ready"; reply: string; version: number; answer: AnswerRecord }
-  | { kind: "failed"; reply: string; version: number; usage?: TokenUsage };
+  | { kind: "failed"; reply: string; version: number; usage?: TokenUsage }
+  /** Ticket 3.3: the AI budget is used, so no check (or no build): back to step 2 like `failed`, with the budget text. */
+  | { kind: "over-budget"; reply: string; version: number; usage?: TokenUsage };
 
 /** The build a readiness message starts: its id is made from the message id, so one approval can only ever make one build. */
 export function buildIdFor(messageId: string): string {

@@ -30,6 +30,7 @@ import {
   ACCOUNT,
   ADMIN_FUNCTION_NAME,
   SETTINGS_PARTITION,
+  SETTINGS_READ_ATTRIBUTES,
   SETTINGS_UPDATE_ATTRIBUTES,
   API_NAME,
   API_ORIGIN_DOMAIN,
@@ -1534,6 +1535,33 @@ describe("api stack: admin function (ticket 3.2)", () => {
 /** The DynamoDB actions that write items (TransactWriteItems is authorized item by item as these). */
 const DYNAMODB_WRITE_ACTIONS = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate", "dynamodb:PartiQLDelete"];
 
+/** Ticket 3.3: a projected read of the settings' caps and Stop, nothing else of `SETTINGS`. */
+function settingsReadStatement(tableArn: unknown) {
+  return {
+    Effect: "Allow",
+    Action: "dynamodb:GetItem",
+    Resource: tableArn,
+    Condition: {
+      "ForAllValues:StringEquals": {
+        "dynamodb:LeadingKeys": ["SETTINGS"],
+        "dynamodb:Attributes": ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"],
+      },
+      StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+    },
+  };
+}
+
+describe("SETTINGS readers (ticket 3.3)", () => {
+  it("WHEN the synthesized stack is inspected THEN the AI worker and the conversation function read SETTINGS only projected to the listed attributes, and the participant function not at all", () => {
+    expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"]);
+    for (const name of [AI_WORKER_FUNCTION_NAME, CONVERSATION_FUNCTION_NAME]) {
+      const reads = apiFunction(name).statements().filter((st) => JSON.stringify(st).includes('"SETTINGS"'));
+      expect(reads, name).toEqual([settingsReadStatement(apiFunction(name).tableArn())]);
+    }
+    expect(JSON.stringify(apiFunction(PARTICIPANT_FUNCTION_NAME).statements())).not.toContain("SETTINGS");
+  });
+});
+
 describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
   it("WHEN the synthesized stacks are inspected THEN only the admin function's role may write SETTINGS, and only the attributes named in config.ts", () => {
     const writers: { roles: string; actions: string[]; attributes: unknown }[] = [];
@@ -1565,6 +1593,52 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
     expect(actionCovers("SETTINGS*", SETTINGS_PARTITION)).toBe(true);
     expect(actionCovers("SESSION#*", SETTINGS_PARTITION)).toBe(false);
     expect(actionCovers("S*", SETTINGS_PARTITION)).toBe(true);
+  });
+});
+
+describe("budget attributes (ticket 3.3)", () => {
+  /** Every DynamoDB write statement in every stack that can reach PARTICIPANT# items, by role name, with its attribute list ("*" when none). */
+  function participantWriters(): { role: string; attributes: string[] }[] {
+    const roleNames = new Map(ofType("AWS::IAM::Role").map(([s, id, r]) => [`${s}/${id}`, String(r.Properties?.RoleName ?? id)]));
+    const writers: { role: string; attributes: string[] }[] = [];
+    const documents: { roles: string[]; statements: Record<string, unknown>[] }[] = [];
+    for (const [s, id, policy] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      const roles = ((policy.Properties?.Roles ?? []) as unknown[]).map((r) => {
+        const ref = (r as { Ref?: unknown }).Ref;
+        return typeof ref === "string" ? (roleNames.get(`${s}/${ref}`) ?? ref) : JSON.stringify(r);
+      });
+      if (roles.length === 0) roles.push(`${s}/${id}`);
+      documents.push({ roles, statements: (policy.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement });
+    }
+    // Inline policies on the roles themselves count too.
+    for (const [s, id, role] of ofType("AWS::IAM::Role")) {
+      for (const inline of (role.Properties?.Policies ?? []) as { PolicyDocument: { Statement: Record<string, unknown>[] } }[]) {
+        documents.push({ roles: [roleNames.get(`${s}/${id}`) ?? id], statements: inline.PolicyDocument.Statement });
+      }
+    }
+    for (const { roles, statements } of documents) {
+      for (const st of statements) {
+        if (st.Effect !== "Allow") continue;
+        assertNoExclusions(JSON.stringify(roles), st);
+        if (!DYNAMODB_WRITE_ACTIONS.some((a) => ([] as unknown[]).concat(st.Action).some((g) => typeof g === "string" && actionCovers(g, a)))) continue;
+        const conditions = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
+        const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
+        if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, "PARTICIPANT#p-1"))) continue;
+        const attributes = Object.values(conditions).find((c) => c["dynamodb:Attributes"] !== undefined)?.["dynamodb:Attributes"];
+        for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String) });
+      }
+    }
+    return writers;
+  }
+
+  it("WHEN the synthesized stacks are inspected THEN no role may write extraBudget (until ticket 3.10), and only the AI worker and the builder task may write costUsd", () => {
+    const writers = participantWriters();
+    expect(writers.length).toBeGreaterThan(3);
+    // No write statement on participant items may leave its attributes open (that would cover both names).
+    for (const w of writers) expect(w.attributes, w.role).not.toContain("*");
+    for (const w of writers) expect(w.attributes, w.role).not.toContain("extraBudget");
+    const costWriters = [...new Set(writers.filter((w) => w.attributes.includes("costUsd")).map((w) => w.role))].sort();
+    expect(costWriters).toEqual([AI_WORKER_FUNCTION_NAME, BUILDER_TASK_ROLE_NAME].sort());
   });
 });
 
@@ -1795,6 +1869,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
         },
       },
       { Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn() },
+      settingsReadStatement(f.tableArn()),
       ...sessionCheckStatements(f.tableArn()),
     ]);
   });
@@ -1848,6 +1923,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },
+      settingsReadStatement(f.tableArn()),
       {
         Effect: "Allow",
         Action: "bedrock:InvokeModel",

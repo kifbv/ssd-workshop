@@ -32,9 +32,13 @@ import {
 } from "../keys.js";
 import { isStep } from "../session/session.js";
 import type { BuildStatus, ConversationState, MessageStatus, TokenUsage } from "../types.js";
+import type { BudgetFacts } from "../workshop/budget.js";
+import { limitsFromItem } from "../workshop/settings.js";
+import { readSettings } from "../workshop/store.js";
 import type { Exchange } from "./answer.js";
 import { addUsage } from "./model.js";
 import {
+  finishStatus,
   STALE_PENDING_SECONDS,
   type ConversationStore,
   type CreateResult,
@@ -171,7 +175,7 @@ export function readFeed(list: readonly AttributeValue[] | undefined): BuildFeed
   return events;
 }
 
-const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure" } as const;
+const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure", "over-budget": "budget" } as const;
 
 export class DynamoConversationStore implements ConversationStore {
   constructor(
@@ -531,9 +535,10 @@ export class DynamoConversationStore implements ConversationStore {
 
   async finishReadiness(participantId: string, messageId: string, outcome: ReadinessFinish, nowIso: string): Promise<boolean> {
     const ready = outcome.kind === "ready";
-    const answer = outcome.kind === "failed" ? undefined : outcome.answer;
+    const answered = outcome.kind === "ready" || outcome.kind === "not-ready";
+    const answer = answered ? outcome.answer : undefined;
     const items: TransactWriteItem[] = [
-      setItem(this.tableName, messageKey(participantId, messageId), { status: str(outcome.kind === "failed" ? "failed" : "done") }, {
+      setItem(this.tableName, messageKey(participantId, messageId), { status: str(answered ? "done" : "failed") }, {
         expression: "#status = :pending",
         values: { ":pending": str("pending") },
       }),
@@ -544,7 +549,7 @@ export class DynamoConversationStore implements ConversationStore {
           type: str("message"),
           author: str("assistant"),
           text: str(outcome.reply),
-          kind: str(outcome.kind === "failed" ? "failure" : "answer"),
+          kind: str(answered ? "answer" : outcome.kind === "over-budget" ? "budget" : "failure"),
           replyTo: str(messageId),
           createdAt: str(nowIso),
           ...(answer === undefined
@@ -596,7 +601,7 @@ export class DynamoConversationStore implements ConversationStore {
         ),
       );
     }
-    const spent = outcome.kind === "failed" ? outcome.usage : outcome.answer.usage;
+    const spent = answered ? outcome.answer.usage : outcome.usage;
     if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) items.push(this.usageItem(participantId, spent, nowIso));
     try {
       await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));
@@ -666,7 +671,7 @@ export class DynamoConversationStore implements ConversationStore {
         this.tableName,
         messageKey(participantId, messageId),
         {
-          status: str(outcome.kind),
+          status: str(finishStatus(outcome.kind)),
           ...(guardrail === undefined
             ? {}
             : {
@@ -747,6 +752,32 @@ export class DynamoConversationStore implements ConversationStore {
   async addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void> {
     if (usage.inputTokens + usage.outputTokens === 0) return;
     await this.client.send(new TransactWriteItemsCommand({ TransactItems: [this.usageItem(participantId, usage, nowIso)] }));
+  }
+
+  async getBudgetFacts(participantId: string): Promise<BudgetFacts> {
+    const [settings, profile, usage] = await Promise.all([
+      readSettings(this.client, this.tableName),
+      // Projected reads (the item is small either way): only what the budget needs.
+      this.client.send(
+        new GetItemCommand({
+          TableName: this.tableName,
+          Key: keyOf(participantKey(participantId)),
+          ConsistentRead: true,
+          ProjectionExpression: "#extraBudget",
+          ExpressionAttributeNames: { "#extraBudget": "extraBudget" },
+        }),
+      ),
+      this.client.send(
+        new GetItemCommand({
+          TableName: this.tableName,
+          Key: keyOf(usageKey(participantId)),
+          ConsistentRead: true,
+          ProjectionExpression: "#costUsd",
+          ExpressionAttributeNames: { "#costUsd": "costUsd" },
+        }),
+      ),
+    ]);
+    return { settings, limits: limitsFromItem(profile.Item), spentUsd: Number(usage.Item?.["costUsd"]?.N ?? 0) };
   }
 
   /** The atomic ADD of tokens and cost to the participant's `USAGE` totals. */
