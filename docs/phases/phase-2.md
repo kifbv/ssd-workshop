@@ -206,6 +206,21 @@ Acceptance criteria (each starts as FAIL):
 - WHEN `cfn-lint --regions eu-central-1 -- infra/access/access-stack.yaml` runs THEN it reports nothing (command)
 - WHEN Franck has applied the stack THEN from a session `npm run smoke -- bedrock` answers and a write such as `aws s3 cp` to the apps bucket is refused with an explicit deny (live check "After applying ticket 2.12's access stack" in `infra/README.md`; pending until Franck applies)
 
+### 2.13 Reset a test participant (operator command)
+
+Franck and testers need to start the workshop over with the same sign-in. `npm run participant -- reset <nickname> [--yes]`, run with the owner's own AWS credentials (`AWS_PROFILE`), shows what it would delete and, with `--yes`, deletes the conversation and every spec version, puts the step back to Clarify (clearing the approved version and the build link), deletes the app's data (`APPDATA#<nickname>`) and live marker (`APP#<nickname>`/`LIVE`), and deletes the app's GitHub repository with the GitHub App key read from `ssd-workshop-github`. It keeps the allow-list entry, the nickname, sessions, usage totals and build records (cost history). It refuses while the participant's build is queued, building or deploying, and a run that stopped part way finishes on the next run. App files: see question 6.
+
+Depends on: 2.6, 2.9 merged. Areas: platform (operator command), docs.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN `reset <nickname>` runs without `--yes` THEN it prints what it would delete and changes nothing (test)
+- WHEN `reset <nickname> --yes` runs for a participant at any step THEN their messages, replies, spec versions, conversation item, app data, live marker and repository are gone, the step is Clarify with no approved version or build link, and the allow-list entry, nickname claim, usage and build records are unchanged (test against in-memory fakes)
+- WHEN the participant's build is queued, building or deploying, or the AI is answering THEN nothing changes and the command says why (test)
+- WHEN the repository is already gone, or a first run stopped part way THEN a second run finishes without error (test)
+- WHEN the command prints or fails THEN no email address, participant id, token or message text is in its output (test)
+- WHEN Franck runs it for his test participant THEN the page shows step 1 after reloading and the next approved spec builds into a new repository (live check, Franck)
+
 ## Questions for Franck
 
 1. **(Answered: yes.) New paid services:** ECS Fargate (about $0.01 per 10-minute build), ECR (about $0.10 a month), Secrets Manager ($0.40 a month for one secret) and a public IPv4 address per running build task ($0.005 an hour). At rest under $1 a month more; Bedrock for builds about $0.50 to $2 each, so phase 2's tests and evals about $20 to $50. No NAT gateway. Suggested: yes.
@@ -213,6 +228,7 @@ Acceptance criteria (each starts as FAIL):
 3. **(Answered: risk accepted.) Access stack for build tasks:** CloudFormation needs `ecs:DescribeTaskDefinition`, which AWS only grants account-wide, so the workshop's principals could read other projects' task definitions (including their environment variables). In return 2.2 pins build tasks to the workshop subnets, closing accepted risk 1. Suggested: yes, as a new accepted risk with a CloudTrail check.
 4. **(Answered: yes, spec delta approved.) Builder's AWS rights and the coding agent** (spec delta, CHANGED: section 5 "Builder ... has no AWS rights"). The container must call Claude on Bedrock. Suggested: the coding agent (Claude Agent SDK, the engine behind Claude Code) gets only file tools inside its workspace, no shell and no network, and holds no credentials; the runner around it holds a role that can only call the Sonnet 4.6 EU profile, write its build's records and hand off to the deployer. New wording: "The coding agent holds no AWS rights; the builder task may only call Claude, report progress and hand the result to the deployer."
 5. **(Answered: sandboxed.) Apps run sandboxed** on `workshop.rankly.games/apps/<nickname>/`: no cookies and no `localStorage`, storage only through the data API, which anyone with the app's address can read and write (as the spec says). Suggested: yes. The alternative, a separate address such as `apps.workshop.rankly.games`, needs a DNS record and a spec delta.
+6. **(Answered: leave the files until the next build.) (2.13) Taking the old app offline on a reset.** Only the deployer's role may change app files (bucket policy). Suggested: leave the files until the next build, whose deploy already removes stale files; no access change. Alternatives: an undeploy job through the deployer, or adding Franck's principal to the bucket policy exception.
 
 ## Blocked
 
