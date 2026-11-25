@@ -286,7 +286,7 @@ describe("DynamoConversationStore", () => {
     expect(Object.values(input.ExpressionAttributeNames ?? {})).not.toContain("costUsd");
   });
 
-  it("moves the profile from clarify to spec only while nothing is in flight, inside the conversation function's attribute list (ticket 1.8)", async () => {
+  it("moves the profile from clarify to spec (stepSince the time of the move, ticket 3.2) only while nothing is in flight, inside the conversation function's attribute list (ticket 1.8)", async () => {
     const { client, sent } = stubClient([
       {},
       cancelled(["ConditionalCheckFailed", "None"]),
@@ -301,9 +301,9 @@ describe("DynamoConversationStore", () => {
     const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems.map((i) => i.Update);
     expect(items[0]).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
-      UpdateExpression: "SET #step = :step",
+      UpdateExpression: "SET #step = :step, #stepSince = :stepSince",
       ConditionExpression: "#step = :clarify",
-      ExpressionAttributeValues: { ":step": { S: "spec" }, ":clarify": { S: "clarify" } },
+      ExpressionAttributeValues: { ":step": { S: "spec" }, ":stepSince": { S: NOW_ISO }, ":clarify": { S: "clarify" } },
     });
     expect(items[1]).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "CONVERSATION" } },
@@ -368,7 +368,11 @@ describe("DynamoConversationStore", () => {
     await expect(new DynamoConversationStore(client, TABLE).approveSpec("p-1", 2, 5000, NOW_ISO, readiness)).resolves.toBe("approved");
     const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
     expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual(["PROFILE", "CONVERSATION", "SPEC#0002", `MSG#${ID}`]);
-    expect(items[0]?.Update).toMatchObject({ ConditionExpression: "#step = :spec", ExpressionAttributeValues: { ":step": { S: "approved" }, ":spec": { S: "spec" } } });
+    expect(items[0]?.Update).toMatchObject({
+      UpdateExpression: "SET #step = :step, #stepSince = :stepSince",
+      ConditionExpression: "#step = :spec",
+      ExpressionAttributeValues: { ":step": { S: "approved" }, ":stepSince": { S: NOW_ISO }, ":spec": { S: "spec" } },
+    });
     expect(items[1]?.Update).toMatchObject({
       UpdateExpression:
         "SET #approvedSpecVersion = :approvedSpecVersion, #state = :state, #pendingId = :pendingId, #pendingSince = :pendingSince, #updatedAt = :updatedAt",
@@ -450,7 +454,11 @@ describe("DynamoConversationStore", () => {
         ConditionExpression: "#pendingId = :messageId AND #approvedSpecVersion = :version",
         ExpressionAttributeValues: { ":messageId": { S: ID }, ":version": { N: "2" }, ":buildId": { S: BUILD_ID } },
       });
-      expect(items[3]?.Update).toMatchObject({ ConditionExpression: "#step = :approved", ExpressionAttributeValues: { ":step": { S: "building" } } });
+      expect(items[3]?.Update).toMatchObject({
+        UpdateExpression: "SET #step = :step, #stepSince = :stepSince",
+        ConditionExpression: "#step = :approved",
+        ExpressionAttributeValues: { ":step": { S: "building" }, ":stepSince": { S: NOW_ISO } },
+      });
       expect(items[4]?.Update).toMatchObject({
         ConditionExpression: "attribute_not_exists(#pk)",
         ExpressionAttributeValues: {
@@ -483,7 +491,11 @@ describe("DynamoConversationStore", () => {
         UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt REMOVE #pendingId, #pendingSince, #approvedSpecVersion",
         ConditionExpression: "#pendingId = :messageId AND #approvedSpecVersion = :version",
       });
-      expect(items[3]?.Update).toMatchObject({ ConditionExpression: "#step = :approved", ExpressionAttributeValues: { ":step": { S: "spec" } } });
+      expect(items[3]?.Update).toMatchObject({
+        UpdateExpression: "SET #step = :step, #stepSince = :stepSince",
+        ConditionExpression: "#step = :approved",
+        ExpressionAttributeValues: { ":step": { S: "spec" }, ":stepSince": { S: NOW_ISO } },
+      });
       for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
     });
 

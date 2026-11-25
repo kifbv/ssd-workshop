@@ -49,7 +49,7 @@ export interface ResetStore {
    * that the conversation item is unchanged since it was read (same message in flight, same `updatedAt`;
    * none read: still none). False when it changed.
    */
-  restart(participantId: string, seen: ResetState): Promise<boolean>;
+  restart(participantId: string, seen: ResetState, nowIso: string): Promise<boolean>;
   /** Deletes the given sort keys of the participant's partition. */
   deleteItems(participantId: string, sortKeys: readonly string[]): Promise<void>;
 }
@@ -172,7 +172,7 @@ export class DynamoResetStore implements ResetStore {
     return items;
   }
 
-  async restart(participantId: string, seen: ResetState): Promise<boolean> {
+  async restart(participantId: string, seen: ResetState, nowIso: string): Promise<boolean> {
     const conversation = conversationKey(participantId);
     const profile = participantKey(participantId);
     try {
@@ -184,10 +184,17 @@ export class DynamoResetStore implements ResetStore {
               Update: {
                 TableName: this.table,
                 Key: { pk: str(profile.pk), sk: str(profile.sk) },
-                UpdateExpression: "SET #step = :clarify",
+                // Ticket 3.2: back at step 1 since now (also when already there: the step starts again).
+                UpdateExpression: "SET #step = :clarify, #stepSince = :now",
                 ConditionExpression: "attribute_exists(#pk) AND #step IN (:clarify, :spec, :approved, :building)",
-                ExpressionAttributeNames: { "#pk": "pk", "#step": "step" },
-                ExpressionAttributeValues: { ":clarify": str("clarify"), ":spec": str("spec"), ":approved": str("approved"), ":building": str("building") },
+                ExpressionAttributeNames: { "#pk": "pk", "#step": "step", "#stepSince": "stepSince" },
+                ExpressionAttributeValues: {
+                  ":clarify": str("clarify"),
+                  ":spec": str("spec"),
+                  ":approved": str("approved"),
+                  ":building": str("building"),
+                  ":now": str(nowIso),
+                },
               },
             },
           ],

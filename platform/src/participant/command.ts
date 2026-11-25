@@ -113,7 +113,7 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   // approved spec) while the live marker, the data and the repository go; a retry finds no conversation, restarts
   // again harmlessly and repeats each delete, all of which accept "already gone".
   if (stepName !== undefined) {
-    if (!(await store.restart(participantId, state))) {
+    if (!(await store.restart(participantId, state, deps.now().toISOString()))) {
       deps.err(`${nickname} sent a message meanwhile; nothing changed. Try again in a minute.`);
       return 1;
     }

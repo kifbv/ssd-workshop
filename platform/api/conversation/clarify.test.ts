@@ -65,7 +65,7 @@ function setup() {
     advance(5);
     return id;
   };
-  return { table, queue, model, logs, deps, advance, drain, call, exchange };
+  return { table, queue, model, logs, deps, advance, drain, call, exchange, now: () => clock };
 }
 
 const cookie = (t: string) => [`${SESSION_COOKIE}=${t}`];
@@ -247,6 +247,8 @@ describe("criterion 5: Write my spec moves the participant to step 2", () => {
     // Ticket 1.9: the request for the first spec version is queued too.
     expect(json(res)).toEqual({ step: "spec", id: expect.any(String) as unknown });
     expect(s.table.profiles.get("me-1")?.step).toBe("spec");
+    // Ticket 3.2: the step change records its time.
+    expect(s.table.profiles.get("me-1")?.stepSince).toBe(s.now().toISOString());
     expect(json(await s.call(historyOf()))["step"]).toBe("spec");
     // Pressed twice: still fine.
     expect((await s.call(writeSpec())).statusCode).toBe(200);

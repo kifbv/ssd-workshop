@@ -196,6 +196,8 @@ describe("criterion 2: WHEN the check passes THEN the step is building and exact
     ]);
     expect(s.builds.sent).toEqual([{ buildId, participantId: "me-1" }]);
     expect(s.table.profiles.get("me-1")?.step).toBe("building");
+    // Ticket 3.2: the step change records its time.
+    expect(s.table.profiles.get("me-1")?.stepSince).toBe("2026-11-24T10:00:00.000Z");
     expect(s.table.conversations.get("me-1")).toMatchObject({ buildId, approvedSpecVersion: 1 });
     expect(s.table.conversations.get("me-1")?.pendingId).toBeUndefined();
     expect(s.table.replies.get("me-1")?.get(id)).toMatchObject({ text: READY_REPLY, kind: "answer", promptVersion: READINESS_PROMPT_VERSION, modelId: MODEL_ID });
