@@ -221,6 +221,63 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the command prints or fails THEN no email address, participant id, token or message text is in its output (test)
 - WHEN Franck runs it for his test participant THEN the page shows step 1 after reloading and the next approved spec builds into a new repository (live check, Franck)
 
+### 2.14 Apps may use free, keyless outside services
+
+Franck, 2026-11-25: participants' ideas often want outside data (movie posters, book covers, weather, exchange rates). Apps may now read data and show images from free public services that need no key, over HTTPS. Scripts, styles and fonts still come only from the app's own files. Every layer that says "no outside service" today changes together: the apps' sandbox header (a new headers policy version), the deploy check (it accepts `https://` addresses and refuses any other outside address, and it now also refuses an API key or access token written in a file), the readiness check, the Clarify and spec prompts, the guardrail, and the builder's `AGENTS.md`. The `AGENTS.md` gets a short list of known keyless services that answer browsers (question 8). Spec delta below (question 7). $0.
+
+```mermaid
+flowchart LR
+  visitor[Visitor's browser] --> app[App at /apps/nickname/<br/>sandboxed]
+  app -->|data: fetch https| svc[Free keyless service<br/>e.g. Wikipedia, Open-Meteo]
+  app -->|images: img https| img[Image host<br/>e.g. upload.wikimedia.org]
+  app -->|own data| api[Workshop data API]
+  app -. scripts, styles, fonts:<br/>own files only .-> app
+```
+
+Depends on: 2.3, 2.7, 2.8 merged (all are). Areas: infra (edge headers policy), platform (deploy check, prompts, evals), templates (`AGENTS.md`), docs.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN `/apps/<nickname>/` is served THEN its policy is `sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'` under a new versioned headers policy (synth test of the headers policy; live check in `infra/README.md`)
+- WHEN a page under that policy fetches JSON from another HTTPS origin that answers with CORS and shows an `<img>` from it THEN both work, and a `<script>`, stylesheet or font from that origin and a fetch to an `http:` address are blocked (Playwright test with two local origins, `template.test.ts`)
+- WHEN an app file holds an `https://` address THEN the deploy check accepts it, and WHEN it holds `http:`, `ws:`, `wss:`, `ftp:`, any other scheme, a scheme-relative `//host` or an address with a user name or password in it THEN the check still refuses it (tests in `check.test.ts`, the existing 256 KB line time limits kept)
+- WHEN an app file holds an API key or token (`api_key=`, `apikey=`, `access_token=`, `key=` with a long value in an address, or an `Authorization` header) THEN the deploy check refuses it (tests)
+- WHEN the guardrail eval runs THEN an idea that wants a free outside service is on-path and one that needs someone's key, password or account is still flagged (`npm run eval -- guardrails`)
+- WHEN the readiness eval runs THEN a spec that reads from a free public service is ready, and a spec that needs a key, a login to another service, emails, notifications, payments or an AI service is not ready (`npm run eval -- readiness`, new examples)
+- WHEN the Clarify eval runs on the movie idea THEN the first reply no longer says outside services are impossible, and it asks nothing technical (`npm run eval -- clarify`)
+- WHEN `npm run eval -- build` runs on a new example spec (a movie watchlist with posters and summaries from Wikipedia) THEN the result passes the deploy check, holds no key, and loads in Playwright under the new policy at 375 px with no console error, with the network open (eval)
+- WHEN Franck opens a built app that reads an outside service THEN its data and images show on his phone (live check, Franck)
+
+Spec delta (approved by Franck 2026-11-25):
+
+- **CHANGED, section 4 item 1.** Old: "No servers, no logins, no outside APIs, no payments." New: "No servers, no logins, no payments. An app may read data and show images from free public services that need no key, over HTTPS; its scripts, styles and fonts come only from its own files."
+- **CHANGED, section 4 item 3.** Old: "Before deploy, an automatic check rejects a build that adds files outside the template's allowed types, calls outside domains, or exceeds 5 MB." New: "Before deploy, an automatic check rejects a build that adds files outside the template's allowed types, uses an outside address that is not HTTPS, holds an API key or token, or exceeds 5 MB."
+
+### 2.15 The coding agent can use the web
+
+Franck, 2026-11-25: without the web, the coding agent writes calls to outside services from memory and cannot see whether an address still answers or what its data looks like. Franck chose the full web tool over a narrow one. The agent gets Claude Code's own `WebFetch` (it reads a page or an API answer and summarises it with the build model), and `WebSearch` if Claude Code offers it on Bedrock (if not, the build notes say so and only `WebFetch` is added). The deny-by-default hook lets `WebFetch` through only for `https://` addresses with a host name: no IP addresses, no `localhost` or single-label names, no `.internal`/`.local` names, no user name, password or port. The task's credentials address (`169.254.170.x`) answers only plain `http` on a path the agent never sees, because the runner keeps that variable out of the agent's environment. Fetched pages are data for the agent, never instructions, and the system prompt says so. The agent still has no shell and no credentials, and the deploy check still decides what goes live.
+
+```mermaid
+flowchart LR
+  agent[Coding agent<br/>files + WebFetch] -->|hook: https, named host only| web[Public web<br/>docs, APIs]
+  agent -. refused by hook .-> meta[IP addresses, localhost,<br/>169.254.x, internal names]
+  agent --> files[Workspace files] --> check[Deploy check] --> live[Live app]
+```
+
+Depends on: 2.14. Areas: platform (builder), docs.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN the agent's tools are listed THEN they are Read, Write, Edit, Glob and WebFetch (plus WebSearch only if Bedrock offers it), and Bash and every other tool stay disallowed (test in `agent.test.ts`)
+- WHEN WebFetch is called with an `https://` address of a named public host THEN the hook allows it (test in `permissions.test.ts`)
+- WHEN WebFetch is called with `http:`, another scheme, an IPv4 or IPv6 address in any form (`169.254.170.2`, `[::1]`, `0x7f000001`, `2130706433`), `localhost`, a single-label or `.internal`/`.local` name, a user name, password or port THEN the hook denies it (tests)
+- WHEN the agent's environment is built THEN it holds no `AWS_CONTAINER_*` or `ECS_CONTAINER_METADATA_*` variable (existing test kept)
+- WHEN `npm run eval -- build` runs the Wikipedia watchlist example THEN the agent fetched at least one page and the app passes as in 2.14 (eval; the feed shows each fetch)
+
+Spec delta (Franck asked for it 2026-11-25):
+
+- **CHANGED, section 5 "Builder"** (wording approved with question 4 of this brief). Old: "The coding agent holds no AWS rights; the builder task may only call Claude, report progress and hand the result to the deployer." New: "The coding agent holds no AWS rights; besides its files it may read the public web (web fetch, and web search where available). The builder task may only call Claude, report progress and hand the result to the deployer."
+
 ## Questions for Franck
 
 1. **(Answered: yes.) New paid services:** ECS Fargate (about $0.01 per 10-minute build), ECR (about $0.10 a month), Secrets Manager ($0.40 a month for one secret) and a public IPv4 address per running build task ($0.005 an hour). At rest under $1 a month more; Bedrock for builds about $0.50 to $2 each, so phase 2's tests and evals about $20 to $50. No NAT gateway. Suggested: yes.
@@ -229,6 +286,9 @@ Acceptance criteria (each starts as FAIL):
 4. **(Answered: yes, spec delta approved.) Builder's AWS rights and the coding agent** (spec delta, CHANGED: section 5 "Builder ... has no AWS rights"). The container must call Claude on Bedrock. Suggested: the coding agent (Claude Agent SDK, the engine behind Claude Code) gets only file tools inside its workspace, no shell and no network, and holds no credentials; the runner around it holds a role that can only call the Sonnet 4.6 EU profile, write its build's records and hand off to the deployer. New wording: "The coding agent holds no AWS rights; the builder task may only call Claude, report progress and hand the result to the deployer."
 5. **(Answered: sandboxed.) Apps run sandboxed** on `workshop.rankly.games/apps/<nickname>/`: no cookies and no `localStorage`, storage only through the data API, which anyone with the app's address can read and write (as the spec says). Suggested: yes. The alternative, a separate address such as `apps.workshop.rankly.games`, needs a DNS record and a spec delta.
 6. **(Answered: leave the files until the next build.) (2.13) Taking the old app offline on a reset.** Only the deployer's role may change app files (bucket policy). Suggested: leave the files until the next build, whose deploy already removes stale files; no access change. Alternatives: an undeploy job through the deployer, or adding Franck's principal to the bucket policy exception.
+7. **(Answered: yes, Franck 2026-11-25.) (2.14) Spec delta for outside services** (above): apps may read data and show images from any HTTPS address, and scripts, styles and fonts stay their own. Suggested: yes. Allowing scripts or styles from other sites (CDN libraries) would let an outside server run code in every app that uses it, so it stays out.
+8. **(Answered: yes, the suggested list; Franck also asked for the coding agent to get the full web tool, ticket 2.15.) (2.14) Who picks the service.** The coding agent has no network, so it writes the calls from what it knows and cannot try them. Suggested: `AGENTS.md` lists a few well-known keyless services that answer browsers, and the agent prefers them: Wikipedia (summaries and images, film posters included), Open Library (books and covers), Open-Meteo (weather), Frankfurter (exchange rates), TVMaze (TV shows), REST Countries. The Clarify and spec steps name the information in plain words ("movie posters from Wikipedia"), and the app shows a friendly message when the service does not answer. Any other free keyless service stays allowed. Alternative: only the listed services, enforced in the sandbox header (safer, but narrower).
+9. **(Answered: risk accepted.) (2.14) New accepted risk.** An app can send what its visitors type to any HTTPS address (a fake sign-in form, for example), and visitors' IP addresses and searches reach the services it uses. Forms still post only to the app itself. Suggested: accept it for the workshop. Apps are public code in GitHub, built from participants' own specs, and seen only by colleagues. Phase 5's read-only apps after the workshop apply. The alternative is the allow-list from question 8.
 
 ## Blocked
 
