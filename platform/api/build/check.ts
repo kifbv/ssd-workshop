@@ -304,7 +304,6 @@ const shorten = (address: string): string => (address.length > TOO_LONG ? `${add
 const outsideAddressReason = (address: string): string =>
   `It refers to an outside address that is not allowed (${shorten(address)}). An app may use its own files and outside addresses written plainly as https:// and the site's name, with no user name, password or port.`;
 
-/** The outside addresses in one reading of a line (`original`: the line as written), in the order they appear. */
 /** The plain https starts (`https://host`) of a line as written, each found once by the same scan: linear. */
 function writtenStarts(line: string): Set<string> {
   const starts = new Set<string>();
@@ -315,6 +314,10 @@ function writtenStarts(line: string): Set<string> {
   return starts;
 }
 
+/**
+ * The outside addresses in one reading of a line, in the order they appear. `written` holds the plain https starts of
+ * the line as written (`writtenStarts`), or is undefined when this reading is that line.
+ */
 function addressesIn(line: string, written: ReadonlySet<string> | undefined): string[] {
   const found: { at: number; address: string }[] = [];
   for (const match of line.matchAll(SCHEME_ADDRESS)) {
