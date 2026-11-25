@@ -129,6 +129,16 @@ describe("outside addresses (criterion 3; ticket 2.14: plain https:// addresses 
     ["fetch(`https://a.b${f(x)}`)", "app.js"],
     ["<a href='https://a.b\"@evil.example/'>x</a>", "index.html"],
     ["fetch(`https://a.b${x}\"@evil.example/`)", "app.js"],
+    // Ticket 2.14 try 4: punctuation after an address in prose is trimmed, but a port, a user name or an at sign is not.
+    ["Data from https://a.b:8080. thanks", "notes.md"],
+    ["Data from https://a.b:8080", "notes.md"],
+    ["Data from https://a.b.@evil.example", "notes.md"],
+    ["Data from https://user:pw@a.b.", "notes.md"],
+    ["Data from https://a.b:@evil.", "notes.md"],
+    ["<p>Data from http://a.b.</p>", "index.html"],
+    ["Chat on wss://a.b, live", "notes.md"],
+    ["<a href='https://a.b,\"@evil.example/'>x</a>", "index.html"],
+    ["<a href='https://a.b.;\"@evil.example/'>x</a>", "index.html"],
     // An https address written with escapes or entities is refused: write it plainly.
     ['<img src="https&#58;&#47;&#47;images.example.com/a.png">', "index.html"],
     ['fetch("https://ex\\u0061mple.com/x")', "app.js"],
@@ -234,6 +244,15 @@ describe("outside addresses (criterion 3; ticket 2.14: plain https:// addresses 
     // An at sign after a space, a tag's end or a comma is not part of the address.
     '<a href="https://example.com">Mail me</a> at me@example.com',
     "Data from https://example.com @someone",
+    // Ticket 2.14 try 4: punctuation that ends a sentence or a clause is not part of the address.
+    "Data from https://en.wikipedia.org, thanks",
+    "Posters come from https://upload.wikimedia.org.",
+    "<p>Data from https://open-meteo.com.</p>",
+    "Weather by https://open-meteo.com; free",
+    "<!-- https://api.frankfurter.app: rates -->",
+    "(see https://open-meteo.com!)",
+    "Is it https://open-meteo.com?",
+    "Thanks to https://open-meteo.com.\" said the page",
   ])("accepts the plain https address in %s (ticket 2.14)", (line) => {
     expect(check(text("app.js", line), text("page.html", line), text("notes.md", line)).problems).toEqual([]);
   });
@@ -356,6 +375,10 @@ describe("outside addresses (criterion 3; ticket 2.14: plain https:// addresses 
     ["set calls", '.set("key", "'],
     ["set calls and long values", '.set("appid","a1'],
     ["joined query values", '?appid=" + "'],
+    // Ticket 2.14 try 4.
+    ["https addresses ending a sentence", "https://a.b. "],
+    ["https addresses before a colon", "https://a.b:"],
+    ["https addresses and runs of punctuation", "https://a.b.,;:!?"],
   ])("scans a line of 256 KB of %s within a second, for addresses and keys (ticket 2.14)", (_name, unit) => {
     const line = unit.repeat(Math.ceil((256 * 1024) / unit.length));
     for (const variant of [line, `=${line}`, `"${line}`, `?key=${line}`, `api_key ${line}`, `key: "${line}`, `https://a.b${line}`]) {

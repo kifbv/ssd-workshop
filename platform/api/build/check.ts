@@ -3,7 +3,8 @@
  * Only allowed file types, at most 5 MB in total, and in text files:
  * - no outside address other than a plain `https://` one (ticket 2.14, spec delta of 2026-11-25): `https://`, a
  *   host of letters, digits, dashes and dots, then the end or `/`, `?`, `#` (or a template literal's `${`, with no
- *   `@` or `:` after it before the path, try 3). No other scheme (`http:`, `ws:`,
+ *   `@` or `:` after it before the path, try 3). Punctuation ending a sentence (`.,;:!?`) right after an address,
+ *   before a space, the line's end, `<`, `)`, `]` or a quote, is not part of it (try 4). No other scheme (`http:`, `ws:`,
  *   `wss:`, `ftp:`, ...), no scheme-relative `//host`, no user name, password or port, and no address written
  *   with escapes or entities (`https&#58;//`, `https:\/\/`). The apps' CSP lets such addresses be read
  *   (`connect-src`) and shown as images (`img-src`) only; scripts, styles and fonts from them are blocked there.
@@ -224,14 +225,35 @@ const extensionOf = (path: string): string => {
  * address that only a decoded reading shows (`https&#58;//host`, `https:\/\/host`, `\x68ttps://host`) is
  * refused, so that what people read in the file is what the browser opens.
  */
-const isAllowedAddress = (address: string, original: string, line: string, at: number): boolean => {
-  const lower = address.toLowerCase();
+const isAllowedAddress = (match: string, original: string, line: string, end: number): boolean => {
+  const lower = match.toLowerCase();
   if (NAMESPACE_ADDRESSES.some((name) => name.toLowerCase() === lower)) return true;
+  const address = withoutProsePunctuation(match, line[end]);
   const start = PLAIN_HTTPS.exec(address)?.[0];
   if (start === undefined || !original.includes(start)) return false;
   const tail = hostTail(address, start.length);
-  return tail === "path" || (tail === "end" && !atSignAfter(line, at + address.length));
+  return tail === "path" || (tail === "end" && !atSignAfter(line, end));
 };
+
+/** Punctuation that may end a sentence or a clause right after an address. */
+const PROSE_PUNCTUATION = ".,;:!?";
+/** What may follow such punctuation for it to be prose: the end of the line, a space, a tag, a bracket or a quote. */
+const PROSE_AFTER = `<)]"'\``;
+
+/**
+ * The address without the punctuation that ends a sentence around it (ticket 2.14 try 4): `Data from
+ * https://open-meteo.com.` or `https://en.wikipedia.org, thanks` is the address `https://open-meteo.com`. A trailing run
+ * of `.,;:!?` is dropped only when what follows the address in the line (`next`) is the end of the line, a space, `<`,
+ * `)`, `]` or a quote; anything inside the address stays (`https://a.b:8080.` is still `https://a.b:8080`,
+ * `https://a.b.@evil.example` keeps its `@`). `atSignAfter` still starts after the whole match, so
+ * `'https://a.b,"@evil.example/'` stays refused. One backward pass over the match's end: linear.
+ */
+function withoutProsePunctuation(address: string, next: string | undefined): string {
+  if (next !== undefined && next > " " && !/\s/.test(next) && !PROSE_AFTER.includes(next)) return address;
+  let end = address.length;
+  while (end > 0 && PROSE_PUNCTUATION.includes(address[end - 1] ?? "")) end -= 1;
+  return address.slice(0, end);
+}
 
 /**
  * What follows the host of a plain https address, up to its path (ticket 2.14 try 3): `path` when a `/`, `?` or `#`
@@ -284,7 +306,8 @@ const outsideAddressReason = (address: string): string =>
 function addressesIn(line: string, original: string): string[] {
   const found: { at: number; address: string }[] = [];
   for (const match of line.matchAll(SCHEME_ADDRESS)) {
-    if (!isAllowedAddress(match[0], original, line, match.index)) found.push({ at: match.index, address: match[0] });
+    const end = match.index + match[0].length;
+    if (!isAllowedAddress(match[0], original, line, end)) found.push({ at: match.index, address: match[0] });
   }
   for (const match of line.matchAll(BARE_SCHEME)) found.push({ at: match.index, address: match[0] });
   for (const match of line.matchAll(RELATIVE_ADDRESS)) {
