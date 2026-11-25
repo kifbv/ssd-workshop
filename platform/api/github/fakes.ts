@@ -69,6 +69,10 @@ export class FakeGitHub {
   overrideTokenAnswer: Record<string, unknown> | undefined;
   /** Organization the installation reports. */
   installationAccount = APPS_GITHUB_OWNER;
+  /** Names of the repositories deleted (ticket 2.13), in order. */
+  readonly deleted: string[] = [];
+  /** When set, the next DELETE of a repository answers this status instead (a GitHub hiccup), then works again. */
+  failNextDelete: number | undefined;
   /** Default branch of repositories created from now on (the organization's setting). */
   defaultBranch = "main";
 
@@ -249,6 +253,20 @@ export class FakeGitHub {
     if (rest === "" && method === "GET") {
       if (!this.canUse(auth, undefined, "administration")) return json(401, { message: "Bad credentials" });
       return repo ? json(200, this.repoJson(repo)) : json(404, { message: "Not Found" });
+    }
+    if (rest === "" && method === "DELETE") {
+      if (this.failNextDelete !== undefined) {
+        const status = this.failNextDelete;
+        this.failNextDelete = undefined;
+        return json(status, { message: "Server Error" });
+      }
+      // Deleting needs administration write on the repository (else 404, as GitHub hides what a token cannot reach); 204
+      // with no body, 404 when it is gone.
+      if (!this.canUse(auth, name, "administration")) return json(404, { message: "Not Found" });
+      if (!repo) return json(404, { message: "Not Found" });
+      this.repositories.delete(name);
+      this.deleted.push(name);
+      return new Response(null, { status: 204 });
     }
     if (!repo || !this.canUse(auth, name, "contents")) return json(404, { message: "Not Found" });
     if (method === "PUT" && rest.startsWith("/contents/")) {

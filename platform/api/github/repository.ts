@@ -379,3 +379,38 @@ async function isLoneOpeningCommit(
     only.sha === BOOTSTRAP_BLOB_ID
   );
 }
+
+/**
+ * The operator's view of the app repositories (ticket 2.13, `npm run participant -- reset`): whether a participant's
+ * repository exists, and deleting it. Holds one organization-wide token checked to grant only `administration: write`
+ * (plus `metadata: read`), the same the launcher uses to create repositories; it stays in this object, is never
+ * returned or printed, and expires within the hour. Opening it reads nothing but the installation, so a reset that
+ * cannot reach GitHub fails before it changes anything.
+ */
+export interface RepositoryAdmin {
+  /** True when the participant's repository exists (200), false when GitHub answers 404. */
+  exists(nickname: string): Promise<boolean>;
+  /** Deletes the participant's repository: true when deleted (204), false when it was already gone (404). */
+  remove(nickname: string): Promise<boolean>;
+}
+
+export async function openRepositoryAdmin(credentials: AppCredentials, deps: GitHubDeps): Promise<RepositoryAdmin> {
+  const jwt = appJwt(credentials, deps.now());
+  const installation = await findInstallation(deps, jwt);
+  const { token } = await adminToken(deps, jwt, installation.id);
+  const path = (nickname: string) => `/repos/${APPS_GITHUB_OWNER}/${repositoryNameFor(nickname)}`;
+  return {
+    async exists(nickname) {
+      const answer = await githubCall(deps, "get-repository", "GET", path(nickname), token);
+      if (answer.status === 404) return false;
+      expectStatus(answer, "get-repository", 200);
+      return true;
+    },
+    async remove(nickname) {
+      const answer = await githubCall(deps, "delete-repository", "DELETE", path(nickname), token);
+      if (answer.status === 404) return false;
+      expectStatus(answer, "delete-repository", 204);
+      return true;
+    },
+  };
+}

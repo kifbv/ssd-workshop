@@ -13,6 +13,7 @@ import {
   REBUILD_COMMIT_MESSAGE,
   builderToken,
   commitRequest,
+  openRepositoryAdmin,
   prepareRepository,
   repositoryNameFor,
   withSpec,
@@ -706,5 +707,55 @@ describe("logs (criterion 5)", () => {
     for (const secretish of ["ada-lovelace", "ssd-hana", "Plant diary", "example.com", "ssd-workshop-apps/"]) {
       expect(all.toLowerCase()).not.toContain(secretish.toLowerCase());
     }
+  });
+});
+
+describe("openRepositoryAdmin (ticket 2.13, the operator's reset)", () => {
+  it("asks for administration write only and checks GitHub's answer before using the token", async () => {
+    const s = setup();
+    await openRepositoryAdmin(credentials, s.deps);
+    const tokenCall = s.github.calls.find((c) => c.path.endsWith("/access_tokens"));
+    expect(tokenCall?.body).toEqual({ permissions: { administration: "write" } });
+
+    const greedy = setup();
+    greedy.github.overrideTokenAnswer = { permissions: { administration: "write", contents: "write", metadata: "read" } };
+    await expect(openRepositoryAdmin(credentials, greedy.deps)).rejects.toThrow("grants more than administration write");
+  });
+
+  it("says whether the repository exists and deletes it: 204 deleted, 404 already gone", async () => {
+    const s = setup();
+    s.github.addRepository("ssd-ada");
+    const admin = await openRepositoryAdmin(credentials, s.deps);
+    await expect(admin.exists("Ada")).resolves.toBe(true);
+    await expect(admin.remove("Ada")).resolves.toBe(true);
+    expect(s.github.deleted).toEqual(["ssd-ada"]);
+    await expect(admin.exists("Ada")).resolves.toBe(false);
+    await expect(admin.remove("Ada")).resolves.toBe(false);
+    expect(s.github.calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
+      "/repos/ssd-workshop-apps/ssd-ada",
+      "/repos/ssd-workshop-apps/ssd-ada",
+    ]);
+  });
+
+  it("fails plainly on any other answer, naming the step and status but never the token or the repository", async () => {
+    const s = setup();
+    s.github.addRepository("ssd-ada");
+    s.github.failNextDelete = 500;
+    const admin = await openRepositoryAdmin(credentials, s.deps);
+    const error = await admin.remove("Ada").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toBe('GitHub answered 500 to the step "delete-repository".');
+    expect(message).not.toContain(FAKE_TOKEN_PREFIX);
+    expect(message).not.toContain("ssd-ada");
+    expect(s.github.repositories.has("ssd-ada")).toBe(true);
+  });
+
+  it("refuses a nickname outside the workshop's rules before calling GitHub", async () => {
+    const s = setup();
+    const admin = await openRepositoryAdmin(credentials, s.deps);
+    const before = s.github.calls.length;
+    await expect(admin.remove("../x")).rejects.toThrow("does not follow the workshop's rules");
+    expect(s.github.calls).toHaveLength(before);
   });
 });

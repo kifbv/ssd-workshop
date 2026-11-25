@@ -21,7 +21,8 @@
     "flags": "npm run -s flags -w platform --",
     "eval": "npm run -s eval -w platform --",
     "conversation": "npm run -s conversation -w platform --",
-    "builds": "npm run -s builds -w platform --"
+    "builds": "npm run -s builds -w platform --",
+    "participant": "npm run -s participant -w platform --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

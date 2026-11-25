@@ -10,7 +10,7 @@ import {
   type QueryCommandOutput,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { conversationKey, MESSAGE_PREFIX, nicknameKey, participantKey, SPEC_PREFIX } from "../../api/keys.js";
+import { buildKey, conversationKey, MESSAGE_PREFIX, nicknameKey, participantKey, SPEC_PREFIX } from "../../api/keys.js";
 import { conditionFailed } from "../../api/conversation/store.js";
 
 /** What the command needs to know before it resets anything. */
@@ -25,6 +25,8 @@ export interface ResetState {
   updatedAt?: string;
   /** Whether the conversation item exists (a participant who never wrote has none). */
   exists: boolean;
+  /** The build the readiness check started (ticket 2.7), if any: both resets check its status (ticket 2.13). */
+  buildId?: string;
 }
 
 /** The items a reset deletes: sort keys of the participant's messages, replies and spec versions. */
@@ -39,6 +41,8 @@ export interface ResetStore {
   /** The participant's step, or undefined when there is no profile. */
   getStep(participantId: string): Promise<string | undefined>;
   getResetState(participantId: string): Promise<ResetState>;
+  /** The build's status (`queued`, `building`, `deploying`, `live`, `failed`), or undefined when there is no such build. */
+  getBuildStatus(buildId: string): Promise<string | undefined>;
   listResetItems(participantId: string): Promise<ResetItems>;
   /**
    * Deletes the conversation item and puts the step back to clarify, in one transaction, on condition
@@ -95,12 +99,12 @@ export function unchangedSince(seen: ResetState): {
 
 export class DynamoResetStore implements ResetStore {
   constructor(
-    private readonly sender: ResetSender,
-    private readonly table: string,
+    protected readonly sender: ResetSender,
+    protected readonly table: string,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
-  private async getAttributes(key: { pk: string; sk: string }, names: string[]): Promise<Record<string, AttributeValue> | undefined> {
+  protected async getAttributes(key: { pk: string; sk: string }, names: string[]): Promise<Record<string, AttributeValue> | undefined> {
     const output = await this.sender.send(
       new GetItemCommand({
         TableName: this.table,
@@ -122,18 +126,24 @@ export class DynamoResetStore implements ResetStore {
   }
 
   async getResetState(participantId: string): Promise<ResetState> {
-    const item = await this.getAttributes(conversationKey(participantId), ["pk", "pendingId", "pendingSince", "state", "updatedAt"]);
+    const item = await this.getAttributes(conversationKey(participantId), ["pk", "pendingId", "pendingSince", "state", "updatedAt", "buildId"]);
     const pendingId = item?.["pendingId"]?.S;
     const pendingSince = item?.["pendingSince"]?.N;
     const state = item?.["state"]?.S;
     const updatedAt = item?.["updatedAt"]?.S;
+    const buildId = item?.["buildId"]?.S;
     return {
       exists: item?.["pk"] !== undefined,
       ...(pendingId === undefined ? {} : { pendingId }),
       ...(pendingSince === undefined ? {} : { pendingSince: Number(pendingSince) }),
       ...(state === undefined ? {} : { state }),
       ...(updatedAt === undefined ? {} : { updatedAt }),
+      ...(buildId === undefined ? {} : { buildId }),
     };
+  }
+
+  async getBuildStatus(buildId: string): Promise<string | undefined> {
+    return (await this.getAttributes(buildKey(buildId), ["status"]))?.["status"]?.S;
   }
 
   async listResetItems(participantId: string): Promise<ResetItems> {
@@ -191,7 +201,11 @@ export class DynamoResetStore implements ResetStore {
   }
 
   async deleteItems(participantId: string, sortKeys: readonly string[]): Promise<void> {
-    const pk = conversationKey(participantId).pk;
+    await this.deleteKeys(conversationKey(participantId).pk, sortKeys);
+  }
+
+  /** Deletes the given sort keys of one partition, in batches of 25, retrying what DynamoDB leaves unprocessed. */
+  protected async deleteKeys(pk: string, sortKeys: readonly string[]): Promise<void> {
     for (let i = 0; i < sortKeys.length; i += BATCH_SIZE) {
       let requests: { DeleteRequest: { Key: Record<string, AttributeValue> } }[] = sortKeys.slice(i, i + BATCH_SIZE).map((sk) => ({ DeleteRequest: { Key: { pk: str(pk), sk: str(sk) } } }));
       for (let attempt = 1; requests.length > 0; attempt++) {
