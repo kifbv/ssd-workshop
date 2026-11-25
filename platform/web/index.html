@@ -187,11 +187,28 @@
         <p id="message-build" class="message" role="status" aria-live="polite"></p>
       </section>
 
-      <!-- Step 4, Live (ticket 2.10 shows it; ticket 2.11 adds the QR code, the repository link and its explanation). -->
+      <!-- Step 4, Live (tickets 2.10 and 2.11): the address, a QR code drawn in the page, the repository and how the app got there. -->
       <section id="screen-live" class="card" data-screen aria-labelledby="live-heading" hidden>
         <h2 id="live-heading" tabindex="-1">Step 4: Live</h2>
         <p class="live-title"><strong>Your app is live</strong></p>
-        <p id="live-address" hidden>Open it at <a id="live-link" rel="noopener" target="_blank"></a></p>
+        <p id="live-address" hidden>Open it at <a id="live-link" rel="noopener noreferrer" target="_blank"></a></p>
+        <figure id="live-qr" class="qr" hidden>
+          <div id="live-qr-code" class="qr-code"></div>
+          <figcaption>Scan it with your phone's camera to open your app there.</figcaption>
+        </figure>
+        <p id="live-repository" hidden>Your app's code is public on GitHub: <a id="live-repository-link" rel="noopener noreferrer" target="_blank"></a></p>
+        <p id="live-next" class="notice">Next: you will be able to ask for changes to your app, and the AI builds a new version.</p>
+
+        <aside id="live-behind" class="behind" aria-labelledby="live-behind-heading">
+          <h3 id="live-behind-heading">Behind the scenes</h3>
+          <ol id="live-behind-flow" class="flow">
+            <li data-part="github">GitHub repository</li>
+            <li data-part="deployer">Deployer: checks, then publishes</li>
+            <li data-part="storage">Amazon S3 and CloudFront</li>
+            <li data-part="address" data-current="true">Your address</li>
+          </ol>
+          <p class="help">Your app's files are in your public GitHub repository. The deployer downloaded exactly what GitHub holds, checked it once more against the workshop's rules and copied it to the workshop's storage on Amazon S3. Amazon CloudFront serves it at your address, on a laptop or a phone alike; the QR code holds the same address. Your app runs in a sandbox: it never sees anyone's sign-in, and it keeps its data through the workshop's data API.</p>
+        </aside>
         <p id="message-live" class="message" role="status" aria-live="polite"></p>
       </section>
     </main>

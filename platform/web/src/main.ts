@@ -1,5 +1,5 @@
 // Sign-in screens (ticket 1.6): email, code, nickname, then the step screen; step 1, Clarify (ticket
-// 1.8), step 2, Spec and approval (ticket 1.9), step 3, Build, and the start of step 4, Live (ticket 2.10). The rules for each API answer are in ./flow.ts,
+// 1.8), step 2, Spec and approval (ticket 1.9), step 3, Build (ticket 2.10), and step 4, Live (tickets 2.10 and 2.11). The rules for each API answer are in ./flow.ts,
 // ./chat.ts and ./spec-view.ts; this file only wires them to the page. Both steps share one
 // conversation, polling and Send form logic, each on its own elements (`VIEWS`).
 //
@@ -35,6 +35,7 @@ import {
 import type { DiagramApi } from "./diagram.js";
 import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
+import { qrModules, qrSvgPath } from "./qr.js";
 import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, stageStates, type Build } from "./build-view.js";
 
 type ScreenName = Screen | "loading";
@@ -461,7 +462,7 @@ async function drawDiagram(source: string, title: string, round: number): Promis
   }
 }
 
-// ---- Step 3: the live build feed, and step 4 once live (ticket 2.10) ----
+// ---- Step 3: the live build feed, and step 4 once live (tickets 2.10 and 2.11) ----
 
 let buildTimer: number | undefined;
 /** Bumped whenever build polling starts or stops, so an answer to an older poll is ignored. */
@@ -564,16 +565,49 @@ function renderBuild(build: Build): void {
   );
 }
 
-/** Step 4 (ticket 2.10; ticket 2.11 completes it): the app is live at its address. */
+/**
+ * Step 4 (tickets 2.10 and 2.11): the app's address as a link and as a QR code, and the repository link. Only the
+ * addresses `parseBuild` validated reach the page, set with `href` and `textContent`; each part stays hidden
+ * without its address.
+ */
 function showLive(build: Build): void {
   const link = byId<HTMLAnchorElement>("live-link");
+  const code = byId("live-qr-code");
   if (build.appUrl !== undefined) {
     link.href = build.appUrl;
     link.textContent = build.appUrl;
-  }
+    code.replaceChildren(qrSvg(build.appUrl));
+  } else code.replaceChildren();
   byId("live-address").hidden = build.appUrl === undefined;
+  byId("live-qr").hidden = build.appUrl === undefined;
+  const repository = byId<HTMLAnchorElement>("live-repository-link");
+  if (build.repositoryUrl !== undefined) {
+    repository.href = build.repositoryUrl;
+    repository.textContent = build.repositoryUrl;
+  }
+  byId("live-repository").hidden = build.repositoryUrl === undefined;
   clearMessage("live");
   show("live", "live-heading");
+}
+
+/** The QR code for `text` as an SVG element: a white square and one black path (no markup, no style attribute). */
+function qrSvg(text: string): SVGSVGElement {
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const { size, d } = qrSvgPath(qrModules(text));
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+  svg.setAttribute("shape-rendering", "crispEdges");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `QR code for ${text}`);
+  const background = document.createElementNS(SVG_NS, "rect");
+  background.setAttribute("width", String(size));
+  background.setAttribute("height", String(size));
+  background.setAttribute("fill", "#ffffff");
+  const modules = document.createElementNS(SVG_NS, "path");
+  modules.setAttribute("d", d);
+  modules.setAttribute("fill", "#000000");
+  svg.append(background, modules);
+  return svg;
 }
 
 /** Sends the message in the current step's form. */

@@ -481,3 +481,25 @@ main:has(#screen-spec:not([hidden])) {
   color: var(--accent);
   font-weight: 600;
 }
+#live-repository-link {
+  color: var(--accent);
+}
+/* Step 4's QR code (ticket 2.11): square, at most 15rem and never wider than the card, black on white in both themes. */
+.qr {
+  margin: 0 0 1rem;
+}
+.qr-code {
+  width: 100%;
+  max-width: 15rem;
+}
+.qr-code svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+.qr figcaption {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
