@@ -7,6 +7,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ALLOWED_EXTENSIONS, KEY_VALUE_MIN_CHARS, MAX_APP_BYTES, MAX_PROBLEMS, checkApp, keysIn, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
 
+/** Fake key values, built at run time so secret scanners do not take the test file for a leak (ticket 2.14). */
+const FAKE_KEY = ["FAKE", "test", "KEY", "0123456789", "not", "REAL"].join("");
+const GOOGLE_LIKE = ["AI", "za", "Sy", FAKE_KEY, "x1"].join("");
+const GOOGLE_LIKE_DASHED = ["AI", "za", "Sy", "D-", FAKE_KEY, "-x1"].join("");
+const GITHUB_LIKE = ["gh", "p_", FAKE_KEY, "q7r8"].join("");
+
 const TEMPLATE_DIR = fileURLToPath(new URL("../../../templates/basic/", import.meta.url));
 
 const text = (path: string, content: string): AppFile => ({ path, kind: "file", bytes: new TextEncoder().encode(content) });
@@ -411,31 +417,31 @@ describe("API keys and tokens (ticket 2.14)", () => {
     ['fetch("https://api.example.com/x?api\\u005fkey=abc123")', "app.js", "api_key="],
     ["See the api_key=abc123 example.", "notes.md", "api_key="],
     // Ticket 2.14 try 2: camelCase and run-together names, and a property named key, token or appid with a long value.
-    ['const weatherApiKey = "FAKEtestKEY0123456789notREAL";', "app.js", "ApiKey ="],
+    [`const weatherApiKey = "${FAKE_KEY}";`, "app.js", "ApiKey ="],
     ['const config = { myAccessToken: "abc123" };', "app.js", "AccessToken:"],
     ["const myApiKey = 'abc123';", "app.js", "ApiKey ="],
     ['const WEATHERAPI_KEY = "abc123";', "app.js", "API_KEY ="],
     ['{ "openWeatherApiKey": "abc123" }', "data.json", 'ApiKey":'],
     ['headers.set("myAccessToken", "abc123");', "app.js", 'AccessToken",'],
-    ['{ "key": "AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW" }', "data.json", "key:"],
-    ['const settings = { key: "FAKEtestKEY0123456789notREAL" };', "app.js", "key:"],
+    [`{ "key": "${GOOGLE_LIKE}" }`, "data.json", "key:"],
+    [`const settings = { key: "${FAKE_KEY}" };`, "app.js", "key:"],
     ['const token = "abc123def456ghi789";', "app.js", "token="],
-    ["config.appid = 'FAKEtestKEY0123456789notREAL';", "app.js", "appid="],
+    [`config.appid = '${FAKE_KEY}';`, "app.js", "appid="],
     ['{ "token" : "abcdef0123456789" }', "data.json", "token:"],
     // Ticket 2.14 try 3: any name ending in key, token or appid, set() calls and query values joined with +.
-    ['const OPENWEATHER_KEY = "FAKEtestKEY0123456789notREAL";', "app.js", "KEY="],
-    ['const myKey = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "Key="],
-    ['const apiToken = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "Token="],
-    ['const WeatherApikey = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "Apikey="],
-    ['const weatherAppId = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "AppId="],
-    ['const my_token = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "token="],
-    ['url.searchParams.set("appid", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6");', "app.js", '"appid",'],
-    ["params.append('key', 'AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW');", "app.js", "'key',"],
-    ['const url = "https://x.y/?appid=" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "appid="],
-    ['const url = "https://x.y/?q=paris&key=" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6";', "app.js", "key="],
+    [`const OPENWEATHER_KEY = "${FAKE_KEY}";`, "app.js", "KEY="],
+    [`const myKey = "${FAKE_KEY}";`, "app.js", "Key="],
+    [`const apiToken = "${FAKE_KEY}";`, "app.js", "Token="],
+    [`const WeatherApikey = "${FAKE_KEY}";`, "app.js", "Apikey="],
+    [`const weatherAppId = "${FAKE_KEY}";`, "app.js", "AppId="],
+    [`const my_token = "${FAKE_KEY}";`, "app.js", "token="],
+    [`url.searchParams.set("appid", "${FAKE_KEY}");`, "app.js", '"appid",'],
+    [`params.append('key', '${GOOGLE_LIKE}');`, "app.js", "'key',"],
+    [`const url = "https://x.y/?appid=" + "${FAKE_KEY}";`, "app.js", "appid="],
+    [`const url = "https://x.y/?q=paris&key=" + "${FAKE_KEY}";`, "app.js", "key="],
     // A key with dashes or underscores still counts when one part mixes letters and digits.
-    ['const MAPS_KEY = "AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY";', "app.js", "KEY="],
-    ['const GITHUB_TOKEN = "ghp_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8";', "app.js", "TOKEN="],
+    [`const MAPS_KEY = "${GOOGLE_LIKE_DASHED}";`, "app.js", "KEY="],
+    [`const GITHUB_TOKEN = "${GITHUB_LIKE}";`, "app.js", "TOKEN="],
     ['const STORAGE_KEY = "movieWatchlist2024";', "app.js", "KEY="],
   ])("fails %s and names the file, the line and what looks like a key, not its value", (line, file, shown) => {
     const result = check(text(file, `first line\n\n${line}\nlast line`));
@@ -479,10 +485,10 @@ describe("API keys and tokens (ticket 2.14)", () => {
     'const sortKey = "title"; const storageKey = "favourite-books-list";',
     'const STORAGE_KEY = "movie-watchlist-v1";',
     'const SAVE_KEY = "book_club_2024_v2"; const listKey = "films-watched-2025";',
-    'const hotkey = "a1b2c3d4e5f6g7h8i9j0"; const turkey = "a1b2c3d4e5f6g7h8i9j0";',
-    'const keyboardLayout = "a1b2c3d4e5f6g7h8i9j0"; const tokenizer = "a1b2c3d4e5f6g7h8i9j0";',
-    'if (key === "a1b2c3d4e5f6g7h8i9j0") go();',
-    'url.searchParams.set("q", "a1b2c3d4e5f6g7h8i9j0"); url.searchParams.set("key", "title");',
+    `const hotkey = "${FAKE_KEY}"; const turkey = "${FAKE_KEY}";`,
+    `const keyboardLayout = "${FAKE_KEY}"; const tokenizer = "${FAKE_KEY}";`,
+    `if (key === "${FAKE_KEY}") go();`,
+    `url.searchParams.set("q", "${FAKE_KEY}"); url.searchParams.set("key", "title");`,
     'const url = "https://x.y/?appid=" + appid;',
   ])("accepts %s", (line) => {
     expect(check(text("app.js", line), text("notes.md", line)).problems).toEqual([]);

@@ -343,7 +343,7 @@ const KEY_SET_CALL = /\.(?:set|append)\(\s*(["'`])(key|token|appid)\1\s*,\s*["'`
 /**
  * A value that looks like a key: `KEY_VALUE_MIN_CHARS` or more letters, digits, `_` and `-`, holding both a letter
  * and a digit; and, when it holds `-` or `_`, one of the parts between them is 8 or more characters long with both a
- * letter and a digit (`AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY`, `ghp_...`). Storage names are words joined with
+ * letter and a digit (`AIzaSy...`, `ghp_...`). Storage names are words joined with
  * dashes or underscores, each part a word, a short version or a year (`movie-watchlist-v1`, `book_club_2024_v2`), so
  * they pass; one long run such as `movieWatchlist2024` under a key's name does not.
  */
