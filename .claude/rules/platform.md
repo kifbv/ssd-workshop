@@ -192,3 +192,8 @@ paths:
   A cloud session's network policy may refuse the services' hosts ("proxy refused the connection" in the tool result, 0
   fetches in the eval): the session environment must allow them (now allowed: en.wikipedia.org, upload.wikimedia.org,
   openlibrary.org, covers.openlibrary.org, api.open-meteo.com, api.frankfurter.app, api.tvmaze.com, restcountries.com).
+- A CommonJS package whose types say `export default` (`jsqr`) type-checks under `NodeNext` only as `import m from "x"; const f = m.default;`
+  (the default import is the module itself); `m.default` is the function at run time in Node.js and in vitest alike (ticket 2.11).
+- Proving a picture the page draws (step 4's QR code, ticket 2.11): screenshot the element, turn the PNG back into pixels in
+  the page (`createImageBitmap` of a `Blob`, `OffscreenCanvas.getImageData`: no file, no network, CSP-safe) and decode them
+  in Node.js (`decodeQrOnScreen` in `pages.test.ts`).

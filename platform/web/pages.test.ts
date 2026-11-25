@@ -8,12 +8,16 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { extname, join, normalize } from "node:path";
+// jsqr is CommonJS: the default import is its module, whose `default` is the decoder (in Node.js and in vitest).
+import jsQRModule from "jsqr";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
 import { BUILD_TEXTS } from "./src/build-view.js";
+
+const jsQR = jsQRModule.default;
 
 const PHONE = { width: 375, height: 667 };
 const EMAIL = "ada@example.com";
@@ -1159,6 +1163,116 @@ describe("step 3: Build (ticket 2.10)", () => {
     expect(await page.locator("#build-behind-flow li[data-current=true]").textContent()).toBe("Build launcher");
     await buildPollAfter(2000);
     expect(api.state.polls).toBe(4);
+  }, 30_000);
+});
+
+// Ticket 2.11: step 4 (Live) complete: the address, its QR code (decoded from the rendered pixels), the repository.
+const LIVE_FEED = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html"), stepEvent("checking"), stepEvent("committing"), stepEvent("deploying")];
+
+/** Takes a screenshot of the QR code as it is on the screen and decodes its pixels with jsQR. */
+async function decodeQrOnScreen(): Promise<string | undefined> {
+  const png = await page.locator("#live-qr-code svg").screenshot();
+  // The browser turns the PNG back into pixels (no file, no network); jsQR reads them here.
+  const image = await page.evaluate(async (base64) => {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("no 2d context");
+    context.drawImage(bitmap, 0, 0);
+    const data = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    return { width: bitmap.width, height: bitmap.height, data: Array.from(data) };
+  }, png.toString("base64"));
+  return jsQR(Uint8ClampedArray.from(image.data), image.width, image.height)?.data;
+}
+
+/** Step 4 with everything a live build shows; the QR code fits the phone screen, square, and nothing scrolls sideways. */
+async function expectLiveScreen(): Promise<void> {
+  await expect.poll(() => screen("live").isVisible()).toBe(true);
+  expect(await screen("build").isVisible()).toBe(false);
+  expect(await page.locator("#live-heading").textContent()).toBe("Step 4: Live");
+  expect(await screen("live").textContent()).toContain("Your app is live");
+  const address = page.getByRole("link", { name: APP_URL });
+  expect(await address.getAttribute("href")).toBe(APP_URL);
+  expect(await address.getAttribute("target")).toBe("_blank");
+  expect(await address.getAttribute("rel")).toBe("noopener noreferrer");
+  const repository = page.getByRole("link", { name: REPOSITORY_URL });
+  expect(await repository.getAttribute("href")).toBe(REPOSITORY_URL);
+  expect(await repository.getAttribute("target")).toBe("_blank");
+  expect(await repository.getAttribute("rel")).toBe("noopener noreferrer");
+  const qr = page.getByRole("img", { name: `QR code for ${APP_URL}` });
+  expect(await qr.isVisible()).toBe(true);
+  expect(await page.locator("#live-next").textContent()).toBe("Next: you will be able to ask for changes to your app, and the AI builds a new version.");
+  // Behind the scenes leads with its diagram, the text under it.
+  expect(await page.locator("#live-behind-flow li").allTextContents()).toEqual([
+    "GitHub repository",
+    "Deployer: checks, then publishes",
+    "Amazon S3 and CloudFront",
+    "Your address",
+  ]);
+  expect(await page.locator("#live-behind > :nth-child(2)").getAttribute("id")).toBe("live-behind-flow");
+  expect(await page.locator("#live-behind > p.help").isVisible()).toBe(true);
+  // 375 px: the QR code is a square inside the screen, big enough to scan.
+  const box = await qr.boundingBox();
+  if (box === null) throw new Error("the QR code has no box");
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(PHONE.width);
+  expect(Math.abs(box.width - box.height)).toBeLessThan(1);
+  expect(box.width).toBeGreaterThanOrEqual(150);
+  await expectNoSideScroll();
+}
+
+describe("step 4: Live (ticket 2.11)", () => {
+  it("WHEN the build turns live THEN step 4 shows the address, the repository link and a QR code that fits 375 px (criteria 1 and 3)", async () => {
+    const api = fakeBuildApi("building", LIVE_FEED);
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    api.state.status = "live";
+    await buildPollAfter(2000);
+    await expectLiveScreen();
+    // No more polls once live.
+    const polls = api.state.polls;
+    await page.clock.runFor(20_000);
+    await settle();
+    expect(api.state.polls).toBe(polls);
+  }, 30_000);
+
+  it("WHEN the QR code is decoded THEN it gives exactly the app's address (criterion 2)", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expectLiveScreen();
+    expect(await decodeQrOnScreen()).toBe(APP_URL);
+  }, 30_000);
+
+  it("WHEN a participant reloads at step 4 THEN they land on step 4 again (criterion 4)", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expectLiveScreen();
+    await page.reload();
+    await expectLiveScreen();
+    expect(await decodeQrOnScreen()).toBe(APP_URL);
+  }, 30_000);
+
+  it("WHEN the answer has no address the page trusts THEN step 4 shows neither a link nor a QR code for it", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    api.state.answer = {
+      status: 200,
+      body: { buildId: "b-1", status: "live", feed: [], repositoryUrl: "https://evil.example/ssd-ada-l", appUrl: "javascript:alert(1)//workshop.rankly.games/apps/ada-l/" },
+    };
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    expect(await screen("live").textContent()).toContain("Your app is live");
+    expect(await page.locator("#live-address").isHidden()).toBe(true);
+    expect(await page.locator("#live-qr").isHidden()).toBe(true);
+    expect(await page.locator("#live-qr-code svg").count()).toBe(0);
+    expect(await page.locator("#live-repository").isHidden()).toBe(true);
+    expect(await page.locator("#screen-live a[href]").count()).toBe(0);
+    await expectNoSideScroll();
   }, 30_000);
 });
 
