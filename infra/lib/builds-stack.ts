@@ -186,10 +186,10 @@ export class BuildsStack extends Stack {
 
     // Ticket 2.9: the builder's task. Its image is the deploy workflow's push, named by digest.
     const digest = builderImageDigest(this.node.tryGetContext(BUILDER_IMAGE_DIGEST_CONTEXT));
-    // Only tasks on the builds cluster may assume the builder's task role (ticket 2.9 try 2). Unverified until the first
-    // live build: that ECS names the task's ARN as aws:SourceArn there; if a task fails with "ECS was unable to assume the
-    // role", widen it to `arn:aws:ecs:<region>:<account>:*` (infra/README.md). The execution role keeps the account-wide
-    // form AWS documents for it (ticket 2.9 try 3, checker 6): ECS may name another ARN when it pulls the image.
+    // Both builder roles trust ECS in this account only (`arn:aws:ecs:<region>:<account>:*`, the form AWS documents).
+    // Try 2 pinned the task role to `task/<builds cluster>/*`; the first live build's RunTask was refused with a
+    // ClientException (2026-11-25), ECS checking the trust before any task ARN exists. Only the launcher may RunTask
+    // and pass this role (boundary `RunBuilds`, `NoLauncherForSessions`), which is what keeps other tasks off it.
     const taskPrincipal = (sourceArn: string) =>
       new ServicePrincipal("ecs-tasks.amazonaws.com", {
         conditions: { StringEquals: { "aws:SourceAccount": ACCOUNT }, ArnLike: { "aws:SourceArn": sourceArn } },
@@ -203,7 +203,7 @@ export class BuildsStack extends Stack {
     // the deploy queue. Nothing else: no secret, no other table partition, no other queue.
     const taskRole = new Role(this, "BuilderTaskRole", {
       roleName: BUILDER_TASK_ROLE_NAME,
-      assumedBy: taskPrincipal(`arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`),
+      assumedBy: taskPrincipal(`arn:aws:ecs:${REGION}:${ACCOUNT}:*`),
       description: "The builder task's runner: the build model, its build record, usage counters, the deploy queue",
     });
     const executionRole = new Role(this, "BuilderExecutionRole", {

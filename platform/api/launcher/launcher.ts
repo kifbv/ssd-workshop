@@ -134,6 +134,20 @@ export interface DeadLetters {
   remove(receiptHandle: string): Promise<void>;
 }
 
+/**
+ * AWS's own explanation of a refused ECS call (`ClientException`, `InvalidParameterException`, `AccessDeniedException`,
+ * for example "ECS was unable to assume the role ..."), cut to 300 characters, so a refused RunTask can be diagnosed
+ * from the logs (first live build after 2.9). ECS's messages name resources and settings, never override values, so the
+ * build's token never reaches the log; other errors keep their name only.
+ */
+export function ecsRefusal(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const { name, message, $metadata } = error as { name?: unknown; message?: unknown; $metadata?: unknown };
+  if ($metadata === undefined || typeof message !== "string") return undefined;
+  if (name !== "ClientException" && name !== "InvalidParameterException" && name !== "AccessDeniedException") return undefined;
+  return message.slice(0, 300);
+}
+
 export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "failed";
 
 export interface LauncherLogEntry {
@@ -216,7 +230,14 @@ class LaunchFailure extends Error {
 export async function processLaunch(body: string | undefined, deps: LauncherDeps): Promise<LaunchOutcome> {
   const started = deps.now().getTime();
   const log = (outcome: LaunchOutcome, error?: unknown): void => {
-    deps.log({ event: "launcher", outcome, ...(error === undefined ? {} : { error: errorName(error) }), durationMs: Math.max(0, deps.now().getTime() - started) });
+    const detail = ecsRefusal(error);
+    deps.log({
+      event: "launcher",
+      outcome,
+      ...(error === undefined ? {} : { error: errorName(error) }),
+      ...(detail === undefined ? {} : { detail }),
+      durationMs: Math.max(0, deps.now().getTime() - started),
+    });
   };
   const buildId = parseLaunchMessage(body);
   if (buildId === undefined) {
