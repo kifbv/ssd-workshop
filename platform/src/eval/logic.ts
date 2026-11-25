@@ -172,6 +172,8 @@ export interface ClarifyExample {
   newKeywords: string[];
   /** change-of-mind: no numbered question names any of these (whole word, plural allowed). */
   oldKeywords: string[];
+  /** first-reply: when not empty, the reply names at least one of these (start of a word), e.g. the outside-service limit. */
+  mentions: string[];
 }
 
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim() !== "");
@@ -188,7 +190,7 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: ClarifyExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { name, check, history = [], text, newKeywords = [], oldKeywords = [] } = (e ?? {}) as Record<string, unknown>;
+    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [] } = (e ?? {}) as Record<string, unknown>;
     const historyOk =
       Array.isArray(history) &&
       history.every((h) => {
@@ -204,13 +206,14 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
       !historyOk ||
       !isStringList(newKeywords) ||
       !isStringList(oldKeywords) ||
+      !isStringList(mentions) ||
       (check === "change-of-mind" && (newKeywords.length === 0 || oldKeywords.length === 0 || (history as unknown[]).length === 0));
     if (bad) {
       return {
         error: `example ${i + 1} needs a name, a check (first-reply, change-of-mind or offers-spec), a text, a history of question/answer pairs, and for change-of-mind a history and new and old keywords`,
       };
     }
-    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords });
+    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions });
   }
   return result;
 }
@@ -255,6 +258,9 @@ export function scoreClarify(example: ClarifyExample, answer: Pick<ClarifyAnswer
     if (items.length < min || items.length > max) problems.push(`${items.length} numbered questions (expected ${min} to ${max})`);
     if (questions < items.length) problems.push(`${items.length - questions} numbered item(s) without a question mark`);
     if (answer.offersSpec) problems.push("offered the spec too early");
+  }
+  if (example.check === "first-reply" && example.mentions.length > 0 && !example.mentions.some((k) => startsWord(answer.text, k))) {
+    problems.push(`never mentions (${example.mentions.join(", ")})`);
   }
   if (example.check === "change-of-mind") {
     if (!example.newKeywords.some((k) => startsWord(answer.text, k))) problems.push(`never names the new idea (${example.newKeywords.join(", ")})`);

@@ -71,6 +71,17 @@ describe("guardrails.json (criterion 7's examples)", () => {
     }
   });
 
+  it("lets an idea that only wants an outside service through, and still flags someone's API key (guardrail-v2)", () => {
+    const examples = parseGuardrailExamples(FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const outside = examples.filter((e) => e.category === "outside service");
+    expect(outside.length).toBeGreaterThanOrEqual(3);
+    expect(outside.every((e) => e.expected === "on-path")).toBe(true);
+    // Franck's held message (2026-11-25) is one of them, word for word.
+    expect(outside.some((e) => e.text.startsWith("I want an app to manage the movies i've seen"))).toBe(true);
+    expect(examples.some((e) => e.expected === "flag" && /API key/.test(e.text))).toBe(true);
+  });
+
   it("refuses a malformed file", () => {
     expect(parseGuardrailExamples("nope")).toEqual({ error: "the examples file is not JSON" });
     expect(parseGuardrailExamples("{}")).toEqual({ error: "the examples file has no examples list" });
@@ -122,7 +133,14 @@ describe("clarify.json (ticket 1.8 criteria 1 and 2)", () => {
   it("has the three example ideas as first replies, a change of mind and a ready example", () => {
     const examples = parseClarifyExamples(CLARIFY_FILE);
     if ("error" in examples) throw new Error(examples.error);
-    expect(examples.filter((e) => e.check === "first-reply").map((e) => e.name)).toEqual(["fitness tracker", "movies tracker", "nutrition calculator"]);
+    expect(examples.filter((e) => e.check === "first-reply").map((e) => e.name)).toEqual([
+      "fitness tracker",
+      "movies tracker",
+      "nutrition calculator",
+      "movies with posters from a free API",
+    ]);
+    // The outside-service idea must get the limit explained (guardrail-v2 sends it on to the guide).
+    expect(examples.find((e) => e.name === "movies with posters from a free API")?.mentions).not.toHaveLength(0);
     expect(examples.filter((e) => e.check === "change-of-mind")).toHaveLength(1);
     expect(examples.filter((e) => e.check === "offers-spec")).toHaveLength(1);
   });
@@ -145,9 +163,11 @@ const example = (over: Partial<ClarifyExample>): ClarifyExample => ({
   text: "an idea",
   newKeywords: [],
   oldKeywords: [],
+  mentions: [],
   ...over,
 });
-const FOUR = "A run log.\n1. Who is it for?\n2. What do you record?\n3. Which totals?\n4. What can wait?";
+const FOUR_QUESTIONS = "1. Who is it for?\n2. What do you record?\n3. Which totals?\n4. What can wait?";
+const FOUR = `A run log.\n${FOUR_QUESTIONS}`;
 
 describe("scoreClarify", () => {
   it("reads numbered items in 1. and 1) form", () => {
@@ -166,6 +186,13 @@ describe("scoreClarify", () => {
     expect(scoreClarify(example({}), { text: "1. A?\n3. B?\n4. C?", offersSpec: false }).detail).toContain("numbering");
     expect(scoreClarify(example({}), { text: "1. A?\n2. B.\n3. C?", offersSpec: false }).detail).toContain("without a question mark");
     expect(scoreClarify(example({}), { text: FOUR, offersSpec: true }).detail).toContain("offered the spec too early");
+  });
+
+  it("passes a first reply with mentions only when it names one of them", () => {
+    const limit = example({ mentions: ["outside", "other website"] });
+    const told = `A watchlist. The app cannot reach outside services, so you type each film in yourself.\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(limit, { text: told, offersSpec: false })).toEqual({ pass: true, detail: "4 numbered questions" });
+    expect(scoreClarify(limit, { text: FOUR, offersSpec: false }).detail).toContain("never mentions (outside, other website)");
   });
 
   it("passes a change of mind only when the questions are about the new idea", () => {
@@ -198,6 +225,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       new Error("throttled"),
       { text: "Plant reminders!\n1. How many plants?\n2. Indoors?\n3. Water how often?", inputTokens: 100, outputTokens: 50 },
       { text: 'All set: press "Write my spec".\n[READY_FOR_SPEC]', inputTokens: 100, outputTokens: 50 },
+      { text: `Movies. Posters live on other websites, which apps cannot reach.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
     ]);
     const seen: string[] = [];
     const results = await runClarifyEval(
@@ -208,7 +236,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       },
       (r, i) => seen.push(formatClarifyResult(r, i)),
     );
-    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true]);
+    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true]);
     expect(results[2]?.detail).toBe("error Error");
     // The history goes to the model before the new message.
     expect(model.requests[3]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
@@ -216,9 +244,9 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
     expect(seen[0]).toContain("     | 1. Who is it for?");
     expect(seen[4]).toContain("(offers to write the spec)");
     expect(formatClarifySummary(results)).toEqual([
-      "Clarify: 4/5 passed",
-      `Tokens: 400 in, 200 out, cost $${usageOf({ inputTokens: 400, outputTokens: 200 }).costUsd.toFixed(4)}`,
-      "  first-reply: 2/3",
+      "Clarify: 5/6 passed",
+      `Tokens: 500 in, 250 out, cost $${usageOf({ inputTokens: 500, outputTokens: 250 }).costUsd.toFixed(4)}`,
+      "  first-reply: 3/4",
       "  change-of-mind: 1/1",
       "  offers-spec: 1/1",
     ]);

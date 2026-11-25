@@ -5,6 +5,7 @@ import {
   checkGuardrail,
   declineReply,
   DEFAULT_SUGGESTION,
+  GUARDRAIL_PROMPT_VERSION,
   GUARDRAIL_SYSTEM_PROMPT,
   parseGuardrailAnswer,
   suggestionPhrase,
@@ -13,6 +14,15 @@ import { addUsage, costOf, usageOf } from "./model.js";
 
 /** One sentence: no sentence break inside, one end mark at the end. */
 const isOneSentence = (text: string): boolean => /^[A-Z][^.!?]*(?:[.!?])$/.test(text) && !/[.!?]\s/.test(text);
+
+describe("the guardrail prompt (guardrail-v2)", () => {
+  it("sends an idea that only wants an outside service on to the guide, and flags someone's own API key", () => {
+    expect(GUARDRAIL_PROMPT_VERSION).toBe("guardrail-v2");
+    expect(GUARDRAIL_SYSTEM_PROMPT).toContain("wants information from an outside website or service (a free or paid API");
+    expect(GUARDRAIL_SYSTEM_PROMPT).toContain("needs someone's own API key, password or account");
+    expect(GUARDRAIL_SYSTEM_PROMPT).not.toContain("calls an external paid API");
+  });
+});
 
 describe("parseGuardrailAnswer", () => {
   it("reads the three verdicts with reason and suggestion", () => {
