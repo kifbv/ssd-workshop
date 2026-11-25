@@ -36,6 +36,7 @@ import {
   SESSION_ALLOW_READ_ATTRIBUTES,
   SES_SEND_RESOURCES,
   SETTINGS_PARTITION,
+  SETTINGS_READ_ATTRIBUTES,
   SETTINGS_UPDATE_ATTRIBUTES,
   SIGN_IN_CODE_PUT_ATTRIBUTES,
   SIGN_IN_CODE_FUNCTION_NAME,
@@ -418,6 +419,8 @@ export class ApiStack extends Stack {
     conversation.addToRolePolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [aiQueue.queueArn] }),
     );
+    // Ticket 3.3: `GET /api/conversation` answers the budget left, so it reads the settings' caps (projected).
+    addSettingsReadRights(conversation, this.table);
     addSessionCheckRights(conversation, this.table);
     // One invoke permission scoped to this API, as for the participant routes (path parameter route).
     const conversationIntegration = new HttpLambdaIntegration("ConversationIntegration", conversation, {
@@ -461,6 +464,9 @@ export class ApiStack extends Stack {
         },
       }),
     );
+    // Ticket 3.3: the AI budget check before each AI call reads the settings' caps (projected; its spend and extra
+    // budget come from the participant's own partition above).
+    addSettingsReadRights(worker, this.table);
     worker.addToRolePolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["bedrock:InvokeModel"], resources: [...BEDROCK_INVOKE_RESOURCES] }),
     );
@@ -530,6 +536,24 @@ export class ApiStack extends Stack {
       value: this.api.apiEndpoint,
     });
   }
+}
+
+/**
+ * A read of the `SETTINGS` item (ticket 3.3): GetItem in the `SETTINGS` partition of `SETTINGS_READ_ATTRIBUTES` only,
+ * with a projection (`dynamodb:Select` `SPECIFIC_ATTRIBUTES`), never a write.
+ */
+export function addSettingsReadRights(fn: NodejsFunction, table: Table): void {
+  fn.addToRolePolicy(
+    new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:GetItem"],
+      resources: [table.tableArn],
+      conditions: {
+        "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [SETTINGS_PARTITION], "dynamodb:Attributes": [...SETTINGS_READ_ATTRIBUTES] },
+        StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    }),
+  );
 }
 
 /**

@@ -213,6 +213,13 @@ export const SETTINGS_PARTITION = "SETTINGS";
  */
 export const SETTINGS_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt"] as const;
 
+/**
+ * The attribute names the AI worker and the conversation function may read from the `SETTINGS` item (GetItem with a
+ * projection, `dynamodb:Select` `SPECIFIC_ATTRIBUTES`; ticket 3.3 reads the budget, ticket 3.5 will read `stopped`).
+ * `readSettings` in platform/api/workshop/store.ts projects exactly these (tested).
+ */
+export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"] as const;
+
 /** Lambda function, role and log group of the data API for apps (ticket 2.4). */
 export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
 /**

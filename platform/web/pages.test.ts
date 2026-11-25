@@ -399,11 +399,11 @@ const ME = { id: "p-1", nickname: "ada-l", role: "participant", group: "g1" };
  * a sent message stays pending until `answer()` (or `flag()`) is called. Polls are counted per id.
  */
 function fakeConversation(start: MockMessage[] = [], step = "clarify") {
-  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1 };
-  const answer = (reply: string, offersSpec = false) => {
+  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined };
+  const answer = (reply: string, offersSpec = false, status = "done") => {
     const id = state.pendingId ?? "";
     const message = state.messages.find((m) => m.id === id);
-    if (message) message.status = "done";
+    if (message) message.status = status;
     state.messages.push({ id: `${id}-r`, author: "assistant", text: reply, ...(offersSpec ? { offersSpec } : {}) });
     state.pendingId = undefined;
     state.waiting = false;
@@ -417,7 +417,13 @@ function fakeConversation(start: MockMessage[] = [], step = "clarify") {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: state.step } }),
     "GET /api/conversation": () => ({
       status: 200,
-      body: { step: state.step, state: state.waiting ? "waiting" : "open", messages: state.messages, ...(state.pendingId ? { pendingId: state.pendingId } : {}) },
+      body: {
+        step: state.step,
+        state: state.waiting ? "waiting" : "open",
+        messages: state.messages,
+        ...(state.pendingId ? { pendingId: state.pendingId } : {}),
+        ...(state.budgetLeft === undefined ? {} : { budgetLeft: state.budgetLeft }),
+      },
     }),
     "POST /api/conversation/messages": (call) => {
       if (state.pendingId) return { status: 409, body: { reason: "busy", message: "Please wait for the answer to your last message." } };
@@ -523,6 +529,30 @@ describe("step 1: Clarify (ticket 1.8)", () => {
     expect(await page.locator("#chat .bubble").nth(1).evaluate((e) => getComputedStyle(e).whiteSpace)).toBe("pre-wrap");
     expect(await page.locator("#spec-offer").isVisible()).toBe(true);
     expect(await page.locator("#spec-offer").getAttribute("data-offered")).toBe("false");
+    expect(await page.locator("#chat-send").isDisabled()).toBe(false);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("ticket 3.3: WHEN the AI budget is used THEN the budget text shows where the AI reply would, the budget left reads $0.00, and Send stays available, at 375 px", async () => {
+    const budgetText = "You've used your AI budget for today. Your facilitator can add more.";
+    const api = fakeConversation();
+    api.state.budgetLeft = 0.04;
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#chat-budget").textContent()).toBe("AI budget left: $0.04");
+    expect(await page.locator("#chat-budget").isVisible()).toBe(true);
+
+    await page.getByRole("textbox", { name: "Your message" }).fill("A plant watering reminder.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    // The worker made no AI call: the message ends failed with the budget text as its reply.
+    api.state.budgetLeft = 0;
+    api.answer(budgetText, false, "failed");
+    await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A plant watering reminder.", budgetText]);
+    expect(await page.locator("#chat .bubble").nth(1).getAttribute("data-author")).toBe("assistant");
+    await expect.poll(() => page.locator("#chat-budget").textContent()).toBe("AI budget left: $0.00");
+    expect(await page.locator("#typing").isVisible()).toBe(false);
     expect(await page.locator("#chat-send").isDisabled()).toBe(false);
     await expectNoSideScroll();
   }, 30_000);

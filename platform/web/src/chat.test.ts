@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   POLL_INTERVAL_MS,
+  budgetLeftText,
   canWriteSpec,
   conversationResult,
   parseConversation,
@@ -17,6 +18,18 @@ const asked: ChatMessage[] = [
   { id: "m1", author: "participant", text: "a run tracker", status: "done" },
   { id: "m1-r", author: "assistant", text: "1. Who?\n2. What?\n3. When?" },
 ];
+
+describe("AI budget left (ticket 3.3)", () => {
+  it("reads budgetLeft only as a number of dollars from 0, and shows it to the cent", () => {
+    const base = { step: "clarify", state: "open", messages: [] };
+    expect(parseConversation({ ...base, budgetLeft: 3.2 })?.budgetLeft).toBe(3.2);
+    expect(parseConversation({ ...base, budgetLeft: 0 })?.budgetLeft).toBe(0);
+    for (const bad of [-1, "3", null, Number.NaN, Number.POSITIVE_INFINITY]) expect(parseConversation({ ...base, budgetLeft: bad })).toEqual(base);
+    expect(budgetLeftText(3.2)).toBe("AI budget left: $3.20");
+    expect(budgetLeftText(0)).toBe("AI budget left: $0.00");
+    expect(budgetLeftText(4.99)).toBe("AI budget left: $4.99");
+  });
+});
 
 describe("conversation (GET /api/conversation)", () => {
   it("reads the conversation, its state and the message in flight", () => {

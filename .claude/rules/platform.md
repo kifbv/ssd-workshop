@@ -206,3 +206,7 @@ paths:
   take participant-facing messages (not button labels, which stay in the web code) from `platform/api/workshop/texts.ts`. Every update that changes a profile's `step` sets
   `stepSince` to the same time in the same update, and the role's attribute list in `infra/lib/config.ts` names it.
   Only the admin function (`ssd-workshop-api-admin`) may write `SETTINGS`; the synth test fails on any other writer.
+- AI budget (ticket 3.3): every new AI call (3.6's suggestions included) first reads `ConversationStore.getBudgetFacts` and
+  stops on `budgetOf(...).reached`, and a job that makes several calls checks `overBudget(budget, costSoFar)` before
+  each later one; at the limit it stores `BUDGET_REPLY` (reply kind `budget`, message `failed`) without calling the model.
+  Never add a budget check to the launcher, builder or deployer: a queued or running build always finishes (tested).

@@ -11,7 +11,14 @@
 // conditional transaction, tokens counted), and when it passed, the build id goes to the launch queue after
 // that transaction. A send that fails is thrown, so SQS delivers the job again: the message is then done and
 // the conversation holds that build, so the job only sends the build id again (no second check, no second build).
+//
+// Ticket 3.3: before each AI call (the guardrail, the answer, the readiness check) and before a build is queued, the
+// participant's spend (read once per job, plus what this job's earlier calls cost) is compared with their budget. At or
+// over it, the call is not made: the message ends `failed` with the budget text (they send again once a facilitator
+// added budget), and a readiness request goes back to step 2 like a failed check, with no build. A build already
+// queued (a redelivered readiness job only re-sends its id) or running is never stopped.
 import { errorName } from "../sign-in/code-request.js";
+import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
 import { answerMessage } from "./answer.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, usageOf, type ModelClient } from "./model.js";
@@ -35,7 +42,18 @@ import {
  * `building`, `not-ready`: the readiness check passed (the build is queued) or failed (ticket 2.7); `resent`: a
  * redelivered readiness job that only sent its build id again.
  */
-export type WorkerOutcome = "done" | "declined" | "flagged" | "failed" | "skipped" | "invalid" | "building" | "not-ready" | "resent";
+export type WorkerOutcome =
+  | "done"
+  | "declined"
+  | "flagged"
+  | "failed"
+  | "skipped"
+  | "invalid"
+  | "building"
+  | "not-ready"
+  | "resent"
+  /** Ticket 3.3: the AI budget is used; the (next) AI call was not made and no build was queued. */
+  | "over-budget";
 
 /** The only things ever logged: outcome, verdict and an error name (no text, prompt, reply or id). */
 export interface WorkerLogEntry {
@@ -117,6 +135,13 @@ async function run(
   let guardrail: GuardrailRecord | undefined;
   let finishing = false;
   try {
+    // Ticket 3.3: no AI call once the budget is used (also for an approved flag or Write my spec's request).
+    const budget = budgetOf(await deps.store.getBudgetFacts(participantId));
+    if (budget.reached) {
+      finishing = true;
+      const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY });
+      return { outcome: applied ? "over-budget" : "skipped" };
+    }
     // A facilitator approved this very text after a flag: no new check. A text changed since (by
     // anyone) has another hash and is checked again. Write my spec's own request (ticket 1.9) is the
     // platform's fixed text, so it needs no check either.
@@ -134,6 +159,12 @@ async function run(
         finishing = true;
         const applied = await finish({ kind: "flagged", guardrail });
         return { outcome: applied ? "flagged" : "skipped", verdict: "flag" };
+      }
+      // The guardrail call itself may have used the last of the budget: no answer call then.
+      if (overBudget(budget, guardrail.usage.costUsd)) {
+        finishing = true;
+        const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY, guardrail });
+        return { outcome: applied ? "over-budget" : "skipped", verdict: guardrail.verdict };
       }
     }
     const history = await deps.store.getHistory(participantId, messageId);
@@ -205,7 +236,7 @@ async function runReadiness(
           continue;
         }
         // The check's tokens were spent: count them although the outcome could not be stored (as above).
-        const spent = outcome.kind === "failed" ? outcome.usage : outcome.answer.usage;
+        const spent = outcome.kind === "failed" || outcome.kind === "over-budget" ? outcome.usage : outcome.answer.usage;
         try {
           if (spent !== undefined) await deps.store.addUsage(participantId, spent, deps.now().toISOString());
         } catch {
@@ -219,6 +250,13 @@ async function runReadiness(
   let finishing = false;
   let usage: ReturnType<typeof usageOf> | undefined;
   try {
+    // Ticket 3.3: no readiness check (and so no build) once the budget is used.
+    const budget = budgetOf(await deps.store.getBudgetFacts(participantId));
+    if (budget.reached) {
+      finishing = true;
+      const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY, version });
+      return { outcome: applied ? "over-budget" : "skipped" };
+    }
     const spec = await deps.store.getSpec(participantId, version);
     if (spec === undefined) throw Object.assign(new Error("the approved spec is missing"), { name: "MissingSpec" });
     const check = await checkReadiness(deps.model, spec.text, signal);
@@ -229,6 +267,11 @@ async function runReadiness(
     if (check.verdict === "not-ready") {
       const applied = await finish({ kind: "not-ready", reply: notReadyReply(check.reasons), version, answer });
       return { outcome: applied ? "not-ready" : "skipped" };
+    }
+    // The check itself may have used the last of the budget: then no build is queued (its tokens are counted).
+    if (overBudget(budget, check.usage.costUsd)) {
+      const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY, version, usage: check.usage });
+      return { outcome: applied ? "over-budget" : "skipped" };
     }
     const applied = await finish({ kind: "ready", reply: READY_REPLY, version, answer, build: { buildId, nickname } });
     if (!applied) return { outcome: "skipped" };

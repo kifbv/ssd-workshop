@@ -30,6 +30,29 @@ const key = (): Record<string, AttributeValue> => {
   return { pk: str(k.pk), sk: str(k.sk) };
 };
 
+/**
+ * The settings now, for any store that can send a GetItem (the conversation store reads them for the AI budget, ticket
+ * 3.3): a consistent read projected to the caps and Stop (`SETTINGS_READ_ATTRIBUTES` in infra/lib/config.ts, which a
+ * reader's role is limited to), so an admin's change applies at the very next read.
+ */
+export async function readSettings(client: { send(command: GetItemCommand): Promise<GetItemCommandOutput> }, tableName: string): Promise<WorkshopSettings> {
+  const output = await client.send(
+    new GetItemCommand({
+      TableName: tableName,
+      Key: key(),
+      ConsistentRead: true,
+      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped",
+      ExpressionAttributeNames: {
+        "#aiBudgetUsd": "aiBudgetUsd",
+        "#changeRequestsPerPerson": "changeRequestsPerPerson",
+        "#buildsAtOnce": "buildsAtOnce",
+        "#stopped": "stopped",
+      },
+    }),
+  );
+  return settingsFromItem(output.Item);
+}
+
 export class DynamoSettingsStore implements SettingsStore {
   constructor(
     private readonly client: SettingsSender,
@@ -37,22 +60,7 @@ export class DynamoSettingsStore implements SettingsStore {
   ) {}
 
   async getSettings(): Promise<WorkshopSettings> {
-    const output = await this.client.send(
-      new GetItemCommand({
-        TableName: this.tableName,
-        Key: key(),
-        // An admin's change (and, from ticket 3.5, Stop) applies at the very next read.
-        ConsistentRead: true,
-        ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped",
-        ExpressionAttributeNames: {
-          "#aiBudgetUsd": "aiBudgetUsd",
-          "#changeRequestsPerPerson": "changeRequestsPerPerson",
-          "#buildsAtOnce": "buildsAtOnce",
-          "#stopped": "stopped",
-        },
-      }),
-    );
-    return settingsFromItem(output.Item);
+    return readSettings(this.client, this.tableName);
   }
 
   async putCaps(caps: WorkshopCaps, nowIso: string): Promise<void> {

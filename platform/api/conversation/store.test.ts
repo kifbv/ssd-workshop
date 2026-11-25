@@ -10,7 +10,10 @@ import {
   BUILD_QUEUE_NAME as INFRA_BUILD_QUEUE_NAME,
   CONVERSATION_UPDATE_ATTRIBUTES,
   MODEL_ID as INFRA_MODEL_ID,
+  SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
+import { BUDGET_REPLY } from "../workshop/budget.js";
+import { DEFAULT_SETTINGS } from "../workshop/settings.js";
 import { ACCOUNT, AI_QUEUE_NAME, AI_QUEUE_URL, BUILD_QUEUE_NAME, BUILD_QUEUE_URL, MODEL_ID, PRICE_PER_MILLION_TOKENS } from "../settings.js";
 import { DEFAULT_MODEL_ID } from "../../src/smoke/logic.js";
 import { BedrockModel, usageOf } from "./model.js";
@@ -235,6 +238,57 @@ describe("DynamoConversationStore", () => {
     expect(items.map((i) => i?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, "CONVERSATION", "USAGE"]);
     expect(items[1]?.ExpressionAttributeValues).toMatchObject({ ":state": { S: "waiting" } });
     for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+  });
+
+  it("ends a message over budget (ticket 3.3) as failed with the budget text as a reply of kind budget, counting a guardrail call's tokens, inside the worker's list", async () => {
+    const { client, sent } = stubClient([{}, {}]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await store.finish("p-1", ID, { kind: "over-budget", reply: BUDGET_REPLY }, "pending", NOW_ISO);
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems.map((i) => i.Update);
+    expect(items.map((i) => i?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, `MSG#${ID}-r`, "CONVERSATION"]);
+    expect(items[0]?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" }, ":from": { S: "pending" } });
+    expect(items[1]?.ExpressionAttributeValues).toMatchObject({ ":text": { S: BUDGET_REPLY }, ":kind": { S: "budget" } });
+    expect(items[1]?.ExpressionAttributeValues?.[":costUsd"]).toBeUndefined();
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    await store.finish("p-1", ID, { kind: "over-budget", reply: BUDGET_REPLY, guardrail }, "pending", NOW_ISO);
+    const withGuardrail = (sent[1]?.input as { TransactItems: TransactWriteItem[] }).TransactItems.map((i) => i.Update);
+    expect(withGuardrail.map((i) => i?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, `MSG#${ID}-r`, "CONVERSATION", "USAGE"]);
+    expect(withGuardrail[3]?.ExpressionAttributeValues).toMatchObject({ ":add_costUsd": { N: String(guardrail.usage.costUsd) } });
+    for (const name of namesUsed(sent[1])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+  });
+
+  it("reads the budget facts (ticket 3.3): the settings, the profile's extraBudget and the usage's costUsd, each projected and consistent", async () => {
+    const { client, sent } = stubClient([
+      { Item: { aiBudgetUsd: { N: "8" }, stopped: { BOOL: false } } },
+      { Item: { extraBudget: { N: "2" } } },
+      { Item: { costUsd: { N: "3.25" } } },
+    ]);
+    const facts = await new DynamoConversationStore(client, TABLE).getBudgetFacts("p-1");
+    expect(facts).toEqual({
+      settings: { ...DEFAULT_SETTINGS, aiBudgetUsd: 8 },
+      limits: { extraBudget: 2, paused: false, changeRequestsUsed: 0 },
+      spentUsd: 3.25,
+    });
+    const inputs = sent.map((c) => c.input as GetItemCommand["input"]);
+    expect(inputs.map((i) => [i.Key?.["pk"]?.S, i.Key?.["sk"]?.S])).toEqual([
+      ["SETTINGS", "SETTINGS"],
+      ["PARTICIPANT#p-1", "PROFILE"],
+      ["PARTICIPANT#p-1", "USAGE"],
+    ]);
+    expect(inputs.every((i) => i.ConsistentRead === true && i.TableName === TABLE)).toBe(true);
+    expect(inputs.map((i) => Object.values(i.ExpressionAttributeNames ?? {}))).toEqual([
+      ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"],
+      ["extraBudget"],
+      ["costUsd"],
+    ]);
+    for (const name of Object.values(inputs[0]?.ExpressionAttributeNames ?? {})) expect(SETTINGS_READ_ATTRIBUTES, name).toContain(name);
+    // No items yet: the defaults, no extra budget, nothing spent.
+    const empty = stubClient([{}, {}, {}]);
+    await expect(new DynamoConversationStore(empty.client, TABLE).getBudgetFacts("p-1")).resolves.toEqual({
+      settings: DEFAULT_SETTINGS,
+      limits: { extraBudget: 0, paused: false, changeRequestsUsed: 0 },
+      spentUsd: 0,
+    });
   });
 
   it("ends a message the queue refused with the conversation function's attributes only (no usage)", async () => {
@@ -510,6 +564,16 @@ describe("DynamoConversationStore", () => {
       }
       const withTokens = await run({ kind: "failed", reply: "Sorry.", version: 2, usage: usage(10, 1) });
       expect(withTokens.items.at(-1)?.Update?.Key?.["sk"]?.S).toBe("USAGE");
+    });
+
+    it("over budget (ticket 3.3): like no verdict, back to step spec, with the budget text as a reply of kind budget and the tokens counted", async () => {
+      const { sent, items } = await run({ kind: "over-budget", reply: BUDGET_REPLY, version: 2, usage: usage(900, 60) });
+      expect(items.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, `MSG#${ID}-r`, "CONVERSATION", "PROFILE", "USAGE"]);
+      expect(items[0]?.Update?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" } });
+      expect(items[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":text": { S: BUDGET_REPLY }, ":kind": { S: "budget" } });
+      expect(items[2]?.Update?.UpdateExpression).toContain("REMOVE #pendingId, #pendingSince, #approvedSpecVersion");
+      for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+      expect((await run({ kind: "over-budget", reply: BUDGET_REPLY, version: 2 })).items).toHaveLength(4);
     });
 
     it("answers false on a lost race (a duplicate delivery, a second build) and throws anything else", async () => {

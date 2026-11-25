@@ -30,6 +30,7 @@ import {
   ACCOUNT,
   ADMIN_FUNCTION_NAME,
   SETTINGS_PARTITION,
+  SETTINGS_READ_ATTRIBUTES,
   SETTINGS_UPDATE_ATTRIBUTES,
   API_NAME,
   API_ORIGIN_DOMAIN,
@@ -1534,6 +1535,33 @@ describe("api stack: admin function (ticket 3.2)", () => {
 /** The DynamoDB actions that write items (TransactWriteItems is authorized item by item as these). */
 const DYNAMODB_WRITE_ACTIONS = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate", "dynamodb:PartiQLDelete"];
 
+/** Ticket 3.3: a projected read of the settings' caps and Stop, nothing else of `SETTINGS`. */
+function settingsReadStatement(tableArn: unknown) {
+  return {
+    Effect: "Allow",
+    Action: "dynamodb:GetItem",
+    Resource: tableArn,
+    Condition: {
+      "ForAllValues:StringEquals": {
+        "dynamodb:LeadingKeys": ["SETTINGS"],
+        "dynamodb:Attributes": ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"],
+      },
+      StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+    },
+  };
+}
+
+describe("SETTINGS readers (ticket 3.3)", () => {
+  it("WHEN the synthesized stack is inspected THEN the AI worker and the conversation function read SETTINGS only projected to the listed attributes, and the participant function not at all", () => {
+    expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"]);
+    for (const name of [AI_WORKER_FUNCTION_NAME, CONVERSATION_FUNCTION_NAME]) {
+      const reads = apiFunction(name).statements().filter((st) => JSON.stringify(st).includes('"SETTINGS"'));
+      expect(reads, name).toEqual([settingsReadStatement(apiFunction(name).tableArn())]);
+    }
+    expect(JSON.stringify(apiFunction(PARTICIPANT_FUNCTION_NAME).statements())).not.toContain("SETTINGS");
+  });
+});
+
 describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
   it("WHEN the synthesized stacks are inspected THEN only the admin function's role may write SETTINGS, and only the attributes named in config.ts", () => {
     const writers: { roles: string; actions: string[]; attributes: unknown }[] = [];
@@ -1795,6 +1823,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
         },
       },
       { Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn() },
+      settingsReadStatement(f.tableArn()),
       ...sessionCheckStatements(f.tableArn()),
     ]);
   });
@@ -1848,6 +1877,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },
+      settingsReadStatement(f.tableArn()),
       {
         Effect: "Allow",
         Action: "bedrock:InvokeModel",

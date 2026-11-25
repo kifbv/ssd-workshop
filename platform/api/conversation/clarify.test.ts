@@ -155,13 +155,15 @@ describe("criterion 4: GET /api/conversation shows the conversation so far", () 
         { id: second, author: "participant", text: "just me, weekly totals", step: "clarify", status: "done" },
         { id: `${second}-r`, author: "assistant", text: parseReadyMarker(OFFER).text, step: "clarify", offersSpec: true },
       ],
+      // Ticket 3.3: the $5 budget less the four calls' few cents, rounded down to whole cents.
+      budgetLeft: 4.99,
     });
     expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "history", outcome: "ok" });
   });
 
   it("names the message in flight while it is pending or flagged, so the page polls it or shows the facilitator notice", async () => {
     const s = setup();
-    expect(json(await s.call(historyOf()))).toEqual({ step: "clarify", state: "open", messages: [] });
+    expect(json(await s.call(historyOf()))).toEqual({ step: "clarify", state: "open", messages: [], budgetLeft: 5 });
     const id = json(await s.call(send("a quiz about our office plants")))["id"] as string;
     expect(json(await s.call(historyOf()))).toMatchObject({ state: "open", pendingId: id, messages: [{ id, status: "pending" }] });
     s.model.push(verdictReply("flag", "", "unsure"));

@@ -14,8 +14,8 @@ type Method = keyof VerifyStore | keyof ParticipantStore;
 export class FakeTable implements VerifyStore, ParticipantStore {
   readonly allow = new Map<string, AllowEntry>();
   readonly codes = new Map<string, StoredCodes>();
-  /** `stepSince` is set with every step change, as the stores do (ticket 3.2). */
-  readonly profiles = new Map<string, ParticipantRecord & { createdAt: string; stepSince?: string }>();
+  /** `stepSince` is set with every step change, as the stores do (ticket 3.2); `extraBudget` as a facilitator grants it (ticket 3.3 tests). */
+  readonly profiles = new Map<string, ParticipantRecord & { createdAt: string; stepSince?: string; extraBudget?: number }>();
   /** By token hash; `allowRef` is the address sealed under the token (as the verify function stores it). */
   readonly sessions = new Map<string, StoredSession & { createdAt: string }>();
   /** Nickname claims by lower-cased nickname. */

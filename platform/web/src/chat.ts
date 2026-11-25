@@ -30,6 +30,8 @@ export interface Conversation {
   /** The newest and the approved spec versions (ticket 1.9). */
   latestSpecVersion?: number;
   approvedSpecVersion?: number;
+  /** Ticket 3.3: the person's AI budget left, in dollars (never below 0). */
+  budgetLeft?: number;
 }
 
 export const CHAT_TEXTS = {
@@ -75,7 +77,7 @@ function parseMessage(value: unknown): ChatMessage | undefined {
 export function parseConversation(body: unknown): Conversation | undefined {
   const b = record(body);
   if (b === undefined) return undefined;
-  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion } = b;
+  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft } = b;
   if (typeof step !== "string" || (state !== "open" && state !== "waiting") || !Array.isArray(messages)) return undefined;
   const parsed = messages.map(parseMessage);
   if (parsed.some((m) => m === undefined)) return undefined;
@@ -86,7 +88,13 @@ export function parseConversation(body: unknown): Conversation | undefined {
     ...(typeof pendingId === "string" ? { pendingId } : {}),
     ...(isVersion(latestSpecVersion) ? { latestSpecVersion } : {}),
     ...(isVersion(approvedSpecVersion) ? { approvedSpecVersion } : {}),
+    ...(typeof budgetLeft === "number" && Number.isFinite(budgetLeft) && budgetLeft >= 0 ? { budgetLeft } : {}),
   };
+}
+
+/** Ticket 3.3: the line under the conversation, "AI budget left: $3.20". */
+export function budgetLeftText(dollars: number): string {
+  return "AI budget left: $" + dollars.toFixed(2);
 }
 
 export function conversationResult(answer: ApiAnswer): { kind: "conversation"; conversation: Conversation } | { kind: "signed-out" } | Show {

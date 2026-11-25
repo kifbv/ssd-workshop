@@ -217,8 +217,11 @@ export interface ParticipantMessageItem extends Keyed {
   guardrailCostUsd?: number;
 }
 
-/** How a reply came about: an AI answer, a decline, or the neutral failure text. */
-export type ReplyKind = "answer" | "decline" | "failure";
+/**
+ * How a reply came about: an AI answer, a decline, the neutral failure text, or (ticket 3.3) the budget text when the
+ * participant's AI budget was used and no AI call was made.
+ */
+export type ReplyKind = "answer" | "decline" | "failure" | "budget";
 
 /**
  * The assistant's reply to one participant message (ticket 1.7), at `MSG#<message id>-r`, so it
