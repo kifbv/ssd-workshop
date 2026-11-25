@@ -87,7 +87,7 @@ const json = (res: HttpResponse): Record<string, unknown> => JSON.parse(res.body
 const QUESTIONS = "A run tracker for you.\n1. Who will use it?\n2. What do you log?\n3. Which totals matter?";
 const OFFER = `You want a run log for yourself with weekly totals. I have enough to write your spec: press "Write my spec" when you are ready.\n${READY_MARKER}`;
 
-describe("the ready marker (clarify-v2)", () => {
+describe("the ready marker (clarify-v2 and later)", () => {
   it("strips the marker from the reply and reports the offer", () => {
     expect(parseReadyMarker(OFFER)).toEqual({
       text: 'You want a run log for yourself with weekly totals. I have enough to write your spec: press "Write my spec" when you are ready.',
@@ -100,11 +100,16 @@ describe("the ready marker (clarify-v2)", () => {
   });
 
   it("asks for numbered questions about a new idea, follows a changed idea and names the marker in the prompt", () => {
-    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v2");
+    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v3");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("3 to 5 questions as a numbered list");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("drop the old idea completely");
     expect(CLARIFY_SYSTEM_PROMPT).toContain(`end your reply with this exact line on its own: ${READY_MARKER}`);
     expect(CLARIFY_SYSTEM_PROMPT).toContain('"Write my spec"');
+  });
+
+  it("explains the outside-service limit and keeps going instead of stopping (clarify-v3)", () => {
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Apps cannot reach other websites or services");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Never send them away or stop because of it.");
   });
 
   it("treats a reply that is only the marker as empty (the worker then fails it with the neutral reply)", async () => {
@@ -119,7 +124,7 @@ describe("the ready marker (clarify-v2)", () => {
     const replies = [...must(s.table.replies.get("me-1")).values()];
     expect(replies.map((r) => r.offersSpec)).toEqual([undefined, true]);
     expect(replies[1]?.text).not.toContain("READY");
-    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v2", "clarify-v2"]);
+    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v3", "clarify-v3"]);
     // The history sent to the model holds the stored text, never the marker.
     s.model.push(verdictReply("on-path"), { text: "Sure.", inputTokens: 1, outputTokens: 1 });
     await s.call(send("one more thing"));

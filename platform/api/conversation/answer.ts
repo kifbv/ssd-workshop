@@ -16,7 +16,7 @@ export const ANSWER_TEMPERATURE = 0.4;
 /** Earlier messages sent along as context, at most (participant and assistant counted separately). */
 export const HISTORY_LIMIT = 20;
 
-export const CLARIFY_PROMPT_VERSION = "clarify-v2";
+export const CLARIFY_PROMPT_VERSION = "clarify-v3";
 
 /** The line the model ends a reply with when it offers to write the spec (never shown to the participant). */
 export const READY_MARKER = "[READY_FOR_SPEC]";
@@ -28,6 +28,7 @@ How to reply:
 - When the participant answers, first check the four big points: who it is for, the main things it does, the information it keeps, and what a first version leaves out. If all four are known, offer to write the spec (see below) instead of asking anything. Otherwise briefly acknowledge what you learned and ask only about the big points still missing, again as a numbered list (fewer questions are fine). Never ask again what they already answered. If they say they do not know, suggest a simple default and move on.
 - If the participant changes their mind or switches to a different idea, follow them: drop the old idea completely, do not mention it again, and treat the new idea as a new idea (restate it, then 3 to 5 numbered questions about the new idea only).
 - If the idea is too big for a small single-page app, suggest a simpler first version.
+- Apps cannot reach other websites or services: no outside API (free or paid), no search on another site, no pictures or posters from the web, no live weather, prices, maps or news, no emails or notifications. When the idea needs one, say so kindly in one plain sentence right after your restatement, then keep going with the version that works: the people using the app type that information in themselves (a title, a note, their own rating). Never send them away or stop because of it.
 - If the participant asks something about the workshop or a word you used, answer it in plain language, then continue.
 - A short spec only needs the big picture. Never ask about small details (units, the first day of the week, whether old entries are kept, wording, colours, sorting, edge cases): the spec picks sensible defaults for them, and the participant can change them in step 2.
 - As soon as you know who it is for, the main things it does, the information it keeps, and what the first version leaves out, or when the participant asks for the spec, you have enough: do not ask any more questions, not even "just one more thing" (whether past entries are listed, whether a total is all-time or weekly, and similar points are details the spec decides). Instead: summarise the app in two or three short sentences, say you have enough to write the spec, and tell them to press the "Write my spec" button when they are ready (they can still add details first). Then end your reply with this exact line on its own: ${READY_MARKER}

@@ -1,5 +1,5 @@
 {
-  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer; after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec.",
+  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer, and name one of its `mentions` when it has some (an idea that wants an outside service must be told the limit); after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec.",
   "examples": [
     {
       "name": "fitness tracker",
@@ -39,6 +39,12 @@
         }
       ],
       "text": "Just for me. For each run: the date, the distance in km and how long it took. Show this week's total distance and my longest run. Leave out maps, GPS, sharing and reminders."
+    },
+    {
+      "name": "movies with posters from a free API",
+      "check": "first-reply",
+      "text": "I want an app to manage the movies i've seen and the ones i want to see. It should have a search bar where i type the name of a movie and it automatically search through a free API so that i can get the poster of the movie etc. When i select a movie it saves it on my list of movies to watch and i can later give my own rating and other notes and then the app i saved under my list of watched movies. Feel free to suggest other functionality.",
+      "mentions": ["outside", "other website", "other service", "internet", "the web", "online", "type in", "type them", "type the", "yourself"]
     }
   ]
 }
