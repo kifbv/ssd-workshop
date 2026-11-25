@@ -704,10 +704,10 @@ once he agreed, try 2's `NoBuildTasksForSessions` and the boundary's `WatchBuild
 `NoEventSourcesForSessions`, `NoBuildCheckScheduleForSessions` and `NoBuildsClusterTasksForSessions`) and the GitHub
 App secret must be loaded (section above).
 
-Also checked by the first live build (ticket 2.9 try 2), since only AWS can prove them: the builder's
-task role trusts only `aws:SourceArn` `task/ssd-workshop-builds/*` (if the task fails with "ECS was
-unable to assume the role", widen it to `arn:aws:ecs:eu-central-1:<account>:*` in
-`infra/lib/builds-stack.ts`; the execution role already uses that AWS-documented form, try 3); the check's scheduler role trusts only its schedule's ARN (if the launcher
+Also checked by the first live build (ticket 2.9 try 2), since only AWS can prove them: both builder
+roles trust `aws:SourceArn` `arn:aws:ecs:eu-central-1:<account>:*` (the task role's narrower
+`task/ssd-workshop-builds/*` was refused at the first live RunTask, 2026-11-25; the launcher now logs
+ECS's reason as `detail`); the check's scheduler role trusts the default schedule group (if the launcher
 logs no `build-check` line each minute, look at the schedule's target errors); `role*/<name>` in the
 boundary's `ArnNotLike` matches the launcher's, builder's, AI worker's and scheduler's sessions (a
 launch, a hand-over and a check all work); RunTask accepts `startedBy` = the build id, and
