@@ -84,7 +84,9 @@ paths:
   start a variable run only where it begins (a lookbehind such as `(?<![a-z0-9+.-])` before a scheme), never put
   two optional runs of the same characters side by side (`=\s*["']?\s*` is quadratic on spaces), and test it with
   long lines against a time limit with a margin over 10x (256 KB lines, 1 s: CI runners are slower and run test
-  files in parallel with Chromium). Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters.
+  files in parallel with Chromium). Try 1's `[a-z][a-z0-9+-]*://` took 72 s on 400 KB of letters. Time-limit
+  tests must also use many DISTINCT matches, not one unit repeated: a per-match `line.includes(...)` is quadratic but
+  stops at once on a repeated unit (ticket 2.14 try 5: 1.8 s on 256 KB of distinct hosts; use a `Set` built in one scan).
 - An API that sandboxed apps call (opaque origin `null`, ticket 2.4) puts `Access-Control-Allow-Origin: *` on every
   answer, errors, 404 and the preflight included (else the page cannot read the reason), never with credentials, and
   never reads or sets a cookie. Prove it in Chromium with the real handler behind a local server serving the page

@@ -389,6 +389,24 @@ describe("outside addresses (criterion 3; ticket 2.14: plain https:// addresses 
     }
   });
 
+  // Ticket 2.14 try 5: each address was searched for in the whole line (quadratic: 1.8 s at 256 KB of distinct hosts).
+  it.each([
+    ["distinct https hosts", (i: number) => `https://a${i}.b `],
+    ["distinct https hosts in quotes, ending a sentence", (i: number) => `'https://a${i}.b.' `],
+    ["distinct https hosts behind an entity", (i: number) => `&amp; https://a${i}.b `],
+  ])("scans a line of 256 KB of %s within a second", (_name, unit) => {
+    const parts: string[] = [];
+    let length = 0;
+    for (let i = 0; length < 256 * 1024; i += 1) {
+      parts.push(unit(i));
+      length += parts[parts.length - 1]?.length ?? 0;
+    }
+    const line = parts.join("");
+    const started = performance.now();
+    expect(outsideAddresses(line)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it("does not scan binary files", () => {
     expect(check(text("photo.png", "http://example.com api_key=x")).ok).toBe(true);
   });

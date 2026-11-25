@@ -223,28 +223,30 @@ const extensionOf = (path: string): string => {
 /**
  * A namespace name, or a plain HTTPS address whose start (`https://host`) is written as is in the line: an
  * address that only a decoded reading shows (`https&#58;//host`, `https:\/\/host`, `\x68ttps://host`) is
- * refused, so that what people read in the file is what the browser opens.
+ * refused, so that what people read in the file is what the browser opens. `written` holds the plain https starts
+ * of the line as written (`writtenStarts`), or is undefined when `line` is that line: a set, so a line of many
+ * addresses is checked in linear time (searching the whole line for each address was quadratic, ticket 2.14 try 5).
  */
-const isAllowedAddress = (match: string, original: string, line: string, end: number): boolean => {
+const isAllowedAddress = (match: string, written: ReadonlySet<string> | undefined, line: string, end: number): boolean => {
   const lower = match.toLowerCase();
   if (NAMESPACE_ADDRESSES.some((name) => name.toLowerCase() === lower)) return true;
   const address = withoutProsePunctuation(match, line[end]);
   const start = PLAIN_HTTPS.exec(address)?.[0];
-  if (start === undefined || !original.includes(start)) return false;
+  if (start === undefined || (written !== undefined && !written.has(start))) return false;
   const tail = hostTail(address, start.length);
   return tail === "path" || (tail === "end" && !atSignAfter(line, end));
 };
 
 /** Punctuation that may end a sentence or a clause right after an address. */
 const PROSE_PUNCTUATION = ".,;:!?";
-/** What may follow such punctuation for it to be prose: the end of the line, a space, a tag, a bracket or a quote. */
-const PROSE_AFTER = `<)]"'\``;
+/** What may follow such punctuation for it to be prose: the end of the line, a space, a tag, `)` or a quote. */
+const PROSE_AFTER = `<)"'\``;
 
 /**
  * The address without the punctuation that ends a sentence around it (ticket 2.14 try 4): `Data from
  * https://open-meteo.com.` or `https://en.wikipedia.org, thanks` is the address `https://open-meteo.com`. A trailing run
  * of `.,;:!?` is dropped only when what follows the address in the line (`next`) is the end of the line, a space, `<`,
- * `)`, `]` or a quote; anything inside the address stays (`https://a.b:8080.` is still `https://a.b:8080`,
+ * `)` or a quote (`]` never follows: the scan keeps it inside the address); anything inside the address stays (`https://a.b:8080.` is still `https://a.b:8080`,
  * `https://a.b.@evil.example` keeps its `@`). `atSignAfter` still starts after the whole match, so
  * `'https://a.b,"@evil.example/'` stays refused. One backward pass over the match's end: linear.
  */
@@ -303,11 +305,21 @@ const outsideAddressReason = (address: string): string =>
   `It refers to an outside address that is not allowed (${shorten(address)}). An app may use its own files and outside addresses written plainly as https:// and the site's name, with no user name, password or port.`;
 
 /** The outside addresses in one reading of a line (`original`: the line as written), in the order they appear. */
-function addressesIn(line: string, original: string): string[] {
+/** The plain https starts (`https://host`) of a line as written, each found once by the same scan: linear. */
+function writtenStarts(line: string): Set<string> {
+  const starts = new Set<string>();
+  for (const match of line.matchAll(SCHEME_ADDRESS)) {
+    const start = PLAIN_HTTPS.exec(withoutProsePunctuation(match[0], line[match.index + match[0].length]))?.[0];
+    if (start !== undefined) starts.add(start);
+  }
+  return starts;
+}
+
+function addressesIn(line: string, written: ReadonlySet<string> | undefined): string[] {
   const found: { at: number; address: string }[] = [];
   for (const match of line.matchAll(SCHEME_ADDRESS)) {
     const end = match.index + match[0].length;
-    if (!isAllowedAddress(match[0], original, line, end)) found.push({ at: match.index, address: match[0] });
+    if (!isAllowedAddress(match[0], written, line, end)) found.push({ at: match.index, address: match[0] });
   }
   for (const match of line.matchAll(BARE_SCHEME)) found.push({ at: match.index, address: match[0] });
   for (const match of line.matchAll(RELATIVE_ADDRESS)) {
@@ -323,8 +335,9 @@ function addressesIn(line: string, original: string): string[] {
  * (`location.protocol + "//host"`) cannot be found by a scan; the apps' CSP blocks loading them.
  */
 export function outsideAddresses(line: string): string[] {
+  let written: Set<string> | undefined;
   for (const reading of readings(line)) {
-    const found = addressesIn(reading, line);
+    const found = addressesIn(reading, reading === line ? undefined : (written ??= writtenStarts(line)));
     if (found.length > 0) return found;
   }
   return [];
