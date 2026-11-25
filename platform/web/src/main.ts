@@ -1,5 +1,5 @@
 // Sign-in screens (ticket 1.6): email, code, nickname, then the step screen; step 1, Clarify (ticket
-// 1.8), and step 2, Spec and approval (ticket 1.9). The rules for each API answer are in ./flow.ts,
+// 1.8), step 2, Spec and approval (ticket 1.9), step 3, Build, and the start of step 4, Live (ticket 2.10). The rules for each API answer are in ./flow.ts,
 // ./chat.ts and ./spec-view.ts; this file only wires them to the page. Both steps share one
 // conversation, polling and Send form logic, each on its own elements (`VIEWS`).
 //
@@ -35,6 +35,7 @@ import {
 import type { DiagramApi } from "./diagram.js";
 import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
+import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, stageStates, type Build } from "./build-view.js";
 
 type ScreenName = Screen | "loading";
 
@@ -77,8 +78,9 @@ function clearMessage(screen: Screen): void {
   byId(`message-${screen}`).textContent = "";
 }
 
-/** Shows one screen and moves the focus to its first field, or to its heading. */
+/** Shows one screen and moves the focus to its first field, or to its heading. Leaving step 3 stops its polling. */
 function show(name: ScreenName, focusId?: string): void {
+  if (name !== "build") stopBuildPolling();
   for (const section of document.querySelectorAll<HTMLElement>("[data-screen]")) {
     section.hidden = section.id !== `screen-${name}`;
   }
@@ -113,6 +115,10 @@ function showMe(me: Me): void {
     stopPolling();
     clearMessage("nickname");
     show("nickname", "nickname-input");
+    return;
+  }
+  if (screen === "build") {
+    openBuild();
     return;
   }
   openView(screen === "spec" ? "spec" : "step");
@@ -173,7 +179,7 @@ let pollRound = 0;
 let localVersion = 0;
 
 /** Step 2 (ticket 1.9): the newest and approved versions, and the version on the page. */
-let specInfo: { latest?: number; approved?: number; atApproved: boolean; building: boolean } = { atApproved: false, building: false };
+let specInfo: { latest?: number; approved?: number; atApproved: boolean } = { atApproved: false };
 let shownSpec: SpecVersion | null = null;
 
 function stopPolling(): void {
@@ -225,20 +231,20 @@ function renderStepOne(): void {
 
 /**
  * Step 2 (ticket 1.9): the approved notice, the missing-spec button, the form and Approve spec. Ticket 2.7: while the
- * readiness check runs (step approved, its request in flight) the notice says so; once it passed (step building) it
- * says the build is starting. At step approved with nothing in flight (an approval from before 2.7, a check that never
+ * readiness check runs (step approved, its request in flight) the notice says so; once it passed (step building) the
+ * page moves to step 3 (ticket 2.10). At step approved with nothing in flight (an approval from before 2.7, a check that never
  * finished) Approve spec shows again, to ask for the check.
  */
 function renderStepTwo(): void {
   const checking = specInfo.atApproved && waiting !== null;
-  const approved = checking || specInfo.building;
+  const approved = checking;
   const notice = byId("spec-approved");
   notice.hidden = !approved;
-  notice.textContent = specInfo.building ? SPEC_TEXTS.building : SPEC_TEXTS.approved;
+  notice.textContent = SPEC_TEXTS.approved;
   byId("spec-doc").hidden = shownSpec === null;
   byId("spec-missing").hidden = approved || specInfo.atApproved || specInfo.latest !== undefined || waiting !== null;
   byId("spec-typing-text").textContent = specInfo.atApproved ? SPEC_TEXTS.checking : specInfo.latest === undefined ? SPEC_TEXTS.writing : SPEC_TEXTS.answering;
-  byId("spec-chat-form").hidden = specInfo.atApproved || specInfo.building;
+  byId("spec-chat-form").hidden = specInfo.atApproved;
   byId("spec-approve").hidden = approved || shownSpec === null;
   byId<HTMLButtonElement>("approve-spec-button").disabled = waiting !== null || shownSpec?.version !== specInfo.latest;
 }
@@ -313,13 +319,18 @@ async function loadConversation(): Promise<void> {
     await goToOwnStep(view.screen);
     return;
   }
+  // Ticket 2.10: once the readiness check passed, the build is on, and step 3 follows it.
+  if (conversation.step === "building") {
+    stopPolling();
+    openBuild();
+    return;
+  }
   openView(conversation.step === "clarify" ? "step" : "spec");
   messages = view.screen === "spec" ? stepTwoMessages(conversation.messages) : conversation.messages;
   specInfo = {
     ...(conversation.latestSpecVersion === undefined ? {} : { latest: conversation.latestSpecVersion }),
     ...(conversation.approvedSpecVersion === undefined ? {} : { approved: conversation.approvedSpecVersion }),
     atApproved: conversation.step === "approved",
-    building: conversation.step === "building",
   };
   stopPolling();
   const pending = conversation.pendingId;
@@ -448,6 +459,121 @@ async function drawDiagram(source: string, title: string, round: number): Promis
     img.hidden = true;
     status.textContent = SPEC_TEXTS.noDiagram;
   }
+}
+
+// ---- Step 3: the live build feed, and step 4 once live (ticket 2.10) ----
+
+let buildTimer: number | undefined;
+/** Bumped whenever build polling starts or stops, so an answer to an older poll is ignored. */
+let buildRound = 0;
+
+function stopBuildPolling(): void {
+  if (buildTimer !== undefined) window.clearTimeout(buildTimer);
+  buildTimer = undefined;
+  buildRound++;
+}
+
+/** Shows step 3 (once) and asks for the build at once, then every 2 seconds while it runs. */
+function openBuild(): void {
+  if (!byId("screen-build").hidden && buildTimer !== undefined) return;
+  stopPolling();
+  byId("build-nickname").textContent = nickname;
+  clearMessage("build");
+  show("build", "build-heading");
+  // Until the first answer: the build as it starts (no stage yet, nothing written).
+  renderBuild({ buildId: "", status: "queued", feed: [] });
+  stopBuildPolling();
+  void pollBuild(buildRound);
+}
+
+async function pollBuild(round: number): Promise<void> {
+  buildTimer = undefined;
+  const result = buildResult(await call("GET", "/api/build"));
+  if (round !== buildRound) return;
+  if (result.kind === "signed-out") {
+    showEmail(MESSAGES.signedOut);
+    return;
+  }
+  if (result.kind === "show") say("build", result.message, result.tone);
+  else clearMessage("build");
+  if (result.kind === "build") {
+    renderBuild(result.build);
+    if (result.build.status === "live") {
+      showLive(result.build);
+      return;
+    }
+    if (!isRunning(result.build.status)) return;
+  }
+  // Running, not there yet (404) or a passing problem: ask again in 2 seconds.
+  buildTimer = window.setTimeout(() => void pollBuild(round), BUILD_POLL_INTERVAL_MS);
+}
+
+/** The stages (the current one highlighted), the line on what happens now, the feed and the behind-the-scenes part. */
+function renderBuild(build: Build): void {
+  const states = stageStates(build);
+  const failed = build.status === "failed";
+  for (const item of byId("build-stages").querySelectorAll<HTMLElement>("li[data-stage]")) {
+    const state = states[item.dataset["stage"] as keyof typeof states] ?? "todo";
+    item.dataset["state"] = state;
+    if (state === "current") item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+    if (failed && state === "current") item.dataset["failed"] = "true";
+    else delete item.dataset["failed"];
+  }
+  const now = byId("build-now");
+  now.textContent = nowText(build);
+  now.dataset["tone"] = failed ? "error" : "info";
+  const reasons = byId("build-reasons");
+  const shownReasons = failed ? (build.failureReasons ?? []) : [];
+  reasons.hidden = shownReasons.length === 0;
+  reasons.replaceChildren(
+    ...shownReasons.map((reason) => {
+      const li = document.createElement("li");
+      li.textContent = reason;
+      return li;
+    }),
+  );
+  const part = behindPart(build);
+  for (const item of byId("build-behind-flow").querySelectorAll<HTMLElement>("li[data-part]")) {
+    if (item.dataset["part"] === part) item.dataset["current"] = "true";
+    else delete item.dataset["current"];
+  }
+  const lines = feedLines(build);
+  byId("build-feed-empty").hidden = lines.length > 0;
+  byId("build-feed").replaceChildren(
+    ...lines.map((line) => {
+      const li = document.createElement("li");
+      li.dataset["kind"] = line.kind;
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = line.label;
+      const text = document.createElement(line.kind === "commit" ? "span" : "code");
+      text.textContent = line.text;
+      li.append(label, text);
+      if (line.link !== undefined) {
+        const a = document.createElement("a");
+        a.href = line.link.href;
+        a.rel = "noopener";
+        a.target = "_blank";
+        a.textContent = line.link.text;
+        a.setAttribute("aria-label", `Commit ${line.link.text} on GitHub`);
+        li.append(a);
+      }
+      return li;
+    }),
+  );
+}
+
+/** Step 4 (ticket 2.10; ticket 2.11 completes it): the app is live at its address. */
+function showLive(build: Build): void {
+  const link = byId<HTMLAnchorElement>("live-link");
+  if (build.appUrl !== undefined) {
+    link.href = build.appUrl;
+    link.textContent = build.appUrl;
+  }
+  byId("live-address").hidden = build.appUrl === undefined;
+  clearMessage("live");
+  show("live", "live-heading");
 }
 
 /** Sends the message in the current step's form. */

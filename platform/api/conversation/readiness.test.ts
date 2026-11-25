@@ -364,7 +364,13 @@ describe("criterion 5: WHEN a participant asks for another participant's build T
     const buildId = must([...s.table.builds.keys()][0]);
     const mine = await s.call(buildOf());
     expect(mine.statusCode).toBe(200);
-    expect(json(mine)).toEqual({ buildId, status: "queued" });
+    expect(json(mine)).toEqual({
+      buildId,
+      status: "queued",
+      feed: [],
+      repositoryUrl: "https://github.com/ssd-workshop-apps/ssd-ada-runner",
+      appUrl: "https://workshop.rankly.games/apps/ada-runner/",
+    });
     // Bob has no build: Ada's is not found for him.
     const theirs = await s.call(buildOf(THEIRS));
     expect(theirs.statusCode).toBe(404);
@@ -374,10 +380,60 @@ describe("criterion 5: WHEN a participant asks for another participant's build T
     expect((await s.call(buildOf(THEIRS))).statusCode).toBe(404);
     // A failed build carries its reasons (as stored; the page shows them as text).
     s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), status: "failed", failureReasons: ["index.html: an outside address"] });
-    expect(json(await s.call(buildOf()))).toEqual({ buildId, status: "failed", failureReasons: ["index.html: an outside address"] });
+    expect(json(await s.call(buildOf()))).toMatchObject({ buildId, status: "failed", failureReasons: ["index.html: an outside address"] });
     expect((await s.call({ routeKey: BUILD_ROUTE })).statusCode).toBe(401);
     expect(s.logs.map((l) => l.route)).toContain("build");
     // Logs carry no ids or text.
     expect(JSON.stringify([...s.logs, ...s.workerLogs])).not.toMatch(/me-1|other-2|Ada|Bob|login|Run log/);
+  });
+});
+
+describe("ticket 2.10: GET /api/build carries the feed and the links the step 3 page needs", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const FEED = [
+    { kind: "step" as const, step: "preparing" as const, at: "2026-11-24T10:00:01.000Z" },
+    { kind: "step" as const, step: "writing" as const, at: "2026-11-24T10:00:02.000Z" },
+    { kind: "file" as const, path: "index.html", at: "2026-11-24T10:00:03.000Z" },
+    { kind: "fetch" as const, host: "en.wikipedia.org", at: "2026-11-24T10:00:04.000Z" },
+    { kind: "commit" as const, sha: SHA, message: "Add the home screen", at: "2026-11-24T10:00:05.000Z" },
+  ];
+
+  async function withBuild() {
+    const s = setup();
+    await s.call(approve(1));
+    s.model.push(readinessReply("ready"));
+    await s.drain();
+    const buildId = must([...s.table.builds.keys()][0]);
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), status: "building", feed: FEED });
+    return { s, buildId };
+  }
+
+  it("WHEN a build is running THEN the caller gets its feed in order, the repository (owner/ssd-<lower-cased nickname>) and the app's address", async () => {
+    const { s, buildId } = await withBuild();
+    const answer = await s.call(buildOf());
+    expect(answer.statusCode).toBe(200);
+    expect(json(answer)).toEqual({
+      buildId,
+      status: "building",
+      feed: FEED,
+      repositoryUrl: "https://github.com/ssd-workshop-apps/ssd-ada-runner",
+      appUrl: "https://workshop.rankly.games/apps/ada-runner/",
+    });
+  });
+
+  it("WHEN another participant asks THEN the build, feed included, is still not found; the answer never names the participant", async () => {
+    const { s, buildId } = await withBuild();
+    s.table.conversations.set("other-2", { ...must(s.table.conversations.get("other-2")), buildId });
+    const theirs = await s.call(buildOf(THEIRS));
+    expect(theirs.statusCode).toBe(404);
+    expect(json(theirs)).toEqual({ message: "Not found." });
+    const mine = await s.call(buildOf());
+    expect(mine.body).not.toMatch(/me-1|participantId|@/);
+  });
+
+  it("WHEN the build is not failed THEN no failure reasons are sent, even when some are stored", async () => {
+    const { s, buildId } = await withBuild();
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), status: "live", failureReasons: ["old"] });
+    expect(json(await s.call(buildOf()))).not.toHaveProperty("failureReasons");
   });
 });

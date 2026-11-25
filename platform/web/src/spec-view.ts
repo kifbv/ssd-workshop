@@ -21,8 +21,6 @@ export const SPEC_TEXTS = {
   approved:
     "Spec approved. Next comes the build: first the AI checks that your spec is ready to build (no login, no payments, no service that needs a key or an account, and no open questions). This takes a few seconds.",
   checking: "The AI is checking your spec…",
-  /** Ticket 2.7: the check passed and the build is queued (ticket 2.10 brings the step 3 screen). */
-  building: "Your spec is ready and the build is starting: the AI now turns your spec into your app.",
   drawing: "Drawing the diagram…",
   noDiagram: "The diagram could not be drawn. Ask the AI to fix it, or read it as text below.",
   diagramText: "Diagram as text",

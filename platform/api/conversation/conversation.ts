@@ -18,7 +18,8 @@ import {
   type HttpRequest,
   type HttpResponse,
 } from "../http.js";
-import { FAILED_MESSAGE, NOT_FOUND_MESSAGE } from "../participant/participant.js";
+import { FAILED_MESSAGE, NICKNAME_PATTERN, NOT_FOUND_MESSAGE } from "../participant/participant.js";
+import { appAddress, appRepositoryUrl } from "../settings.js";
 import { requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { ConversationState, MessageStatus, Step } from "../types.js";
@@ -347,8 +348,8 @@ async function queueReadiness(participantId: string, messageId: string, version:
 }
 
 /**
- * The caller's own build (ticket 2.7; the step 3 page polls it from ticket 2.10): its id, status and, when it
- * failed, the reasons. Found through the caller's own conversation, and only a build that names the caller:
+ * The caller's own build (ticket 2.7; the step 3 page polls it from ticket 2.10): its id, status, feed, repository
+ * and app address and, when it failed, the reasons. Found through the caller's own conversation, and only a build that names the caller:
  * anyone else's build (or none yet) is simply not found.
  */
 async function build(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
@@ -357,11 +358,16 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
   if (buildId === undefined) return notFound;
   const found = await deps.store.getBuild(buildId);
   if (found === undefined || found.participantId !== participant.id) return notFound;
+  // Ticket 2.10: the feed so far and the links the page shows (commits under the repository, the app's address).
+  // Never the participant id: the answer holds only the build's own facts.
+  const nickname = found.nickname !== undefined && NICKNAME_PATTERN.test(found.nickname) ? found.nickname : undefined;
   return {
     outcome: "ok",
     response: jsonResponse(200, {
       buildId: found.buildId,
       status: found.status,
+      feed: found.feed ?? [],
+      ...(nickname === undefined ? {} : { repositoryUrl: appRepositoryUrl(nickname), appUrl: appAddress(nickname) }),
       ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
     }),
   };

@@ -18,7 +18,7 @@ export interface Me {
   step: string;
 }
 
-export type Screen = "email" | "code" | "nickname" | "step" | "spec";
+export type Screen = "email" | "code" | "nickname" | "step" | "spec" | "build" | "live";
 export type Tone = "info" | "error";
 
 /** A message for the current screen. */
@@ -119,10 +119,13 @@ export function nicknameResult(
 
 /**
  * A person without a nickname picks one first; at step 1 they go to the Clarify screen (`step`),
- * after Write my spec to the step 2 screen (`spec`, ticket 1.8; ticket 1.9 fills it in).
+ * after Write my spec to the step 2 screen (`spec`, ticket 1.8; ticket 1.9 fills it in). Once the build
+ * started (step `building`, ticket 2.10) they go to the step 3 screen (`build`), which moves on to step 4
+ * when the build is live.
  */
-export function screenFor(me: Me): "nickname" | "step" | "spec" {
+export function screenFor(me: Me): "nickname" | "step" | "spec" | "build" {
   if (me.nickname === null || me.step === "nickname") return "nickname";
+  if (me.step === "building") return "build";
   return me.step === "clarify" ? "step" : "spec";
 }
 

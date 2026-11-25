@@ -1,7 +1,7 @@
 // The conversation's records and the store interface shared by the API routes, the AI worker and
 // the flags command (ticket 1.7). The DynamoDB adapter is ./store.ts; tests use ./fakes.ts.
 import { createHash } from "node:crypto";
-import type { BuildStatus, ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
+import type { BuildItem, BuildStatus, ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 
 /**
@@ -196,11 +196,18 @@ export interface ParticipantInfo {
   nickname?: string;
 }
 
-/** A build as `GET /api/build` reads it (ticket 2.7). */
+/** One event of a build's live feed (ticket 2.8 writes it, 2.10's step 3 page shows it). */
+export type BuildFeedEvent = NonNullable<BuildItem["feed"]>[number];
+
+/** A build as `GET /api/build` reads it (ticket 2.7; ticket 2.10 adds the nickname and the feed). */
 export interface StoredBuild {
   buildId: string;
   participantId: string;
   status: BuildStatus;
+  /** As the participant typed it (the repository and the app's address are named after it, lower-cased). */
+  nickname?: string;
+  /** Oldest first; only well-formed events (see `readFeed` in ./store.ts). */
+  feed?: BuildFeedEvent[];
   failureReasons?: string[];
 }
 

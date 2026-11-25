@@ -517,13 +517,59 @@ describe("DynamoConversationStore", () => {
     ]);
     const store = new DynamoConversationStore(client, TABLE);
     await expect(store.getParticipantInfo("p-1")).resolves.toEqual({ step: "approved", nickname: "Ada" });
-    await expect(store.getBuild("b-1")).resolves.toEqual({ buildId: "b-1", participantId: "p-1", status: "failed", failureReasons: ["a", "b"] });
+    await expect(store.getBuild("b-1")).resolves.toEqual({ buildId: "b-1", participantId: "p-1", status: "failed", feed: [], failureReasons: ["a", "b"] });
     await expect(store.getBuild("b-1")).resolves.toBeUndefined();
     await expect(store.getBuild("b-1")).resolves.toBeUndefined();
     // A malformed id is not even read.
     await expect(store.getBuild("../x")).resolves.toBeUndefined();
     expect(sent).toHaveLength(4);
     expect((sent[1] as GetItemCommand).input).toMatchObject({ Key: { pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } }, ConsistentRead: true });
+  });
+
+  it("reads a build's nickname and feed, keeping only well-formed events, oldest first (ticket 2.10)", async () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const at = { S: "2026-11-24T10:00:00.000Z" };
+    const ev = (fields: Record<string, string>) => ({ M: { ...Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, { S: v }])), at } });
+    const { client, sent } = stubClient([
+      {
+        Item: {
+          type: { S: "build" },
+          buildId: { S: "b-1" },
+          participantId: { S: "p-1" },
+          status: { S: "building" },
+          nickname: { S: "Ada-Runner" },
+          feed: {
+            L: [
+              ev({ kind: "step", step: "preparing" }),
+              ev({ kind: "step", step: "hacking" }),
+              ev({ kind: "file", path: "<b>index.html</b>" }),
+              ev({ kind: "fetch", host: "en.wikipedia.org" }),
+              ev({ kind: "commit", sha, message: "Add the home screen" }),
+              ev({ kind: "commit", sha: "../../evil", message: "x" }),
+              ev({ kind: "other" }),
+              { M: { kind: { S: "file" }, path: { S: "no-time.js" } } },
+              { S: "not a map" },
+            ],
+          },
+        },
+      },
+    ]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.getBuild("b-1")).resolves.toEqual({
+      buildId: "b-1",
+      participantId: "p-1",
+      status: "building",
+      nickname: "Ada-Runner",
+      feed: [
+        { kind: "step", step: "preparing", at: at.S },
+        { kind: "file", path: "<b>index.html</b>", at: at.S },
+        { kind: "fetch", host: "en.wikipedia.org", at: at.S },
+        { kind: "commit", sha, message: "Add the home screen", at: at.S },
+      ],
+    });
+    const input = (sent[0] as GetItemCommand).input;
+    expect(input.ProjectionExpression).toBe("#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed");
+    expect(Object.keys(input.ExpressionAttributeNames ?? {}).sort()).toEqual(["#buildId", "#failureReasons", "#feed", "#nickname", "#participantId", "#status", "#type"]);
   });
 
   it("sends a build id alone to the FIFO launch queue, deduplicated by the build id, grouped by participant (ticket 2.7)", async () => {
