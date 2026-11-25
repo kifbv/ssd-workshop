@@ -161,3 +161,14 @@ export const BUILD_TASK_MAX_MS = 30 * 60 * 1000;
  * deployer: about 7 minutes; tested in infra/lib/app.test.ts).
  */
 export const HANDED_OVER_GRACE_MS = 20 * 60 * 1000;
+/**
+ * Ticket 3.4: a build that finds no free slot stays `queued` and its launch message comes back after this many seconds
+ * (the launcher sets the message's visibility and reports it as a batch item failure).
+ */
+export const LAUNCH_WAIT_SECONDS = 30;
+/**
+ * Ticket 3.4: a waiting entry counts as "ahead" (on the page, and for the start order) only while its message was seen
+ * within this long. A waiting message comes back every LAUNCH_WAIT_SECONDS, so an entry not seen for 2 minutes belongs
+ * to a build whose message is gone (dead-lettered, or the build was retried or reset): it never blocks the line.
+ */
+export const QUEUE_SEEN_MS = 2 * 60 * 1000;

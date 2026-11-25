@@ -5,19 +5,26 @@ import type { AddressInfo } from "node:net";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { settle } from "../api/sign-in/fakes.js";
+import { BUILD_AGENT_TIMEOUT_MS } from "../api/settings.js";
+import { AGENT_MAX_RETRIES } from "./agent.js";
 import {
+  BACKOFF_MAX_MS,
   MAX_BODY_BYTES,
   MAX_IN_FLIGHT,
   NodeSha256,
+  THROTTLE_RETRY_MS,
+  backoffMs,
   UPSTREAM_ERROR_MESSAGE,
   allowedPaths,
   pathShape,
   startBedrockProxy,
   type BedrockProxy,
+  type BedrockProxyOptions,
   type BedrockProxyLogEntry,
 } from "./bedrock-proxy.js";
 
 const MODEL = "eu.anthropic.claude-sonnet-4-6";
+type BedrockProxyOptionsRetry = NonNullable<BedrockProxyOptions["retry"]>;
 const CREDENTIALS = { accessKeyId: "AKIDTESTPROXY", secretAccessKey: "secret-test-key", sessionToken: "session-test-token" };
 
 interface Seen {
@@ -32,6 +39,9 @@ let upstreamUrl: string;
 const seen: Seen[] = [];
 /** How the fake Bedrock answers: a 200 stream, an error naming the account (as Bedrock's do), or held until released. */
 let mode: "stream" | "error" | "hold" = "stream";
+/** Ticket 3.4: the fake Bedrock first answers this many requests with `throttleStatus` (it throttles), then as `mode` says. */
+let throttleLeft = 0;
+let throttleStatus = 429;
 const held: ServerResponse[] = [];
 const ERROR_BODY = JSON.stringify({ message: "User: arn:aws:sts::123456789012:assumed-role/ssd-workshop-builder/x is not authorized" });
 
@@ -41,6 +51,12 @@ beforeAll(async () => {
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       seen.push({ method: request.method ?? "", url: request.url ?? "", headers: request.headers, body: Buffer.concat(chunks).toString() });
+      if (throttleLeft > 0) {
+        throttleLeft -= 1;
+        response.writeHead(throttleStatus, { "content-type": "application/json" });
+        response.end(JSON.stringify({ message: "Too many requests, please wait before trying again." }));
+        return;
+      }
       if (mode === "error") {
         response.writeHead(403, { "content-type": "application/json", "x-amzn-errortype": "AccessDeniedException:arn:aws:iam::123456789012:x" });
         response.end(ERROR_BODY);
@@ -66,6 +82,8 @@ const proxies: BedrockProxy[] = [];
 afterEach(async () => {
   seen.length = 0;
   mode = "stream";
+  throttleLeft = 0;
+  throttleStatus = 429;
   for (const response of held.splice(0)) response.end();
   await Promise.all(proxies.splice(0).map((proxy) => proxy.close()));
 });
@@ -335,5 +353,119 @@ describe("the Bedrock proxy refuses what a browser page or a guess could send (t
     // Once they are done, a new request goes through again.
     mode = "stream";
     expect((await send()).status).toBe(200);
+  });
+});
+
+describe("ticket 3.4: Bedrock throttling (criterion 5)", () => {
+  /** A fake clock that moves only when the proxy pauses, and every pause it took. */
+  function fakeTime(random: () => number) {
+    const clock = { now: 0, pauses: [] as number[] };
+    const retry = {
+      now: () => clock.now,
+      sleep: async (ms: number) => {
+        clock.pauses.push(ms);
+        clock.now += ms;
+      },
+      random,
+    };
+    return { clock, retry };
+  }
+
+  async function startWith(retry: BedrockProxyOptionsRetry, logs: BedrockProxyLogEntry[] = []): Promise<BedrockProxy> {
+    const proxy = await startBedrockProxy({ modelId: MODEL, credentials: async () => CREDENTIALS, upstream: upstreamUrl, log: (entry) => logs.push(entry), retry });
+    proxies.push(proxy);
+    return proxy;
+  }
+  const invoke = (proxy: BedrockProxy): string => `${proxy.url}${allowedPaths(MODEL)[1]}`;
+  const send = (proxy: BedrockProxy) => raw(invoke(proxy), "POST", { host: hostOf(proxy), "content-type": "application/json" }, BODY);
+
+  it("backs off with full jitter: a random pause up to 1 s x 2^try, never above 20 s", () => {
+    expect([0, 1, 2, 3, 4, 5, 6, 10].map((retry) => backoffMs(retry, () => 0.999999))).toEqual([999, 1999, 3999, 7999, 15999, 19999, 19999, 19999]);
+    expect(backoffMs(3, () => 0.5)).toBe(4000);
+    expect(backoffMs(3, () => 0)).toBe(0);
+  });
+
+  for (const status of [429, 503]) {
+    it(`WHEN Bedrock answers ${status} a few times THEN the proxy retries, signed again each time, and the agent gets the 200`, async () => {
+      throttleLeft = 3;
+      throttleStatus = status;
+      const logs: BedrockProxyLogEntry[] = [];
+      const { clock, retry } = fakeTime(() => 0.5);
+      const proxy = await startWith(retry, logs);
+      const answer = await send(proxy);
+      expect(answer.status).toBe(200);
+      expect(answer.body).toBe("part-1;part-2");
+      expect(seen).toHaveLength(4);
+      for (const request of seen) {
+        expect(request.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDTESTPROXY\//);
+        expect(request.body).toBe(BODY);
+      }
+      expect(clock.pauses).toEqual([500, 1000, 2000]);
+      expect(logs.map((entry) => [entry.outcome, entry.status])).toEqual([
+        ["throttled", status],
+        ["throttled", status],
+        ["throttled", status],
+        ["forwarded", 200],
+      ]);
+    });
+  }
+
+  it("WHEN Bedrock keeps throttling THEN the proxy gives up only after about 2 minutes, so the agent's own retries outlast the 12-minute build limit", async () => {
+    for (const random of [() => 0.5, () => 0.999999, () => 0.05]) {
+      throttleLeft = 1_000_000;
+      seen.length = 0;
+      const logs: BedrockProxyLogEntry[] = [];
+      const { clock, retry } = fakeTime(random);
+      const proxy = await startWith(retry, logs);
+      const answer = await send(proxy);
+      // The 429 reaches the agent (Claude Code retries it itself), without Bedrock's text.
+      expect(answer.status).toBe(429);
+      expect(JSON.parse(answer.body)).toEqual({ message: UPSTREAM_ERROR_MESSAGE });
+      expect(clock.now).toBeLessThanOrEqual(THROTTLE_RETRY_MS);
+      expect(clock.now).toBeGreaterThan(THROTTLE_RETRY_MS - BACKOFF_MAX_MS);
+      expect(seen).toHaveLength(clock.pauses.length + 1);
+      expect(logs.at(-1)).toMatchObject({ outcome: "forwarded", status: 429 });
+      // Claude Code sends a request 1 + CLAUDE_CODE_MAX_RETRIES times, each held here for over THROTTLE_RETRY_MS -
+      // BACKOFF_MAX_MS (100 s): a throttled build is still waiting for Bedrock when its 12-minute limit stops it.
+      expect((1 + AGENT_MAX_RETRIES) * clock.now).toBeGreaterThan(BUILD_AGENT_TIMEOUT_MS);
+    }
+  });
+
+  it("does not retry other errors (a 403 goes back at once)", async () => {
+    mode = "error";
+    const { clock, retry } = fakeTime(() => 0.5);
+    const proxy = await startWith(retry);
+    expect((await send(proxy)).status).toBe(403);
+    expect(seen).toHaveLength(1);
+    expect(clock.pauses).toEqual([]);
+  });
+
+  it("WHEN the agent hangs up during a retry pause THEN the proxy stops retrying", async () => {
+    throttleLeft = 1_000_000;
+    let aborted = false;
+    const pauses: number[] = [];
+    const retry: BedrockProxyOptionsRetry = {
+      now: () => 0,
+      random: () => 0.5,
+      // The pause lasts until the agent hangs up.
+      sleep: (ms, signal) =>
+        new Promise<void>((resolve) => {
+          pauses.push(ms);
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            resolve();
+          });
+        }),
+    };
+    const proxy = await startWith(retry);
+    const controller = new AbortController();
+    const pending = fetch(invoke(proxy), { method: "POST", headers: JSON_TYPE, body: BODY, signal: controller.signal });
+    await settle(() => pauses.length === 1);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    await settle(() => aborted);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(seen).toHaveLength(1);
+    expect(pauses).toHaveLength(1);
   });
 });

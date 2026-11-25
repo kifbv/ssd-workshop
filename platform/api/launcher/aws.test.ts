@@ -12,6 +12,7 @@ import {
   type UpdateItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { DescribeTasksCommand, RunTaskCommand, type DescribeTasksCommandInput, type RunTaskCommandInput } from "@aws-sdk/client-ecs";
+import { ChangeMessageVisibilityCommand } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
 import {
   BUILDER_CONTAINER_NAME as INFRA_BUILDER_CONTAINER_NAME,
@@ -19,13 +20,18 @@ import {
   BUILD_DLQ_NAME,
   BUILDS_CLUSTER_NAME as INFRA_BUILDS_CLUSTER_NAME,
   BUILDS_SUBNET_IDS as INFRA_BUILDS_SUBNET_IDS,
+  BUILD_QUEUE_PARTITION,
+  BUILD_SLOTS_PARTITION,
   DEPLOY_DLQ_NAME,
   LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
   LAUNCHER_LAUNCH_ATTRIBUTES,
+  LAUNCHER_QUEUE_ATTRIBUTES,
   LAUNCHER_READ_ATTRIBUTES,
+  LAUNCHER_SLOT_ATTRIBUTES,
   LAUNCHES_PARTITION,
+  SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
-import { LAUNCHES_PK } from "../keys.js";
+import { BUILD_QUEUE_PK, BUILD_SLOTS_PK, LAUNCHES_PK, SETTINGS_PK } from "../keys.js";
 import {
   BUILD_CHECK_QUEUE_NAME,
   BUILD_DLQ_URL,
@@ -34,7 +40,7 @@ import {
   BUILDS_SUBNET_IDS,
   DEPLOY_DLQ_URL,
 } from "../settings.js";
-import { DynamoLaunchRecords, EcsBuildTasks, runTaskRequest, type LauncherTableSender, type TaskSender } from "./aws.js";
+import { DynamoLaunchRecords, EcsBuildTasks, runTaskRequest, SqsLaunchVisibility, type LauncherTableSender, type TaskSender, type VisibilitySender } from "./aws.js";
 
 const TABLE = "ssd-workshop-data";
 const NOW = "2026-11-24T10:00:00.000Z";
@@ -42,6 +48,9 @@ const ARN = "arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/0123
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const ATTEMPT = "6f1c2a9e-1111-4222-8333-444455556666";
 const START = { buildId: "b-1", token: "ghs_token", baseCommit: COMMIT, attemptId: ATTEMPT };
+const QUEUE_KEY = `${NOW}#b-1`;
+const SLOT = { cap: 15, queueKey: QUEUE_KEY };
+const cancelled = (...codes: string[]) => Object.assign(new Error("x"), { name: "TransactionCanceledException", CancellationReasons: codes.map((Code) => ({ Code })) });
 
 function stub(answers: unknown[] = []) {
   const sent: { input: unknown }[] = [];
@@ -58,12 +67,12 @@ function stub(answers: unknown[] = []) {
   return { client, sent, options };
 }
 
-type Expressions = { UpdateExpression?: string; ConditionExpression?: string; ProjectionExpression?: string; KeyConditionExpression?: string };
+type Expressions = { UpdateExpression?: string; ConditionExpression?: string; ProjectionExpression?: string; KeyConditionExpression?: string; FilterExpression?: string };
 type Named = Expressions & { ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, unknown>; Key?: Record<string, unknown>; Item?: Record<string, unknown> };
 
 /** Every attribute name a request uses: placeholders resolved, bare names, the key's and a put item's names. */
 function attributeNames(input: Named): string[] {
-  const text = [input.UpdateExpression, input.ConditionExpression, input.ProjectionExpression, input.KeyConditionExpression].join(" ");
+  const text = [input.UpdateExpression, input.ConditionExpression, input.ProjectionExpression, input.KeyConditionExpression, input.FilterExpression].join(" ");
   const placeholders = (text.match(/#[A-Za-z]+/g) ?? []).map((p) => input.ExpressionAttributeNames?.[p] ?? p);
   const keywords = new Set(["SET", "REMOVE", "ADD", "DELETE", "AND", "OR", "NOT", "IN", "attribute_exists", "attribute_not_exists", "undefined"]);
   const bare = (text.replace(/[#:][A-Za-z]+/g, " ").match(/[A-Za-z_]+/g) ?? []).filter((w) => !keywords.has(w));
@@ -72,12 +81,13 @@ function attributeNames(input: Named): string[] {
 
 /** DynamoDB refuses an expression with an undefined or unused placeholder. */
 function placeholdersMatch(input: Named): void {
-  const text = [input.UpdateExpression, input.ConditionExpression, input.ProjectionExpression, input.KeyConditionExpression].join(" ");
+  const text = [input.UpdateExpression, input.ConditionExpression, input.ProjectionExpression, input.KeyConditionExpression, input.FilterExpression].join(" ");
   expect(new Set(Object.keys(input.ExpressionAttributeNames ?? {}))).toEqual(new Set(text.match(/#[A-Za-z]+/g) ?? []));
   expect(new Set(Object.keys(input.ExpressionAttributeValues ?? {}))).toEqual(new Set(text.match(/:[A-Za-z]+/g) ?? []));
 }
 
-const pkOf = (input: Named): string => ((input.Key ?? input.Item)?.pk as { S: string }).S;
+const pkOf = (input: Named): string =>
+  (((input.Key ?? input.Item)?.pk ?? (input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[":pk"]) as { S: string }).S;
 
 describe("DynamoLaunchRecords (ticket 2.9)", () => {
   async function everyRequest() {
@@ -92,7 +102,18 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.readProfileNickname("p-1")).toBe("Ada");
     expect(await records.readConversation("p-1")).toEqual({ buildId: "b-1", approvedSpecVersion: 2 });
     expect(await records.readApprovedSpec("p-1", 2)).toBe("# Spec");
-    expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).toBe(true);
+    // Ticket 3.4: the cap, the waiting line and the slots.
+    expect(await records.readBuildsAtOnce()).toBe(15);
+    expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);
+    await records.touchQueueEntry(QUEUE_KEY, "b-1", NOW);
+    expect(await records.countAhead(QUEUE_KEY, NOW)).toBe(0);
+    expect(await records.readSlots()).toEqual({ running: 0, version: 0 });
+    expect(await records.listSlotHolders()).toEqual([]);
+    expect(await records.releaseSlot("b-1")).toBe(true);
+    expect(await records.repairSlots({ running: 3, version: 4 }, 2)).toBe(true);
+    expect(await records.listQueueEntries()).toEqual([]);
+    await records.removeQueueEntry(QUEUE_KEY);
+    expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).toBe("claimed");
     await records.recordTask("b-1", ARN, NOW);
     expect(await records.failUnstarted("b-1", ["x"], NOW)).toBe(true);
     expect(await records.failUnrecorded("b-1", NOW, ["x"], NOW)).toBe(true);
@@ -105,19 +126,23 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     return sent;
   }
 
-  it("reads only LAUNCHER_READ_ATTRIBUTES, consistently, with a projection (so dynamodb:Select is SPECIFIC_ATTRIBUTES)", async () => {
+  it("reads only LAUNCHER_READ_ATTRIBUTES (SETTINGS_READ_ATTRIBUTES, LAUNCHER_SLOT_ATTRIBUTES), consistently, with a projection (so dynamodb:Select is SPECIFIC_ATTRIBUTES)", async () => {
     const sent = await everyRequest();
     const reads = sent.filter((command) => command instanceof GetItemCommand).map((command) => command.input as GetItemCommandInput);
-    expect(reads).toHaveLength(4);
-    const names = new Set<string>();
+    expect(reads).toHaveLength(6);
+    const names = { records: new Set<string>(), settings: new Set<string>(), slots: new Set<string>() };
     for (const input of reads) {
       placeholdersMatch(input as Named);
       expect(input.ConsistentRead).toBe(true);
       expect(input.ProjectionExpression).toBeTruthy();
-      expect(pkOf(input as Named)).toMatch(/^(BUILD|PARTICIPANT)#/);
-      for (const name of attributeNames(input as Named)) names.add(name);
+      const pk = pkOf(input as Named);
+      const set = pk === SETTINGS_PK ? names.settings : pk === BUILD_SLOTS_PK ? names.slots : names.records;
+      if (set === names.records) expect(pk).toMatch(/^(BUILD|PARTICIPANT)#/);
+      for (const name of attributeNames(input as Named)) set.add(name);
     }
-    expect([...names].sort()).toEqual([...LAUNCHER_READ_ATTRIBUTES].sort());
+    expect([...names.records].sort()).toEqual([...LAUNCHER_READ_ATTRIBUTES].sort());
+    for (const name of names.settings) expect(SETTINGS_READ_ATTRIBUTES as readonly string[]).toContain(name);
+    for (const name of names.slots) expect(LAUNCHER_SLOT_ATTRIBUTES as readonly string[]).toContain(name);
   });
 
   it("names exactly LAUNCHER_BUILD_UPDATE_ATTRIBUTES in BUILD# and LAUNCHER_LAUNCH_ATTRIBUTES in LAUNCHES, returning nothing", async () => {
@@ -132,38 +157,123 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
         for (const item of command.input.TransactItems ?? []) {
           if (item.Update) writes.push(item.Update as Named);
           if (item.Put) writes.push(item.Put as Named);
+          if (item.Delete) writes.push(item.Delete as Named);
+          if (item.ConditionCheck) writes.push(item.ConditionCheck as Named);
         }
       }
       if (command instanceof QueryCommand) writes.push(command.input as Named);
     }
-    const build = new Set<string>();
-    const launch = new Set<string>();
+    const names: Record<string, Set<string>> = { build: new Set(), [LAUNCHES_PK]: new Set(), [BUILD_SLOTS_PK]: new Set(), [BUILD_QUEUE_PK]: new Set() };
     for (const input of writes) {
       placeholdersMatch(input);
-      const pk = (input as QueryCommandInput).KeyConditionExpression ? LAUNCHES_PK : pkOf(input);
-      if (pk.startsWith("BUILD#")) for (const name of attributeNames(input)) build.add(name);
-      else {
-        expect(pk).toBe(LAUNCHES_PK);
-        for (const name of attributeNames(input)) launch.add(name);
-      }
+      const pk = pkOf(input);
+      const set = pk.startsWith("BUILD#") ? names.build : names[pk];
+      expect(set, pk).toBeDefined();
+      for (const name of attributeNames(input)) set?.add(name);
     }
-    expect([...build].sort()).toEqual([...LAUNCHER_BUILD_UPDATE_ATTRIBUTES].sort());
-    expect([...launch].sort()).toEqual([...LAUNCHER_LAUNCH_ATTRIBUTES].sort());
+    expect([...(names.build ?? [])].sort()).toEqual([...LAUNCHER_BUILD_UPDATE_ATTRIBUTES].sort());
+    expect([...(names[LAUNCHES_PK] ?? [])].sort()).toEqual([...LAUNCHER_LAUNCH_ATTRIBUTES].sort());
+    expect([...(names[BUILD_SLOTS_PK] ?? [])].sort()).toEqual([...LAUNCHER_SLOT_ATTRIBUTES].sort());
+    expect([...(names[BUILD_QUEUE_PK] ?? [])].sort()).toEqual([...LAUNCHER_QUEUE_ATTRIBUTES].sort());
     expect(LAUNCHES_PK).toBe(LAUNCHES_PARTITION);
+    expect(BUILD_SLOTS_PK).toBe(BUILD_SLOTS_PARTITION);
+    expect(BUILD_QUEUE_PK).toBe(BUILD_QUEUE_PARTITION);
+    // Partitions no `BUILD#*` or `PARTICIPANT#*` pattern can match.
+    for (const pk of [BUILD_SLOTS_PK, BUILD_QUEUE_PK]) expect(pk).not.toMatch(/^(BUILD|PARTICIPANT)#/);
   });
 
-  it("claims only a queued build of the read nickname and participant, with its watch-list entry, in one transaction", async () => {
-    const { client, sent } = stub([Object.assign(new Error("x"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "ConditionalCheckFailed" }, { Code: "None" }] })]);
+  it("claims only a queued build of the read nickname and participant, with its watch-list entry and a slot, in one transaction", async () => {
+    const { client, sent } = stub([cancelled("ConditionalCheckFailed", "None", "None", "None", "None")]);
     const records = new DynamoLaunchRecords(client, TABLE);
-    expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).toBe(false);
-    const [update, put] = (sent[0] as TransactWriteItemsCommand).input.TransactItems ?? [];
+    expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).toBe("taken");
+    const [update, put, count, holder, entry] = (sent[0] as TransactWriteItemsCommand).input.TransactItems ?? [];
     expect(update?.Update?.ConditionExpression).toBe("#status = :queued AND #nickname = :nickname AND #participantId = :participantId");
-    expect(update?.Update?.UpdateExpression).toBe("SET #status = :building, #attemptId = :attemptId, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn");
+    expect(update?.Update?.UpdateExpression).toBe("SET #status = :building, #attemptId = :attemptId, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn, #queueKey");
     expect(update?.Update?.ExpressionAttributeValues?.[":attemptId"]).toEqual({ S: ATTEMPT });
     expect(put?.Put?.Item).toEqual({ pk: { S: "LAUNCHES" }, sk: { S: "BUILD#b-1" }, type: { S: "launch" }, buildId: { S: "b-1" }, claimedAt: { S: NOW } });
-    // A conflict that is not a condition is an error.
-    const other = stub([Object.assign(new Error("x"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "TransactionConflict" }] })]);
-    await expect(new DynamoLaunchRecords(other.client, TABLE).claim("b-1", "Ada", "p-1", ATTEMPT, NOW)).rejects.toThrow();
+    // Ticket 3.4: the slot is taken in the same transaction, the waiting entry removed.
+    expect(count?.Update?.Key).toEqual({ pk: { S: "BUILD_SLOTS" }, sk: { S: "COUNT" } });
+    expect(holder?.Put?.Item).toEqual({ pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-1" }, type: { S: "build-slot" }, buildId: { S: "b-1" }, heldSince: { S: NOW } });
+    expect(holder?.Put?.ConditionExpression).toBe("attribute_not_exists(pk)");
+    expect(entry?.Delete?.Key).toEqual({ pk: { S: "BUILD_QUEUE" }, sk: { S: QUEUE_KEY } });
+    // Any other error is thrown.
+    const other = stub([Object.assign(new Error("x"), { name: "ProvisionedThroughputExceededException" })]);
+    await expect(new DynamoLaunchRecords(other.client, TABLE).claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).rejects.toThrow();
+    const odd = stub([cancelled("None", "None", "ValidationError", "None", "None")]);
+    await expect(new DynamoLaunchRecords(odd.client, TABLE).claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).rejects.toThrow();
+  });
+
+  it("criterion 2: WHEN two launchers claim the last slot at the same time THEN the counter's condition lets one through: the other gets no-slot and waits", async () => {
+    // The counter moves only while `running` is under the cap; the losing transaction is cancelled on that item (its
+    // condition, or a TransactionConflict when both hit DynamoDB at once), never on the build.
+    const { client, sent } = stub([{}, cancelled("None", "None", "ConditionalCheckFailed", "None", "None"), cancelled("None", "None", "TransactionConflict", "None", "None")]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    const results = await Promise.all([
+      records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW, { cap: 15, queueKey: QUEUE_KEY }),
+      records.claim("b-2", "Bob", "p-2", ATTEMPT, NOW, { cap: 15, queueKey: `${NOW}#b-2` }),
+      records.claim("b-3", "Cy", "p-3", ATTEMPT, NOW, { cap: 15, queueKey: `${NOW}#b-3` }),
+    ]);
+    expect(results).toEqual(["claimed", "no-slot", "no-slot"]);
+    for (const command of sent) {
+      const count = (command as TransactWriteItemsCommand).input.TransactItems?.[2]?.Update;
+      expect(count?.ConditionExpression).toBe("attribute_not_exists(#running) OR #running < :cap");
+      expect(count?.UpdateExpression).toBe("ADD #running :delta, #version :one");
+      expect(count?.ExpressionAttributeValues).toEqual({ ":delta": { N: "1" }, ":one": { N: "1" }, ":cap": { N: "15" } });
+    }
+    // An earlier holder of the same build not freed yet: also no slot (the check frees it within a minute).
+    const held = stub([cancelled("None", "None", "None", "ConditionalCheckFailed", "None")]);
+    expect(await new DynamoLaunchRecords(held.client, TABLE).claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).toBe("no-slot");
+  });
+
+  it("frees the slot after each failure it writes (exactly once: the release transaction needs the holder), and repairs the counter only at the version it read", async () => {
+    const { client, sent } = stub();
+    const records = new DynamoLaunchRecords(client, TABLE);
+    await records.failStopped("b-1", ARN, ["x"], NOW);
+    expect(sent[1]).toBeInstanceOf(TransactWriteItemsCommand);
+    const [check, holder, count] = (sent[1] as TransactWriteItemsCommand).input.TransactItems ?? [];
+    expect(check?.ConditionCheck?.Key).toEqual({ pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } });
+    expect(check?.ConditionCheck?.ConditionExpression).toBe("attribute_not_exists(pk) OR NOT (#status IN (:building, :deploying))");
+    expect(holder?.Delete).toEqual({ TableName: TABLE, Key: { pk: { S: "BUILD_SLOTS" }, sk: { S: "BUILD#b-1" } }, ConditionExpression: "attribute_exists(pk)" });
+    expect(count?.Update?.ExpressionAttributeValues).toEqual({ ":delta": { N: "-1" }, ":one": { N: "1" } });
+    // A failure write refused by its condition frees nothing.
+    const refused = stub([Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" })]);
+    expect(await new DynamoLaunchRecords(refused.client, TABLE).failQueued("b-1", ["x"], NOW)).toBe(false);
+    expect(refused.sent).toHaveLength(1);
+    // A release that finds no holder (already freed) is not an error, and a failed release leaves the failure written.
+    const freed = stub([{}, cancelled("None", "ConditionalCheckFailed", "None"), {}, Object.assign(new Error("x"), { name: "InternalServerError" })]);
+    const twice = new DynamoLaunchRecords(freed.client, TABLE);
+    expect(await twice.failQueued("b-1", ["x"], NOW)).toBe(true);
+    expect(await twice.failQueued("b-1", ["x"], NOW)).toBe(true);
+    // The repair: SET only while the version is the one read.
+    const repair = stub([{}, Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" })]);
+    const r = new DynamoLaunchRecords(repair.client, TABLE);
+    expect(await r.repairSlots({ running: 9, version: 7 }, 2)).toBe(true);
+    expect(await r.repairSlots({ running: 0, version: 0 }, 2)).toBe(false);
+    const [set, first] = repair.sent.map((command) => command.input as UpdateItemCommandInput);
+    expect(set?.UpdateExpression).toBe("SET #running = :running, #version = :next");
+    expect(set?.ConditionExpression).toBe("#version = :seen");
+    expect(set?.ExpressionAttributeValues).toEqual({ ":running": { N: "2" }, ":next": { N: "8" }, ":seen": { N: "7" } });
+    expect(first?.ConditionExpression).toBe("attribute_not_exists(#version)");
+  });
+
+  it("places a queued build once, counts only entries ahead seen since the cutoff, and makes a waiting message come back after 30 seconds", async () => {
+    const { client, sent } = stub([{}, {}, { Count: 2, LastEvaluatedKey: { pk: { S: "BUILD_QUEUE" }, sk: { S: "x" } } }, { Count: 1 }]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);
+    await records.touchQueueEntry(QUEUE_KEY, "b-1", NOW);
+    expect(await records.countAhead(QUEUE_KEY, "2026-11-24T09:58:00.000Z")).toBe(3);
+    const [enqueue, touch, query] = sent.map((command) => command.input as UpdateItemCommandInput & QueryCommandInput);
+    expect(enqueue?.ConditionExpression).toBe("#status = :queued AND attribute_not_exists(#queueKey)");
+    expect(touch?.Key).toEqual({ pk: { S: "BUILD_QUEUE" }, sk: { S: QUEUE_KEY } });
+    expect(query?.KeyConditionExpression).toBe("pk = :pk AND sk < :place");
+    expect(query?.FilterExpression).toBe("#lastSeenAt >= :since");
+    expect(query?.Select).toBe("COUNT");
+    expect(query?.ExpressionAttributeValues).toEqual({ ":pk": { S: "BUILD_QUEUE" }, ":place": { S: QUEUE_KEY }, ":since": { S: "2026-11-24T09:58:00.000Z" } });
+    const visibility: { input: unknown }[] = [];
+    const sqs = { send: async (command: { input: unknown }) => visibility.push(command) } as unknown as VisibilitySender;
+    await new SqsLaunchVisibility(sqs, "https://sqs/q.fifo").comeBackAfter("handle-1", 30);
+    expect(visibility[0]).toBeInstanceOf(ChangeMessageVisibilityCommand);
+    expect(visibility[0]?.input).toEqual({ QueueUrl: "https://sqs/q.fifo", ReceiptHandle: "handle-1", VisibilityTimeout: 30 });
   });
 
   it("fails builds only in the state each case expects", async () => {
@@ -174,7 +284,8 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     await records.failDeploy("b-1", "Ada", COMMIT, ["x"], NOW);
     await records.failHandedOver("b-1", ARN, ["x"], NOW);
     await records.failUnrecorded("b-1", NOW, ["x"], NOW);
-    const [stopped, queued, deploy, handedOver, unrecorded] = sent.map((command) => command.input as UpdateItemCommandInput);
+    // Each failure write is followed by its slot release (a transaction).
+    const [stopped, queued, deploy, handedOver, unrecorded] = sent.filter((command) => command instanceof UpdateItemCommand).map((command) => command.input as UpdateItemCommandInput);
     expect(unrecorded?.ConditionExpression).toBe("#status = :building AND attribute_not_exists(#taskArn) AND #launchedAt = :claimedAt");
     expect(unrecorded?.ExpressionAttributeValues?.[":claimedAt"]).toEqual({ S: NOW });
     expect(stopped?.ConditionExpression).toBe("#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)");

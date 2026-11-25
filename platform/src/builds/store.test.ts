@@ -25,9 +25,11 @@ describe("npm run builds on AWS (ticket 2.9)", () => {
     expect(update.Key).toEqual({ pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } });
     expect(update.ConditionExpression).toBe("#status = :from");
     expect(update.ExpressionAttributeValues?.[":from"]).toEqual({ S: "failed" });
-    expect(update.UpdateExpression).toBe("SET #status = :queued, #updatedAt = :now REMOVE #failureReasons, #finishedAt, #pushedCommit, #deployedCommit, #taskArn, #launchedAt, #attemptId, #feed");
+    expect(update.UpdateExpression).toBe("SET #status = :queued, #updatedAt = :now REMOVE #failureReasons, #finishedAt, #pushedCommit, #deployedCommit, #taskArn, #launchedAt, #attemptId, #feed, #queueKey");
     expect([...REQUEUE_REMOVED]).toContain("pushedCommit");
     expect([...REQUEUE_REMOVED]).toContain("attemptId");
+    // Ticket 3.4: a retried build gets a new place at the end of the waiting line.
+    expect([...REQUEUE_REMOVED]).toContain("queueKey");
     placeholdersMatch(update);
     placeholdersMatch(sent[1]?.input as ScanCommandInput);
     // The list reads no failure text or participant data beyond the nickname.

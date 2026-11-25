@@ -1,8 +1,8 @@
 import { CreateInvalidationCommand } from "@aws-sdk/client-cloudfront";
-import { UpdateItemCommand, type UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
+import { TransactWriteItemsCommand, UpdateItemCommand, type UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
 import { DeleteObjectsCommand, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
-import { DEPLOYER_BUILD_UPDATE_ATTRIBUTES, DEPLOYER_LIVE_UPDATE_ATTRIBUTES } from "../../../infra/lib/config.js";
+import { DEPLOYER_BUILD_UPDATE_ATTRIBUTES, DEPLOYER_LIVE_UPDATE_ATTRIBUTES, SLOT_RELEASE_ATTRIBUTES, SLOT_RELEASE_CHECK_ATTRIBUTES } from "../../../infra/lib/config.js";
 import {
   CloudFrontCdn,
   DynamoDeployRecords,
@@ -97,11 +97,14 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
   const conditionFailed = () => Object.assign(new Error("failed"), { name: "ConditionalCheckFailedException" });
 
   it("updates only an existing build, naming only the build attributes the deployer's role may write", async () => {
-    const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
+    // Each finishing write is followed by its slot release (ticket 3.4, tested below).
+    const { client, sent: all } = stub<DeployTableSender>([{}, {}, {}, {}, {}]);
     const records = new DynamoDeployRecords(client, TABLE);
     expect(await records.startDeploy("build-1", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(true);
     expect(await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(true);
     expect(await records.markFailed("build-1", ["index.html: no", "x"], NOW)).toBe(true);
+    expect(all.map((command) => command.constructor)).toEqual([UpdateItemCommand, UpdateItemCommand, TransactWriteItemsCommand, UpdateItemCommand, TransactWriteItemsCommand]);
+    const sent = all.filter((command) => command instanceof UpdateItemCommand);
     for (const command of sent) {
       expect(command).toBeInstanceOf(UpdateItemCommand);
       const input = command.input as UpdateItemCommandInput;
@@ -152,12 +155,12 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
   });
 
   it("never sets or removes a build's nickname or pushedCommit (the role could: IAM cannot tell a compared name from a set one), and sets status only to deploying, live or failed", async () => {
-    const { client, sent } = stub<DeployTableSender>([{}, {}, {}]);
+    const { client, sent } = stub<DeployTableSender>([{}, {}, {}, {}, {}]);
     const records = new DynamoDeployRecords(client, TABLE);
     await records.startDeploy("build-1", "Ada", "0123456789abcdef0123456789abcdef01234567", NOW);
     await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW);
     await records.markFailed("build-1", ["x"], NOW);
-    const statuses = sent.map((command) => {
+    const statuses = sent.filter((command) => command instanceof UpdateItemCommand).map((command) => {
       const input = command.input as UpdateItemCommandInput;
       const names = input.ExpressionAttributeNames ?? {};
       const [setPart = "", removePart = ""] = (input.UpdateExpression ?? "").replace(/^SET /, "").split(" REMOVE ");
@@ -182,12 +185,13 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
     await objects.remove(["apps/ada/a"], signal);
     const cf = stub<CloudFrontSender>([{}]);
     await new CloudFrontCdn(cf.client, "E2TOZV0ERAXKZ9").invalidate(["/apps/ada/*"], "r", signal);
-    const table = stub<DeployTableSender>([{}, {}]);
+    const table = stub<DeployTableSender>([{}, {}, {}]);
     const records = new DynamoDeployRecords(table.client, TABLE);
     await records.markAppLive("Ada", NOW, signal);
     await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW, signal);
     for (const options of [...s3.options, ...cf.options, ...table.options]) expect(options.abortSignal).toBe(signal);
-    expect(s3.options.length + cf.options.length + table.options.length).toBe(6);
+    // The live write's slot release (ticket 3.4) is cut off with the same signal.
+    expect(s3.options.length + cf.options.length + table.options.length).toBe(7);
   });
 
   it("writes the live marker under APP#<lower-cased nickname>, keeping the first liveAt, naming only the marker's attributes", async () => {
@@ -198,5 +202,30 @@ describe("DynamoDeployRecords (ticket 2.5)", () => {
     expect(input.UpdateExpression).toContain("#liveAt = if_not_exists(#liveAt, :now)");
     expect(input.ExpressionAttributeValues).toEqual({ ":type": { S: "app-live" }, ":nickname": { S: "Ada-42" }, ":now": { S: NOW } });
     for (const name of namesOf(input)) expect(DEPLOYER_LIVE_UPDATE_ATTRIBUTES, name).toContain(name);
+  });
+
+  it("ticket 3.4 criterion 3: WHEN a build ends live or failed THEN the deployer frees its slot in one transaction naming only the release's attributes; a refused finish frees nothing", async () => {
+    const { client, sent } = stub<DeployTableSender>([{}, {}, {}, {}]);
+    const records = new DynamoDeployRecords(client, TABLE);
+    expect(await records.markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(true);
+    expect(await records.markFailed("build-2", ["x"], NOW)).toBe(true);
+    const releases = sent.filter((command) => command instanceof TransactWriteItemsCommand).map((command) => (command as TransactWriteItemsCommand).input.TransactItems ?? []);
+    expect(releases).toHaveLength(2);
+    for (const [index, [check, holder, count]] of releases.entries()) {
+      const buildId = `build-${String(index + 1)}`;
+      expect(check?.ConditionCheck?.Key).toEqual({ pk: { S: `BUILD#${buildId}` }, sk: { S: "BUILD" } });
+      expect(check?.ConditionCheck?.ExpressionAttributeNames).toEqual({ "#status": "status" });
+      expect(holder?.Delete?.Key).toEqual({ pk: { S: "BUILD_SLOTS" }, sk: { S: `BUILD#${buildId}` } });
+      expect(holder?.Delete?.ConditionExpression).toBe("attribute_exists(pk)");
+      expect(count?.Update?.Key).toEqual({ pk: { S: "BUILD_SLOTS" }, sk: { S: "COUNT" } });
+      expect(Object.values(count?.Update?.ExpressionAttributeNames ?? {})).toEqual(SLOT_RELEASE_ATTRIBUTES.filter((name) => name !== "pk" && name !== "sk"));
+    }
+    expect(SLOT_RELEASE_CHECK_ATTRIBUTES).toEqual(["pk", "sk", "status"]);
+    // Refused (the build was not deploying): no release. A failed release leaves the finish standing (the check repairs).
+    const refused = stub<DeployTableSender>([conditionFailed()]);
+    expect(await new DynamoDeployRecords(refused.client, TABLE).markLive("build-1", "0123456789abcdef0123456789abcdef01234567", NOW)).toBe(false);
+    expect(refused.sent).toHaveLength(1);
+    const broken = stub<DeployTableSender>([{}, Object.assign(new Error("x"), { name: "InternalServerError" })]);
+    expect(await new DynamoDeployRecords(broken.client, TABLE).markFailed("build-1", ["x"], NOW)).toBe(true);
   });
 });

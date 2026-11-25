@@ -2,7 +2,8 @@
  * The builder's view of the table (ticket 2.8): its build record (with the live feed the step 3 page shows, ticket
  * 2.10) and the participant's usage totals. Its read is a GetItem naming only BUILDER_BUILD_READ_ATTRIBUTES; every write is an UpdateItem naming only
  * BUILDER_BUILD_UPDATE_ATTRIBUTES (in `BUILD#*`) or BUILDER_USAGE_UPDATE_ATTRIBUTES (the `USAGE` item), both in infra/lib/config.ts, for ticket 2.9's
- * `dynamodb:Attributes` condition; no call returns attributes (ReturnValues NONE).
+ * `dynamodb:Attributes` condition; no call returns attributes (ReturnValues NONE). Ticket 3.4: a build it marks failed
+ * frees its build slot (../api/build/slots.ts, SLOT_RELEASE_ATTRIBUTES); a failed release is left to the launcher's check.
  *
  * The feed is one list attribute `feed` on the build item: steps, written files, web fetches (the host only, ticket
  * 2.15) and commits, oldest first, each with its time. It stays small (at most MAX_FEED_FILES file events and
@@ -14,8 +15,11 @@ import {
   UpdateItemCommand,
   type AttributeValue,
   type GetItemCommandOutput,
+  type TransactWriteItemsCommand,
+  type TransactWriteItemsCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
+import { releaseSlotQuietly } from "../api/build/slots.js";
 import { buildKey, usageKey, type ItemKey } from "../api/keys.js";
 import type { BuildStatus, TokenUsage } from "../api/types.js";
 
@@ -88,6 +92,7 @@ const feedList = (events: readonly FeedEvent[]): AttributeValue => ({ L: events.
 export interface BuilderTableSender {
   send(command: GetItemCommand): Promise<GetItemCommandOutput>;
   send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
+  send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
 }
 
 const STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "live", "failed"];
@@ -192,14 +197,16 @@ export class DynamoBuildRecords implements BuildRecords {
     );
   }
 
-  markFailed(buildId: string, attemptId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(
+  async markFailed(buildId: string, attemptId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
+    const failed = await this.update(
       buildKey(buildId),
       "SET #status = :failed, #failureReasons = :reasons, #finishedAt = :now, #updatedAt = :now",
       `attribute_exists(pk) AND ${THIS_ATTEMPT}`,
       { "#failureReasons": "failureReasons", "#finishedAt": "finishedAt", "#updatedAt": "updatedAt", ...attemptNames },
       { ":failed": str("failed"), ":reasons": { L: reasons.map(str) }, ":now": str(nowIso), ...attemptValues(attemptId) },
     );
+    if (failed) await releaseSlotQuietly(this.client, this.table, buildId);
+    return failed;
   }
 
   async addUsage(participantId: string, usage: TokenUsage, nowIso: string): Promise<void> {

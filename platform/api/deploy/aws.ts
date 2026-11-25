@@ -6,12 +6,16 @@
 // naming only DEPLOYER_LIVE_UPDATE_ATTRIBUTES and in `BUILD#*` only DEPLOYER_BUILD_UPDATE_ATTRIBUTES
 // (infra/lib/config.ts), condition names included. No call returns attributes (ReturnValues NONE; the role
 // allows only NONE, UPDATED_OLD and UPDATED_NEW). A call given a signal passes it to the SDK (`abortSignal`), so a
-// phase cut off by the deployer's deadline stops its request.
+// phase cut off by the deployer's deadline stops its request. Ticket 3.4: once a build is marked live or failed, its
+// build slot is freed (../build/slots.ts, one transaction naming SLOT_RELEASE_ATTRIBUTES); a failed release is left to
+// the launcher's check.
 import { CreateInvalidationCommand, type CreateInvalidationCommandOutput } from "@aws-sdk/client-cloudfront";
 import {
   ConditionalCheckFailedException,
   UpdateItemCommand,
   type AttributeValue,
+  type TransactWriteItemsCommand,
+  type TransactWriteItemsCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import {
@@ -22,6 +26,7 @@ import {
   type ListObjectsV2CommandOutput,
   type PutObjectCommandOutput,
 } from "@aws-sdk/client-s3";
+import { releaseSlotQuietly } from "../build/slots.js";
 import { appLiveKey, buildKey, type ItemKey } from "../keys.js";
 import type { AppObjects, Cdn, DeployRecords } from "./deploy.js";
 
@@ -109,6 +114,7 @@ export class CloudFrontCdn implements Cdn {
 /** The methods of DynamoDBClient this store uses. */
 export interface DeployTableSender {
   send(command: UpdateItemCommand, options: SendOptions): Promise<UpdateItemCommandOutput>;
+  send(command: TransactWriteItemsCommand, options?: SendOptions): Promise<TransactWriteItemsCommandOutput>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -182,27 +188,34 @@ export class DynamoDeployRecords implements DeployRecords {
     );
   }
 
+  /** Ticket 3.4: after the build's last write, its slot is freed (exactly once, whoever frees it first). */
+  private async released(buildId: string, marked: Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
+    if (!(await marked)) return false;
+    await releaseSlotQuietly(this.client, this.table, buildId, signal);
+    return true;
+  }
+
   /** Only while the build is `deploying` (FINISH_CONDITION): a late write never changes a finished build. */
   markLive(buildId: string, commit: string, nowIso: string, signal?: AbortSignal): Promise<boolean> {
-    return this.updateBuild(
+    return this.released(buildId, this.updateBuild(
       buildId,
       "SET #status = :status, #updatedAt = :now, #finishedAt = :now, #deployedCommit = :commit REMOVE #failureReasons",
       { "#status": "status", "#updatedAt": "updatedAt", "#finishedAt": "finishedAt", "#deployedCommit": "deployedCommit", "#failureReasons": "failureReasons" },
       { ":status": str("live"), ":now": str(nowIso), ":commit": str(commit), ":deploying": str("deploying") },
       FINISH_CONDITION,
       signal,
-    );
+    ), signal);
   }
 
   /** Only while the build is `deploying`, as markLive. */
   markFailed(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.updateBuild(
+    return this.released(buildId, this.updateBuild(
       buildId,
       "SET #status = :status, #updatedAt = :now, #finishedAt = :now, #failureReasons = :reasons REMOVE #deployedCommit",
       { "#status": "status", "#updatedAt": "updatedAt", "#finishedAt": "finishedAt", "#failureReasons": "failureReasons", "#deployedCommit": "deployedCommit" },
       { ":status": str("failed"), ":now": str(nowIso), ":reasons": { L: reasons.map(str) }, ":deploying": str("deploying") },
       FINISH_CONDITION,
-    );
+    ));
   }
 
   async markAppLive(nickname: string, nowIso: string, signal?: AbortSignal): Promise<void> {

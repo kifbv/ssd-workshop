@@ -19,6 +19,15 @@
  * headers (an `authorization` included) are dropped. A Bedrock answer other than 2xx keeps its status, but its body and
  * headers are replaced by a fixed JSON message, so no ARN or account id reaches the agent.
  *
+ * Ticket 3.4: Bedrock throttling (429, ThrottlingException; 503, ServiceUnavailableException) is retried here, with
+ * exponential backoff and full jitter (a random pause up to BACKOFF_BASE_MS x 2^try, at most BACKOFF_MAX_MS), signed
+ * again each time, for up to THROTTLE_RETRY_MS per request: while many builds share the account's requests-per-minute
+ * quota, the agent's request simply takes longer. Claude Code retries a 429 itself only CLAUDE_CODE_MAX_RETRIES times
+ * (10) with pauses of seconds; after the proxy's window it gets the 429 and asks again, and each new request gets a new
+ * window, so throttling alone cannot fail a build before its 12-minute limit (the runner's timeout stops the agent,
+ * which closes its requests and so ends the proxy's retries). The window stays under Claude Code's own request
+ * timeout (10 minutes) and its stream idle timeout (3 minutes). A stream already started is never retried.
+ *
  * Logs (optional): the method, the path's shape (`/model/<build>/invoke`, `/model/<other>/...`, or a known first segment
  * only), the outcome and the status; never a header, body, credential or the prefix.
  */
@@ -43,7 +52,7 @@ export interface BedrockProxyLogEntry {
   method: string;
   /** The path's shape: never a value the agent chose beyond a fixed segment name. */
   shape: string;
-  outcome: "forwarded" | "refused" | "busy" | "upstream-error";
+  outcome: "forwarded" | "refused" | "busy" | "upstream-error" | "throttled";
   status: number;
 }
 
@@ -57,6 +66,8 @@ export interface BedrockProxyOptions {
   /** For the upstream connection: the session's HTTPS proxy agent in local runs. */
   agent?: HttpAgent;
   log?: (entry: BedrockProxyLogEntry) => void;
+  /** Tests only: the clock, the pause and the jitter of the throttling retries (default: real time, Math.random). */
+  retry?: { now?: () => number; sleep?: (ms: number, signal: AbortSignal) => Promise<void>; random?: () => number };
 }
 
 export interface BedrockProxy {
@@ -72,6 +83,37 @@ export const MAX_BODY_BYTES = 20 * 1024 * 1024;
 
 /** At most this many requests are forwarded at once (Claude Code runs one turn at a time, plus a few side calls). */
 export const MAX_IN_FLIGHT = 4;
+
+/** Ticket 3.4: Bedrock answers that mean "slow down", retried by the proxy (ThrottlingException, ServiceUnavailableException). */
+export const RETRIED_STATUSES: ReadonlySet<number> = new Set([429, 503]);
+/** The first retry pause is at most this long; each later one at most twice the one before... */
+export const BACKOFF_BASE_MS = 1000;
+/** ...up to this. */
+export const BACKOFF_MAX_MS = 20_000;
+/** One agent request is retried for at most this long, then its 429 goes to the agent (which asks again). */
+export const THROTTLE_RETRY_MS = 2 * 60 * 1000;
+
+/** Full jitter: a random pause between 0 and min(BACKOFF_MAX_MS, BACKOFF_BASE_MS x 2^retry). */
+export function backoffMs(retry: number, random: () => number): number {
+  return Math.floor(random() * Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** retry));
+}
+
+/** A pause that ends early when the agent goes away. */
+function pauseFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
 
 /** The body that replaces a Bedrock answer other than 2xx (its own may name the role ARN and the account). */
 export const UPSTREAM_ERROR_MESSAGE = "Bedrock refused or could not answer the request.";
@@ -188,6 +230,9 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
   let expectedHost = "";
   let inFlight = 0;
   const signer = new SignatureV4({ service: "bedrock", region: options.region ?? REGION, credentials: options.credentials, sha256: NodeSha256 });
+  const now = options.retry?.now ?? Date.now;
+  const sleep = options.retry?.sleep ?? pauseFor;
+  const random = options.retry?.random ?? Math.random;
   /** The path without the run's prefix, or undefined when it does not start with exactly `<prefix>/`. */
   const unprefixed = (url: string): string | undefined => (url.startsWith(`${prefix}/`) ? url.slice(prefix.length) : undefined);
   const log = (method: string, url: string, outcome: BedrockProxyLogEntry["outcome"], status: number): void => {
@@ -232,55 +277,82 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
     }
     const headers: Record<string, string> = { host, "content-type": JSON_TYPE };
     if (accept !== undefined) headers.accept = accept;
-    const signed = await signer.sign({
-      method: "POST",
-      protocol: upstream.protocol,
-      hostname: upstream.hostname,
-      ...(upstream.port === "" ? {} : { port: Number(upstream.port) }),
-      path,
-      query: {},
-      headers,
-      body,
-    });
     const send = secure ? httpsRequest : httpRequest;
-    const outbound = send({
-      method: "POST",
-      protocol: upstream.protocol,
-      hostname: upstream.hostname,
-      port: upstream.port === "" ? undefined : Number(upstream.port),
-      path,
-      headers: { ...(signed.headers as Record<string, string>), "content-length": String(body.length) },
-      ...(options.agent === undefined ? {} : { agent: options.agent }),
-    });
-    // The agent stopped listening (aborted run): stop the call upstream too.
+    // The agent stopped listening (aborted run): stop the call upstream too, and any retry pause.
+    const gone = new AbortController();
+    let outbound: ReturnType<typeof send> | undefined;
     response.on("close", () => {
-      if (!response.writableFinished) outbound.destroy();
+      if (!response.writableFinished) {
+        gone.abort();
+        outbound?.destroy();
+      }
     });
-    outbound.on("response", (answer) => {
-      const status = answer.statusCode ?? 502;
-      if (status < 200 || status > 299) {
-        // Bedrock's own error text may name the role ARN and the account: only the status goes on.
-        answer.resume();
-        log(method, url, "forwarded", status);
-        response.writeHead(status, { "content-type": JSON_TYPE });
-        response.end(JSON.stringify({ message: UPSTREAM_ERROR_MESSAGE }));
+    /** One signed try (signed again each time: a signature is only valid for minutes). */
+    const attempt = async (): Promise<IncomingMessage> => {
+      const signed = await signer.sign({
+        method: "POST",
+        protocol: upstream.protocol,
+        hostname: upstream.hostname,
+        ...(upstream.port === "" ? {} : { port: Number(upstream.port) }),
+        path,
+        query: {},
+        headers,
+        body,
+      });
+      return new Promise<IncomingMessage>((resolve, reject) => {
+        const request = send({
+          method: "POST",
+          protocol: upstream.protocol,
+          hostname: upstream.hostname,
+          port: upstream.port === "" ? undefined : Number(upstream.port),
+          path,
+          headers: { ...(signed.headers as Record<string, string>), "content-length": String(body.length) },
+          ...(options.agent === undefined ? {} : { agent: options.agent }),
+        });
+        outbound = request;
+        request.on("response", resolve);
+        request.on("error", reject);
+        request.end(body);
+      });
+    };
+    const firstTry = now();
+    let answer: IncomingMessage;
+    for (let retry = 0; ; retry += 1) {
+      try {
+        answer = await attempt();
+      } catch {
+        log(method, url, "upstream-error", 502);
+        if (!response.headersSent) refuse(response, 502);
+        else response.destroy();
         return;
       }
-      const forwarded: Record<string, string | string[]> = {};
-      for (const [name, value] of Object.entries(answer.headers)) {
-        if (value !== undefined && !HOP_BY_HOP.has(name.toLowerCase())) forwarded[name] = value;
-      }
+      const status = answer.statusCode ?? 502;
+      if (!RETRIED_STATUSES.has(status) || gone.signal.aborted) break;
+      const pause = backoffMs(retry, random);
+      if (now() - firstTry + pause > THROTTLE_RETRY_MS) break;
+      answer.resume();
+      log(method, url, "throttled", status);
+      await sleep(pause, gone.signal);
+      if (gone.signal.aborted) return;
+    }
+    const status = answer.statusCode ?? 502;
+    if (status < 200 || status > 299) {
+      // Bedrock's own error text may name the role ARN and the account: only the status goes on.
+      answer.resume();
       log(method, url, "forwarded", status);
-      response.writeHead(status, forwarded);
-      answer.pipe(response);
-      answer.on("error", () => response.destroy());
-    });
-    outbound.on("error", () => {
-      log(method, url, "upstream-error", 502);
-      if (!response.headersSent) refuse(response, 502);
-      else response.destroy();
-    });
-    outbound.end(body);
+      response.writeHead(status, { "content-type": JSON_TYPE });
+      response.end(JSON.stringify({ message: UPSTREAM_ERROR_MESSAGE }));
+      return;
+    }
+    const forwarded: Record<string, string | string[]> = {};
+    for (const [name, value] of Object.entries(answer.headers)) {
+      if (value !== undefined && !HOP_BY_HOP.has(name.toLowerCase())) forwarded[name] = value;
+    }
+    log(method, url, "forwarded", status);
+    response.writeHead(status, forwarded);
+    answer.pipe(response);
+    answer.on("error", () => response.destroy());
+    outbound?.on("error", () => response.destroy());
   };
 
   // Host is checked by the proxy itself (403), so a request without one is refused the same way.

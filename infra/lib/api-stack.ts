@@ -23,6 +23,8 @@ import {
   APP_DATA_WRITE_ATTRIBUTES,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   BUILD_QUEUE_NAME,
+  BUILD_QUEUE_PARTITION,
+  BUILD_SLOTS_PARTITION,
   CONVERSATION_FUNCTION_NAME,
   CONVERSATION_UPDATE_ATTRIBUTES,
   FOUNDATION_MODEL_ID,
@@ -32,6 +34,7 @@ import {
   PARTICIPANT_FUNCTION_NAME,
   PARTICIPANT_NICK_PUT_ATTRIBUTES,
   PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES,
+  QUEUE_COUNT_ATTRIBUTES,
   SENDER_ADDRESS,
   SESSION_ALLOW_READ_ATTRIBUTES,
   SES_SEND_RESOURCES,
@@ -44,6 +47,8 @@ import {
   SIGN_IN_VERIFY_FUNCTION_NAME,
   SIGN_IN_VERIFY_PROFILE_UPDATE_ATTRIBUTES,
   SIGN_IN_VERIFY_SESSION_PUT_ATTRIBUTES,
+  SLOT_RELEASE_ATTRIBUTES,
+  SLOT_RELEASE_CHECK_ATTRIBUTES,
   TABLE_NAME,
 } from "./config.js";
 
@@ -405,6 +410,18 @@ export class ApiStack extends Stack {
         conditions: { "ForAllValues:StringLike": participantPartitions },
       }),
     );
+    // Ticket 3.4: `GET /api/build` counts the queued builds ahead of the caller's: a count only (`Select` COUNT).
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_QUEUE_PARTITION], "dynamodb:Attributes": [...QUEUE_COUNT_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "COUNT" },
+        },
+      }),
+    );
     conversation.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
@@ -630,4 +647,32 @@ export function workshopFunction(
     // bundle self-contained (the synth test loads it).
     bundling: { minify: true, sourceMap: false, externalModules: [], ...(commandHooks === undefined ? {} : { commandHooks }) },
   });
+}
+
+/**
+ * Ticket 3.4: the rights to free a build's slot (platform/api/build/slots.ts), for every role that ends builds: check the
+ * build ended (ConditionCheckItem in `BUILD#*`, `status` only), delete its holder and count the counter down (in
+ * `BUILD_SLOTS`, SLOT_RELEASE_ATTRIBUTES only). Transactions have no IAM action of their own: each item is authorized alone.
+ */
+export function slotReleaseStatements(tableArn: string): PolicyStatement[] {
+  return [
+    new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:ConditionCheckItem"],
+      resources: [tableArn],
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SLOT_RELEASE_CHECK_ATTRIBUTES] },
+      },
+    }),
+    new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+      resources: [tableArn],
+      conditions: {
+        "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_SLOTS_PARTITION], "dynamodb:Attributes": [...SLOT_RELEASE_ATTRIBUTES] },
+        StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+      },
+    }),
+  ];
 }

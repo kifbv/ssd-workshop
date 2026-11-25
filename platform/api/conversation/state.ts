@@ -194,6 +194,11 @@ export interface ConversationStore {
   /** A build (ticket 2.7), or undefined; the caller checks it belongs to the participant asking. */
   getBuild(buildId: string): Promise<StoredBuild | undefined>;
   /**
+   * Ticket 3.4: how many queued builds wait ahead of the place `queueKey` (entries seen at or after `sinceIso`), a count
+   * only (../build/slots.ts countQueuedAhead).
+   */
+  countQueuedAhead(queueKey: string, sinceIso: string): Promise<number>;
+  /**
    * Adds tokens and cost to the participant's usage totals on their own: only when the final write
    * failed for good, so tokens already spent are still counted.
    */
@@ -225,6 +230,8 @@ export interface StoredBuild {
   /** Oldest first; only well-formed events (see `readFeed` in ./store.ts). */
   feed?: BuildFeedEvent[];
   failureReasons?: string[];
+  /** Ticket 3.4: its place in the waiting line, once the launcher saw it queued. */
+  queueKey?: string;
 }
 
 /**

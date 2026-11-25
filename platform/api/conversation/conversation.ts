@@ -20,7 +20,7 @@ import {
   type HttpResponse,
 } from "../http.js";
 import { FAILED_MESSAGE, NICKNAME_PATTERN, NOT_FOUND_MESSAGE } from "../participant/participant.js";
-import { appAddress, appRepositoryUrl } from "../settings.js";
+import { appAddress, appRepositoryUrl, QUEUE_SEEN_MS } from "../settings.js";
 import { requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { ConversationState, MessageStatus, Step } from "../types.js";
@@ -362,7 +362,7 @@ async function queueReadiness(participantId: string, messageId: string, version:
 
 /**
  * The caller's own build (ticket 2.7; the step 3 page polls it from ticket 2.10): its id, status, feed, repository
- * and app address and, when it failed, the reasons. Found through the caller's own conversation, and only a build that names the caller:
+ * and app address and, when it failed, the reasons; while queued, the number of builds ahead of it (ticket 3.4). Found through the caller's own conversation, and only a build that names the caller:
  * anyone else's build (or none yet) is simply not found.
  */
 async function build(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
@@ -374,6 +374,18 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
   // Ticket 2.10: the feed so far and the links the page shows (commits under the repository, the app's address).
   // Never the participant id: the answer holds only the build's own facts.
   const nickname = found.nickname !== undefined && NICKNAME_PATTERN.test(found.nickname) ? found.nickname : undefined;
+  // Ticket 3.4: a queued build the launcher has placed in the waiting line answers how many builds wait ahead of it (a
+  // count only, never whose). A failed count leaves `ahead` out (the page says the build is in the queue) and is logged
+  // by name only.
+  let ahead: number | undefined;
+  let aheadError: string | undefined;
+  if (found.status === "queued" && found.queueKey !== undefined) {
+    const since = new Date(deps.now().getTime() - QUEUE_SEEN_MS).toISOString();
+    ahead = await deps.store.countQueuedAhead(found.queueKey, since).catch((error: unknown) => {
+      aheadError = errorName(error);
+      return undefined;
+    });
+  }
   return {
     outcome: "ok",
     response: jsonResponse(200, {
@@ -382,7 +394,9 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       feed: found.feed ?? [],
       ...(nickname === undefined ? {} : { repositoryUrl: appRepositoryUrl(nickname), appUrl: appAddress(nickname) }),
       ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
+      ...(ahead === undefined ? {} : { ahead }),
     }),
+    ...(aheadError === undefined ? {} : { error: aheadError }),
   };
 }
 

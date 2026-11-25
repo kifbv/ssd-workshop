@@ -41,6 +41,7 @@ export class FakeBuildsStore implements BuildsStore {
     delete build.launchedAt;
     delete build.attemptId;
     delete build.feed;
+    delete build.queueKey;
     build.status = "queued";
     build.updatedAt = nowIso;
     return true;

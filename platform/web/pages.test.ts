@@ -1076,7 +1076,7 @@ const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-
 
 /** A participant at step building and their build, which the test moves on; every GET /api/build is counted. */
 function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html")]) {
-  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined };
+  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined };
   const handlers: Record<string, Handler> = {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
     "GET /api/build": () => {
@@ -1091,6 +1091,7 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
           repositoryUrl: REPOSITORY_URL,
           appUrl: APP_URL,
           ...(state.failureReasons === undefined ? {} : { failureReasons: state.failureReasons }),
+          ...(state.ahead === undefined ? {} : { ahead: state.ahead }),
         },
       };
     },
@@ -1122,6 +1123,29 @@ const stageStatesOnPage = () =>
 const feedOnPage = () => page.locator("#build-feed li").allTextContents();
 
 describe("step 3: Build (ticket 2.10)", () => {
+  it("WHEN a build waits for a slot THEN step 3 shows how many builds are ahead of it (ticket 3.4, criterion 4)", async () => {
+    const api = fakeBuildApi("queued", []);
+    api.state.ahead = 3;
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    await expect.poll(() => page.locator("#build-now").textContent()).toBe("Your build is in the queue: 3 builds ahead of you.");
+    await expectNoSideScroll();
+    api.state.ahead = 1;
+    await buildPollAfter(2000);
+    await expect.poll(() => page.locator("#build-now").textContent()).toBe("Your build is in the queue: 1 build ahead of you.");
+    api.state.ahead = 0;
+    await buildPollAfter(2000);
+    await expect.poll(() => page.locator("#build-now").textContent()).toBe("Your build is next in the queue.");
+    api.state.ahead = undefined;
+    api.state.status = "building";
+    api.state.feed.push(stepEvent("preparing"));
+    await buildPollAfter(2000);
+    await expect.poll(() => page.locator("#build-now").textContent()).not.toContain("queue");
+    await expectNoSideScroll();
+  }, 30_000);
+
   it("WHEN a build is running THEN the page shows its stages, files and commits, and polls every 2 seconds (criteria 1, 4 and 5)", async () => {
     const api = fakeBuildApi();
     await mockApi(api.handlers);
