@@ -14,7 +14,8 @@ type Method = keyof VerifyStore | keyof ParticipantStore;
 export class FakeTable implements VerifyStore, ParticipantStore {
   readonly allow = new Map<string, AllowEntry>();
   readonly codes = new Map<string, StoredCodes>();
-  readonly profiles = new Map<string, ParticipantRecord & { createdAt: string }>();
+  /** `stepSince` is set with every step change, as the stores do (ticket 3.2). */
+  readonly profiles = new Map<string, ParticipantRecord & { createdAt: string; stepSince?: string }>();
   /** By token hash; `allowRef` is the address sealed under the token (as the verify function stores it). */
   readonly sessions = new Map<string, StoredSession & { createdAt: string }>();
   /** Nickname claims by lower-cased nickname. */
@@ -123,14 +124,14 @@ export class FakeTable implements VerifyStore, ParticipantStore {
     return { id: p.id, role: p.role, group: p.group, step: p.step, ...(p.nickname === undefined ? {} : { nickname: p.nickname }) };
   }
 
-  async claimNickname(participantId: string, nickname: string): Promise<ClaimResult> {
+  async claimNickname(participantId: string, nickname: string, nowIso: string): Promise<ClaimResult> {
     this.maybeFail("claimNickname");
     const profile = this.profiles.get(participantId);
     if (profile === undefined || profile.nickname !== undefined || profile.step !== "nickname") return "already-set";
     const key = nickname.toLowerCase();
     if (this.nicknames.has(key)) return "taken";
     this.nicknames.set(key, { nickname, participantId });
-    this.profiles.set(participantId, { ...profile, nickname, step: "clarify" });
+    this.profiles.set(participantId, { ...profile, nickname, step: "clarify", stepSince: nowIso });
     return "saved";
   }
 }

@@ -4,7 +4,7 @@
 // The function's role (infra/lib/api-stack.ts) may read `SESSION#*` and `PARTICIPANT#*` items,
 // read in `EMAIL#*` only the allow-list entry's `role`, `group` and `participantId` (ticket 3.1, never
 // `email`), delete in `SESSION#*` (sign-out and removed people, ticket 3.1), update in `PARTICIPANT#*`
-// only `nickname` and `step`, and put in `NICK#*` only the claim's attribute names. A transaction is
+// only `nickname`, `step` and `stepSince` (ticket 3.2), and put in `NICK#*` only the claim's attribute names. A transaction is
 // authorized item by item as PutItem and UpdateItem. The conversation function reads sessions through
 // this store too, with the same session rights.
 import {
@@ -119,10 +119,11 @@ export class DynamoParticipantStore implements ParticipantStore {
               Update: {
                 TableName: this.tableName,
                 Key: keyOf(participantKey(participantId)),
-                UpdateExpression: "SET #nickname = :nickname, #step = :next",
+                // Ticket 3.2: `stepSince` moves with every step change, in the same update.
+                UpdateExpression: "SET #nickname = :nickname, #step = :next, #stepSince = :now",
                 ConditionExpression: "attribute_exists(#pk) AND attribute_not_exists(#nickname) AND #step = :current",
-                ExpressionAttributeNames: { "#pk": "pk", "#nickname": "nickname", "#step": "step" },
-                ExpressionAttributeValues: { ":nickname": str(nickname), ":next": str("clarify"), ":current": str("nickname") },
+                ExpressionAttributeNames: { "#pk": "pk", "#nickname": "nickname", "#step": "step", "#stepSince": "stepSince" },
+                ExpressionAttributeValues: { ":nickname": str(nickname), ":next": str("clarify"), ":current": str("nickname"), ":now": str(nowIso) },
               },
             },
           ],

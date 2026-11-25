@@ -21,6 +21,7 @@
  * | App data usage       | `APPDATA#<nickname>`   | `DATA_USAGE`         | never                     |
  * | Build                | `BUILD#<build id>`     | `BUILD`              | never                     |
  * | Launch watch entry   | `LAUNCHES`             | `BUILD#<build id>`   | never (removed by check)  |
+ * | Workshop settings    | `SETTINGS`             | `SETTINGS`           | never                     |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
  *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email` (and, sealed
@@ -138,6 +139,17 @@ export interface Participant extends Keyed {
   step: Step;
   /** ISO 8601. */
   createdAt: string;
+  /**
+   * ISO 8601: when `step` last changed (ticket 3.2), set in the same update as every step change. Absent until the
+   * first change after ticket 3.2 (a new profile starts its first step at `createdAt`).
+   */
+  stepSince?: string;
+  /** US dollars a facilitator granted on top of the workshop's budget (ticket 3.2; absent reads as 0). */
+  extraBudget?: number;
+  /** A facilitator's Pause (ticket 3.2; absent reads as false). */
+  paused?: boolean;
+  /** Change requests built so far (ticket 3.2; absent reads as 0). Read through `limitsFromItem` (workshop/settings.ts). */
+  changeRequestsUsed?: number;
 }
 
 /**
@@ -419,6 +431,25 @@ export interface LaunchItem extends Keyed {
   taskArn?: string;
 }
 
+/**
+ * The workshop's settings (ticket 3.2), one item at `SETTINGS` / `SETTINGS`, written only by the admin function
+ * (`SETTINGS_UPDATE_ATTRIBUTES` in infra/lib/config.ts). Missing values read as the defaults ($5, 5, 15, Stop off;
+ * `settingsFromItem` in workshop/settings.ts).
+ */
+export interface SettingsItem extends Keyed {
+  type: "settings";
+  /** US dollars of AI spend per participant, 0 to 50. */
+  aiBudgetUsd: number;
+  /** Change requests per participant, 0 to 20. */
+  changeRequestsPerPerson: number;
+  /** Builds running at once, 1 to 30. */
+  buildsAtOnce: number;
+  /** The global Stop (ticket 3.5 sets it; absent reads as false). */
+  stopped?: boolean;
+  /** ISO 8601: the last change. */
+  updatedAt: string;
+}
+
 export type TableItem =
   | AllowListEntry
   | CodeItem
@@ -434,4 +465,5 @@ export type TableItem =
   | AppDataItem
   | AppDataUsageItem
   | BuildItem
-  | LaunchItem;
+  | LaunchItem
+  | SettingsItem;

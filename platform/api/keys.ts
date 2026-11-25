@@ -113,6 +113,13 @@ export const appDataKey = (nickname: string, key: string): ItemKey => ({
 /** The running totals of an app's data (ticket 2.4): bytes and keys, written with every value. */
 export const appDataUsageKey = (nickname: string): ItemKey => ({ pk: appDataPk(nickname), sk: "DATA_USAGE" });
 
+/**
+ * The workshop's settings (ticket 3.2): one item, `SETTINGS` / `SETTINGS`, holding the admin's caps and the global
+ * Stop. Its own partition, so only a role granted `SETTINGS` (the admin function's) may write it.
+ */
+export const SETTINGS_PK = "SETTINGS";
+export const settingsKey = (): ItemKey => ({ pk: SETTINGS_PK, sk: "SETTINGS" });
+
 /** A new participant id: a random UUID (never holds the key separator). */
 export function newParticipantId(randomUUID: () => string): string {
   return checkId("participant id", randomUUID());

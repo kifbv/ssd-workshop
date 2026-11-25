@@ -103,7 +103,7 @@ describe("DynamoParticipantStore", () => {
     expect(sent[0]?.input).toMatchObject({ Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } }, ConsistentRead: true });
   });
 
-  it("claims the lower-cased nickname and sets it on the profile in one transaction", async () => {
+  it("claims the lower-cased nickname and sets it on the profile in one transaction, with stepSince the time of the step change (ticket 3.2)", async () => {
     const { client, sent } = stubClient([{}]);
     await expect(new DynamoParticipantStore(client, TABLE).claimNickname("p-1", "Ada-42", "2026-11-23T10:00:00.000Z")).resolves.toBe("saved");
     expect(sent[0]).toBeInstanceOf(TransactWriteItemsCommand);
@@ -128,10 +128,15 @@ describe("DynamoParticipantStore", () => {
           Update: {
             TableName: TABLE,
             Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
-            UpdateExpression: "SET #nickname = :nickname, #step = :next",
+            UpdateExpression: "SET #nickname = :nickname, #step = :next, #stepSince = :now",
             ConditionExpression: "attribute_exists(#pk) AND attribute_not_exists(#nickname) AND #step = :current",
-            ExpressionAttributeNames: { "#pk": "pk", "#nickname": "nickname", "#step": "step" },
-            ExpressionAttributeValues: { ":nickname": { S: "Ada-42" }, ":next": { S: "clarify" }, ":current": { S: "nickname" } },
+            ExpressionAttributeNames: { "#pk": "pk", "#nickname": "nickname", "#step": "step", "#stepSince": "stepSince" },
+            ExpressionAttributeValues: {
+              ":nickname": { S: "Ada-42" },
+              ":next": { S: "clarify" },
+              ":current": { S: "nickname" },
+              ":now": { S: "2026-11-23T10:00:00.000Z" },
+            },
           },
         },
       ],

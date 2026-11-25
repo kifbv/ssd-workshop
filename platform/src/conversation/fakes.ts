@@ -37,7 +37,7 @@ export class FakeResetStore implements ResetStore {
       specs: (this.t.specs.get(id) ?? []).map((s) => `SPEC#${String(s.version).padStart(4, "0")}`),
     };
   }
-  async restart(id: string, seen: ResetState) {
+  async restart(id: string, seen: ResetState, nowIso: string) {
     this.restarts++;
     const c = this.t.conversations.get(id);
     if ((c !== undefined) !== seen.exists || (c !== undefined && JSON.stringify(c) !== seen.updatedAt)) return false;
@@ -45,6 +45,7 @@ export class FakeResetStore implements ResetStore {
     if (profile === undefined || profile.step === "nickname") return false;
     this.t.conversations.delete(id);
     profile.step = "clarify";
+    profile.stepSince = nowIso;
     return true;
   }
   async deleteItems(id: string, sortKeys: readonly string[]) {

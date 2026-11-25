@@ -12,6 +12,7 @@ import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   ACCOUNT,
+  ADMIN_FUNCTION_NAME,
   AI_DLQ_NAME,
   AI_QUEUE_NAME,
   AI_WORKER_FUNCTION_NAME,
@@ -34,6 +35,8 @@ import {
   SENDER_ADDRESS,
   SESSION_ALLOW_READ_ATTRIBUTES,
   SES_SEND_RESOURCES,
+  SETTINGS_PARTITION,
+  SETTINGS_UPDATE_ATTRIBUTES,
   SIGN_IN_CODE_PUT_ATTRIBUTES,
   SIGN_IN_CODE_FUNCTION_NAME,
   SIGN_IN_VERIFY_EMAIL_UPDATE_ATTRIBUTES,
@@ -84,6 +87,12 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/participants/{id}", method: HttpMethod.GET },
   // Ticket 3.1: deletes the caller's own session and clears its cookie.
   { path: "/api/sign-out", method: HttpMethod.POST },
+] as const;
+
+/** The admin routes (ticket 3.2), served by their own function: the only role that may write `SETTINGS`. */
+export const ADMIN_ROUTES = [
+  { path: "/api/admin/settings", method: HttpMethod.GET },
+  { path: "/api/admin/settings", method: HttpMethod.PUT },
 ] as const;
 
 /** The protected conversation routes (ticket 1.7; history and step from 1.8; spec and approve from 1.9), served by one function. */
@@ -325,6 +334,38 @@ export class ApiStack extends Stack {
     });
     for (const route of PARTICIPANT_ROUTES) {
       this.api.addRoutes({ path: route.path, methods: [route.method], integration: participantIntegration });
+    }
+
+    // Ticket 3.2: the admin routes. Reads sessions and profiles (the session check) and the `SETTINGS` item, and
+    // updates only the settings' listed attribute names there (no PutItem, so the item is never replaced or emptied).
+    // The admin check is in the code (the role comes from the allow-list); no other role may write `SETTINGS`.
+    const admin = workshopFunction(this, "Admin", ADMIN_FUNCTION_NAME, "admin.ts");
+    admin.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*", SETTINGS_PARTITION] } },
+      }),
+    );
+    admin.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": [SETTINGS_PARTITION],
+            "dynamodb:Attributes": [...SETTINGS_UPDATE_ATTRIBUTES],
+          },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    addSessionCheckRights(admin, this.table);
+    const adminIntegration = new HttpLambdaIntegration("AdminIntegration", admin, { scopePermissionToRoute: false });
+    for (const route of ADMIN_ROUTES) {
+      this.api.addRoutes({ path: route.path, methods: [route.method], integration: adminIntegration });
     }
 
     // Ticket 1.7: the conversation. The routes' function stores a message and hands its ids to the

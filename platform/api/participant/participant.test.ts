@@ -97,6 +97,13 @@ describe("POST /api/me/nickname (ticket 1.5 criterion 4)", () => {
     expect(s.logs.map((l) => l.outcome)).toEqual(["rules", "reserved", "taken", "taken", "taken", "ok"]);
   });
 
+  it("ticket 3.2: WHEN the nickname moves the step to clarify THEN stepSince is that time", async () => {
+    const s = setup();
+    expect(s.table.profiles.get("me-1")?.stepSince).toBeUndefined();
+    expect((await handleParticipantRequest(nickname("Ada"), s.deps)).statusCode).toBe(200);
+    expect(s.table.profiles.get("me-1")).toMatchObject({ step: "clarify", stepSince: NOW.toISOString() });
+  });
+
   it("refuses a second nickname: it is set once", async () => {
     const s = setup();
     await handleParticipantRequest(nickname("Ada"), s.deps);

@@ -170,7 +170,7 @@ function expectAdaReset(s: Setup, kept: { allow: string; nicknames: string; sess
   expect(s.table.replies.get(ADA_ID)?.size ?? 0).toBe(0);
   expect(s.table.specs.get(ADA_ID) ?? []).toEqual([]);
   expect(s.table.conversations.has(ADA_ID)).toBe(false);
-  expect(s.table.profiles.get(ADA_ID)?.step).toBe("clarify");
+  expect(s.table.profiles.get(ADA_ID)).toMatchObject({ step: "clarify", stepSince: NOW.toISOString() });
   expect(s.table.profiles.get(ADA_ID)?.nickname).toBe("Ada");
   expect([...s.apps.values.keys()].filter((k) => k.startsWith("ada/"))).toEqual([]);
   expect(s.apps.usage.has("ada")).toBe(false);
@@ -357,9 +357,9 @@ describe("AC3: refusals", () => {
   it("AC3 WHEN a message arrives between the read and the reset THEN nothing is deleted", async () => {
     const s = setup({ step: "spec" });
     const original = s.store.restart.bind(s.store);
-    s.store.restart = async (id, seen) => {
+    s.store.restart = async (id, seen, nowIso) => {
       s.table.conversations.set(ADA_ID, { state: "open", pendingId: "new", pendingSince: NOW_S });
-      return original(id, seen);
+      return original(id, seen, nowIso);
     };
     const before = snapshot(s);
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(1);

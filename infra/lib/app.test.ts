@@ -28,6 +28,9 @@ import { CONVERSATION_ROUTES as CONVERSATION_ROUTE_KEYS } from "../../platform/a
 import { buildApp } from "./app.js";
 import {
   ACCOUNT,
+  ADMIN_FUNCTION_NAME,
+  SETTINGS_PARTITION,
+  SETTINGS_UPDATE_ATTRIBUTES,
   API_NAME,
   API_ORIGIN_DOMAIN,
   ASSETS_BUCKET_NAME,
@@ -100,6 +103,8 @@ import {
   TABLE_NAME,
 } from "./config.js";
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
+import { ADMIN_ROUTES as ADMIN_ROUTE_KEYS } from "../../platform/api/admin/admin.js";
+import { SETTINGS_PK } from "../../platform/api/keys.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 import {
@@ -891,6 +896,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/me/nickname",
       "GET /api/participants/{id}",
       "POST /api/sign-out",
+      "GET /api/admin/settings",
+      "PUT /api/admin/settings",
       "POST /api/conversation/messages",
       "GET /api/conversation/messages/{id}",
       "GET /api/conversation",
@@ -908,7 +915,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(6);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(7);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -960,6 +967,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       SIGN_IN_CODE_FUNCTION_NAME,
       SIGN_IN_VERIFY_FUNCTION_NAME,
       PARTICIPANT_FUNCTION_NAME,
+      ADMIN_FUNCTION_NAME,
       CONVERSATION_FUNCTION_NAME,
       AI_WORKER_FUNCTION_NAME,
       APP_DATA_FUNCTION_NAME,
@@ -1347,7 +1355,7 @@ function sessionCheckStatements(tableArn: unknown): unknown[] {
 }
 
 describe("api stack: session check (ticket 3.1)", () => {
-  it("lets only the participant and conversation functions read allow-list entries without their address, and delete sessions", () => {
+  it("lets only the participant, conversation and (ticket 3.2) admin functions read allow-list entries without their address, and delete sessions", () => {
     const readers: string[] = [];
     for (const [, , policy] of ofType("AWS::IAM::Policy")) {
       const statements = (policy.Properties?.PolicyDocument as { Statement: { Action: unknown; Condition?: unknown }[] }).Statement;
@@ -1376,6 +1384,8 @@ describe("api stack: session check (ticket 3.1)", () => {
         `read ${roleOf(CONVERSATION_FUNCTION_NAME)}`,
         `delete ${roleOf(PARTICIPANT_FUNCTION_NAME)}`,
         `delete ${roleOf(CONVERSATION_FUNCTION_NAME)}`,
+        `read ${roleOf(ADMIN_FUNCTION_NAME)}`,
+        `delete ${roleOf(ADMIN_FUNCTION_NAME)}`,
       ].sort(),
     );
   });
@@ -1415,7 +1425,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
     expect(source).toContain('"/*/*/*"');
   });
 
-  it("allows only its logs, GetItem on sessions and profiles, nickname claim puts, profile updates of nickname and step, and the session check's rights (ticket 3.1)", () => {
+  it("allows only its logs, GetItem on sessions and profiles, nickname claim puts, profile updates of nickname, step and stepSince (ticket 3.2), and the session check's rights (ticket 3.1)", () => {
     expect(f.statements()).toEqual([
       {
         Effect: "Allow",
@@ -1445,7 +1455,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "nickname", "step"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "nickname", "step", "stepSince"] },
         },
       },
       ...sessionCheckStatements(f.tableArn()),
@@ -1455,6 +1465,106 @@ describe("api stack: participant function (ticket 1.5)", () => {
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
     const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
     await expect(quietly(() => bundle.handler({ routeKey: "GET /api/me" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describe("api stack: admin function (ticket 3.2)", () => {
+  const f = apiFunction(ADMIN_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-admin; Node.js 22 arm64, 256 MB, 10 s", () => {
+    expect(ADMIN_FUNCTION_NAME).toBe("ssd-workshop-api-admin");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: 256,
+      Timeout: 10,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({ LogGroupName: ADMIN_FUNCTION_NAME, RetentionInDays: 14 });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+  });
+
+  it("routes GET and PUT /api/admin/settings to it, invoked only by this API", () => {
+    expect([...ADMIN_ROUTE_KEYS]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings"]);
+    for (const routeKey of ADMIN_ROUTE_KEYS) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({
+        IntegrationType: "AWS_PROXY",
+        PayloadFormatVersion: "2.0",
+        IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+      });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
+    expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
+    expect(source).toContain('"/*/*/*"');
+  });
+
+  it("allows only its logs, GetItem on sessions, profiles and SETTINGS, updates of the settings' listed attributes returning nothing, and the session check's rights", () => {
+    expect(SETTINGS_PK).toBe(SETTINGS_PARTITION);
+    expect(f.statements()).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "PARTICIPANT#*", "SETTINGS"] } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": ["SETTINGS"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt"],
+          },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      ...sessionCheckStatements(f.tableArn()),
+    ]);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
+    await expect(quietly(() => bundle.handler({ routeKey: "GET /api/admin/settings" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
+/** The DynamoDB actions that write items (TransactWriteItems is authorized item by item as these). */
+const DYNAMODB_WRITE_ACTIONS = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate", "dynamodb:PartiQLDelete"];
+
+describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
+  it("WHEN the synthesized stacks are inspected THEN only the admin function's role may write SETTINGS, and only the attributes named in config.ts", () => {
+    const writers: { roles: string; actions: string[]; attributes: unknown }[] = [];
+    const policies = [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")];
+    for (const [, , policy] of policies) {
+      const statements = (policy.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement;
+      for (const st of statements) {
+        if (st.Effect !== "Allow") continue;
+        assertNoExclusions(JSON.stringify(policy.Properties?.Roles), st);
+        const actions = DYNAMODB_WRITE_ACTIONS.filter((a) => ([] as unknown[]).concat(st.Action).some((g) => typeof g === "string" && actionCovers(g, a)));
+        if (actions.length === 0) continue;
+        // The partitions the statement allows: every `dynamodb:LeadingKeys` list under any operator; none means all.
+        const conditions = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
+        const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
+        const reaches = patterns.length === 0 || patterns.some((p) => typeof p === "string" && actionCovers(p, SETTINGS_PARTITION));
+        if (!reaches) continue;
+        const attributes = Object.values(conditions).find((c) => c["dynamodb:Attributes"] !== undefined)?.["dynamodb:Attributes"];
+        writers.push({ roles: JSON.stringify(policy.Properties?.Roles), actions, attributes });
+      }
+    }
+    const admin = apiFunction(ADMIN_FUNCTION_NAME).roleEntry()?.[0];
+    expect(admin).toBeDefined();
+    expect(writers).toEqual([{ roles: JSON.stringify([{ Ref: admin }]), actions: ["dynamodb:UpdateItem"], attributes: [...SETTINGS_UPDATE_ATTRIBUTES] }]);
+    expect(SETTINGS_UPDATE_ATTRIBUTES).not.toContain("stopped");
+  });
+
+  it("counts a partition pattern that matches SETTINGS, wildcards included, as reaching it", () => {
+    expect(actionCovers("SETTINGS", SETTINGS_PARTITION)).toBe(true);
+    expect(actionCovers("SETTINGS*", SETTINGS_PARTITION)).toBe(true);
+    expect(actionCovers("SESSION#*", SETTINGS_PARTITION)).toBe(false);
+    expect(actionCovers("S*", SETTINGS_PARTITION)).toBe(true);
   });
 });
 
@@ -1679,7 +1789,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
           "ForAllValues:StringEquals": {
             "dynamodb:Attributes": [
               "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
-              "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId",
+              "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId", "stepSince",
             ],
           },
         },

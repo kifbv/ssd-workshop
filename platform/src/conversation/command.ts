@@ -112,7 +112,7 @@ async function reset(command: ResetCommand, deps: ConversationDeps, store: Reset
     deps.out(`Nothing changed. Run again with --yes to delete them and send ${nickname} back to step 1 (Clarify); their AI usage totals are kept.`);
     return 0;
   }
-  if (!(await store.restart(participantId, state))) {
+  if (!(await store.restart(participantId, state, deps.now().toISOString()))) {
     deps.err(`${nickname} sent a message meanwhile; nothing changed. Try again in a minute.`);
     return 1;
   }

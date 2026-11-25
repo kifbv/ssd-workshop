@@ -258,7 +258,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       .map((i) => i.item);
   }
 
-  async moveToSpec(participantId: string, nowSeconds: number): Promise<MoveResult> {
+  async moveToSpec(participantId: string, nowSeconds: number, nowIso: string): Promise<MoveResult> {
     this.fail("moveToSpec");
     const profile = this.profiles.get(participantId);
     if (profile?.step !== "clarify") return "wrong-step";
@@ -266,7 +266,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     if (c === undefined) return "busy";
     const free = c.pendingId === undefined || (c.state === "open" && (c.pendingSince ?? 0) < nowSeconds - STALE_PENDING_SECONDS);
     if (!free) return c.state === "waiting" ? "waiting" : "busy";
-    this.profiles.set(participantId, { ...profile, step: "spec" });
+    this.profiles.set(participantId, { ...profile, step: "spec", stepSince: nowIso });
     return "moved";
   }
 
@@ -296,7 +296,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     if (spec === undefined) return "no-spec";
     if (this.messagesOf(participantId).has(readiness.id)) throw new Error("message id taken");
     this.conversations.set(participantId, { ...c, state: "open", approvedSpecVersion: version, pendingId: readiness.id, pendingSince: readiness.nowSeconds });
-    this.profiles.set(participantId, { ...profile, step: "approved" });
+    this.profiles.set(participantId, { ...profile, step: "approved", stepSince: nowIso });
     spec.approvedAt = nowIso;
     this.storeMessage(participantId, readiness);
     return "approved";
@@ -349,7 +349,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     const rest = withoutInFlight(conversation);
     if (outcome.kind === "ready") {
       this.conversations.set(participantId, { ...rest, state: "open", buildId: outcome.build.buildId });
-      this.profiles.set(participantId, { ...profile, step: "building" });
+      this.profiles.set(participantId, { ...profile, step: "building", stepSince: nowIso });
       this.builds.set(outcome.build.buildId, {
         buildId: outcome.build.buildId,
         nickname: outcome.build.nickname,
@@ -361,7 +361,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     } else {
       delete rest.approvedSpecVersion;
       this.conversations.set(participantId, { ...rest, state: "open" });
-      this.profiles.set(participantId, { ...profile, step: "spec" });
+      this.profiles.set(participantId, { ...profile, step: "spec", stepSince: nowIso });
     }
     const spent = outcome.kind === "failed" ? outcome.usage : outcome.answer.usage;
     if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) this.add(participantId, spent);

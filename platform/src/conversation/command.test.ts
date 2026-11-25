@@ -116,6 +116,7 @@ describe("npm run conversation -- reset <nickname>", () => {
     expect(table.usage.get("p-ada")).toEqual({ inputTokens: 100, outputTokens: 10, costUsd: 0.01 });
     const after = await history();
     expect(after.step).toBe("clarify");
+    expect(table.profiles.get("p-ada")?.stepSince).toBe(NOW.toISOString());
     expect(after.messages).toEqual([]);
     expect((await send("A plant watering reminder")).statusCode).toBe(202);
   });
@@ -315,16 +316,22 @@ describe("DynamoResetStore", () => {
     expect((sent[1] as QueryCommand).input.ExclusiveStartKey).toEqual({ pk: { S: "x" } });
   });
 
-  it("restarts in one transaction: deletes the conversation if it is unchanged since read, and sets the step to clarify", async () => {
+  it("restarts in one transaction: deletes the conversation if it is unchanged since read, and sets the step to clarify with stepSince now (ticket 3.2)", async () => {
     const { store, sent } = stub([{}, {}, {}]);
-    await expect(store.restart("p-1", { exists: true, updatedAt: "t1" })).resolves.toBe(true);
-    await expect(store.restart("p-1", { exists: true, pendingId: "m-1", updatedAt: "t2" })).resolves.toBe(true);
-    await expect(store.restart("p-1", { exists: false })).resolves.toBe(true);
+    const at = "2026-11-25T10:00:00.000Z";
+    await expect(store.restart("p-1", { exists: true, updatedAt: "t1" }, at)).resolves.toBe(true);
+    await expect(store.restart("p-1", { exists: true, pendingId: "m-1", updatedAt: "t2" }, at)).resolves.toBe(true);
+    await expect(store.restart("p-1", { exists: false }, at)).resolves.toBe(true);
     for (const command of sent as TransactWriteItemsCommand[]) {
       const items = (command.input.TransactItems ?? []) as TransactWriteItem[];
       expect(items).toHaveLength(2);
       expect(items[0]?.Delete?.Key).toEqual({ pk: { S: "PARTICIPANT#p-1" }, sk: { S: "CONVERSATION" } });
-      expect(items[1]?.Update).toMatchObject({ Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } }, UpdateExpression: "SET #step = :clarify" });
+      expect(items[1]?.Update).toMatchObject({
+        Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
+        UpdateExpression: "SET #step = :clarify, #stepSince = :now",
+        ExpressionAttributeNames: { "#stepSince": "stepSince" },
+        ExpressionAttributeValues: { ":clarify": { S: "clarify" }, ":now": { S: at } },
+      });
       for (const item of items) checkPlaceholders((item.Delete ?? item.Update) as object);
     }
     const first = ((sent[0] as TransactWriteItemsCommand).input.TransactItems ?? [])[0];
@@ -344,8 +351,8 @@ describe("DynamoResetStore", () => {
   it("answers false when a condition failed, and throws any other error", async () => {
     const cancelled = Object.assign(new Error("cancelled"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "ConditionalCheckFailed" }] });
     const { store } = stub([cancelled, Object.assign(new Error("down"), { name: "InternalServerError" })]);
-    await expect(store.restart("p-1", { exists: false })).resolves.toBe(false);
-    await expect(store.restart("p-1", { exists: false })).rejects.toThrow("down");
+    await expect(store.restart("p-1", { exists: false }, "t")).resolves.toBe(false);
+    await expect(store.restart("p-1", { exists: false }, "t")).rejects.toThrow("down");
   });
 
   it("deletes in batches of 25 and retries unprocessed items with a growing wait, then gives up", async () => {

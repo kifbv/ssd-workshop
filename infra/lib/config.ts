@@ -200,8 +200,18 @@ export const SESSION_ALLOW_READ_ATTRIBUTES = ["pk", "sk", "role", "group", "part
 export const PARTICIPANT_FUNCTION_NAME = `${PREFIX}-api-participant`;
 /** The nickname claim's attribute names the participant function may put in `NICK#*`. */
 export const PARTICIPANT_NICK_PUT_ATTRIBUTES = ["pk", "sk", "type", "nickname", "participantId", "createdAt"] as const;
-/** The profile attribute names the participant function may update in `PARTICIPANT#*`. */
-export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "step"] as const;
+/** The profile attribute names the participant function may update in `PARTICIPANT#*` (`stepSince` with the step, ticket 3.2). */
+export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "step", "stepSince"] as const;
+
+/** Lambda function, role and log group of the admin routes (ticket 3.2: `GET` and `PUT /api/admin/settings`). */
+export const ADMIN_FUNCTION_NAME = `${PREFIX}-api-admin`;
+/** Partition key of the one workshop settings item (platform/api/keys.ts SETTINGS_PK). */
+export const SETTINGS_PARTITION = "SETTINGS";
+/**
+ * The attribute names the admin function may update in the `SETTINGS` partition (UpdateItem only; ticket 3.2): the
+ * three caps. No other role may write `SETTINGS` (synth test). Ticket 3.5 adds `stopped` for the global Stop.
+ */
+export const SETTINGS_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt"] as const;
 
 /** Lambda function, role and log group of the data API for apps (ticket 2.4). */
 export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
@@ -273,6 +283,7 @@ export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
  * Never `role`, `group`, `nickname`, `id`, `approvedTextHash` or `specVersion` (readers of a spec version
  * require it, so this role cannot make one). Ticket 2.7: `buildId`, only compared (asking for the readiness check
  * again needs no build yet); `GET /api/build` answers only a build whose own `participantId` is the caller.
+ * Ticket 3.2: `stepSince`, set with every step change.
  */
 export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "pk",
@@ -293,6 +304,7 @@ export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "latestSpecVersion",
   "approvedAt",
   "buildId",
+  "stepSince",
 ] as const;
 /** Lambda function, role and log group of the AI worker (ticket 1.7). */
 export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
@@ -307,7 +319,7 @@ export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
  * writes the conversation's `buildId`, and on a failed check removes `approvedSpecVersion` (so the participant can
  * approve again); every such write is conditional on the step being `approved` and that version being approved
  * with the readiness message in flight. Still never `approvedAt`, `role`, `group`, `nickname`, `id` or
- * `approvedTextHash`.
+ * `approvedTextHash`. Ticket 3.2: `stepSince`, set with the step.
  */
 export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",
@@ -344,6 +356,7 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "step",
   "buildId",
   "approvedSpecVersion",
+  "stepSince",
 ] as const;
 /**
  * The attribute names the AI worker may name in `BUILD#*` (UpdateItem only; ticket 2.7): a new build record, created

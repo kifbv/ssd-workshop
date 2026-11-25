@@ -4,7 +4,8 @@
 // Every write is an UpdateItem (inside a transaction where several items change together), never a
 // PutItem: the functions' roles (infra/lib/api-stack.ts) may update only listed attribute names in
 // `PARTICIPANT#*`, so they can never replace or empty another item of the partition. The lists are
-// CONVERSATION_UPDATE_ATTRIBUTES and AI_WORKER_UPDATE_ATTRIBUTES in infra/lib/config.ts (tested).
+// CONVERSATION_UPDATE_ATTRIBUTES and AI_WORKER_UPDATE_ATTRIBUTES in infra/lib/config.ts (tested). Every step change
+// also sets the profile's `stepSince` to the same time, in the same update (ticket 3.2).
 import {
   GetItemCommand,
   QueryCommand,
@@ -376,7 +377,7 @@ export class DynamoConversationStore implements ConversationStore {
       await this.client.send(
         new TransactWriteItemsCommand({
           TransactItems: [
-            setItem(this.tableName, participantKey(participantId), { step: str("spec") }, {
+            setItem(this.tableName, participantKey(participantId), { step: str("spec"), stepSince: str(nowIso) }, {
               expression: "#step = :clarify",
               values: { ":clarify": str("clarify") },
             }),
@@ -436,7 +437,7 @@ export class DynamoConversationStore implements ConversationStore {
       await this.client.send(
         new TransactWriteItemsCommand({
           TransactItems: [
-            setItem(this.tableName, participantKey(participantId), { step: str("approved") }, {
+            setItem(this.tableName, participantKey(participantId), { step: str("approved"), stepSince: str(nowIso) }, {
               expression: "#step = :spec",
               values: { ":spec": str("spec") },
             }),
@@ -572,7 +573,7 @@ export class DynamoConversationStore implements ConversationStore {
         // Not ready (or no verdict): the approval is cleared, so Approve spec works again.
         { remove: ready ? ["pendingId", "pendingSince"] : ["pendingId", "pendingSince", "approvedSpecVersion"] },
       ),
-      setItem(this.tableName, participantKey(participantId), { step: str(ready ? "building" : "spec") }, {
+      setItem(this.tableName, participantKey(participantId), { step: str(ready ? "building" : "spec"), stepSince: str(nowIso) }, {
         expression: "#step = :approved",
         values: { ":approved": str("approved") },
       }),
