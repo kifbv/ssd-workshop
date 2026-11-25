@@ -5,7 +5,7 @@ import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aws-cdk-lib/aws-s3";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
-import { workshopFunction } from "./api-stack.js";
+import { slotReleaseStatements, workshopFunction } from "./api-stack.js";
 import {
   ACCOUNT,
   APPS_BUCKET_NAME,
@@ -161,6 +161,8 @@ export class AppsStack extends Stack {
         },
       }),
     );
+    // Ticket 3.4: a build that goes live or fails frees its slot.
+    for (const statement of slotReleaseStatements(tableArn)) deployer.addToRolePolicy(statement);
     // One deploy per invocation; the source grants the role the consume rights on this queue only.
     deployer.addEventSource(new SqsEventSource(queue, { batchSize: 1, maxConcurrency: DEPLOYER_MAX_CONCURRENCY }));
   }

@@ -39,6 +39,8 @@ import {
   BUILDER_TASK_FAMILY,
   BUILDER_TASK_ROLE_NAME,
   BUILDER_USAGE_UPDATE_ATTRIBUTES,
+  BUILD_QUEUE_PARTITION,
+  BUILD_SLOTS_PARTITION,
   BUILDER_IMAGES_KEPT,
   BUILDER_REPOSITORY_NAME,
   BUILD_DLQ_NAME,
@@ -53,11 +55,16 @@ import {
   GITHUB_SECRET_NAME,
   LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
   LAUNCHER_LAUNCH_ATTRIBUTES,
+  LAUNCHER_QUEUE_ATTRIBUTES,
   LAUNCHER_READ_ATTRIBUTES,
+  LAUNCHER_SLOT_ATTRIBUTES,
   LAUNCHES_PARTITION,
   REGION,
+  SETTINGS_PARTITION,
+  SETTINGS_READ_ATTRIBUTES,
   TABLE_NAME,
 } from "./config.js";
+
 
 /**
  * The build launcher's timeout (ticket 2.9): preparing the repository (a dozen GitHub calls, each at most 10 s, with
@@ -76,8 +83,15 @@ export const BUILD_CHECK_SCHEDULE = "rate(1 minute)";
 export const BUILD_CHECK_RETENTION_SECONDS = 300;
 /** The template the launcher commits (ticket 2.6), copied next to its bundled code as `template/`. */
 export const TEMPLATE_DIR = fileURLToPath(new URL("../../templates/basic", import.meta.url));
-/** Deliveries of one launch message before it goes to the dead-letter queue. */
-export const BUILD_QUEUE_MAX_RECEIVES = 3;
+/**
+ * Deliveries of one launch message before it goes to the dead-letter queue. Ticket 3.4: a build waiting for a slot gets
+ * its message back every 30 s (platform/api/settings.ts LAUNCH_WAIT_SECONDS), and each comes back as a new delivery: 1,000
+ * (SQS's maximum) lets a build wait about 8 hours. A message the launcher keeps failing on (every 150 s) reaches the
+ * dead-letter queue after about 42 hours, inside BUILD_QUEUE_RETENTION_SECONDS.
+ */
+export const BUILD_QUEUE_MAX_RECEIVES = 1000;
+/** Ticket 3.4: launch messages are kept 2 days (was 1), longer than BUILD_QUEUE_MAX_RECEIVES failed deliveries take. */
+export const BUILD_QUEUE_RETENTION_SECONDS = 2 * 24 * 60 * 60;
 
 /**
  * Where build tasks run (ticket 2.1): a VPC with two public subnets and no NAT gateway
@@ -180,7 +194,7 @@ export class BuildsStack extends Stack {
       contentBasedDeduplication: false,
       encryption: QueueEncryption.SQS_MANAGED,
       visibilityTimeout: Duration.seconds(BUILD_QUEUE_VISIBILITY_SECONDS),
-      retentionPeriod: Duration.days(1),
+      retentionPeriod: Duration.seconds(BUILD_QUEUE_RETENTION_SECONDS),
       deadLetterQueue: { queue: buildDeadLetters, maxReceiveCount: BUILD_QUEUE_MAX_RECEIVES },
     });
 
@@ -258,6 +272,8 @@ export class BuildsStack extends Stack {
     taskRole.addToPolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [`arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}`] }),
     );
+    // Ticket 3.4: no right on the build slots (the task runs next to the AI agent): the launcher's minute check frees
+    // the slot of a build the runner marks failed.
     this.builderTask = new FargateTaskDefinition(this, "BuilderTask", {
       family: BUILDER_TASK_FAMILY,
       cpu: BUILDER_CPU,
@@ -306,11 +322,69 @@ export class BuildsStack extends Stack {
     launcher.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        actions: ["dynamodb:UpdateItem"],
+        actions: ["dynamodb:UpdateItem", "dynamodb:ConditionCheckItem"],
         resources: [tableArn],
         conditions: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    // Ticket 3.4: builds at once (the SETTINGS item, read only), the slots (counter and holders) and the waiting line.
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [SETTINGS_PARTITION], "dynamodb:Attributes": [...SETTINGS_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    // Reads must be projected (or a count, for the line): `StringEquals` on `dynamodb:Select`, so a request without a
+    // projection (the whole item) is refused (try 2). Writes carry no Select, so they get their own statements.
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_SLOTS_PARTITION], "dynamodb:Attributes": [...LAUNCHER_SLOT_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_SLOTS_PARTITION], "dynamodb:Attributes": [...LAUNCHER_SLOT_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_QUEUE_PARTITION], "dynamodb:Attributes": [...LAUNCHER_QUEUE_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": ["SPECIFIC_ATTRIBUTES", "COUNT"] },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_QUEUE_PARTITION], "dynamodb:Attributes": [...LAUNCHER_QUEUE_ATTRIBUTES] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
         },
       }),
@@ -356,7 +430,8 @@ export class BuildsStack extends Stack {
       }),
     );
     // One message per invocation; the sources grant the consume rights on these two queues only.
-    launcher.addEventSource(new SqsEventSource(this.buildQueue, { batchSize: 1, maxConcurrency: LAUNCHER_MAX_CONCURRENCY }));
+    // Ticket 3.4: a build waiting for a slot is reported as a batch item failure (its message comes back after 30 s).
+    launcher.addEventSource(new SqsEventSource(this.buildQueue, { batchSize: 1, maxConcurrency: LAUNCHER_MAX_CONCURRENCY, reportBatchItemFailures: true }));
     launcher.addEventSource(new SqsEventSource(checkQueue, { batchSize: 1, maxConcurrency: 2 }));
 
     // Every minute, EventBridge Scheduler drops a trigger on the check queue (a Lambda cannot be invoked by a workload

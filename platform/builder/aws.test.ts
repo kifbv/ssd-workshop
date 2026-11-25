@@ -63,6 +63,16 @@ function placeholdersMatch(input: UpdateItemCommandInput | GetItemCommandInput):
 const step: FeedEvent = { kind: "step", step: "preparing", at: NOW };
 
 describe("DynamoBuildRecords (ticket 2.8)", () => {
+  it("ticket 3.4 try 2: WHEN the builder marks its build failed THEN it writes only the build (one UpdateItem): it never touches the build slots, which the launcher's minute check frees", async () => {
+    const { client, sent } = stub([{}]);
+    const records = new DynamoBuildRecords(client, TABLE);
+    expect(await records.markFailed("b-1", ATTEMPT, ["x"], NOW)).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBeInstanceOf(UpdateItemCommand);
+    expect((sent[0]?.input as UpdateItemCommandInput).Key).toEqual({ pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } });
+    expect(JSON.stringify(sent.map((command) => command.input))).not.toContain("BUILD_SLOTS");
+  });
+
   it("names exactly BUILDER_BUILD_READ_ATTRIBUTES (GetItem) and BUILDER_BUILD_UPDATE_ATTRIBUTES (UpdateItem) in BUILD#, only BUILDER_USAGE_UPDATE_ATTRIBUTES in the usage item, and returns no attributes", async () => {
     const { client, sent } = stub([{ Item: { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "queued" } } }]);
     const records = new DynamoBuildRecords(client, TABLE);

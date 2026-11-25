@@ -120,6 +120,7 @@ import { APPS_INDEX_FUNCTION_FILE, NOT_FOUND_CACHE_SECONDS } from "./edge-stack.
 import {
   BUILD_CHECK_SCHEDULE,
   BUILD_QUEUE_MAX_RECEIVES,
+  BUILD_QUEUE_RETENTION_SECONDS,
   BUILD_QUEUE_VISIBILITY_SECONDS,
   LAUNCHER_MAX_CONCURRENCY,
   LAUNCHER_MEMORY_MB,
@@ -135,6 +136,9 @@ import {
   DISTRIBUTION_ID as PLATFORM_DISTRIBUTION_ID,
   GITHUB_SECRET_NAME as PLATFORM_GITHUB_SECRET_NAME,
   HANDED_OVER_GRACE_MS,
+  LAUNCH_WAIT_SECONDS,
+  QUEUE_SEEN_MS,
+  QUEUE_WAIT_MAX_MS,
   SITE_DOMAIN as PLATFORM_SITE_DOMAIN,
 } from "../../platform/api/settings.js";
 
@@ -1551,6 +1555,33 @@ function settingsReadStatement(tableArn: unknown) {
   };
 }
 
+/**
+ * Ticket 3.4: what every writer that ends a build may do to free its slot: check the build's `status` (a transaction's
+ * ConditionCheck), delete its holder and count the counter down in `BUILD_SLOTS`, nothing else.
+ */
+function slotReleaseExpected(tableArn: unknown) {
+  return [
+    {
+      Effect: "Allow",
+      Action: "dynamodb:ConditionCheckItem",
+      Resource: tableArn,
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status"] },
+      },
+    },
+    {
+      Effect: "Allow",
+      Action: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+      Resource: tableArn,
+      Condition: {
+        "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_SLOTS"], "dynamodb:Attributes": ["pk", "sk", "running", "version"] },
+        StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+      },
+    },
+  ];
+}
+
 describe("SETTINGS readers (ticket 3.3)", () => {
   it("WHEN the synthesized stack is inspected THEN the AI worker and the conversation function read SETTINGS only projected to the listed attributes, and the participant function not at all", () => {
     expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"]);
@@ -1854,6 +1885,16 @@ describe("api stack: conversation function (ticket 1.7)", () => {
         Resource: f.tableArn(),
         Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] } },
       },
+      // Ticket 3.4: `GET /api/build` counts the builds ahead in the waiting line (a COUNT query, no item read).
+      {
+        Effect: "Allow",
+        Action: "dynamodb:Query",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_QUEUE"], "dynamodb:Attributes": ["pk", "sk", "lastSeenAt"] },
+          StringEquals: { "dynamodb:Select": "COUNT" },
+        },
+      },
       {
         Effect: "Allow",
         Action: "dynamodb:UpdateItem",
@@ -1974,10 +2015,23 @@ describe("api stack: AI worker (ticket 1.7)", () => {
       FifoQueue: true,
       ContentBasedDeduplication: false,
       SqsManagedSseEnabled: true,
-      MessageRetentionPeriod: 86_400,
+      MessageRetentionPeriod: BUILD_QUEUE_RETENTION_SECONDS,
       VisibilityTimeout: BUILD_QUEUE_VISIBILITY_SECONDS,
       RedrivePolicy: { deadLetterTargetArn: { "Fn::GetAtt": [byName(BUILD_DLQ_NAME)?.[0], "Arn"] }, maxReceiveCount: BUILD_QUEUE_MAX_RECEIVES },
     });
+    // Ticket 3.4: a build waiting for a slot gets its message back every LAUNCH_WAIT_SECONDS, each a new delivery: SQS's
+    // maximum lets it wait over 8 hours, and a message that keeps failing (one visibility timeout each) still reaches
+    // the dead-letter queue before the queue would drop it.
+    expect(BUILD_QUEUE_MAX_RECEIVES).toBe(1000);
+    expect(BUILD_QUEUE_RETENTION_SECONDS).toBe(172_800);
+    expect(BUILD_QUEUE_MAX_RECEIVES * LAUNCH_WAIT_SECONDS).toBeGreaterThan(8 * 60 * 60);
+    expect(BUILD_QUEUE_MAX_RECEIVES * BUILD_QUEUE_VISIBILITY_SECONDS).toBeLessThan(BUILD_QUEUE_RETENTION_SECONDS);
+    // Try 2: a waiting entry stays "ahead" longer than a message can stay away (the visibility timeout, when setting its
+    // 30 s failed or a launcher was busy), and the check fails a build waiting longer than QUEUE_WAIT_MAX_MS well before a
+    // waiting message's deliveries run out.
+    expect(QUEUE_SEEN_MS).toBeGreaterThan(BUILD_QUEUE_VISIBILITY_SECONDS * 1000);
+    expect(QUEUE_WAIT_MAX_MS).toBeGreaterThanOrEqual(3 * 60 * 60 * 1000);
+    expect(QUEUE_WAIT_MAX_MS).toBeLessThan(BUILD_QUEUE_MAX_RECEIVES * LAUNCH_WAIT_SECONDS * 1000);
     expect(byName(BUILD_DLQ_NAME)?.[1].Properties).toMatchObject({ FifoQueue: true, SqsManagedSseEnabled: true, MessageRetentionPeriod: 1_209_600 });
     for (const name of [BUILD_QUEUE_NAME, BUILD_DLQ_NAME]) expect(tagsOf(must(byName(name))[1]).project, name).toBe("ssd-workshop");
     // Ticket 2.9 adds the check queue (the schedule's trigger, its own sender, tested below).
@@ -2267,6 +2321,9 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
       },
       { Effect: "Allow", Action: "sqs:SendMessage", Resource: `arn:aws:sqs:${REGION}:${ACCOUNT}:${DEPLOY_QUEUE_NAME}` },
     ]);
+    // Ticket 3.4 try 2: no right on the build slots or the waiting line (the task runs next to the AI agent).
+    for (const partition of ["BUILD_SLOTS", "BUILD_QUEUE"]) expect(JSON.stringify(statementsOf(BUILDER_TASK_ROLE_NAME))).not.toContain(partition);
+    expect(JSON.stringify(statementsOf(BUILDER_TASK_ROLE_NAME))).not.toContain("dynamodb:ConditionCheckItem");
     // The usage writes reach only the token counters: no nickname, status or spec attribute.
     expect([...BUILDER_USAGE_UPDATE_ATTRIBUTES]).not.toContain("nickname");
     expect([...BUILDER_USAGE_UPDATE_ATTRIBUTES]).not.toContain("status");
@@ -2336,6 +2393,7 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
   it("the launcher's rights: the secret, reads and writes by attribute list, RunTask of the builder on the builds cluster only, the dead-letter queues; no send", () => {
     const tasks = `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`;
     const limited = [...ATTRIBUTE_LIMITED_RETURN_VALUES];
+    const slotNames = ["pk", "sk", "type", "buildId", "heldSince", "running", "version", "repairMisses"];
     const queueReads = ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"];
     const logGroupId = (launcher()[1].Properties?.LoggingConfig as { LogGroup: { Ref: string } }).LogGroup.Ref;
     expect(statementsOf(BUILD_LAUNCHER_FUNCTION_NAME)).toEqual([
@@ -2353,11 +2411,51 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
       },
       {
         Effect: "Allow",
-        Action: "dynamodb:UpdateItem",
+        // Ticket 3.4: ConditionCheckItem for the slot release's check that the build has ended.
+        Action: ["dynamodb:UpdateItem", "dynamodb:ConditionCheckItem"],
         Resource: tableArn,
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_BUILD_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
+        },
+      },
+      // Ticket 3.4: the cap (SETTINGS, read only and projected), the slots (counter and holders) and the waiting line.
+      settingsReadStatement(tableArn),
+      // Reads projected (try 2: StringEquals on Select, so a read of whole items is refused), writes in their own statements.
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:GetItem", "dynamodb:Query"],
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_SLOTS"], "dynamodb:Attributes": [...slotNames] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_SLOTS"], "dynamodb:Attributes": [...slotNames] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:Query",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_QUEUE"], "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "lastSeenAt"] },
+          StringEquals: { "dynamodb:Select": ["SPECIFIC_ATTRIBUTES", "COUNT"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_QUEUE"], "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "lastSeenAt"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
         },
       },
@@ -2391,6 +2489,59 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     ]);
     // The launches partition cannot overlap the build or participant prefixes.
     expect(LAUNCHES_PARTITION).not.toMatch(/^(BUILD|PARTICIPANT)#/);
+    // Ticket 3.4: the build's own update attributes include the waiting place it sets at first sight.
+    expect([...LAUNCHER_BUILD_UPDATE_ATTRIBUTES]).toContain("queueKey");
+  });
+
+  it("ticket 3.4: only the launcher writes the waiting line; only the launcher and the deployer write the slots, the deployer only to free one (try 2: never the builder task)", () => {
+    const writers: Record<string, string[]> = { BUILD_SLOTS: [], BUILD_QUEUE: [] };
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        const actions = [st.Action].flat() as string[];
+        if (!actions.some((g) => DYNAMODB_WRITE_ACTIONS.some((a) => actionCovers(g, a)))) continue;
+        const keys = JSON.stringify(st.Condition ?? {});
+        for (const partition of Object.keys(writers)) {
+          // A write statement without a partition condition would reach every partition.
+          if (!keys.includes("dynamodb:LeadingKeys") || keys.includes(`"${partition}"`)) writers[partition]?.push(`${s}/${id}`);
+          if (keys.includes(`"${partition}"`) && !actions.includes("dynamodb:PutItem") && partition === "BUILD_SLOTS") {
+            expect(st.Condition).toMatchObject({ "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "running", "version"] } });
+          }
+        }
+      }
+    }
+    const launcherPolicy = (id: string): boolean => id.includes("Launcher");
+    expect(writers.BUILD_QUEUE?.length).toBeGreaterThan(0);
+    for (const id of writers.BUILD_QUEUE ?? []) expect(launcherPolicy(id), id).toBe(true);
+    expect(writers.BUILD_SLOTS?.some(launcherPolicy)).toBe(true);
+    expect(writers.BUILD_SLOTS?.some((id) => id.startsWith(STACK_NAMES.apps))).toBe(true);
+    expect(writers.BUILD_SLOTS?.some((id) => id.includes("BuilderTask"))).toBe(false);
+    // One policy each: the launcher's and the deployer's.
+    expect(new Set(writers.BUILD_SLOTS).size).toBe(2);
+  });
+
+  it("ticket 3.4 try 2: every Query or GetItem statement on BUILD_SLOTS or BUILD_QUEUE forces a projection or a count (StringEquals dynamodb:Select)", () => {
+    let seen = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        const actions = [st.Action].flat() as string[];
+        if (!actions.some((g) => ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:BatchGetItem"].some((a) => actionCovers(g, a)))) continue;
+        const keys = JSON.stringify(st.Condition ?? {});
+        const reaches = (partition: string): boolean => !keys.includes("dynamodb:LeadingKeys") || keys.includes(`"${partition}"`);
+        for (const partition of ["BUILD_SLOTS", "BUILD_QUEUE"]) {
+          if (!reaches(partition)) continue;
+          seen += 1;
+          const select = [(st.Condition as { StringEquals?: Record<string, unknown> } | undefined)?.StringEquals?.["dynamodb:Select"]].flat();
+          expect(select.length, `${s}/${id} ${partition}`).toBeGreaterThan(0);
+          for (const value of select) expect(["SPECIFIC_ATTRIBUTES", "COUNT"], `${s}/${id} ${partition}`).toContain(value);
+          // The slots are never only counted (no need), and never read whole.
+          if (partition === "BUILD_SLOTS") expect(select, `${s}/${id}`).toEqual(["SPECIFIC_ATTRIBUTES"]);
+        }
+      }
+    }
+    // The launcher's two reads and the conversation function's count.
+    expect(seen).toBe(3);
   });
 
   it("nothing but the launcher may RunTask, StartTask, StopTask or pass a role", () => {
@@ -2415,7 +2566,13 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(mappings).toHaveLength(2);
     expect(mappings).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ EventSourceArn: queueArn(BUILD_QUEUE_NAME), BatchSize: 1, ScalingConfig: { MaximumConcurrency: LAUNCHER_MAX_CONCURRENCY } }),
+        // Ticket 3.4: a waiting build is answered as a batch item failure (its message comes back), not by throwing.
+        expect.objectContaining({
+          EventSourceArn: queueArn(BUILD_QUEUE_NAME),
+          BatchSize: 1,
+          ScalingConfig: { MaximumConcurrency: LAUNCHER_MAX_CONCURRENCY },
+          FunctionResponseTypes: ["ReportBatchItemFailures"],
+        }),
         expect.objectContaining({ EventSourceArn: queueArn(BUILD_CHECK_QUEUE_NAME), BatchSize: 1 }),
       ]),
     );
@@ -2692,6 +2849,8 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
       },
+      // Ticket 3.4: a build that goes live or fails frees its slot.
+      ...slotReleaseExpected(expect.anything()),
       {
         Effect: "Allow",
         Action: ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
@@ -2699,14 +2858,18 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
       },
     ]);
     // The table by name in this account and region, not across stacks.
-    for (const st of statements.filter((st) => st.Action === "dynamodb:UpdateItem")) {
+    for (const st of statements.filter((st) => JSON.stringify(st.Action).includes("dynamodb:"))) {
       expect(st.Resource).toEqual({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, `:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`]] });
     }
     expect(DISTRIBUTION_ID).toBe("E2TOZV0ERAXKZ9");
     // The live marker needs `liveAt` (the data API requires it); no other role may write it, and the deployer never writes app data.
     expect(DEPLOYER_LIVE_UPDATE_ATTRIBUTES).toContain("liveAt");
     expect(JSON.stringify(statements)).not.toContain("APPDATA#");
-    expect(JSON.stringify(statements)).not.toMatch(/dynamodb:(PutItem|DeleteItem|GetItem|Query|Scan|BatchWriteItem)/);
+    expect(JSON.stringify(statements)).not.toMatch(/dynamodb:(PutItem|GetItem|Query|Scan|BatchWriteItem)/);
+    // Its only delete is a slot holder's (ticket 3.4), in BUILD_SLOTS.
+    for (const st of statements.filter((st) => JSON.stringify(st.Action).includes("dynamodb:DeleteItem"))) {
+      expect(st.Condition).toMatchObject({ "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_SLOTS"] } });
+    }
   });
 
   it("names the function, role and log group ssd-workshop-apps-deployer; Node.js 22 arm64, 512 MB, 120 s; role on /ssd-workshop/ with the boundary; no route or invoke permission", () => {

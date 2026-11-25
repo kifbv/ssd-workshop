@@ -456,14 +456,42 @@ export const BUILD_CHECK_SCHEDULER_ROLE_NAME = `${PREFIX}-builds-check-scheduler
  * `BUILD#*` and `PARTICIPANT#*`: the build's nickname, participant and status, the profile's nickname, the
  * conversation's build and approved version, and the approved spec version's text.
  */
-export const LAUNCHER_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status", "buildId", "approvedSpecVersion", "specVersion", "text", "approvedAt"] as const;
+export const LAUNCHER_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status", "buildId", "approvedSpecVersion", "specVersion", "text", "approvedAt", "queueKey"] as const;
 /**
  * The attribute names the launcher may name in `BUILD#*` (UpdateItem, also inside its claim transaction): the move from
  * `queued` to `building` under a new launch (`attemptId`, ticket 2.9 try 2), the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only
- * compared (IAM counts condition names).
+ * compared (IAM counts condition names). Ticket 3.4: `queueKey`, the build's place in the waiting line (set when the
+ * launcher first sees it, removed by the claim); also ConditionCheckItem, for the slot release (SLOT_RELEASE_CHECK_ATTRIBUTES).
  */
-export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "participantId", "pushedCommit", "attemptId", "taskArn", "launchedAt", "updatedAt", "failureReasons", "finishedAt"] as const;
+export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "participantId", "pushedCommit", "attemptId", "taskArn", "launchedAt", "updatedAt", "failureReasons", "finishedAt", "queueKey"] as const;
 /** The watch list's attribute names (`LAUNCHES` partition: PutItem, UpdateItem, DeleteItem, Query). */
 export const LAUNCHER_LAUNCH_ATTRIBUTES = ["pk", "sk", "type", "buildId", "taskArn", "claimedAt"] as const;
 /** The watch list's partition key (platform/api/keys.ts LAUNCHES_PK). */
 export const LAUNCHES_PARTITION = "LAUNCHES";
+/** Ticket 3.4: the build slots' partition (platform/api/keys.ts BUILD_SLOTS_PK): the counter `COUNT` and one holder per build. */
+export const BUILD_SLOTS_PARTITION = "BUILD_SLOTS";
+/** Ticket 3.4: the waiting line's partition (platform/api/keys.ts BUILD_QUEUE_PK): one entry per queued build seen by the launcher. */
+export const BUILD_QUEUE_PARTITION = "BUILD_QUEUE";
+/**
+ * The launcher's names in `BUILD_SLOTS` (GetItem, PutItem, UpdateItem, DeleteItem, Query): the counter (`running`,
+ * `version`, and `repairMisses`, the check's refused repairs in a row, try 2) and the holders (`type`, `buildId`,
+ * `heldSince`). Its reads (GetItem, Query) must be projected (`dynamodb:Select` SPECIFIC_ATTRIBUTES).
+ */
+export const LAUNCHER_SLOT_ATTRIBUTES = ["pk", "sk", "type", "buildId", "heldSince", "running", "version", "repairMisses"] as const;
+/**
+ * The launcher's names in `BUILD_QUEUE` (UpdateItem, DeleteItem, Query): an entry and when its message was last seen. Its
+ * Query must be projected or a count (`dynamodb:Select` SPECIFIC_ATTRIBUTES or COUNT).
+ */
+export const LAUNCHER_QUEUE_ATTRIBUTES = ["pk", "sk", "type", "buildId", "lastSeenAt"] as const;
+/**
+ * The deployer and the launcher free a build's slot when they end it (platform/api/build/slots.ts): DeleteItem of the
+ * holder and UpdateItem of the counter in `BUILD_SLOTS` naming only these, and ConditionCheckItem in `BUILD#*` naming only
+ * SLOT_RELEASE_CHECK_ATTRIBUTES (the build must have ended). The builder task has no right on the slots (try 2).
+ */
+export const SLOT_RELEASE_ATTRIBUTES = ["pk", "sk", "running", "version"] as const;
+export const SLOT_RELEASE_CHECK_ATTRIBUTES = ["pk", "sk", "status"] as const;
+/**
+ * Ticket 3.4: the conversation function counts the queued builds ahead of the caller's (`GET /api/build`): Query in
+ * `BUILD_QUEUE` with `dynamodb:Select` `COUNT` only, naming only these.
+ */
+export const QUEUE_COUNT_ATTRIBUTES = ["pk", "sk", "lastSeenAt"] as const;

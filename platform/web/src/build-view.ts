@@ -3,6 +3,8 @@
 //
 // File paths, hosts, commit messages and failure reasons are anyone's text (the coding agent's, a participant's
 // files): the page shows them with `textContent` only, and puts into a link only what passes the checks below.
+// Ticket 3.4: the queue's place text is shared with the API (phase 3 texts, ticket 3.2): plain functions, no Node.js.
+import { queuePositionText } from "../../api/workshop/texts.js";
 import { MESSAGES, type ApiAnswer, type Show, type Tone } from "./flow.js";
 
 /** The step 3 page asks for news of the build this often while it runs. */
@@ -30,6 +32,8 @@ export interface Build {
   repositoryUrl?: string;
   appUrl?: string;
   failureReasons?: string[];
+  /** Ticket 3.4: while queued, how many builds wait ahead of it (once the launcher has placed it). */
+  ahead?: number;
 }
 
 /** The row of stages on the page: the builder's steps, then live. */
@@ -91,6 +95,7 @@ export function parseBuild(body: unknown): Build | undefined {
     ...(text(b["repositoryUrl"]) && REPOSITORY_URL.test(b["repositoryUrl"]) ? { repositoryUrl: b["repositoryUrl"] } : {}),
     ...(text(b["appUrl"]) && APP_URL.test(b["appUrl"]) ? { appUrl: b["appUrl"] } : {}),
     ...(reasons === undefined ? {} : { failureReasons: reasons }),
+    ...(typeof b["ahead"] === "number" && Number.isInteger(b["ahead"]) && b["ahead"] >= 0 ? { ahead: b["ahead"] } : {}),
   };
 }
 
@@ -139,6 +144,8 @@ export function stageStates(build: Build): Record<Stage, "done" | "current" | "t
 /** The line under the stages. */
 export function nowText(build: Build): string {
   if (build.status === "failed") return BUILD_TEXTS.failed;
+  // Ticket 3.4: a queued build says how many builds are ahead of it, once the launcher placed it in the line.
+  if (build.status === "queued" && build.ahead !== undefined) return queuePositionText(build.ahead);
   return BUILD_TEXTS.now[currentStage(build) ?? "queued"];
 }
 

@@ -224,6 +224,7 @@ describe("the agent's environment", () => {
       DISABLE_AUTOUPDATER: "1",
       DISABLE_TELEMETRY: "1",
       DISABLE_ERROR_REPORTING: "1",
+      CLAUDE_CODE_MAX_RETRIES: "10",
     });
     expect(JSON.stringify(env)).not.toContain("ghs_");
   });

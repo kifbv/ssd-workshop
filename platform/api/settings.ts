@@ -161,3 +161,30 @@ export const BUILD_TASK_MAX_MS = 30 * 60 * 1000;
  * deployer: about 7 minutes; tested in infra/lib/app.test.ts).
  */
 export const HANDED_OVER_GRACE_MS = 20 * 60 * 1000;
+/**
+ * Ticket 3.4: a build that finds no free slot stays `queued` and its launch message comes back after this many seconds
+ * (the launcher sets the message's visibility and reports it as a batch item failure).
+ */
+export const LAUNCH_WAIT_SECONDS = 30;
+/**
+ * Ticket 3.4: a waiting entry counts as "ahead" (on the page, and for the start order) only while its message was seen
+ * within this long. A waiting message comes back every LAUNCH_WAIT_SECONDS, or after the launch queue's visibility
+ * timeout (150 s) when setting its visibility failed or a launcher was busy; 4 minutes is above both, so a busy launcher
+ * never lets a later build pass an earlier one, and an entry not seen for 4 minutes belongs to a build whose message is
+ * gone (dead-lettered, or the build was retried or reset): it never blocks the line for longer (try 2: was 2 minutes).
+ */
+export const QUEUE_SEEN_MS = 4 * 60 * 1000;
+/**
+ * Ticket 3.4 try 2: a build still `queued` this long after the launcher first placed it in the waiting line (its
+ * `queueKey` time) is failed by the minute check (QUEUE_TIMEOUT_REASON in ../launcher/launcher.ts). Longer than the
+ * longest sensible wait (about 40 participants at a lowered cap of 3, each build up to 12 minutes plus its deploy: about
+ * 3.5 hours at worst), far shorter than the 42 hours a launch message the launcher keeps failing on takes to reach the
+ * dead-letter queue, and shorter than a waiting message's life (1,000 deliveries every 30 s, over 8 hours).
+ */
+export const QUEUE_WAIT_MAX_MS = 4 * 60 * 60 * 1000;
+/**
+ * Ticket 3.4 try 2: after this many consecutive minute checks whose repair of the slot counter was refused because its
+ * `version` moved (a claim or release in between), the next repair writes without that condition, so a writer that
+ * keeps moving the version cannot hold a wrong counter forever.
+ */
+export const SLOT_REPAIR_FORCE_AFTER = 3;

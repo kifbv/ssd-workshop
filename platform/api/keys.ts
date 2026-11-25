@@ -99,6 +99,24 @@ export function launchKey(buildId: string): ItemKey {
   return { pk: LAUNCHES_PK, sk: buildKey(buildId).pk };
 }
 
+/**
+ * Build slots (ticket 3.4): one partition `BUILD_SLOTS` with the counter `COUNT` (`running`, `version`) and one holder
+ * item per build holding a slot (`BUILD#<id>`). The launcher's claim adds a holder and counts it up in one transaction
+ * (only while `running` is under the cap); every terminal write then removes the holder and counts down in one
+ * transaction, so a slot is freed exactly once. Not `BUILD#...` (IAM's `BUILD#*` never matches it).
+ */
+export const BUILD_SLOTS_PK = "BUILD_SLOTS";
+export const slotCountKey = (): ItemKey => ({ pk: BUILD_SLOTS_PK, sk: "COUNT" });
+export const slotHolderKey = (buildId: string): ItemKey => ({ pk: BUILD_SLOTS_PK, sk: buildKey(buildId).pk });
+
+/**
+ * The waiting line (ticket 3.4): one entry per queued build the launcher has seen, at `BUILD_QUEUE` / its `queueKey`
+ * (`<ISO time first seen>#<build id>`, so the sort key orders the line). "Builds ahead" counts the entries before it.
+ */
+export const BUILD_QUEUE_PK = "BUILD_QUEUE";
+export const queueEntryKey = (queueKey: string): ItemKey => ({ pk: BUILD_QUEUE_PK, sk: queueKey });
+export const newQueueKey = (nowIso: string, buildId: string): string => `${nowIso}#${buildId}`;
+
 /** Prefix of every stored value's sort key in an app's data partition (ticket 2.4). */
 export const APP_DATA_PREFIX = "DATA#";
 

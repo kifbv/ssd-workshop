@@ -8,7 +8,9 @@ import {
   AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
   AI_WORKER_UPDATE_ATTRIBUTES,
   BUILD_QUEUE_NAME as INFRA_BUILD_QUEUE_NAME,
+  BUILD_QUEUE_PARTITION,
   CONVERSATION_UPDATE_ATTRIBUTES,
+  QUEUE_COUNT_ATTRIBUTES,
   MODEL_ID as INFRA_MODEL_ID,
   SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
@@ -649,8 +651,29 @@ describe("DynamoConversationStore", () => {
       ],
     });
     const input = (sent[0] as GetItemCommand).input;
-    expect(input.ProjectionExpression).toBe("#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed");
-    expect(Object.keys(input.ExpressionAttributeNames ?? {}).sort()).toEqual(["#buildId", "#failureReasons", "#feed", "#nickname", "#participantId", "#status", "#type"]);
+    expect(input.ProjectionExpression).toBe("#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed, #queueKey");
+    expect(Object.keys(input.ExpressionAttributeNames ?? {}).sort()).toEqual(["#buildId", "#failureReasons", "#feed", "#nickname", "#participantId", "#queueKey", "#status", "#type"]);
+  });
+
+  it("ticket 3.4: reads a queued build's place and counts the entries ahead of it with a COUNT-only Query of BUILD_QUEUE (QUEUE_COUNT_ATTRIBUTES)", async () => {
+    const place = "2026-11-25T10:00:00.000Z#b-1";
+    const { client, sent } = stubClient([
+      { Item: { type: { S: "build" }, buildId: { S: "b-1" }, participantId: { S: "p-1" }, status: { S: "queued" }, queueKey: { S: place } } },
+      { Count: 2, LastEvaluatedKey: { pk: { S: "BUILD_QUEUE" }, sk: { S: "x" } } },
+      { Count: 1 },
+    ]);
+    const store = new DynamoConversationStore(client, TABLE);
+    expect((await store.getBuild("b-1"))?.queueKey).toBe(place);
+    expect(await store.countQueuedAhead(place, "2026-11-25T09:58:00.000Z")).toBe(3);
+    const queries = sent.slice(1).map((command) => (command as QueryCommand).input);
+    for (const input of queries) {
+      expect(input.Select).toBe("COUNT");
+      expect(input.ProjectionExpression).toBeUndefined();
+      expect(input.ExpressionAttributeValues?.[":pk"]).toEqual({ S: BUILD_QUEUE_PARTITION });
+      const names = [...Object.values(input.ExpressionAttributeNames ?? {}), "pk", "sk"];
+      for (const name of names) expect(QUEUE_COUNT_ATTRIBUTES as readonly string[], name).toContain(name);
+    }
+    expect(queries[1]?.ExclusiveStartKey).toEqual({ pk: { S: "BUILD_QUEUE" }, sk: { S: "x" } });
   });
 
   it("sends a build id alone to the FIFO launch queue, deduplicated by the build id, grouped by participant (ticket 2.7)", async () => {

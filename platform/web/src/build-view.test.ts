@@ -107,6 +107,16 @@ describe("stages, lines and the behind-the-scenes part", () => {
     expect(nowText(build({ status: "failed" }))).toBe("Something went wrong with your build. Your facilitator can restart it.");
   });
 
+  it("ticket 3.4: a queued build says how many builds are ahead of it; a bad count is dropped", () => {
+    expect(parseBuild({ buildId: "b-1", status: "queued", ahead: 3 })).toEqual({ buildId: "b-1", status: "queued", feed: [], ahead: 3 });
+    for (const ahead of [-1, 1.5, "3", null]) expect(parseBuild({ buildId: "b-1", status: "queued", ahead })).not.toHaveProperty("ahead");
+    expect(nowText(build({ status: "queued", ahead: 3 }))).toBe("Your build is in the queue: 3 builds ahead of you.");
+    expect(nowText(build({ status: "queued", ahead: 1 }))).toBe("Your build is in the queue: 1 build ahead of you.");
+    expect(nowText(build({ status: "queued", ahead: 0 }))).toBe("Your build is next in the queue.");
+    // Once it runs, the count no longer matters.
+    expect(nowText(build({ status: "building", ahead: 3, feed: [{ kind: "step", step: "checking", at }] }))).toBe(BUILD_TEXTS.now.checking);
+  });
+
   it("lists files, pages read (\"Read <host>\") and commits with their link, oldest first", () => {
     const lines = feedLines(
       build({

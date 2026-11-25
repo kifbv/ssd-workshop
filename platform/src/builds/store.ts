@@ -29,7 +29,7 @@ export interface BuildsTableSender {
 }
 
 /** What a retry removes from the build, so the launcher and the builder take it as new. */
-export const REQUEUE_REMOVED = ["failureReasons", "finishedAt", "pushedCommit", "deployedCommit", "taskArn", "launchedAt", "attemptId", "feed"] as const;
+export const REQUEUE_REMOVED = ["failureReasons", "finishedAt", "pushedCommit", "deployedCommit", "taskArn", "launchedAt", "attemptId", "feed", "queueKey"] as const;
 
 export class DynamoBuildsStore implements BuildsStore {
   constructor(

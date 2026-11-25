@@ -210,3 +210,15 @@ paths:
   stops on `budgetOf(...).reached`, and a job that makes several calls checks `overBudget(budget, costSoFar)` before
   each later one; at the limit it stores `BUDGET_REPLY` (reply kind `budget`, message `failed`) without calling the model.
   Never add a budget check to the launcher, builder or deployer: a queued or running build always finishes (tested).
+- A cap on running work (ticket 3.4, build slots): take the slot in the same transaction that claims the record (a
+  counter `ADD` under `attribute_exists(running) AND running >= 0 AND running < :cap`, so a missing or broken counter
+  is full, never empty, plus a holder item per record), and free it in one transaction keyed by the holder's existence
+  and the record no longer being in a running state, written after its own terminal write by the trusted paths that end
+  the record (`releaseSlotQuietly`, `platform/api/build/slots.ts`); a role that runs next to untrusted code (the builder
+  task, beside the AI agent) gets no right on the counter, and the scheduled check frees its records' slots. The check
+  deletes malformed holder items, frees holders of records no longer running, and repairs the counter from the holders
+  under a `version` condition, forced when the counter is missing or negative or after `SLOT_REPAIR_FORCE_AFTER`
+  refused repairs in a row (counted on the counter, in an attribute only the check writes), so no writer can block it. A Lambda SQS worker that must wait (no slot) sets the message's
+  visibility and returns it in `batchItemFailures` (`reportBatchItemFailures` on the source), never throws, and its
+  queue's `maxReceiveCount` and retention must cover the wait. A new DynamoDB item kind in a transaction needs every
+  writer's stub answers and IAM statements updated (`ConditionCheckItem` is its own action).

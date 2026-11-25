@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { SESSION_COOKIE } from "../session/session.js";
-import { MODEL_ID } from "../settings.js";
+import { MODEL_ID, QUEUE_SEEN_MS } from "../settings.js";
 import { APPROVE_ROUTE, BUILD_ROUTE, HISTORY_ROUTE, handleConversationRequest, SPEC_ROUTE, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
 import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, readinessReply } from "./fakes.js";
 import { usageOf } from "./model.js";
@@ -387,6 +387,69 @@ describe("criterion 5: WHEN a participant asks for another participant's build T
     expect(s.logs.map((l) => l.route)).toContain("build");
     // Logs carry no ids or text.
     expect(JSON.stringify([...s.logs, ...s.workerLogs])).not.toMatch(/me-1|other-2|Ada|Bob|login|Run log/);
+  });
+});
+
+describe("ticket 3.4: GET /api/build tells a queued build how many builds are ahead of it", () => {
+  it("WHEN the caller's build is queued behind others THEN the answer carries `ahead` (entries before its place seen within QUEUE_SEEN_MS), and only while queued", async () => {
+    const s = setup();
+    await s.call(approve(1));
+    s.model.push(readinessReply("ready"));
+    await s.drain();
+    const buildId = must([...s.table.builds.keys()][0]);
+    // Not placed yet by the launcher: no count.
+    expect(json(await s.call(buildOf()))).not.toHaveProperty("ahead");
+    const now = s.deps.now().getTime();
+    const iso = (ms: number) => new Date(now + ms).toISOString();
+    const place = `${iso(-10_000)}#${buildId}`;
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), queueKey: place });
+    s.table.queueEntries.set(place, iso(-5_000));
+    // Three placed earlier and seen lately, one placed earlier but not seen for over QUEUE_SEEN_MS, one placed later.
+    s.table.queueEntries.set(`${iso(-60_000)}#a`, iso(-20_000));
+    s.table.queueEntries.set(`${iso(-50_000)}#b`, iso(-1_000));
+    s.table.queueEntries.set(`${iso(-40_000)}#c`, iso(-QUEUE_SEEN_MS + 1000));
+    s.table.queueEntries.set(`${iso(-30_000)}#gone`, iso(-QUEUE_SEEN_MS - 1000));
+    s.table.queueEntries.set(`${iso(-1_000)}#later`, iso(-1_000));
+    const answer = json(await s.call(buildOf()));
+    expect(answer).toMatchObject({ buildId, status: "queued", ahead: 3 });
+    // The answer names no other build.
+    expect(JSON.stringify(answer)).not.toMatch(/#a|gone|later/);
+    // None ahead: 0 (the page says "next in the queue").
+    s.table.queueEntries.clear();
+    expect(json(await s.call(buildOf()))).toMatchObject({ ahead: 0 });
+    // Once building, no count.
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), status: "building" });
+    expect(json(await s.call(buildOf()))).not.toHaveProperty("ahead");
+    // A failed count still answers the build, without `ahead`, and logs the error's name only.
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), status: "queued" });
+    s.table.conversationFailOn = "countQueuedAhead";
+    const failed = await s.call(buildOf());
+    expect(failed.statusCode).toBe(200);
+    expect(json(failed)).not.toHaveProperty("ahead");
+    expect(s.logs.at(-1)).toMatchObject({ route: "build", outcome: "ok" });
+    expect(s.logs.at(-1)?.error).toBeTruthy();
+  });
+});
+
+describe("ticket 3.4 try 2: another participant's queued build", () => {
+  it("WHEN a participant asks for another participant's queued build THEN the answer is 404 and the builds ahead are never counted", async () => {
+    const s = setup();
+    await s.call(approve(1));
+    s.model.push(readinessReply("ready"));
+    await s.drain();
+    const buildId = must([...s.table.builds.keys()][0]);
+    const place = `${s.deps.now().toISOString()}#${buildId}`;
+    s.table.builds.set(buildId, { ...must(s.table.builds.get(buildId)), queueKey: place });
+    s.table.queueEntries.set("2026-01-01T00:00:00.000Z#a", s.deps.now().toISOString());
+    // Even a conversation that names Ada's queued build.
+    s.table.conversations.set("other-2", { ...must(s.table.conversations.get("other-2")), buildId });
+    const theirs = await s.call(buildOf(THEIRS));
+    expect(theirs.statusCode).toBe(404);
+    expect(json(theirs)).toEqual({ message: "Not found." });
+    expect(s.table.countQueuedAheadCalls).toEqual([]);
+    // Ada's own call counts (once, from her build's place).
+    expect(json(await s.call(buildOf()))).toMatchObject({ buildId, status: "queued", ahead: 1 });
+    expect(s.table.countQueuedAheadCalls).toEqual([place]);
   });
 });
 

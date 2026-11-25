@@ -35,6 +35,7 @@ import type { BuildStatus, ConversationState, MessageStatus, TokenUsage } from "
 import type { BudgetFacts } from "../workshop/budget.js";
 import { limitsFromItem } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
+import { countQueuedAhead } from "../build/slots.js";
 import type { Exchange } from "./answer.js";
 import { addUsage } from "./model.js";
 import {
@@ -635,7 +636,7 @@ export class DynamoConversationStore implements ConversationStore {
         TableName: this.tableName,
         Key: keyOf(buildKey(buildId)),
         ConsistentRead: true,
-        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed",
+        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed, #queueKey",
         ExpressionAttributeNames: {
           "#type": "type",
           "#buildId": "buildId",
@@ -644,6 +645,7 @@ export class DynamoConversationStore implements ConversationStore {
           "#failureReasons": "failureReasons",
           "#nickname": "nickname",
           "#feed": "feed",
+          "#queueKey": "queueKey",
         },
       }),
     );
@@ -653,6 +655,7 @@ export class DynamoConversationStore implements ConversationStore {
     if (item?.["type"]?.S !== "build" || item["buildId"]?.S !== buildId || participantId === undefined || !isBuildStatus(status)) return undefined;
     const reasons = item["failureReasons"]?.L?.flatMap((r) => (r.S === undefined ? [] : [r.S]));
     const nickname = item["nickname"]?.S;
+    const queueKey = item["queueKey"]?.S;
     return {
       buildId,
       participantId,
@@ -660,7 +663,12 @@ export class DynamoConversationStore implements ConversationStore {
       ...(nickname === undefined ? {} : { nickname }),
       feed: readFeed(item["feed"]?.L),
       ...(reasons === undefined ? {} : { failureReasons: reasons }),
+      ...(queueKey === undefined ? {} : { queueKey }),
     };
+  }
+
+  countQueuedAhead(queueKey: string, sinceIso: string): Promise<number> {
+    return countQueuedAhead(this.client, this.tableName, queueKey, sinceIso);
   }
 
   async finish(participantId: string, messageId: string, outcome: Finish, from: "pending" | "flagged", nowIso: string): Promise<boolean> {

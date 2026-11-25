@@ -75,6 +75,9 @@ export function buildPrompt(workspace: string): string {
 /** At most this many agent turns (a small app takes 30 to 50). */
 export const MAX_AGENT_TURNS = 120;
 
+/** Ticket 3.4: how many times Claude Code asks again after a 429 the Bedrock proxy passed on (Claude Code's default). */
+export const AGENT_MAX_RETRIES = 10;
+
 /**
  * Environment variables passed through to the agent's process when set: only `PATH`. Its model calls go only to the
  * local Bedrock proxy (plain HTTP on 127.0.0.1), so it needs no AWS credential; its web fetches go straight out from the
@@ -87,7 +90,7 @@ export const PASSED_ENVIRONMENT = ["PATH"] as const;
  * `CLAUDE_CODE_SKIP_BEDROCK_AUTH`), every model alias set to the build model (the proxy forwards no other; WebFetch's
  * summary uses the small, fast one), no non-essential traffic (telemetry, error reports, updates), every tool declared
  * in full (`ENABLE_TOOL_SEARCH=false`: no tool is deferred behind a ToolSearch tool the agent does not have), a fresh
- * home and configuration folder, and `PATH`. Nothing else.
+ * home and configuration folder, Claude Code's own 429 retries pinned (ticket 3.4), and `PATH`. Nothing else.
  */
 export function agentEnvironment(source: Readonly<Record<string, string | undefined>>, modelId: string, home: string, bedrockUrl: string): Record<string, string> {
   const env: Record<string, string> = {};
@@ -115,6 +118,9 @@ export function agentEnvironment(source: Readonly<Record<string, string | undefi
     DISABLE_AUTOUPDATER: "1",
     DISABLE_TELEMETRY: "1",
     DISABLE_ERROR_REPORTING: "1",
+    // Ticket 3.4: Claude Code's own retries of a 429 (its default, pinned): with the Bedrock proxy holding each throttled
+    // request up to THROTTLE_RETRY_MS, 1 + 10 requests outlast the build's 12-minute limit.
+    CLAUDE_CODE_MAX_RETRIES: String(AGENT_MAX_RETRIES),
   };
 }
 

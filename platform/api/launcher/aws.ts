@@ -1,7 +1,8 @@
 /**
- * The launcher's outside world on AWS (ticket 2.9): the table (DynamoDB), the builder's tasks (ECS) and the two
- * dead-letter queues (SQS). Every table request names only the attribute lists its IAM statements allow
- * (infra/lib/config.ts LAUNCHER_READ_ATTRIBUTES, LAUNCHER_BUILD_UPDATE_ATTRIBUTES, LAUNCHER_LAUNCH_ATTRIBUTES; checked
+ * The launcher's outside world on AWS (ticket 2.9): the table (DynamoDB), the builder's tasks (ECS), the two
+ * dead-letter queues (SQS) and (ticket 3.4) the launch queue's message visibility. Every table request names only the
+ * attribute lists its IAM statements allow (infra/lib/config.ts LAUNCHER_READ_ATTRIBUTES, LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
+ * LAUNCHER_LAUNCH_ATTRIBUTES, LAUNCHER_SLOT_ATTRIBUTES, LAUNCHER_QUEUE_ATTRIBUTES, SETTINGS_READ_ATTRIBUTES; checked
  * both ways by ./aws.test.ts) and returns no attributes (ReturnValues NONE).
  */
 import {
@@ -27,15 +28,33 @@ import {
   type StopTaskCommandOutput,
 } from "@aws-sdk/client-ecs";
 import {
+  ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
   ReceiveMessageCommand,
+  type ChangeMessageVisibilityCommandOutput,
   type DeleteMessageCommandOutput,
   type ReceiveMessageCommandOutput,
 } from "@aws-sdk/client-sqs";
-import { buildKey, conversationKey, launchKey, LAUNCHES_PK, participantKey, specKey, type ItemKey } from "../keys.js";
+import { cancellationCodes, countQueuedAhead, releaseSlot, releaseSlotQuietly, slotCountChange } from "../build/slots.js";
+import {
+  BUILD_ID_PATTERN,
+  BUILD_QUEUE_PK,
+  BUILD_SLOTS_PK,
+  buildKey,
+  conversationKey,
+  launchKey,
+  LAUNCHES_PK,
+  participantKey,
+  queueEntryKey,
+  slotCountKey,
+  slotHolderKey,
+  specKey,
+  type ItemKey,
+} from "../keys.js";
+import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
-import type { BuildTasks, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, TaskStart, TaskState } from "./launcher.js";
+import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
 
 const str = (value: string): AttributeValue => ({ S: value });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
@@ -44,12 +63,6 @@ const STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "li
 const conditionFailed = (error: unknown): boolean =>
   error instanceof ConditionalCheckFailedException || (error as { name?: unknown } | null)?.name === "ConditionalCheckFailedException";
 
-/** A transaction cancelled only because a condition failed (any other cancel reason is an error). */
-function transactionConditionFailed(error: unknown): boolean {
-  if ((error as { name?: unknown } | null)?.name !== "TransactionCanceledException") return false;
-  const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? [];
-  return reasons.some((reason) => reason.Code === "ConditionalCheckFailed") && reasons.every((reason) => reason.Code === "ConditionalCheckFailed" || reason.Code === "None");
-}
 
 /** The DynamoDBClient methods the launcher uses. */
 export interface LauncherTableSender {
@@ -116,12 +129,144 @@ export class DynamoLaunchRecords implements LaunchRecords {
   }
 
   async readBuild(buildId: string): Promise<LaunchBuild | undefined> {
-    const item = await this.get(buildKey(buildId), ["nickname", "participantId", "status"]);
+    const item = await this.get(buildKey(buildId), ["nickname", "participantId", "status", "queueKey"]);
     const nickname = item?.nickname?.S;
     const participantId = item?.participantId?.S;
     const status = item?.status?.S;
+    const queueKey = item?.queueKey?.S;
     if (nickname === undefined || participantId === undefined || !(STATUSES as readonly string[]).includes(status ?? "")) return undefined;
-    return { nickname, participantId, status: status as BuildStatus };
+    return { nickname, participantId, status: status as BuildStatus, ...(queueKey === undefined ? {} : { queueKey }) };
+  }
+
+  async readBuildsAtOnce(): Promise<number> {
+    return (await readSettings(this.client, this.table)).buildsAtOnce;
+  }
+
+  enqueue(buildId: string, queueKey: string): Promise<boolean> {
+    return this.update(
+      buildKey(buildId),
+      "SET #queueKey = :queueKey",
+      "#status = :queued AND attribute_not_exists(#queueKey)",
+      { "#queueKey": "queueKey", "#status": "status" },
+      { ":queueKey": str(queueKey), ":queued": str("queued") },
+    );
+  }
+
+  async touchQueueEntry(queueKey: string, buildId: string, nowIso: string): Promise<void> {
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.table,
+        Key: keyOf(queueEntryKey(queueKey)),
+        UpdateExpression: "SET #type = :type, #buildId = :buildId, #lastSeenAt = :now",
+        ExpressionAttributeNames: { "#type": "type", "#buildId": "buildId", "#lastSeenAt": "lastSeenAt" },
+        ExpressionAttributeValues: { ":type": str("queued-build"), ":buildId": str(buildId), ":now": str(nowIso) },
+        ReturnValues: "NONE",
+      }),
+    );
+  }
+
+  countAhead(queueKey: string, sinceIso: string): Promise<number> {
+    return countQueuedAhead(this.client, this.table, queueKey, sinceIso);
+  }
+
+  async readSlots(): Promise<SlotCount> {
+    const item = await this.get(slotCountKey(), ["running", "version", "repairMisses"]);
+    const whole = (value: AttributeValue | undefined): number | undefined => {
+      const n = value?.N === undefined ? Number.NaN : Number(value.N);
+      return Number.isSafeInteger(n) ? n : undefined;
+    };
+    return { running: whole(item?.running), version: whole(item?.version) ?? 0, misses: Math.max(0, whole(item?.repairMisses) ?? 0) };
+  }
+
+  async listSlotHolders(): Promise<SlotItem[]> {
+    return (await this.queryAll(BUILD_SLOTS_PK, ["type", "buildId"])).flatMap((item): SlotItem[] => {
+      const sk = item.sk?.S;
+      if (sk === undefined || sk === slotCountKey().sk) return [];
+      const buildId = item.buildId?.S;
+      const wellFormed = item.type?.S === "build-slot" && buildId !== undefined && BUILD_ID_PATTERN.test(buildId) && slotHolderKey(buildId).sk === sk;
+      return [wellFormed ? { sk, buildId } : { sk }];
+    });
+  }
+
+  async removeSlotItem(sk: string): Promise<void> {
+    if (sk === slotCountKey().sk) throw Object.assign(new Error("not a slot item"), { name: "NotASlotItem" });
+    await this.client.send(new DeleteItemCommand({ TableName: this.table, Key: keyOf({ pk: BUILD_SLOTS_PK, sk }), ReturnValues: "NONE" }));
+  }
+
+  releaseSlot(buildId: string): Promise<boolean> {
+    return releaseSlot(this.client, this.table, buildId);
+  }
+
+  async repairSlots(seen: SlotCount, running: number, force: boolean): Promise<boolean> {
+    const expression = "SET #running = :running, #repairMisses = :zero ADD #version :one";
+    const names = { "#running": "running", "#repairMisses": "repairMisses", "#version": "version" };
+    const values = { ":running": { N: String(running) }, ":zero": { N: "0" }, ":one": { N: "1" } };
+    if (force) {
+      await this.client.send(
+        new UpdateItemCommand({ TableName: this.table, Key: keyOf(slotCountKey()), UpdateExpression: expression, ExpressionAttributeNames: names, ExpressionAttributeValues: values, ReturnValues: "NONE" }),
+      );
+      return true;
+    }
+    return this.update(
+      slotCountKey(),
+      expression,
+      seen.version === 0 ? "attribute_not_exists(#version)" : "#version = :seen",
+      names,
+      { ...values, ...(seen.version === 0 ? {} : { ":seen": { N: String(seen.version) } }) },
+    );
+  }
+
+  async noteRepairRefused(): Promise<void> {
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.table,
+        Key: keyOf(slotCountKey()),
+        UpdateExpression: "ADD #repairMisses :one",
+        ExpressionAttributeNames: { "#repairMisses": "repairMisses" },
+        ExpressionAttributeValues: { ":one": { N: "1" } },
+        ReturnValues: "NONE",
+      }),
+    );
+  }
+
+  async listQueueEntries(): Promise<{ queueKey: string; buildId: string }[]> {
+    return (await this.queryAll(BUILD_QUEUE_PK, ["buildId"])).flatMap((item) =>
+      item.sk?.S !== undefined && item.buildId?.S !== undefined ? [{ queueKey: item.sk.S, buildId: item.buildId.S }] : [],
+    );
+  }
+
+  async removeQueueEntry(queueKey: string): Promise<void> {
+    await this.client.send(new DeleteItemCommand({ TableName: this.table, Key: keyOf(queueEntryKey(queueKey)), ReturnValues: "NONE" }));
+  }
+
+  /** Every item of a partition (consistent), with the key and `names` (a projection: `Select` SPECIFIC_ATTRIBUTES, which IAM requires). */
+  private async queryAll(pk: string, names: readonly string[]): Promise<Record<string, AttributeValue>[]> {
+    const items: Record<string, AttributeValue>[] = [];
+    let start: Record<string, AttributeValue> | undefined;
+    do {
+      const answer = await this.client.send(
+        new QueryCommand({
+          TableName: this.table,
+          KeyConditionExpression: "pk = :pk",
+          ProjectionExpression: ["pk", "sk", ...names].map((name) => `#${name}`).join(", "),
+          ExpressionAttributeNames: Object.fromEntries(["pk", "sk", ...names].map((name) => [`#${name}`, name])),
+          ExpressionAttributeValues: { ":pk": str(pk) },
+          Select: "SPECIFIC_ATTRIBUTES",
+          ConsistentRead: true,
+          ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+        }),
+      );
+      items.push(...(answer.Items ?? []));
+      start = answer.LastEvaluatedKey;
+    } while (start !== undefined);
+    return items;
+  }
+
+  /** A failure write, then (ticket 3.4) the build's slot freed: a failed release is left to the check. */
+  private async failAndRelease(buildId: string, failed: Promise<boolean>): Promise<boolean> {
+    if (!(await failed)) return false;
+    await releaseSlotQuietly(this.client, this.table, buildId);
+    return true;
   }
 
   async readProfileNickname(participantId: string): Promise<string | undefined> {
@@ -144,7 +289,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
     return item.text?.S;
   }
 
-  async claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string): Promise<boolean> {
+  async claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string, slot: { cap: number; queueKey: string }): Promise<ClaimResult> {
     const launch = launchKey(buildId);
     try {
       await this.client.send(
@@ -154,7 +299,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
               Update: {
                 TableName: this.table,
                 Key: keyOf(buildKey(buildId)),
-                UpdateExpression: "SET #status = :building, #attemptId = :attemptId, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn",
+                UpdateExpression: "SET #status = :building, #attemptId = :attemptId, #launchedAt = :now, #updatedAt = :now REMOVE #taskArn, #queueKey",
                 ConditionExpression: "#status = :queued AND #nickname = :nickname AND #participantId = :participantId",
                 ExpressionAttributeNames: {
                   "#status": "status",
@@ -162,6 +307,7 @@ export class DynamoLaunchRecords implements LaunchRecords {
                   "#launchedAt": "launchedAt",
                   "#updatedAt": "updatedAt",
                   "#taskArn": "taskArn",
+                  "#queueKey": "queueKey",
                   "#nickname": "nickname",
                   "#participantId": "participantId",
                 },
@@ -181,12 +327,37 @@ export class DynamoLaunchRecords implements LaunchRecords {
                 Item: { ...keyOf(launch), type: str("launch"), buildId: str(buildId), claimedAt: str(nowIso) },
               },
             },
+            // Ticket 3.4: the slot. The counter goes up only while it exists and is between 0 and the cap: a missing or
+            // negative counter is full until the minute check repairs it (try 2).
+            {
+              Update: {
+                TableName: this.table,
+                Key: keyOf(slotCountKey()),
+                ...slotCountChange(1),
+                ConditionExpression: "attribute_exists(#running) AND #running >= :zero AND #running < :cap",
+                ExpressionAttributeValues: { ...slotCountChange(1).ExpressionAttributeValues, ":zero": { N: "0" }, ":cap": { N: String(slot.cap) } },
+              },
+            },
+            {
+              Put: {
+                TableName: this.table,
+                Item: { ...keyOf(slotHolderKey(buildId)), type: str("build-slot"), buildId: str(buildId), heldSince: str(nowIso) },
+                ConditionExpression: "attribute_not_exists(pk)",
+              },
+            },
+            { Delete: { TableName: this.table, Key: keyOf(queueEntryKey(slot.queueKey)) } },
           ],
         }),
       );
-      return true;
+      return "claimed";
     } catch (error) {
-      if (transactionConditionFailed(error)) return false;
+      const codes = cancellationCodes(error);
+      if (codes === undefined) throw error;
+      // The build is no longer queued (or changed): a duplicate. Otherwise the counter was at the cap (or missing or
+      // negative), another write to it won the race (TransactionConflict), or an item at this build's holder key (an
+      // earlier holder not freed yet, or a malformed item) is still there: wait for a slot; the check clears the last two.
+      if (codes[0] === "ConditionalCheckFailed") return "taken";
+      if (codes.every((code) => code === undefined || code === "None" || code === "ConditionalCheckFailed" || code === "TransactionConflict")) return "no-slot";
       throw error;
     }
   }
@@ -208,59 +379,59 @@ export class DynamoLaunchRecords implements LaunchRecords {
   }
 
   async failUnstarted(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    const failed = await this.update(
+    const failed = await this.failAndRelease(buildId, this.update(
       buildKey(buildId),
       FAILED_SET,
       "#status = :building AND attribute_not_exists(#taskArn)",
       { ...failedNames, "#taskArn": "taskArn" },
       { ...failedValues(reasons, nowIso), ":building": str("building") },
-    );
+    ));
     await this.removeLaunch(buildId, undefined);
     return failed;
   }
 
   failUnrecorded(buildId: string, claimedAt: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(
+    return this.failAndRelease(buildId, this.update(
       buildKey(buildId),
       FAILED_SET,
       "#status = :building AND attribute_not_exists(#taskArn) AND #launchedAt = :claimedAt",
       { ...failedNames, "#taskArn": "taskArn", "#launchedAt": "launchedAt" },
       { ...failedValues(reasons, nowIso), ":building": str("building"), ":claimedAt": str(claimedAt) },
-    );
+    ));
   }
 
   failStopped(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(
+    return this.failAndRelease(buildId, this.update(
       buildKey(buildId),
       FAILED_SET,
       "#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)",
       { ...failedNames, "#taskArn": "taskArn", "#pushedCommit": "pushedCommit" },
       { ...failedValues(reasons, nowIso), ":building": str("building"), ":taskArn": str(taskArn) },
-    );
+    ));
   }
 
   failHandedOver(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(
+    return this.failAndRelease(buildId, this.update(
       buildKey(buildId),
       FAILED_SET,
       "#status = :building AND #taskArn = :taskArn AND attribute_exists(#pushedCommit)",
       { ...failedNames, "#taskArn": "taskArn", "#pushedCommit": "pushedCommit" },
       { ...failedValues(reasons, nowIso), ":building": str("building"), ":taskArn": str(taskArn) },
-    );
+    ));
   }
 
   failQueued(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(buildKey(buildId), FAILED_SET, "#status = :queued", failedNames, { ...failedValues(reasons, nowIso), ":queued": str("queued") });
+    return this.failAndRelease(buildId, this.update(buildKey(buildId), FAILED_SET, "#status = :queued", failedNames, { ...failedValues(reasons, nowIso), ":queued": str("queued") }));
   }
 
   failDeploy(buildId: string, nickname: string, commit: string, reasons: readonly string[], nowIso: string): Promise<boolean> {
-    return this.update(
+    return this.failAndRelease(buildId, this.update(
       buildKey(buildId),
       FAILED_SET,
       "#status IN (:building, :deploying) AND #nickname = :nickname AND #pushedCommit = :commit",
       { ...failedNames, "#nickname": "nickname", "#pushedCommit": "pushedCommit" },
       { ...failedValues(reasons, nowIso), ":building": str("building"), ":deploying": str("deploying"), ":nickname": str(nickname), ":commit": str(commit) },
-    );
+    ));
   }
 
   async listLaunches(): Promise<LaunchEntry[]> {
@@ -386,6 +557,23 @@ export class EcsBuildTasks implements BuildTasks {
 
   async stop(taskArn: string): Promise<void> {
     await this.client.send(new StopTaskCommand({ cluster: BUILDS_CLUSTER_NAME, task: taskArn, reason: "Stopped by the build launcher" }));
+  }
+}
+
+/** The SQSClient method the launch uses to make a waiting build's message come back (ticket 3.4). */
+export interface VisibilitySender {
+  send(command: ChangeMessageVisibilityCommand): Promise<ChangeMessageVisibilityCommandOutput>;
+}
+
+/** The launch queue: a waiting build's message becomes visible again after `seconds` (instead of the queue's 150). */
+export class SqsLaunchVisibility {
+  constructor(
+    private readonly client: VisibilitySender,
+    private readonly queueUrl: string,
+  ) {}
+
+  async comeBackAfter(receiptHandle: string, seconds: number): Promise<void> {
+    await this.client.send(new ChangeMessageVisibilityCommand({ QueueUrl: this.queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
   }
 }
 
