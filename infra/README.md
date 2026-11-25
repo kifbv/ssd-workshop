@@ -9,7 +9,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v1` and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v2` (v1 retained until Franck deletes it, ticket 2.14) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check, own record, nickname) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push), GitHub App secret `ssd-workshop-github` (ticket 2.6), FIFO launch queue `ssd-workshop-builds.fifo` and its dead-letter queue (ticket 2.7; the AI worker is its only sender, the launcher its consumer), from ticket 2.9 the builder task definition `ssd-workshop-builder` (image by digest, logs `/ecs/ssd-workshop-builder`), the launcher Lambda `ssd-workshop-builds-launcher`, the check queue and schedule `ssd-workshop-builds-check`; see "Build network (ticket 2.1)" and "Builds: builder task and launcher (ticket 2.9)" | `CliCredentialsStackSynthesizer`, assets bucket (from ticket 2.9) |
@@ -499,7 +499,7 @@ AWS_PROFILE=franck aws dynamodb get-item --region eu-central-1 --table-name ssd-
 #         {"event":"deployer","outcome":"live","files":N,"bytes":N,"removed":0,"durationMs":N}
 ```
 
-Criterion 3, the headers (the apps' policy `ssd-workshop-apps-v1`):
+Criterion 3, the headers (the apps' policy `ssd-workshop-apps-v1`; since ticket 2.14 `-v2`, see below):
 
 ```sh
 curl -sS -I https://workshop.rankly.games/apps/<nickname>/ \
@@ -564,6 +564,29 @@ message with a new build id) leaves the live files as they were and gives the bu
 **Safari on an iPhone** (decision "(2.3) For 2.5": the sandbox with `'self'` was proved only in Chromium): open
 `https://workshop.rankly.games/apps/<nickname>/` on an iPhone, check that the page's styles apply, press the
 template's counter, reload: the count is kept (the data API saved it).
+
+## Check after the outside-services deploy (ticket 2.14)
+
+```mermaid
+flowchart LR
+  phone[Franck phone] --> app[App at apps nickname]
+  app -->|fetch, https| svc[Free keyless service]
+  app -->|img, https| img[Its images]
+  app -. scripts, styles, fonts: own files only .-> app
+```
+
+The apps' policy is now `ssd-workshop-apps-v2`; CloudFormation creates it and leaves `ssd-workshop-apps-v1` (retained,
+no longer used by the distribution) for Franck to delete in the CloudFront console once v2 answers.
+
+```sh
+curl -sS -I https://workshop.rankly.games/apps/<nickname>/ | grep -i '^content-security-policy'
+# expect: content-security-policy: sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self';
+#           connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'
+```
+
+Then (Franck, on a phone): build an app whose spec reads an outside service (for example the readiness eval's
+"movie watchlist with posters from Wikipedia" example) and open it at `/apps/<nickname>/`. Expect: the posters and
+summaries show; with the phone offline (or the service down) the page shows its friendly message instead.
 
 ## Build network (ticket 2.1)
 

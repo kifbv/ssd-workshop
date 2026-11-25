@@ -105,7 +105,10 @@ describe("the spec format (criterion 1)", () => {
   });
 
   it("asks for the format, the diagram and question-versus-change in the prompt, with the current spec", () => {
-    expect(SPEC_PROMPT_VERSION).toBe("spec-v1");
+    expect(SPEC_PROMPT_VERSION).toBe("spec-v2");
+    // Ticket 2.14: an outside source is named in plain words, never with an address or a key.
+    expect(SPEC_SYSTEM_PROMPT).toContain('name the information and its source in plain words where the app uses it (for example "movie posters and summaries from Wikipedia")');
+    expect(SPEC_SYSTEM_PROMPT).toContain("Never write web addresses, keys or technical words about it.");
     for (const part of ["## What it does", "## Screens", "## Data it keeps", "flowchart TD", "do not write a spec: the spec stays as it is", '"Approve spec"']) {
       expect(SPEC_SYSTEM_PROMPT).toContain(part);
     }
@@ -125,7 +128,7 @@ describe("the spec format (criterion 1)", () => {
   it("sends the spec prompt with the current spec and a larger token limit", async () => {
     const model = new FakeModel([{ text: "Screens are views.", inputTokens: 5, outputTokens: 5 }]);
     const answer = await answerMessage(model, "spec", [{ question: "a run log", answer: "Who for?" }], "What is a screen?", undefined, SPEC_V1);
-    expect(answer).toMatchObject({ text: "Screens are views.", promptVersion: "spec-v1", offersSpec: false, historyCount: 2 });
+    expect(answer).toMatchObject({ text: "Screens are views.", promptVersion: "spec-v2", offersSpec: false, historyCount: 2 });
     expect(answer.spec).toBeUndefined();
     expect(model.requests[0]).toMatchObject({ maxTokens: SPEC_MAX_TOKENS, system: specSystemPrompt(SPEC_V1) });
   });
@@ -225,7 +228,7 @@ describe("criterion 1 and 2: the spec is written, explained and changed", () => 
     expect(request.messages.map((m) => m.text)).toEqual(["a run log for me", "Who is it for?", WRITE_SPEC_REQUEST]);
     expect(s.model.requests).toHaveLength(5);
     expect(s.table.specs.get("me-1")).toEqual([{ version: 1, text: SPEC_V1, messageId: id, createdAt: expect.any(String) as unknown }]);
-    expect(s.table.replies.get("me-1")?.get(id)).toMatchObject({ text: "Here is your spec.", specVersion: 1, promptVersion: "spec-v1" });
+    expect(s.table.replies.get("me-1")?.get(id)).toMatchObject({ text: "Here is your spec.", specVersion: 1, promptVersion: "spec-v2" });
     // The spec is never kept in the reply's text, so it never goes back to the model as history.
     expect(s.table.replies.get("me-1")?.get(id)?.text).not.toContain("flowchart");
 

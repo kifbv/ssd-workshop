@@ -71,7 +71,7 @@ describe("guardrails.json (criterion 7's examples)", () => {
     }
   });
 
-  it("lets an idea that only wants an outside service through, and still flags someone's API key (guardrail-v2)", () => {
+  it("lets an idea that only wants an outside service through, and still flags someone's API key (guardrail-v2, kept by guardrail-v3)", () => {
     const examples = parseGuardrailExamples(FILE);
     if ("error" in examples) throw new Error(examples.error);
     const outside = examples.filter((e) => e.category === "outside service");
@@ -139,8 +139,12 @@ describe("clarify.json (ticket 1.8 criteria 1 and 2)", () => {
       "nutrition calculator",
       "movies with posters from a free API",
     ]);
-    // The outside-service idea must get the limit explained (guardrail-v2 sends it on to the guide).
-    expect(examples.find((e) => e.name === "movies with posters from a free API")?.mentions).not.toHaveLength(0);
+    // Ticket 2.14: the outside-service idea must hear about a free service that needs no key, never that it is impossible,
+    // and get no technical question.
+    const movies = examples.find((e) => e.name === "movies with posters from a free API");
+    expect(movies?.mentions).toEqual(expect.arrayContaining(["Wikipedia", "free", "no key"]));
+    expect(movies?.mentions).not.toContain("outside");
+    expect(movies?.avoids).toEqual(expect.arrayContaining(["cannot reach", "can't reach", "API key", "endpoint"]));
     expect(examples.filter((e) => e.check === "change-of-mind")).toHaveLength(1);
     expect(examples.filter((e) => e.check === "offers-spec")).toHaveLength(1);
   });
@@ -164,6 +168,7 @@ const example = (over: Partial<ClarifyExample>): ClarifyExample => ({
   newKeywords: [],
   oldKeywords: [],
   mentions: [],
+  avoids: [],
   ...over,
 });
 const FOUR_QUESTIONS = "1. Who is it for?\n2. What do you record?\n3. Which totals?\n4. What can wait?";
@@ -193,6 +198,18 @@ describe("scoreClarify", () => {
     const told = `A watchlist. The app cannot reach outside services, so you type each film in yourself.\n${FOUR_QUESTIONS}`;
     expect(scoreClarify(limit, { text: told, offersSpec: false })).toEqual({ pass: true, detail: "4 numbered questions" });
     expect(scoreClarify(limit, { text: FOUR, offersSpec: false }).detail).toContain("never mentions (outside, other website)");
+  });
+
+  it("fails a reply that names any of its avoids, whatever the check (ticket 2.14)", () => {
+    const free = example({ mentions: ["Wikipedia", "free"], avoids: ["cannot reach", "API key"] });
+    const good = `A watchlist; the posters can come from Wikipedia, which is free and needs no key.\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(free, { text: good, offersSpec: false })).toEqual({ pass: true, detail: "4 numbered questions" });
+    const old = `A watchlist. The app cannot reach outside services, so you type each film in yourself (free).\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(free, { text: old, offersSpec: false }).detail).toBe("says what it should not (cannot reach)");
+    const technical = `A watchlist with posters from Wikipedia.\n${FOUR_QUESTIONS}\n5. Do you have an API key?`;
+    expect(scoreClarify(free, { text: technical, offersSpec: false }).detail).toBe("says what it should not (API key)");
+    const ready = example({ check: "offers-spec", avoids: ["API key"] });
+    expect(scoreClarify(ready, { text: 'Enough. Do you have an API key? Press "Write my spec".', offersSpec: true }).pass).toBe(false);
   });
 
   it("passes a change of mind only when the questions are about the new idea", () => {
@@ -225,7 +242,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       new Error("throttled"),
       { text: "Plant reminders!\n1. How many plants?\n2. Indoors?\n3. Water how often?", inputTokens: 100, outputTokens: 50 },
       { text: 'All set: press "Write my spec".\n[READY_FOR_SPEC]', inputTokens: 100, outputTokens: 50 },
-      { text: `Movies. Posters live on other websites, which apps cannot reach.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
+      { text: `Movies. The posters can come from Wikipedia, which is free and needs no key.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
     ]);
     const seen: string[] = [];
     const results = await runClarifyEval(
@@ -322,12 +339,20 @@ describe("readiness (ticket 2.7)", () => {
     expect(parseEvalArgs(["readiness"])).toEqual({ suite: "readiness" });
   });
 
-  it("readiness.json (criterion 1's examples): the three example specs expected ready; login, payment, outside service and open question expected not ready", () => {
+  it("readiness.json (criterion 1's examples): the four example specs and free services expected ready; login, payment, outside service and open question expected not ready", () => {
     const examples = parseReadinessExamples(READINESS_FILE);
     if ("error" in examples) throw new Error(examples.error);
     const ready = examples.filter((e) => e.expected === "ready");
-    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example"]);
-    for (const idea of ["fitness tracker", "movie tracker", "nutrition calculator"]) expect(ready.some((e) => e.name.includes(idea)), idea).toBe(true);
+    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example", "example", "free service", "free service"]);
+    for (const idea of ["fitness tracker", "movie tracker", "nutrition calculator", "movie watchlist with posters from Wikipedia"]) {
+      expect(ready.some((e) => e.name.includes(idea)), idea).toBe(true);
+    }
+    // Ticket 2.14: free keyless services are ready; a key, a sign-in with another service, emails, notifications and AI are not.
+    expect(ready.filter((e) => e.category === "free service").map((e) => e.name)).toEqual(["office weather board from Open-Meteo", "book club list with covers from Open Library"]);
+    const outside = examples.filter((e) => e.category === "outside service").map((e) => e.name);
+    for (const name of ["stock board with the company's API key", "playlists after signing in to a music service", "plant reminders sent by email", "recipe ideas from an AI chat service", "lunch orders with phone notifications"]) {
+      expect(outside, name).toContain(name);
+    }
     const failing = new Set(examples.filter((e) => e.expected === "not-ready").map((e) => e.category));
     for (const category of ["login", "payment", "outside service", "open question"]) expect(failing, category).toContain(category);
     // Every failing example's keywords include its category's own word, so a passing reason names it.
@@ -389,13 +414,14 @@ describe("the build suite's title check", () => {
   if ("error" in examples) throw new Error(examples.error);
   const specs = examples.filter((e) => e.category === "example").map((e) => e.spec);
 
-  it("reads the title and the screens of the three workshop example specs", () => {
-    expect(specs).toHaveLength(3);
-    expect(specs.map(specTitle)).toEqual(["Run Log", "Movie Watchlist", "Calorie Counter"]);
+  it("reads the title and the screens of the four workshop example specs (ticket 2.14 adds the Wikipedia one)", () => {
+    expect(specs).toHaveLength(4);
+    expect(specs.map(specTitle)).toEqual(["Run Log", "Movie Watchlist", "Calorie Counter", "Film Posters Watchlist"]);
     expect(specs.map(screenNames)).toEqual([
       ["Home", "Add a run"],
       ["Watchlist", "Add a film", "Watched"],
       ["Today", "Add a food", "Daily goal"],
+      ["Find a film", "Watchlist", "Watched"],
     ]);
     expect(screenNames("# X\n\n## Screens\n- **Main**: a list\n* Other: more\n\n## Data it keeps\n- Ignored: x")).toEqual(["Main", "Other"]);
     expect(screenNames("# X\n")).toEqual([]);
@@ -420,12 +446,19 @@ describe("scoreBuild", () => {
     consoleErrors: [],
     overflow: 0,
     missing: [],
+    outsideHosts: [],
     durationMs: 185_000,
     usage: { inputTokens: 600_000, outputTokens: 20_000, costUsd: 0.75 },
   };
 
   it("passes a handed-over build with the steps in order, a commit, a passing check, no error, no overflow and every screen", () => {
     expect(scoreBuild(ok).pass).toBe(true);
+  });
+
+  it("names the outside services a passing build reached (ticket 2.14)", () => {
+    expect(scoreBuild(ok).detail).not.toContain("outside services");
+    const result = scoreBuild({ ...ok, outsideHosts: ["en.wikipedia.org", "upload.wikimedia.org"] });
+    expect(result).toEqual({ pass: true, detail: expect.stringMatching(/, outside services: en\.wikipedia\.org, upload\.wikimedia\.org$/) as unknown });
   });
 
   it("names each problem", () => {

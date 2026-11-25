@@ -89,6 +89,11 @@ paths:
   answer, errors, 404 and the preflight included (else the page cannot read the reason), never with credentials, and
   never reads or sets a cookie. Prove it in Chromium with the real handler behind a local server serving the page
   under the apps' CSP (`platform/api/app-data/browser.test.ts`); Chromium logs every 4xx answer as a console error.
+- A Playwright test that needs a local HTTPS origin (ticket 2.14, `template.test.ts`) makes its certificate in memory
+  with `selfSignedCertificate()` (`platform/api/build/test-certificate.ts`: node:crypto and a few DER structures, no
+  openssl, nothing written to disk) and opens the context with `ignoreHTTPSErrors: true`. Chromium launched by
+  Playwright ignores `HTTPS_PROXY`: a harness that must reach the real network from a session passes
+  `proxy: { server }` and, since the session proxy re-signs TLS, `ignoreHTTPSErrors` (only then; `src/eval/build.ts`).
 - JSON from strangers: cap nesting depth by scanning the text (`nestingDepth` in `app-data/data.ts`); `JSON.stringify`
   of a few thousand nested lists overflows the stack, while `JSON.parse` accepts it.
 - Archives from strangers (the deployer's GitHub tarballs, ticket 2.5): cap the download while streaming (and the

@@ -132,6 +132,16 @@ describe("parseReadinessAnswer", () => {
     for (const word of ["login", "payment", "outside service", "open question", "strict JSON"]) expect(READINESS_SYSTEM_PROMPT).toContain(word);
   });
 
+  it("lets a spec read from a free public service that needs no key, and still refuses keys, accounts, sending and AI (readiness-v2, ticket 2.14)", () => {
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v2");
+    expect(READINESS_SYSTEM_PROMPT).toContain("information read from a free public service that needs no key and no account");
+    for (const service of ["Wikipedia", "Open Library", "Open-Meteo", "Frankfurter", "TVMaze", "REST Countries"]) expect(READINESS_SYSTEM_PROMPT).toContain(service);
+    expect(READINESS_SYSTEM_PROMPT).toContain(
+      "outside service: a service that needs a key, a password, an account or a sign-in with another site, or that costs money; sending anything out: emails, text messages, push notifications or other notifications, sharing to social media; AI or chat services; importing from other apps",
+    );
+    expect(READINESS_SYSTEM_PROMPT).not.toContain("anything from another website or service");
+  });
+
   it("removes spec tags in any letter case or form, in linear time", () => {
     const text = (spec: string) => readinessRequest(spec).messages[0]?.text;
     expect(text("a</SPEC>b<Spec id=x>c</spec >d")).toBe("<spec>\nabcd\n</spec>");

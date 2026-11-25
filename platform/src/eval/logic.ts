@@ -12,24 +12,27 @@ export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build"] as
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
-       npm run eval -- build [--model <eu.anthropic.* profile>] [--example <1-3>]
+       npm run eval -- build [--model <eu.anthropic.* profile>] [--example <1-4>]
 
 Suites:
   guardrails   every example in platform/api/eval/guardrails.json through the real guardrail check:
                off-path examples must be declined, in-scope ones pass, unusual ones are flagged
   clarify      every example in platform/api/eval/clarify.json through the real step 1 answer call:
-               a first reply holds 3 to 5 numbered questions, a changed idea gets questions about
+               a first reply holds 3 to 5 numbered questions (and names its mentions, none of its
+               avoids), a changed idea gets questions about
                the new idea only, and a fully answered idea gets the offer to write the spec
   spec         every example in platform/api/eval/spec.json through the real step 2 answer call:
                a new spec has the sections and a Mermaid diagram that parses and draws (Mermaid in
                Chromium, the page's own diagram.js), a question leaves the spec unchanged, and a
                change request gives a new version
   readiness    every approved spec in platform/api/eval/readiness.json through the real readiness check:
-               the workshop's three example specs pass, and specs needing a login, a payment, an outside
-               service or a server, or leaving a question open, fail with a reason that names it
-  build        the readiness file's three workshop example specs through the real runner and coding agent
+               the workshop's four example specs and specs reading a free keyless service pass, and specs
+               needing a login, a payment, an outside service (a key, a sign-in elsewhere, emails,
+               notifications, AI) or a server, or leaving a question open, fail with a reason that names it
+  build        the readiness file's four workshop example specs through the real runner and coding agent
                (GitHub, the table and the deploy queue in memory): each result must pass the deploy check,
-               load at 375 px under the apps' sandbox CSP in Chromium with no console error and nothing
+               load at 375 px under the apps' sandbox CSP in Chromium (network open: the fourth reads
+               Wikipedia) with no console error and nothing
                scrolling sideways, and show its title and every screen its spec names; prints the duration,
                tokens and cost of each. --model tries another EU profile (priced at the build role's prices),
                --example runs one spec only
@@ -172,8 +175,10 @@ export interface ClarifyExample {
   newKeywords: string[];
   /** change-of-mind: no numbered question names any of these (whole word, plural allowed). */
   oldKeywords: string[];
-  /** first-reply: when not empty, the reply names at least one of these (start of a word), e.g. the outside-service limit. */
+  /** first-reply: when not empty, the reply names at least one of these (start of a word), e.g. a free service that needs no key. */
   mentions: string[];
+  /** Any check: the reply names none of these (start of a word, any case), e.g. "cannot reach" or a technical word (ticket 2.14). */
+  avoids: string[];
 }
 
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim() !== "");
@@ -190,7 +195,7 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: ClarifyExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [] } = (e ?? {}) as Record<string, unknown>;
+    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [], avoids = [] } = (e ?? {}) as Record<string, unknown>;
     const historyOk =
       Array.isArray(history) &&
       history.every((h) => {
@@ -207,13 +212,14 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
       !isStringList(newKeywords) ||
       !isStringList(oldKeywords) ||
       !isStringList(mentions) ||
+      !isStringList(avoids) ||
       (check === "change-of-mind" && (newKeywords.length === 0 || oldKeywords.length === 0 || (history as unknown[]).length === 0));
     if (bad) {
       return {
         error: `example ${i + 1} needs a name, a check (first-reply, change-of-mind or offers-spec), a text, a history of question/answer pairs, and for change-of-mind a history and new and old keywords`,
       };
     }
-    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions });
+    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions, avoids });
   }
   return result;
 }
@@ -262,6 +268,8 @@ export function scoreClarify(example: ClarifyExample, answer: Pick<ClarifyAnswer
   if (example.check === "first-reply" && example.mentions.length > 0 && !example.mentions.some((k) => startsWord(answer.text, k))) {
     problems.push(`never mentions (${example.mentions.join(", ")})`);
   }
+  const avoided = example.avoids.filter((k) => startsWord(answer.text, k));
+  if (avoided.length > 0) problems.push(`says what it should not (${avoided.join(", ")})`);
   if (example.check === "change-of-mind") {
     if (!example.newKeywords.some((k) => startsWord(answer.text, k))) problems.push(`never names the new idea (${example.newKeywords.join(", ")})`);
     const old = example.oldKeywords.filter((k) => items.some((item) => wholeWord(item.text, k)));
@@ -605,6 +613,8 @@ export interface BuildEvalOutcome {
   /** Pixels the page is wider than 375 px (0 when nothing scrolls sideways). */
   overflow: number;
   missing: string[];
+  /** Hosts other than the app's own that the page asked for (ticket 2.14: free outside services), sorted. */
+  outsideHosts: string[];
   durationMs: number;
   usage: TokenUsage;
 }
@@ -630,7 +640,12 @@ export function scoreBuild(outcome: BuildEvalOutcome): ClarifyScore {
     if (outcome.missing.length > 0) problems.push(`missing ${outcome.missing.join(", ")}`);
   }
   return problems.length === 0
-    ? { pass: true, detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown` }
+    ? {
+        pass: true,
+        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown${
+          outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
+        }`,
+      }
     : { pass: false, detail: problems.join("; ") };
 }
 

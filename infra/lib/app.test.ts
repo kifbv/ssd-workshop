@@ -2564,18 +2564,20 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
       ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
     });
     expect(APPS_CONTENT_SECURITY_POLICY).toBe(
-      "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'self'",
+      "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'",
     );
+    // Ticket 2.14: data and images from any HTTPS address, never plain http:, and no script, style or font source beyond 'self'.
+    expect(APPS_CONTENT_SECURITY_POLICY).not.toMatch(/http:|script-src|style-src|font-src|\*/);
     expect(APPS_CONTENT_SECURITY_POLICY).not.toContain("allow-same-origin");
     expect(config.CorsConfig).toBeUndefined();
     expect(config.CustomHeadersConfig).toBeUndefined();
   });
 
-  it("names the policy ssd-workshop-apps-v1 in the edge stack, retained, versioned in its logical id", () => {
+  it("names the policy ssd-workshop-apps-v2 in the edge stack (ticket 2.14's CSP change), retained, versioned in its logical id", () => {
     const [stackName, id, resource] = policy() ?? [];
     expect(stackName).toBe(STACK_NAMES.edge);
-    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v1");
-    expect(id).toMatch(/^AppsHeadersV1[0-9A-F]{8}$/);
+    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v2");
+    expect(id).toMatch(/^AppsHeadersV2[0-9A-F]{8}$/);
     expect(resource).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 

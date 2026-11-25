@@ -3,6 +3,8 @@
 // process gets none), with GitHub, the table and the deploy queue in memory (no repository
 // is created). The pushed commit is then checked as the deployer would (download, unpack, deploy check) and opened in
 // Playwright's Chromium at 375 px, served under the apps' sandbox CSP with an in-memory data API.
+// Ticket 2.14: the network stays open (only the app's own origin is routed), so an app that reads a free outside service
+// reaches it; behind a session's HTTPS proxy, Chromium is sent through it (see `launchBrowser`).
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
@@ -36,11 +38,20 @@ const LABELS_SCRIPT = `Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,b
   .flatMap((el) => [el.textContent || "", el.getAttribute("aria-label") || ""]).filter((t) => t.trim() !== "")`;
 
 /** Opens the app's files at /apps/<nickname>/ in Chromium under the CSP and reads what the title check needs. */
-async function openInBrowser(browser: Browser, files: readonly AppFile[]): Promise<{ errors: string[]; overflow: number; title: string; labels: string[] }> {
+async function openInBrowser(
+  browser: Browser,
+  files: readonly AppFile[],
+): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[] }> {
   const origin = "https://workshop.test";
-  const context = await browser.newContext({ viewport: PHONE });
+  // Behind the session's proxy, HTTPS answers are re-signed by the proxy's own authority, which Chromium does not know.
+  const context = await browser.newContext({ viewport: PHONE, ignoreHTTPSErrors: proxyServer() !== undefined });
   const page = await context.newPage();
   const errors: string[] = [];
+  const outsideHosts = new Set<string>();
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== origin && url.protocol !== "data:") outsideHosts.add(url.host);
+  });
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
   });
@@ -79,7 +90,13 @@ async function openInBrowser(browser: Browser, files: readonly AppFile[]): Promi
     await page.waitForLoadState("networkidle").catch(() => undefined);
     await page.waitForTimeout(500);
     const overflow = await page.evaluate<number>(`Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - document.documentElement.clientWidth`);
-    return { errors, overflow: Math.max(0, overflow), title: await page.title(), labels: await page.evaluate<string[]>(LABELS_SCRIPT) };
+    return {
+      errors,
+      overflow: Math.max(0, overflow),
+      title: await page.title(),
+      labels: await page.evaluate<string[]>(LABELS_SCRIPT),
+      outsideHosts: [...outsideHosts].sort(),
+    };
   } finally {
     await context.close();
   }
@@ -151,6 +168,7 @@ export async function evalBuild(
       consoleErrors: [],
       overflow: 0,
       missing: [],
+      outsideHosts: [],
       durationMs,
       usage: records.usage.get("eval-participant") ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 },
     };
@@ -166,10 +184,17 @@ export async function evalBuild(
       consoleErrors: page.errors,
       overflow: page.overflow,
       missing: missingScreens(specTitle(spec), screenNames(spec), page),
+      outsideHosts: page.outsideHosts,
     };
   } finally {
     await Promise.all(temporary.map((dir) => rm(dir, { recursive: true, force: true })));
   }
 }
 
-export const launchBrowser = (): Promise<Browser> => chromium.launch();
+/** The HTTPS proxy a session sets for outbound traffic, if any (Chromium does not read it from the environment). */
+const proxyServer = (): string | undefined => process.env.HTTPS_PROXY || process.env.https_proxy || undefined;
+
+export const launchBrowser = (): Promise<Browser> => {
+  const server = proxyServer();
+  return chromium.launch(server === undefined ? {} : { proxy: { server } });
+};
