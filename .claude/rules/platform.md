@@ -203,6 +203,6 @@ paths:
   in Node.js (`decodeQrOnScreen` in `pages.test.ts`).
 - Phase 3 limits (ticket 3.2): read the caps only through `settingsFromItem`/`DynamoSettingsStore.getSettings` and a
   profile's limit fields through `limitsFromItem` (`platform/api/workshop/settings.ts`; absent values are defaults), and
-  take participant-facing texts from `platform/api/workshop/texts.ts`. Every update that changes a profile's `step` sets
+  take participant-facing messages (not button labels, which stay in the web code) from `platform/api/workshop/texts.ts`. Every update that changes a profile's `step` sets
   `stepSince` to the same time in the same update, and the role's attribute list in `infra/lib/config.ts` names it.
   Only the admin function (`ssd-workshop-api-admin`) may write `SETTINGS`; the synth test fails on any other writer.
