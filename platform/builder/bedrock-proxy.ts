@@ -85,9 +85,23 @@ const ACCEPTED = new Set([JSON_TYPE, "application/vnd.amazon.eventstream"]);
 /** The Bedrock runtime operations the agent may use (InvokeModel, InvokeModelWithResponseStream). */
 export const ALLOWED_OPERATIONS = ["invoke", "invoke-with-response-stream"] as const;
 
-/** The exact paths the proxy forwards for `modelId`. */
+/** The exact paths the proxy forwards for `modelId` (the model id URL-encoded, as Bedrock expects it). */
 export function allowedPaths(modelId: string): string[] {
   return ALLOWED_OPERATIONS.map((operation) => `/model/${encodeURIComponent(modelId)}/${operation}`);
+}
+
+/**
+ * The paths the proxy accepts for `modelId`, each with the path it forwards: the encoded form, and the raw form Claude
+ * Code sends for an id with a `:` (such as `eu.anthropic.claude-haiku-4-5-20251001-v1:0`), forwarded encoded.
+ */
+export function acceptedPaths(modelId: string): Map<string, string> {
+  const accepted = new Map<string, string>();
+  for (const operation of ALLOWED_OPERATIONS) {
+    const forwarded = `/model/${encodeURIComponent(modelId)}/${operation}`;
+    accepted.set(forwarded, forwarded);
+    accepted.set(`/model/${modelId}/${operation}`, forwarded);
+  }
+  return accepted;
 }
 
 /** Bedrock runtime operations and first path segments the logs may name; anything else is `<op>` or `<other>`. */
@@ -103,7 +117,7 @@ export function pathShape(url: string, modelId: string): string {
   const match = /^\/model\/([^/]*)\/([^/]*)$/.exec(path);
   if (match) {
     const operation = KNOWN_OPERATIONS.has(match[2] ?? "") ? match[2] : "<op>";
-    return `/model/${match[1] === encodeURIComponent(modelId) ? "<build>" : "<other>"}/${operation}${url.includes("?") ? "?<query>" : ""}`;
+    return `/model/${match[1] === encodeURIComponent(modelId) || match[1] === modelId ? "<build>" : "<other>"}/${operation}${url.includes("?") ? "?<query>" : ""}`;
   }
   const first = /^\/([a-z-]{1,40})(\/|$)/.exec(path);
   return first && KNOWN_SEGMENTS.has(first[1] ?? "") ? `/${first[1]}${first[2] === "/" ? "/..." : ""}` : "<other>";
@@ -170,7 +184,7 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
   const host = upstream.host;
   // The run's secret path prefix: 128 random bits, in the agent's base URL only.
   const prefix = `/${randomBytes(16).toString("hex")}`;
-  const allowed = new Set(allowedPaths(options.modelId));
+  const allowed = acceptedPaths(options.modelId);
   let expectedHost = "";
   let inFlight = 0;
   const signer = new SignatureV4({ service: "bedrock", region: options.region ?? REGION, credentials: options.credentials, sha256: NodeSha256 });
@@ -184,12 +198,13 @@ export async function startBedrockProxy(options: BedrockProxyOptions): Promise<B
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const method = request.method ?? "";
     const url = request.url ?? "";
-    const path = unprefixed(url);
+    const received = unprefixed(url);
+    const path = received === undefined ? undefined : allowed.get(received);
     const type = request.headers["content-type"];
     const accept = request.headers.accept;
     const fromHere = request.headers.host === expectedHost && request.headers.origin === undefined;
     const typed = type === JSON_TYPE && (accept === undefined || ACCEPTED.has(accept));
-    if (method !== "POST" || path === undefined || !allowed.has(path) || !fromHere || !typed) {
+    if (method !== "POST" || path === undefined || !fromHere || !typed) {
       request.resume();
       log(method, url, "refused", 403);
       refuse(response, 403);

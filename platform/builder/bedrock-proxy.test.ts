@@ -98,6 +98,28 @@ const hostOf = (proxy: BedrockProxy): string => new URL(proxy.url).host;
 const prefixOf = (proxy: BedrockProxy): string => new URL(proxy.url).pathname;
 
 describe("the Bedrock proxy (finding 1: the agent holds no AWS credential)", () => {
+  it("accepts the raw form Claude Code sends for a model id with a colon and forwards it URL-encoded; another model's raw form stays refused", async () => {
+    const colonModel = "eu.anthropic.claude-haiku-4-5-20251001-v1:0";
+    const logs: BedrockProxyLogEntry[] = [];
+    const proxy = await startBedrockProxy({ modelId: colonModel, credentials: async () => CREDENTIALS, upstream: upstreamUrl, log: (entry) => logs.push(entry) });
+    try {
+      const before = seen.length;
+      const headers = { "content-type": "application/json", accept: "application/vnd.amazon.eventstream" };
+      const ok = await fetch(`${proxy.url}/model/${colonModel}/invoke-with-response-stream`, { method: "POST", headers, body: BODY });
+      expect(ok.status).toBe(200);
+      await ok.text();
+      const other = await fetch(`${proxy.url}/model/eu.anthropic.claude-opus-4-6-v1:0/invoke`, { method: "POST", headers, body: BODY });
+      expect(other.status).toBe(403);
+      expect(seen.slice(before).map((request) => request.url)).toEqual([`/model/${encodeURIComponent(colonModel)}/invoke-with-response-stream`]);
+      expect(logs.map((entry) => [entry.shape, entry.outcome])).toEqual([
+        ["/model/<build>/invoke-with-response-stream", "forwarded"],
+        ["/model/<other>/invoke", "refused"],
+      ]);
+    } finally {
+      await proxy.close();
+    }
+  });
+
   it("listens on 127.0.0.1 only, on a port of its own, under a 128-bit random path prefix of its own (try 3)", async () => {
     const proxy = await start();
     const other = await start();

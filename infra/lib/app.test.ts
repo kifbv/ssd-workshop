@@ -2188,16 +2188,16 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(JSON.stringify(roleEntry(BUILD_CHECK_SCHEDULER_ROLE_NAME)[1].Properties?.AssumeRolePolicyDocument)).toContain("scheduler.amazonaws.com");
   });
 
-  it("trusts the scheduler only for its own schedule, the builder's task role only for tasks on the builds cluster (ticket 2.9 try 2) and its execution role for ECS in this account (try 3)", () => {
+  it("trusts the scheduler only for the default schedule group of this account, and both builder roles for ECS in this account (task role widened after the first live build)", () => {
     const trust = (name: string) => (roleEntry(name)[1].Properties?.AssumeRolePolicyDocument as { Statement: { Principal: unknown; Condition: unknown }[] }).Statement;
     expect(trust(BUILD_CHECK_SCHEDULER_ROLE_NAME)).toEqual([
       expect.objectContaining({
         Principal: { Service: "scheduler.amazonaws.com" },
-        Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule/default/${BUILD_CHECK_SCHEDULE_NAME}` } },
+        Condition: { StringEquals: { "aws:SourceAccount": ACCOUNT, "aws:SourceArn": `arn:aws:scheduler:${REGION}:${ACCOUNT}:schedule-group/default` } },
       }),
     ]);
     const sources: [string, string][] = [
-      [BUILDER_TASK_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`],
+      [BUILDER_TASK_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:*`],
       // The form AWS documents for task execution roles (the confused-deputy condition): ECS in this account only.
       [BUILDER_EXECUTION_ROLE_NAME, `arn:aws:ecs:${REGION}:${ACCOUNT}:*`],
     ];

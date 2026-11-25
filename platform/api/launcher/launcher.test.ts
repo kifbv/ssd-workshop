@@ -17,6 +17,7 @@ import {
   UNSTARTED_REASON,
   LAUNCH_SERVICE_REASON,
   parseLaunchMessage,
+  ecsRefusal,
   processLaunch,
   runCheck,
   type CheckDeps,
@@ -213,6 +214,18 @@ describe("launching a build (ticket 2.9)", () => {
     expect(await processLaunch(message(), t.deps)).toBe("failed");
     expect(t.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [LAUNCH_SERVICE_REASON] });
     expect(t.logs.at(-1)).toMatchObject({ outcome: "failed", error: "ThrottlingException" });
+  });
+
+  it("logs AWS's reason when ECS refuses RunTask (cut to 300 characters), and only the name for other errors", async () => {
+    const s = setup();
+    const refusal = "ECS was unable to assume the role 'arn:aws:iam::123456789012:role/ssd-workshop/ssd-workshop-builder' that was provided for this task.";
+    s.tasks.startError = Object.assign(new Error(refusal), { name: "ClientException", $metadata: { httpStatusCode: 400 } });
+    expect(await processLaunch(message(), s.deps)).toBe("failed");
+    expect(s.logs.at(-1)).toMatchObject({ outcome: "failed", error: "ClientException", detail: refusal });
+    expect(ecsRefusal(Object.assign(new Error("x".repeat(400)), { name: "InvalidParameterException", $metadata: {} }))).toHaveLength(300);
+    expect(ecsRefusal(Object.assign(new Error("secret value"), { name: "ThrottlingException", $metadata: {} }))).toBeUndefined();
+    expect(ecsRefusal(new Error("not from AWS"))).toBeUndefined();
+    expect(ecsRefusal(undefined)).toBeUndefined();
   });
 
   it("gives RunTask the launch's deadline signal; a RunTask cut off at the deadline marks the build failed", async () => {

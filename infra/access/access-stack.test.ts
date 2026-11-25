@@ -475,6 +475,23 @@ function resolve(v: unknown): unknown {
   if (typeof o["Fn::Sub"] === "string") return o["Fn::Sub"].replace(/\$\{([^}]+)\}/g, (_, k: string) => SAMPLE[k] ?? k);
   return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, resolve(x)]));
 }
+// The resource part of an IAM ARN IAM accepts in a policy's Resource: "*", root, or one of its resource types.
+const IAM_RESOURCE_PREFIXES = ["user/", "federated-user/", "role/", "group/", "policy/", "instance-profile/", "mfa/", "sms-mfa/", "server-certificate/", "saml-provider/", "oidc-provider/", "access-report/"];
+function invalidIamResources(t: Template): string[] {
+  return ALL_POLICIES.flatMap((id) =>
+    statements(t, id).flatMap((s) =>
+      [...list(s.Resource), ...list(s.NotResource as Value | Value[] | undefined)]
+        .map((r) => live(r))
+        .filter((arn) => {
+          const m = /^arn:aws:iam::[^:]*:(.*)$/.exec(arn);
+          if (!m) return false;
+          const part = m[1] ?? "";
+          return !(part === "*" || part === "root" || IAM_RESOURCE_PREFIXES.some((p) => part.startsWith(p)));
+        })
+        .map((arn) => `${id}/${s.Sid}: ${arn}`),
+    ),
+  );
+}
 const policySize = (t: Template, id: string) =>
   JSON.stringify(resolve((t.Resources[id]?.Properties as { PolicyDocument: unknown }).PolicyDocument)).length;
 
@@ -845,6 +862,20 @@ describe("access stack: deploy policies (criterion 2)", () => {
 
   it("keeps each managed policy under IAM's 6,144-character limit", () => {
     for (const id of ALL_POLICIES) expect(policySize(template, id), id).toBeLessThanOrEqual(6144);
+  });
+
+  // IAM validates a Resource/NotResource ARN on create and update; cfn-lint does not. The stack update after ticket
+  // 2.9 failed on "IAM resource path must either be "*", root, or start with user/, ..." for role*/<name>, which
+  // works only in a condition value (ArnNotLike aws:PrincipalArn).
+  it("gives every IAM ARN in a Resource or NotResource a resource part IAM accepts (no role*/)", () => {
+    expect(invalidIamResources(template)).toEqual([]);
+    const broken = withText(
+      "- !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builder\n",
+      "- !Sub arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builder\n",
+    );
+    expect(invalidIamResources(broken)).toEqual([`DeployPolicyRead/NoLauncherForSessions: arn:aws:iam::${ACCOUNT}:role*/ssd-workshop-builder`]);
+    // Conditions are not path-validated: the boundary's role*/<name> values stay.
+    expect(templateText).toContain(":role*/ssd-workshop-builds-launcher");
   });
 });
 
@@ -1530,14 +1561,18 @@ describe("access stack: Claude sessions read-only (ticket 2.12)", () => {
     expect(sessionScopeGaps(template)).toEqual([]);
     const loose = withText("              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/ssd-workshop-*\n          - Sid: WorkshopResourceReads", "              - \"*\"\n          - Sid: WorkshopResourceReads");
     expect(sessionScopeGaps(loose)).toEqual(["WorkshopLogReads"]);
-    // Foundation models only in EU regions (EU inference profiles route there), as the API stack's worker (try 2).
+    // Any provider's foundation model, any region (Franck, 2026-11-25: benchmarks of other models for the builder,
+    // global profiles route anywhere); inference profiles only eu.* or global.* (an us.* or apac.* profile is refused).
     const model = (region: string) => `arn:aws:bedrock:${region}::foundation-model/anthropic.claude-sonnet-4-6`;
-    for (const region of ["eu-central-1", "eu-west-3", "eu-north-1"]) expect(allowedBy(claude, "bedrock:InvokeModel", model(region), CLAUDE), region).toBe(true);
-    for (const region of ["us-east-1", "ap-southeast-2"]) expect(allowedBy(claude, "bedrock:InvokeModel", model(region), CLAUDE), region).toBe(false);
+    for (const region of ["eu-central-1", "us-east-1"]) expect(allowedBy(claude, "bedrock:InvokeModel", model(region), CLAUDE), region).toBe(true);
+    const profile = (id: string) => `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/${id}`;
+    for (const id of ["eu.anthropic.claude-sonnet-4-6", "global.anthropic.claude-sonnet-4-6", "eu.amazon.nova-pro-v1:0"]) expect(allowedBy(claude, "bedrock:InvokeModel", profile(id), CLAUDE), id).toBe(true);
+    for (const id of ["us.anthropic.claude-sonnet-4-6", "apac.anthropic.claude-sonnet-4-6"]) expect(allowedBy(claude, "bedrock:InvokeModel", profile(id), CLAUDE), id).toBe(false);
     const bedrock = statements(template, "SessionPolicy").find((s) => s.Sid === "Bedrock");
     expect(list(bedrock?.Resource).map(text)).toEqual([
-      "arn:aws:bedrock:eu-*::foundation-model/anthropic.*",
-      "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*",
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.*",
+      "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/global.*",
     ]);
   });
 
@@ -1945,6 +1980,10 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${BUILD_LAUNCHER_FUNCTION_NAME}:live`,
     ];
     const ASSET = `arn:aws:s3:::${ASSETS_BUCKET_NAME}/abc123.zip`;
+    // Since 2.12 the build-task denies sit on ssd-workshop-session (the user's own policy, no principal condition).
+    // Checked here against the deploy rights plus those denies: the worst case of a user that still held deploy rights.
+    const BUILD_DENIES = ["NoBuildTasksForSessions", "NoBuildsClusterTasksForSessions", "NoBuildsClusterServicesForSessions"];
+    const asClaude = [...deploy, ...statements(template, "SessionPolicy").filter((s) => BUILD_DENIES.includes(s.Sid ?? ""))];
     const ROLE_WRITES = [
       "iam:CreateRole", "iam:PassRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePolicy", "iam:AttachRolePolicy",
       "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:UpdateRole", "iam:TagRole", "iam:DeleteRole",
@@ -2023,16 +2062,16 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
     it("denies the Claude user reading, starting or stopping build tasks (the token is in the task's override)", () => {
       // ExecuteCommand too: a shell in the task would show its environment (the launcher never enables it; belt and braces).
       for (const action of ["ecs:DescribeTasks", "ecs:StopTask", "ecs:ExecuteCommand"]) {
-        expect(allowedBy(deploy, action, BUILD_TASK, CLAUDE), action).toBe(false);
+        expect(allowedBy(asClaude, action, BUILD_TASK, CLAUDE), action).toBe(false);
         expect(allowedBy(deploy, action, BUILD_TASK, DEPLOY), action).toBe(true);
         // Without the deny a session could (ecs:* on task/ssd-workshop-*/*).
-        expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildTasksForSessions"), action, BUILD_TASK, CLAUDE), action).toBe(true);
+        expect(allowedBy(asClaude.filter((s) => s.Sid !== "NoBuildTasksForSessions"), action, BUILD_TASK, CLAUDE), action).toBe(true);
       }
       const run = { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER };
-      expect(allowedBy(deploy, "ecs:RunTask", BUILDER_DEFINITION, run)).toBe(false);
+      expect(allowedBy(asClaude, "ecs:RunTask", BUILDER_DEFINITION, run)).toBe(false);
       expect(allowedBy(deploy, "ecs:RunTask", BUILDER_DEFINITION, { ...run, "aws:PrincipalArn": DEPLOY["aws:PrincipalArn"] })).toBe(true);
       // Tasks of other workshop clusters (none yet) stay readable.
-      expect(allowedBy(deploy, "ecs:DescribeTasks", `${ECS_ARN}:task/ssd-workshop-apps/0123`, CLAUDE)).toBe(true);
+      expect(allowedBy(asClaude, "ecs:DescribeTasks", `${ECS_ARN}:task/ssd-workshop-apps/0123`, CLAUDE)).toBe(true);
     });
 
     it("denies the Claude user sending to the deploy queue (a deploy message publishes pushedCommit)", () => {
@@ -2064,6 +2103,21 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(allowedBy(deploy, "lambda:GetEventSourceMapping", mapping, { ...CLAUDE, "lambda:FunctionArn": FUNCTIONS[0] ?? "" })).toBe(true);
     });
 
+    // Rollback after 2.9: CloudFormation reads a mapping by UUID before deleting it, and Lambda checked
+    // GetEventSourceMapping on Resource "*" without lambda:FunctionArn (denied live). Reads go through on "*";
+    // changes by UUID only on mappings tagged for the workshop, and still never for sessions.
+    it("lets deploys read any mapping by UUID and change only workshop-tagged ones, without a function ARN", () => {
+      const mapping = `arn:aws:lambda:${REGION}:${ACCOUNT}:event-source-mapping:0123-4567`;
+      const TAGGED = { "aws:ResourceTag/project": "ssd-workshop" };
+      expect(allowedBy(deploy, "lambda:GetEventSourceMapping", "*", DEPLOY)).toBe(true);
+      for (const action of ["lambda:DeleteEventSourceMapping", "lambda:UpdateEventSourceMapping"]) {
+        expect(allowedBy(deploy, action, mapping, { ...DEPLOY, ...TAGGED }), action).toBe(true);
+        expect(allowedBy(deploy, action, mapping, DEPLOY), `${action} untagged`).toBe(false);
+        expect(allowedBy(deploy, action, mapping, { ...DEPLOY, "aws:ResourceTag/project": "letters" }), `${action} other project`).toBe(false);
+        expect(allowedBy(deploy, action, mapping, { ...CLAUDE, ...TAGGED }), `${action} session`).toBe(false);
+      }
+    });
+
     // Ticket 2.9 try 3 (access review HIGH): roles the boundary's denies let through by name, and the apps deployer
     // (the apps bucket's only writer), cannot be borrowed by a session: no PassRole to its own task or function, no
     // change to their policies or trust, and no change to the code that runs as them.
@@ -2071,6 +2125,8 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
     const EXCEPTION_ROLES = [BUILDER_TASK_ROLE_NAME, BUILDER_EXECUTION_ROLE_NAME, AI_WORKER_FUNCTION_NAME, BUILD_CHECK_SCHEDULER_ROLE_NAME, DEPLOYER_FUNCTION_NAME];
     const PASSES = ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com", "scheduler.amazonaws.com"];
 
+    // The deny names each role with its path (IAM rejects role*/<name> in a Resource); the path-less form has no
+    // allow at all, since sessions create, pass and change roles only under role/ssd-workshop/.
     it("denies the Claude user passing, changing or deleting the exception roles (both ARN forms), but not reading them", () => {
       for (const name of EXCEPTION_ROLES) {
         for (const arn of [role(name), role(name, false)]) {
@@ -2089,7 +2145,7 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
           expect(allowedBy(deploy, action, role(name), DEPLOY), `${action} ${name}`).toBe(true);
         }
         // Without the new resources a session could pass them.
-        const old = deploy.map((s) => (s.Sid === "NoLauncherForSessions" ? { ...s, Resource: list(s.Resource).filter((r) => !live(r).endsWith(`role*/${name}`)) } : s));
+        const old = deploy.map((s) => (s.Sid === "NoLauncherForSessions" ? { ...s, Resource: list(s.Resource).filter((r) => live(r) !== role(name)) } : s));
         expect(allowedBy(old, "iam:PassRole", role(name), CLAUDE), name).toBe(true);
       }
       // Other workshop roles (one a session creates for its own function) stay passable.
@@ -2117,7 +2173,8 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
 
     it("names the exception roles and functions of infra/lib/config.ts", () => {
       const resources = list(deploy.find((s) => s.Sid === "NoLauncherForSessions")?.Resource).map(live);
-      for (const name of EXCEPTION_ROLES) expect(resources).toContain(`arn:aws:iam::${ACCOUNT}:role*/${name}`);
+      for (const name of EXCEPTION_ROLES) expect(resources).toContain(role(name));
+      for (const r of resources) expect(r, r).not.toContain("role*/");
       for (const name of [AI_WORKER_FUNCTION_NAME, DEPLOYER_FUNCTION_NAME]) {
         expect(resources).toContain(`arn:aws:lambda:*:${ACCOUNT}:function:${name}`);
         expect(resources).toContain(`arn:aws:lambda:*:${ACCOUNT}:function:${name}:*`);
@@ -2143,28 +2200,29 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
 
     it("denies the Claude user running any task on the builds cluster, whatever its task definition", () => {
       const own = `${ECS_ARN}:task-definition/ssd-workshop-session-own:1`;
-      expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(false);
-      expect(allowedBy(deploy.filter((s) => s.Sid !== "NoBuildsClusterTasksForSessions"), "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
+      expect(allowedBy(asClaude, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(false);
+      expect(allowedBy(asClaude.filter((s) => s.Sid !== "NoBuildsClusterTasksForSessions"), "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
       expect(allowedBy(deploy, "ecs:RunTask", own, { ...DEPLOY, "ecs:cluster": WORKSHOP_CLUSTER })).toBe(true);
-      expect(allowedBy(deploy, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": `${ECS_ARN}:cluster/ssd-workshop-other` })).toBe(true);
+      expect(allowedBy(asClaude, "ecs:RunTask", own, { ...CLAUDE, "ecs:cluster": `${ECS_ARN}:cluster/ssd-workshop-other` })).toBe(true);
     });
 
     it("denies the Claude user creating or updating a service or task set on the builds cluster (access review)", () => {
       const service = (cluster: string) => `${ECS_ARN}:service/${cluster}/ssd-workshop-session-own`;
       const taskSet = (cluster: string) => `${ECS_ARN}:task-set/${cluster}/ssd-workshop-session-own/ecs-svc-0123`;
-      const withoutDeny = deploy.filter((s) => s.Sid !== "NoBuildsClusterServicesForSessions");
+      const withoutDeny = asClaude.filter((s) => s.Sid !== "NoBuildsClusterServicesForSessions");
       for (const action of ["ecs:CreateService", "ecs:UpdateService"]) {
-        expect(allowedBy(deploy, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(false);
+        expect(allowedBy(asClaude, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(false);
         expect(allowedBy(withoutDeny, action, service("ssd-workshop-builds"), CLAUDE), action).toBe(true);
         expect(allowedBy(deploy, action, service("ssd-workshop-builds"), DEPLOY), action).toBe(true);
-        expect(allowedBy(deploy, action, service("ssd-workshop-other"), CLAUDE), action).toBe(true);
+        expect(allowedBy(asClaude, action, service("ssd-workshop-other"), CLAUDE), action).toBe(true);
       }
       // No deploy policy grants task sets today; the deny keeps the builds cluster's closed if one ever does.
-      expect(allowedBy(deploy, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(false);
-      const deny = deploy.find((s) => s.Sid === "NoBuildsClusterServicesForSessions");
+      expect(allowedBy(asClaude, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(false);
+      const deny = asClaude.find((s) => s.Sid === "NoBuildsClusterServicesForSessions");
       expect(deny && statementApplies(deny, "ecs:CreateTaskSet", taskSet("ssd-workshop-builds"), CLAUDE)).toBe(true);
       expect(deny && statementApplies(deny, "ecs:CreateTaskSet", taskSet("ssd-workshop-other"), CLAUDE)).toBe(false);
-      expect(deny && statementApplies(deny, "ecs:CreateService", service("ssd-workshop-builds"), DEPLOY)).toBe(false);
+      // The deny reaches only the user: it sits on ssd-workshop-session, which no deploy policy is.
+      expect(deploy.some((s) => s.Sid === "NoBuildsClusterServicesForSessions")).toBe(false);
     });
 
     it("leaves the deploy role able to create, pass and update the launcher and upload assets (2.9 deploys it)", () => {
@@ -2227,5 +2285,39 @@ describe("access stack: the GitHub App's key (ticket 2.6)", () => {
       expect(names("BuildsFromTheirSendersOnly")).toEqual([either(AI_WORKER_FUNCTION_NAME), either(BUILD_CHECK_SCHEDULER_ROLE_NAME)]);
     });
 
+  });
+});
+
+// Ticket 2.9 follow-up: the deploy workflow logs in to ECR Public before building the builder image (anonymous pulls
+// from GitHub's runners got 429). Actions and condition key from the Service Authorization Reference
+// (servicereference.us-east-1.amazonaws.com/v1/ecr-public/ecr-public.json and sts.json, read 2026-11-24): neither action
+// takes a resource. The bearer token has no sts:AWSServiceName condition: with one, the live login was denied.
+describe("access stack: ECR Public login for the deploy workflow (ticket 2.9 follow-up)", () => {
+  const deploy = deployStatements(template);
+  const boundary = boundaryStatements(template);
+  const DEPLOY_ROLE = { "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:role/ssd-workshop-deploy` };
+  const ECR_PUBLIC = { "sts:AWSServiceName": "ecr-public.amazonaws.com" };
+
+  it("lets the deploy principals get an ECR Public login token and its bearer token", () => {
+    expect(allowedBy(deploy, "ecr-public:GetAuthorizationToken", "*", DEPLOY_ROLE)).toBe(true);
+    expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", { ...DEPLOY_ROLE, ...ECR_PUBLIC })).toBe(true);
+  });
+
+  it("grants the bearer token without a service condition (the live login carried none that matched) and nothing else in ECR Public", () => {
+    expect(allowedBy(deploy, "sts:GetServiceBearerToken", "*", DEPLOY_ROLE)).toBe(true);
+    for (const action of ["ecr-public:PutImage", "ecr-public:CreateRepository", "ecr-public:InitiateLayerUpload"]) {
+      expect(allowedBy(deploy, action, `arn:aws:ecr-public::${ACCOUNT}:repository/ssd-workshop-x`, DEPLOY_ROLE), action).toBe(false);
+    }
+  });
+
+  it("puts both in the -deploy-ec2 policy (the deploy role's only, since 2.12) and not in the boundary", () => {
+    const sids = statements(template, "DeployPolicyEc2").map((s) => s.Sid);
+    expect(sids).toContain("EcrPublicLogin");
+    expect(sids).toContain("EcrPublicBearerToken");
+    for (const action of ["ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken"]) {
+      expect(boundary.some((s) => s.Effect === "Allow" && list(s.Action).some((p) => matches(p, action))), action).toBe(false);
+    }
+    expect(JSON.stringify(template.Resources.DeployRole?.Properties.ManagedPolicyArns)).toContain("DeployPolicyEc2");
+    expect(JSON.stringify(template.Resources.ClaudeUser?.Properties.ManagedPolicyArns)).not.toContain("DeployPolicyEc2");
   });
 });
