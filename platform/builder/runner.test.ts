@@ -150,7 +150,7 @@ describe("criterion 3: the feed holds the steps in order and every written file,
   });
 
   it("fails with the check's reasons, and commits and sends nothing, when the app fails the deploy check", async () => {
-    const t = await setup([{ write: "app.js", content: 'fetch("https://api.example.org/x");\n' }]);
+    const t = await setup([{ write: "app.js", content: 'fetch("http://api.example.org/x");\n' }]);
     expect(await runBuild(jobFor(t), t.deps)).toBe("failed");
     const build = t.records.builds.get(BUILD);
     expect(build?.status).toBe("failed");

@@ -2,15 +2,19 @@
 // Criterion 5 serves the template at /apps/<nickname>/ from a tiny local server with the apps'
 // real Content-Security-Policy (sandbox, opaque origin) and opens it at phone width in Playwright's
 // Chromium, with the data API (ticket 2.4) mocked.
+// Ticket 2.14: a second, HTTPS origin (a certificate made in the test) proves that the policy lets an app read data
+// and show images from an outside HTTPS address, and still blocks its scripts, styles and fonts and any http: address.
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import type { AddressInfo } from "node:net";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
-import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, NAMESPACE_ADDRESSES, readAppFolder } from "./check.js";
+import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, NAMESPACE_ADDRESSES, checkApp, readAppFolder } from "./check.js";
+import { selfSignedCertificate } from "./test-certificate.js";
 
 const TEMPLATE_DIR = fileURLToPath(new URL("../../../templates/basic/", import.meta.url));
 const NICKNAME = "test-nick";
@@ -33,6 +37,10 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
   let outside: Server;
   let outsideOrigin: string;
   let outsideHits: string[];
+  /** An outside HTTPS service (ticket 2.14): JSON with CORS, an image, and a script, stylesheet and font the CSP must block. */
+  let service: Server;
+  let serviceOrigin: string;
+  let serviceHits: string[];
 
   beforeAll(async () => {
     server = createServer((request, response) => {
@@ -61,6 +69,22 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     });
     await new Promise<void>((resolve) => outside.listen(0, "127.0.0.1", resolve));
     outsideOrigin = `http://127.0.0.1:${(outside.address() as AddressInfo).port}`;
+    const SERVICE_FILES: Record<string, [string, string]> = {
+      "/data.json": ["application/json", JSON.stringify({ title: "Casablanca", year: 1942 })],
+      "/poster.svg": ["image/svg+xml", '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>'],
+      "/lib.js": ["text/javascript", "window.serviceScriptRan = true;"],
+      "/style.css": ["text/css", "body { margin: 7px; }"],
+      "/font.woff2": ["font/woff2", "not really a font"],
+    };
+    service = createHttpsServer(selfSignedCertificate(), (request, response) => {
+      const path = new URL(request.url ?? "/", "https://localhost").pathname;
+      serviceHits.push(path);
+      const [type, body] = SERVICE_FILES[path] ?? ["text/plain", ""];
+      response.writeHead(SERVICE_FILES[path] ? 200 : 404, { "access-control-allow-origin": "*", "content-type": type });
+      response.end(body);
+    });
+    await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+    serviceOrigin = `https://127.0.0.1:${(service.address() as AddressInfo).port}`;
     browser = await chromium.launch();
   }, 60_000);
 
@@ -68,10 +92,12 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     await browser?.close();
     await new Promise((resolve) => server?.close(resolve));
     await new Promise((resolve) => outside?.close(resolve));
+    await new Promise((resolve) => service?.close(resolve));
   });
 
   beforeEach(async () => {
-    context = await browser.newContext({ viewport: PHONE });
+    // The service's certificate is made in the test, so no browser trusts it: only that error is ignored.
+    context = await browser.newContext({ viewport: PHONE, ignoreHTTPSErrors: true });
     page = await context.newPage();
     page.setDefaultTimeout(5_000);
     errors = [];
@@ -82,6 +108,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     store = new Map();
     calls = [];
     outsideHits = [];
+    serviceHits = [];
     // A stand-in for the data API (ticket 2.4): JSON values by key, CORS for any origin, no cookies.
     // A key with no value answers 200 with null (Chromium logs every 404 as a console error).
     await page.route("**/api/apps/**", async (route: Route) => {
@@ -177,7 +204,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(errors).toEqual([]);
   });
 
-  it("blocks an outside fetch and an outside image under the CSP, while its own files and data load", async () => {
+  it("blocks an outside http: fetch and an outside http: image under the CSP, while its own files and data load", async () => {
     store.set("presses", String(STORED));
     await openApp(String(STORED));
     // The CSP's refusals are console errors here, and only they are expected.
@@ -209,6 +236,89 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
       expect.stringContaining(`Loading the image '${outsideOrigin}/pixel.svg' violates`),
     ]);
     expect(outsideHits).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 2.14: reads JSON and shows an image from an outside HTTPS service, and blocks its script, stylesheet and font, and an http: fetch", async () => {
+    store.set("presses", String(STORED));
+    await openApp(String(STORED));
+    // The CSP's refusals are console errors here, and only they are expected.
+    page.removeAllListeners("console");
+    const refused: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() !== "error") return;
+      if (message.text().includes("Content Security Policy") || message.text().startsWith("Refused to connect")) refused.push(message.text());
+      else errors.push(message.text());
+    });
+    const outcome = await page.evaluate<{
+      data: unknown;
+      image: string;
+      imageSize: string;
+      script: string;
+      scriptRan: boolean;
+      style: string;
+      margin: string;
+      font: string;
+      http: string;
+      violations: string[];
+    }>(`(async () => {
+      const violations = [];
+      document.addEventListener("securitypolicyviolation", (event) => violations.push(event.effectiveDirective));
+      const service = "${serviceOrigin}";
+      const data = await fetch(service + "/data.json").then((response) => response.json(), (error) => "blocked: " + error.message);
+      const loaded = (element) => new Promise((resolve) => {
+        element.onload = () => resolve("loaded");
+        element.onerror = () => resolve("blocked");
+        document.body.append(element);
+      });
+      const img = document.createElement("img");
+      img.src = service + "/poster.svg";
+      const image = await loaded(img);
+      const script = document.createElement("script");
+      script.src = service + "/lib.js";
+      const scriptOutcome = await loaded(script);
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = service + "/style.css";
+      const style = await loaded(link);
+      const font = await new FontFace("Outside", "url(" + service + "/font.woff2)").load().then(() => "loaded", () => "blocked");
+      const http = await fetch("${outsideOrigin}/data.json").then(() => "loaded", () => "blocked");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return {
+        data,
+        image,
+        imageSize: img.naturalWidth + "x" + img.naturalHeight,
+        script: scriptOutcome,
+        scriptRan: window.serviceScriptRan === true,
+        style,
+        margin: getComputedStyle(document.body).marginTop,
+        font,
+        http,
+        violations,
+      };
+    })()`);
+    expect(outcome).toEqual({
+      data: { title: "Casablanca", year: 1942 },
+      image: "loaded",
+      imageSize: "2x3",
+      script: "blocked",
+      scriptRan: false,
+      style: "blocked",
+      margin: expect.not.stringMatching(/^7px$/),
+      font: "blocked",
+      http: "blocked",
+      violations: ["script-src-elem", "style-src-elem", "font-src", "connect-src"],
+    });
+    // Only the data and the image reached the service; nothing reached the http: server.
+    expect(serviceHits.sort()).toEqual(["/data.json", "/poster.svg"]);
+    expect(outsideHits).toEqual([]);
+    expect(refused).toEqual([
+      expect.stringContaining(`Loading the script '${serviceOrigin}/lib.js' violates`),
+      expect.stringContaining(`Loading the stylesheet '${serviceOrigin}/style.css' violates`),
+      expect.stringContaining(`Loading the font '${serviceOrigin}/font.woff2' violates`),
+      expect.stringContaining(`Connecting to '${outsideOrigin}/data.json' violates`),
+      expect.stringContaining("Refused to connect"),
+    ]);
     expect(errors).toEqual([]);
   });
 
@@ -313,6 +423,25 @@ describe("the template's contents", () => {
     // The namespace names it lists, one per line in a code block, are exactly the allowed ones.
     const listed = agents.split("\n").map((line) => line.trim()).filter((line) => /^[a-z]+:\/\//.test(line));
     expect(listed).toEqual([...NAMESPACE_ADDRESSES]);
+  });
+
+  it("AGENTS.md lists the preferred keyless services with addresses the deploy check accepts (ticket 2.14)", () => {
+    const agents = readFileSync(join(TEMPLATE_DIR, "AGENTS.md"), "utf8");
+    const addresses = [
+      "https://en.wikipedia.org/api/rest_v1/",
+      "https://openlibrary.org",
+      "https://covers.openlibrary.org",
+      "https://api.open-meteo.com",
+      "https://api.frankfurter.app",
+      "https://api.tvmaze.com",
+      "https://restcountries.com",
+    ];
+    for (const address of addresses) expect(agents).toContain(`\`${address}\``);
+    const index = { path: "index.html", kind: "file" as const, bytes: new TextEncoder().encode("<!doctype html>") };
+    const uses = { path: "app.js", kind: "file" as const, bytes: new TextEncoder().encode(addresses.map((address) => `fetch("${address}");`).join("\n")) };
+    expect(checkApp([index, uses]).problems).toEqual([]);
+    expect(agents).toContain("never write a key or token in any file");
+    expect(agents).toContain("show a friendly message in the page");
   });
 
   it("README.md lists every file of the template", async () => {

@@ -1,10 +1,17 @@
 // Ticket 2.3: the deploy check (criteria 1 to 4). Pure rules on a list of files, plus the folder reader.
+// Ticket 2.14: plain https:// addresses are accepted, and API keys or tokens written in a file are refused.
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, MAX_PROBLEMS, checkApp, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
+import { ALLOWED_EXTENSIONS, KEY_VALUE_MIN_CHARS, MAX_APP_BYTES, MAX_PROBLEMS, checkApp, keysIn, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
+
+/** Fake key values, built at run time so secret scanners do not take the test file for a leak (ticket 2.14). */
+const FAKE_KEY = ["FAKE", "test", "KEY", "0123456789", "not", "REAL"].join("");
+const GOOGLE_LIKE = ["AI", "za", "Sy", FAKE_KEY, "x1"].join("");
+const GOOGLE_LIKE_DASHED = ["AI", "za", "Sy", "D-", FAKE_KEY, "-x1"].join("");
+const GITHUB_LIKE = ["gh", "p_", FAKE_KEY, "q7r8"].join("");
 
 const TEMPLATE_DIR = fileURLToPath(new URL("../../../templates/basic/", import.meta.url));
 
@@ -78,25 +85,64 @@ describe("file types (criterion 2)", () => {
   });
 });
 
-describe("outside addresses (criterion 3)", () => {
+describe("outside addresses (criterion 3; ticket 2.14: plain https:// addresses are fine)", () => {
   it.each([
-    ['<script src="https://cdn.example.com/lib.js"></script>', "index.html"],
     ['<img src="//images.example.com/cat.png" alt="">', "index.html"],
     ['<a href=//example.com>x</a>', "index.html"],
     ['const data = await fetch("http://api.example.com/items");', "app.js"],
     ["const socket = new WebSocket('wss://chat.example.com');", "app.js"],
     ["const image = `//images.example.com/${name}.png`;", "app.js"],
-    ['import confetti from "https://esm.sh/confetti";', "app.js"],
     ["body { background: url(//images.example.com/bg.png); }", "style.css"],
-    ['@import url("https://fonts.googleapis.com/css2?family=Inter");', "style.css"],
-    ['{ "source": "HTTPS://Example.com/data" }', "data.json"],
-    ["See https://example.com for more.", "notes.md"],
-    ['<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.com/a.png"/></svg>', "logo.svg"],
-    ['fetch("https://workshop.rankly.games.example.com/x")', "app.js"],
     ['fetch("https://workshop.rankly.games@example.com/x")', "app.js"],
     ['fetch("https://workshop.rankly.games:8443/x")', "app.js"],
     ['fetch("http://workshop.rankly.games/x")', "app.js"],
     ["const link = 'git+ssh://example.com/repo';", "app.js"],
+    // Ticket 2.14: every scheme but https stays refused, and an https address must be plain.
+    ['fetch("http://api.example.com/items")', "app.js"],
+    ["const socket = new WebSocket('ws://chat.example.com');", "app.js"],
+    ['<a href="ftp://files.example.com/a.txt">x</a>', "index.html"],
+    ['<iframe src="data://example.com"></iframe>', "index.html"],
+    ['<a href="javascript://example.com/%0Aalert(1)">x</a>', "index.html"],
+    ['fetch("https://user:secret@api.example.com/x")', "app.js"],
+    ['fetch("https://user@api.example.com/x")', "app.js"],
+    ['fetch("https://api.example.com:8443/x")', "app.js"],
+    ['fetch("https://api.example.com:443/x")', "app.js"],
+    ['fetch("https://api.example.com@evil.example.com/x")', "app.js"],
+    ['fetch("https://%65vil.example.com/x")', "app.js"],
+    ['fetch("https://localhost/x")', "app.js"],
+    ['fetch("https://")', "app.js"],
+    ['fetch("https://example.com./x")', "app.js"],
+    ['fetch("https://[::1]/x")', "app.js"],
+    // Ticket 2.14 try 2: `${` may follow the host, but a literal port or user name still may not.
+    ["fetch(`https://api.example.com:8080${path}`)", "app.js"],
+    ["fetch(`https://user@api.example.com${path}`)", "app.js"],
+    ["fetch(`https://api.example.com$/x`)", "app.js"],
+    ["fetch(`https://api.example.com{x}`)", "app.js"],
+    // Ticket 2.14 try 3: what follows `${...}` up to the path is read too, and an `@` right after an address.
+    ['<img src="https://a.b${x}@evil.example/p.png">', "index.html"],
+    ['fetch("https://a.b${x}@evil.example/p.json")', "app.js"],
+    ['fetch("https://a.b${:pw@evil.example/")', "app.js"],
+    ["fetch(`https://a.b${}:8080/`)", "app.js"],
+    ["fetch(`https://a.b${x}.c:8080/`)", "app.js"],
+    ["fetch(`https://a.b${x/y}@evil.example/`)", "app.js"],
+    ["fetch(`https://a.b${f(x)}@evil.example/`)", "app.js"],
+    ["fetch(`https://a.b${f(x)}`)", "app.js"],
+    ["<a href='https://a.b\"@evil.example/'>x</a>", "index.html"],
+    ["fetch(`https://a.b${x}\"@evil.example/`)", "app.js"],
+    // Ticket 2.14 try 4: punctuation after an address in prose is trimmed, but a port, a user name or an at sign is not.
+    ["Data from https://a.b:8080. thanks", "notes.md"],
+    ["Data from https://a.b:8080", "notes.md"],
+    ["Data from https://a.b.@evil.example", "notes.md"],
+    ["Data from https://user:pw@a.b.", "notes.md"],
+    ["Data from https://a.b:@evil.", "notes.md"],
+    ["<p>Data from http://a.b.</p>", "index.html"],
+    ["Chat on wss://a.b, live", "notes.md"],
+    ["<a href='https://a.b,\"@evil.example/'>x</a>", "index.html"],
+    ["<a href='https://a.b.;\"@evil.example/'>x</a>", "index.html"],
+    // An https address written with escapes or entities is refused: write it plainly.
+    ['<img src="https&#58;&#47;&#47;images.example.com/a.png">', "index.html"],
+    ['fetch("https://ex\\u0061mple.com/x")', "app.js"],
+    ["fetch('https://example.com\\x2fx')", "app.js"],
     // A scheme without slashes still opens another server.
     ['<a href="http:example.com">x</a>', "index.html"],
     ["new WebSocket('wss:example.com')", "app.js"],
@@ -156,17 +202,59 @@ describe("outside addresses (criterion 3)", () => {
     expect(result.problems).toEqual([{ file, line: 3, reason: expect.stringMatching(/outside address/) }]);
   });
 
-  it("names the address in the reason", () => {
-    const [problem] = check(text("app.js", 'fetch("https://api.example.com/items");')).problems;
-    expect(problem?.reason).toContain("https://api.example.com/items");
+  it("names the address in the reason, in plain words", () => {
+    const [problem] = check(text("app.js", 'fetch("http://api.example.com/items");')).problems;
+    expect(problem?.reason).toBe(
+      "It refers to an outside address that is not allowed (http://api.example.com/items). An app may use its own files and outside addresses written plainly as https:// and the site's name, with no user name, password or port.",
+    );
   });
 
   it("reports every outside address of a line once", () => {
-    const result = check(text("index.html", '<a href="https://a.example.com">a</a> <a href="//b.example.com">b</a>'));
+    const result = check(text("index.html", '<a href="http://a.example.com">a</a> <a href="//b.example.com">b</a> <a href="https://c.example.com">c</a>'));
     expect(result.problems.map((problem) => problem.reason)).toEqual([
-      expect.stringContaining("https://a.example.com"),
+      expect.stringContaining("http://a.example.com"),
       expect.stringContaining("//b.example.com"),
     ]);
+  });
+
+  it.each([
+    'fetch("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(title))',
+    '<img src="https://upload.wikimedia.org/wikipedia/en/a/a1/Poster.jpg" alt="Poster">',
+    'fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m`)',
+    'const cover = "https://covers.openlibrary.org/b/isbn/" + isbn + "-M.jpg";',
+    '{ "source": "HTTPS://Example.com/data", "home": "https://openlibrary.org" }',
+    "See https://example.com for more.",
+    "// Data from https://api.frankfurter.app/latest?from=EUR",
+    '<a href="https://api.tvmaze.com/search/shows?q=girls#top">TV</a>',
+    'fetch("https://restcountries.com/v3.1/name/" + name)',
+    'fetch("https://workshop.rankly.games.example.com/x")',
+    'fetch("https://xn--bcher-kva.example/x")',
+    'fetch("https://api.example.com/path/@user:42")',
+    'fetch("https://api.example.com?q=1")',
+    // Scripts, styles and fonts from other sites pass the check, but the apps' CSP blocks them (template.test.ts).
+    '<script src="https://cdn.example.com/lib.js"></script>',
+    'import confetti from "https://esm.sh/confetti";',
+    '@import url("https://fonts.googleapis.com/css2?family=Inter");',
+    '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.com/a.png"/></svg>',
+    // A template literal's part right after the host (Open Library's `doc.key` starts with a slash).
+    "fetch(`https://openlibrary.org${doc.key}.json`)",
+    "const cover = `https://covers.openlibrary.org${path}`;",
+    "const cover = `https://a.b${path}`;",
+    "fetch(`https://openlibrary.org${doc.key}.json?fields=${fields}`)",
+    // An at sign after a space, a tag's end or a comma is not part of the address.
+    '<a href="https://example.com">Mail me</a> at me@example.com',
+    "Data from https://example.com @someone",
+    // Ticket 2.14 try 4: punctuation that ends a sentence or a clause is not part of the address.
+    "Data from https://en.wikipedia.org, thanks",
+    "Posters come from https://upload.wikimedia.org.",
+    "<p>Data from https://open-meteo.com.</p>",
+    "Weather by https://open-meteo.com; free",
+    "<!-- https://api.frankfurter.app: rates -->",
+    "(see https://open-meteo.com!)",
+    "Is it https://open-meteo.com?",
+    "Thanks to https://open-meteo.com.\" said the page",
+  ])("accepts the plain https address in %s (ticket 2.14)", (line) => {
+    expect(check(text("app.js", line), text("page.html", line), text("notes.md", line)).problems).toEqual([]);
   });
 
   it.each([
@@ -207,13 +295,13 @@ describe("outside addresses (criterion 3)", () => {
   });
 
   it("reads lines split by \\r\\n, \\r or \\n", () => {
-    const result = check(text("app.js", "one\r\ntwo\rthree\nfetch('https://example.com')"));
+    const result = check(text("app.js", "one\r\ntwo\rthree\nfetch('http://example.com')"));
     expect(result.problems).toEqual([{ file: "app.js", line: 4, reason: expect.stringMatching(/outside address/) }]);
   });
 
   it("accepts a UTF-8 file that starts with a byte order mark, and still scans it", () => {
     const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
-    const body = new TextEncoder().encode("ok\nfetch('https://example.com')");
+    const body = new TextEncoder().encode("ok\nfetch('http://example.com')");
     const withBom = (content: Uint8Array): AppFile => ({ path: "app.js", kind: "file", bytes: new Uint8Array([...bom, ...content]) });
     expect(check(withBom(new TextEncoder().encode("const a = 1;"))).ok).toBe(true);
     expect(check(withBom(body)).problems).toEqual([{ file: "app.js", line: 2, reason: expect.stringMatching(/outside address/) }]);
@@ -260,8 +348,67 @@ describe("outside addresses (criterion 3)", () => {
     }
   });
 
+  it.each([
+    ["letters after https://", "https://a"],
+    ["dots after https://", "https://a."],
+    ["https:// over and over", "https://"],
+    ["key= in an address", "?key="],
+    ["key names", "api_key"],
+    ["key names and quotes", "apikey'"],
+    ["key names and spaces", "access_token "],
+    ["Authorization and quotes", "Authorization\" "],
+    ["long key values", "&token=a"],
+    ["camelCase key names", "aApiKey"],
+    ["camelCase names and spaces", "xAccessToken "],
+    ["upper-case names", "AAPI_KEY"],
+    ["key properties", 'key: "'],
+    ["key properties and long values", 'key:"a1'],
+    ["quoted key properties", '"token" : '],
+    // Ticket 2.14 try 3.
+    ["template parts after https://", "https://a.b${"],
+    ["closed template parts", "${x}"],
+    ["open braces", "${"],
+    ["at signs", "@"],
+    ["key names ending a longer name", 'OPENWEATHER_KEY = "'],
+    ["camelCase key names and long values", 'aKey:"a1'],
+    ["Apikey names", "aApikey"],
+    ["set calls", '.set("key", "'],
+    ["set calls and long values", '.set("appid","a1'],
+    ["joined query values", '?appid=" + "'],
+    // Ticket 2.14 try 4.
+    ["https addresses ending a sentence", "https://a.b. "],
+    ["https addresses before a colon", "https://a.b:"],
+    ["https addresses and runs of punctuation", "https://a.b.,;:!?"],
+  ])("scans a line of 256 KB of %s within a second, for addresses and keys (ticket 2.14)", (_name, unit) => {
+    const line = unit.repeat(Math.ceil((256 * 1024) / unit.length));
+    for (const variant of [line, `=${line}`, `"${line}`, `?key=${line}`, `api_key ${line}`, `key: "${line}`, `https://a.b${line}`]) {
+      const started = performance.now();
+      outsideAddresses(variant);
+      keysIn(variant);
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
+  // Ticket 2.14 try 5: each address was searched for in the whole line (quadratic: 1.8 s at 256 KB of distinct hosts).
+  it.each([
+    ["distinct https hosts", (i: number) => `https://a${i}.b `],
+    ["distinct https hosts in quotes, ending a sentence", (i: number) => `'https://a${i}.b.' `],
+    ["distinct https hosts behind an entity", (i: number) => `&amp; https://a${i}.b `],
+  ])("scans a line of 256 KB of %s within a second", (_name, unit) => {
+    const parts: string[] = [];
+    let length = 0;
+    for (let i = 0; length < 256 * 1024; i += 1) {
+      parts.push(unit(i));
+      length += parts[parts.length - 1]?.length ?? 0;
+    }
+    const line = parts.join("");
+    const started = performance.now();
+    expect(outsideAddresses(line)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it("does not scan binary files", () => {
-    expect(check(text("photo.png", "https://example.com")).ok).toBe(true);
+    expect(check(text("photo.png", "http://example.com api_key=x")).ok).toBe(true);
   });
 
   it("lists the first 50 problems and counts the rest in one line", () => {
@@ -288,6 +435,111 @@ describe("outside addresses (criterion 3)", () => {
   });
 });
 
+describe("API keys and tokens (ticket 2.14)", () => {
+  const LONG = "a".repeat(KEY_VALUE_MIN_CHARS);
+  it.each([
+    ['fetch("https://api.example.com/x?api_key=abc123")', "app.js", "api_key="],
+    ['fetch("https://api.example.com/x?apikey=abc123")', "app.js", "apikey="],
+    ['fetch("https://api.example.com/x?APIKEY=abc123")', "app.js", "APIKEY="],
+    ['fetch("https://api.example.com/x?access_token=abc123")', "app.js", "access_token="],
+    ['const API_KEY = "abc123";', "app.js", "API_KEY ="],
+    ['const apiKey = "abc123";', "app.js", "apiKey ="],
+    ["const config = { apiKey: 'abc123' };", "app.js", "apiKey:"],
+    ['{ "api_key": "abc123" }', "data.json", 'api_key":'],
+    ['{ "accessToken": "abc123" }', "data.json", 'accessToken":'],
+    ['fetch(url, { headers: { "x-api-key": "abc123" } })', "app.js", 'api-key":'],
+    ['fetch(url, { headers: { Authorization: "Bearer abc123" } })', "app.js", "Authorization:"],
+    ['fetch(url, { headers: { "authorization": token } })', "app.js", 'authorization":'],
+    ['headers.set("Authorization", "Bearer abc123");', "app.js", 'Authorization",'],
+    [`fetch("https://maps.example.com/api?key=${LONG}")`, "app.js", "key="],
+    [`fetch("https://api.example.com/x?q=paris&appid=${LONG}")`, "app.js", "appid="],
+    [`fetch("https://api.example.com/x?q=1&token=${LONG}")`, "app.js", "token="],
+    ['<img src="https://api.example.com/x?api&#95;key=abc123">', "index.html", "api_key="],
+    ['fetch("https://api.example.com/x?api\\u005fkey=abc123")', "app.js", "api_key="],
+    ["See the api_key=abc123 example.", "notes.md", "api_key="],
+    // Ticket 2.14 try 2: camelCase and run-together names, and a property named key, token or appid with a long value.
+    [`const weatherApiKey = "${FAKE_KEY}";`, "app.js", "ApiKey ="],
+    ['const config = { myAccessToken: "abc123" };', "app.js", "AccessToken:"],
+    ["const myApiKey = 'abc123';", "app.js", "ApiKey ="],
+    ['const WEATHERAPI_KEY = "abc123";', "app.js", "API_KEY ="],
+    ['{ "openWeatherApiKey": "abc123" }', "data.json", 'ApiKey":'],
+    ['headers.set("myAccessToken", "abc123");', "app.js", 'AccessToken",'],
+    [`{ "key": "${GOOGLE_LIKE}" }`, "data.json", "key:"],
+    [`const settings = { key: "${FAKE_KEY}" };`, "app.js", "key:"],
+    ['const token = "abc123def456ghi789";', "app.js", "token="],
+    [`config.appid = '${FAKE_KEY}';`, "app.js", "appid="],
+    ['{ "token" : "abcdef0123456789" }', "data.json", "token:"],
+    // Ticket 2.14 try 3: any name ending in key, token or appid, set() calls and query values joined with +.
+    [`const OPENWEATHER_KEY = "${FAKE_KEY}";`, "app.js", "KEY="],
+    [`const myKey = "${FAKE_KEY}";`, "app.js", "Key="],
+    [`const apiToken = "${FAKE_KEY}";`, "app.js", "Token="],
+    [`const WeatherApikey = "${FAKE_KEY}";`, "app.js", "Apikey="],
+    [`const weatherAppId = "${FAKE_KEY}";`, "app.js", "AppId="],
+    [`const my_token = "${FAKE_KEY}";`, "app.js", "token="],
+    [`url.searchParams.set("appid", "${FAKE_KEY}");`, "app.js", '"appid",'],
+    [`params.append('key', '${GOOGLE_LIKE}');`, "app.js", "'key',"],
+    [`const url = "https://x.y/?appid=" + "${FAKE_KEY}";`, "app.js", "appid="],
+    [`const url = "https://x.y/?q=paris&key=" + "${FAKE_KEY}";`, "app.js", "key="],
+    // A key with dashes or underscores still counts when one part mixes letters and digits.
+    [`const MAPS_KEY = "${GOOGLE_LIKE_DASHED}";`, "app.js", "KEY="],
+    [`const GITHUB_TOKEN = "${GITHUB_LIKE}";`, "app.js", "TOKEN="],
+    ['const STORAGE_KEY = "movieWatchlist2024";', "app.js", "KEY="],
+  ])("fails %s and names the file, the line and what looks like a key, not its value", (line, file, shown) => {
+    const result = check(text(file, `first line\n\n${line}\nlast line`));
+    expect(result.ok).toBe(false);
+    expect(result.problems).toEqual([
+      {
+        file,
+        line: 3,
+        reason: `It holds what looks like a key or password for another service (${shown}). Anything in an app's files is public: use free services that need no key.`,
+      },
+    ]);
+    expect(result.problems[0]?.reason).not.toContain("abc123");
+    expect(result.problems[0]?.reason).not.toContain(LONG);
+  });
+
+  it.each([
+    `fetch("https://maps.example.com/api?key=${"a".repeat(KEY_VALUE_MIN_CHARS - 1)}")`,
+    'fetch("https://api.example.com/x?key=" + encodeURIComponent(word))',
+    'fetch("https://api.tvmaze.com/lookup/shows?imdb=tt0944947")',
+    'const params = new URLSearchParams({ q: name, sort: "key" });',
+    'const key = "score-" + nickname;',
+    "await workshopData.set(key, value);",
+    "const monkey = 1, keyboard = 2, tokens = [];",
+    "<p>This app needs no API key, no password and no authorization.</p>",
+    "Free services that need no key: Wikipedia, Open-Meteo.",
+    'const apiKeyless = true; const accessTokens = [];',
+    'fetch("https://example.com/x?donkey=abcdefghijklmnopqrstuvwxyz")',
+    'fetch("https://example.com/x?monkey_key=1")',
+    // Ticket 2.14 try 2: names that only contain a key's name, short or plain values, Open Library's `key`.
+    "const apiKeyless = true; const hasApiKeys = false; const myApiKeyName = 1;",
+    'const monkey = "abcdef0123456789abcdef"; const keyboard = { key: "Enter" };',
+    'const columns = [{ key: "title" }, { key: "author_name" }];',
+    'fetch(`https://openlibrary.org${doc.key}.json`)',
+    'if (doc.key === "/works/OL45883W") show(doc);',
+    '{ "key": "/works/OL45883W", "title": "Fantastic Mr Fox" }',
+    '{ "key": "/authors/OL1234567A" }',
+    'await workshopData.set("favourite-books-list", list); const item = { key: "favourite-books-list" };',
+    'const token = "abc123"; const appid = 42;',
+    "const isSecret = true; const secretWord = 'banana';",
+    // Ticket 2.14 try 3: storage names (words joined with dashes or underscores), names that only contain key or token.
+    'const sortKey = "title"; const storageKey = "favourite-books-list";',
+    'const STORAGE_KEY = "movie-watchlist-v1";',
+    'const SAVE_KEY = "book_club_2024_v2"; const listKey = "films-watched-2025";',
+    `const hotkey = "${FAKE_KEY}"; const turkey = "${FAKE_KEY}";`,
+    `const keyboardLayout = "${FAKE_KEY}"; const tokenizer = "${FAKE_KEY}";`,
+    `if (key === "${FAKE_KEY}") go();`,
+    `url.searchParams.set("q", "${FAKE_KEY}"); url.searchParams.set("key", "title");`,
+    'const url = "https://x.y/?appid=" + appid;',
+  ])("accepts %s", (line) => {
+    expect(check(text("app.js", line), text("notes.md", line)).problems).toEqual([]);
+  });
+
+  it("sets the long-value threshold for key= at 16 characters", () => {
+    expect(KEY_VALUE_MIN_CHARS).toBe(16);
+  });
+});
+
 describe("size (criterion 4)", () => {
   const big = (path: string, bytes: number): AppFile => ({ path, kind: "file", bytes: new Uint8Array(Math.round(bytes)) });
 
@@ -308,7 +560,7 @@ describe("size (criterion 4)", () => {
   });
 
   it("does not scan an app over the limit for addresses, but still checks names and types", () => {
-    const result = check(text("app.js", 'fetch("https://example.com")'), text("run.sh", "x"), big("a.png", MAX_APP_BYTES));
+    const result = check(text("app.js", 'fetch("http://example.com") // api_key=x'), text("run.sh", "x"), big("a.png", MAX_APP_BYTES));
     expect(result.problems).toEqual([
       { file: "run.sh", reason: expect.stringMatching(/not an allowed file type/) },
       { reason: "The app is 5.1 MB; the limit is 5 MB." },

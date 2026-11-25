@@ -1,5 +1,5 @@
 {
-  "description": "Readiness check examples (ticket 2.7): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v1). The three workshop example specs must pass (verdict ready); each spec needing a login, a payment, an outside service, a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case).",
+  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v2). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example.",
   "examples": [
     {
       "name": "fitness tracker (example)",
@@ -18,6 +18,24 @@
       "category": "example",
       "expected": "ready",
       "spec": "# Calorie Counter\n\n```mermaid\nflowchart TD\n  today[Today] -->|add a food| add[Add a food]\n  add -->|saves| foods[(Foods eaten)]\n  foods -->|daily total| today\n  today -->|set goal| goal[Daily goal]\n  goal -->|saves| settings[(Goal)]\n```\n\n## What it does\nA daily calorie counter. You type in each food you eat with its calories, and the app adds them up for the day and compares the total with your daily goal.\n\n## Screens\n- Today: the foods eaten today, the total calories and how much is left of the goal.\n- Add a food: the food's name and its calories, with an Add button.\n- Daily goal: the number of calories you aim for each day.\n\n## Data it keeps\n- Foods eaten: name, calories and the day it was eaten.\n- Goal: the daily calorie goal."
+    },
+    {
+      "name": "movie watchlist with posters from Wikipedia (example)",
+      "category": "example",
+      "expected": "ready",
+      "spec": "# Film Posters Watchlist\n\n```mermaid\nflowchart TD\n  find[Find a film] -->|add to watchlist| films[(Films)]\n  films -->|films to watch| list[Watchlist]\n  list -->|tick off and rate| watched[Watched]\n  watched -->|saves the stars| films\n  wiki[Wikipedia] -->|poster and summary| find\n```\n\n## What it does\nA watchlist of films with their posters. You type a film's title, the app shows its poster and a short summary from Wikipedia, and you add it to your watchlist. Once you have seen it, you tick it off and give it 1 to 5 stars. If Wikipedia does not answer, the app shows a friendly message and you can still add the film by its title.\n\n## Screens\n- Find a film: a box to type a title, then the film's poster and summary from Wikipedia, with an Add to watchlist button.\n- Watchlist: the films still to watch, each with its poster and a Watched button.\n- Watched: the films you have seen, with their posters and stars, best rated first.\n\n## Data it keeps\n- Films: the title as Wikipedia names it, whether it was watched and its rating from 1 to 5 stars. Posters and summaries are read from Wikipedia each time, not kept."
+    },
+    {
+      "name": "office weather board from Open-Meteo",
+      "category": "free service",
+      "expected": "ready",
+      "spec": "# Office Weather Board\n\n```mermaid\nflowchart TD\n  board[Weather board] -->|add a city| cities[Cities]\n  cities -->|saves| list[(City list)]\n  list -->|cities shown| board\n  meteo[Open-Meteo] -->|weather today| board\n```\n\n## What it does\nA board that shows today's weather for the cities of our offices. The weather comes from Open-Meteo, a free weather service that needs no key, each time the board is opened. If it does not answer, the board says the weather could not be loaded and shows the cities anyway.\n\n## Screens\n- Weather board: each city with its current temperature and today's highest and lowest temperature from Open-Meteo.\n- Cities: add a city by its name and position on the map in degrees, or remove one.\n\n## Data it keeps\n- City list: the name, latitude and longitude of each city shown."
+    },
+    {
+      "name": "book club list with covers from Open Library",
+      "category": "free service",
+      "expected": "ready",
+      "spec": "# Book Club Shelf\n\n```mermaid\nflowchart TD\n  shelf[Shelf] -->|suggest a book| suggest[Suggest a book]\n  suggest -->|saves| books[(Books)]\n  books -->|titles and votes| shelf\n  library[Open Library] -->|covers and authors| suggest\n```\n\n## What it does\nA shared shelf for our book club. Members type a title, pick the right book from what Open Library finds, with its cover and author, and add it to the shelf. Everyone can vote for the next book. If Open Library does not answer, the app says so and the book can be added by its title alone.\n\n## Screens\n- Shelf: the suggested books with their covers and votes, most votes first, each with a Vote button.\n- Suggest a book: a box to type a title, the matching books from Open Library with covers and authors, and an Add button.\n\n## Data it keeps\n- Books: title, author, the Open Library book number for its cover, and the number of votes."
     },
     {
       "name": "habit tracker with personal accounts",
@@ -42,19 +60,18 @@
       "spec": "# Bake Sale Shop\n\n```mermaid\nflowchart TD\n  menu[Cakes] -->|add to basket| basket[Basket]\n  basket -->|pay by card| checkout[Checkout]\n  checkout -->|saves| orders[(Orders)]\n```\n\n## What it does\nAn online shop for our office bake sale. Colleagues choose cakes, put them in a basket and pay by credit card at checkout, so the money goes to charity.\n\n## Screens\n- Cakes: the cakes on sale with their prices.\n- Basket: the chosen cakes and the total price.\n- Checkout: card number, expiry date and a Pay button.\n\n## Data it keeps\n- Orders: the cakes ordered, the total paid and the time of the order."
     },
     {
-      "name": "weather dashboard with a live forecast",
+      "name": "stock board with the company's API key",
       "category": "outside service",
       "expected": "not-ready",
       "keywords": [
         "outside service",
+        "key",
+        "paid",
+        "account",
         "outside api",
-        "api",
-        "external",
-        "another website",
-        "other website",
-        "weather service"
+        "external"
       ],
-      "spec": "# Office Weather Board\n\n```mermaid\nflowchart TD\n  board[Weather board] -->|fetch forecast| forecast[(Forecast)]\n  board -->|add a city| cities[Cities]\n  cities -->|saves| list[(City list)]\n```\n\n## What it does\nA dashboard that shows today's live weather forecast for the cities of our offices, fetched every hour from a weather forecast API.\n\n## Screens\n- Weather board: the current temperature and today's forecast for each city, updated every hour.\n- Cities: add or remove the cities shown.\n\n## Data it keeps\n- City list: the names of the cities shown.\n- Forecast: the latest forecast fetched from the weather API for each city."
+      "spec": "# Stock Board\n\n```mermaid\nflowchart TD\n  board[Stock board] -->|add a share| shares[Shares]\n  shares -->|saves| list[(Share list)]\n  list -->|shares shown| board\n  market[Market data service] -->|live prices| board\n```\n\n## What it does\nA board with the live prices of the shares our team follows. The prices come every minute from a paid market data service, using our company's own key for that service, which the app keeps.\n\n## Screens\n- Stock board: each share with its live price and today's change.\n- Shares: add or remove the shares shown.\n\n## Data it keeps\n- Share list: the names of the shares shown.\n- Settings: our company's key for the market data service."
     },
     {
       "name": "plant reminders sent by email",
@@ -66,6 +83,46 @@
         "server"
       ],
       "spec": "# Plant Care\n\n```mermaid\nflowchart TD\n  plants[My plants] -->|add a plant| add[Add a plant]\n  add -->|saves| list[(Plants)]\n  list -->|due today| reminders[Reminders]\n```\n\n## What it does\nA list of house plants with how often each needs water. Every morning the app sends me an email listing the plants to water that day.\n\n## Screens\n- My plants: each plant and when it was last watered.\n- Add a plant: name and how many days between waterings.\n\n## Data it keeps\n- Plants: name, days between waterings and the date it was last watered."
+    },
+    {
+      "name": "playlists after signing in to a music service",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service",
+        "login",
+        "log in",
+        "sign in",
+        "sign-in",
+        "account"
+      ],
+      "spec": "# Team Playlist\n\n```mermaid\nflowchart TD\n  connect[Connect your music] -->|sign in| songs[(Your playlists)]\n  songs -->|pick songs| team[Team playlist]\n  team -->|saves| list[(Team songs)]\n```\n\n## What it does\nEach colleague signs in with their own music streaming account, the app reads their playlists, and they pick songs for a shared office playlist.\n\n## Screens\n- Connect your music: a button to sign in with your music streaming account.\n- Team playlist: your playlists from the music service and the shared list of picked songs.\n\n## Data it keeps\n- Team songs: title, artist and who picked each song."
+    },
+    {
+      "name": "recipe ideas from an AI chat service",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service",
+        "ai service",
+        "ai chat",
+        "chat service",
+        "artificial intelligence",
+        "chatbot"
+      ],
+      "spec": "# Fridge Chef\n\n```mermaid\nflowchart TD\n  fridge[My fridge] -->|ask for ideas| ideas[Recipe ideas]\n  fridge -->|saves| items[(Ingredients)]\n  chat[AI chat service] -->|writes recipes| ideas\n```\n\n## What it does\nYou list what is in your fridge, and an AI chat service writes three recipe ideas that use those ingredients.\n\n## Screens\n- My fridge: the ingredients you have, with a box to add one and an Ideas button.\n- Recipe ideas: the three recipes the AI wrote, with their steps.\n\n## Data it keeps\n- Ingredients: the name of each ingredient in the fridge."
+    },
+    {
+      "name": "lunch orders with phone notifications",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service",
+        "notification",
+        "server",
+        "background"
+      ],
+      "spec": "# Lunch Run\n\n```mermaid\nflowchart TD\n  orders[Orders] -->|add an order| add[Add an order]\n  add -->|saves| list[(Orders)]\n  list -->|new order| phones[Notifications]\n```\n\n## What it does\nColleagues add what they want for lunch, and every colleague gets a notification on their phone each time someone adds an order, even when the app is closed.\n\n## Screens\n- Orders: today's orders and who placed them.\n- Add an order: your name and what you want, with an Add button.\n\n## Data it keeps\n- Orders: name, what they want and the time of the order."
     },
     {
       "name": "quiz with an undecided scoring rule",

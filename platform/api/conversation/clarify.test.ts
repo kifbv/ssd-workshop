@@ -100,16 +100,21 @@ describe("the ready marker (clarify-v2 and later)", () => {
   });
 
   it("asks for numbered questions about a new idea, follows a changed idea and names the marker in the prompt", () => {
-    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v3");
+    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v4");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("3 to 5 questions as a numbered list");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("drop the old idea completely");
     expect(CLARIFY_SYSTEM_PROMPT).toContain(`end your reply with this exact line on its own: ${READY_MARKER}`);
     expect(CLARIFY_SYSTEM_PROMPT).toContain('"Write my spec"');
   });
 
-  it("explains the outside-service limit and keeps going instead of stopping (clarify-v3)", () => {
-    expect(CLARIFY_SYSTEM_PROMPT).toContain("Apps cannot reach other websites or services");
+  it("welcomes free keyless services, explains the keyed or paid ones kindly and keeps going (clarify-v4, ticket 2.14)", () => {
+    expect(CLARIFY_SYSTEM_PROMPT).not.toContain("Apps cannot reach other websites or services");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Apps can show information from free public services that need no key");
+    for (const service of ["Wikipedia", "Open Library", "Open-Meteo", "Frankfurter", "TVMaze", "REST Countries"]) expect(CLARIFY_SYSTEM_PROMPT).toContain(service);
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Apps cannot use services that need a key, an account or a sign-in, or that cost money");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("suggest a free service that needs no key or that people type the information in themselves");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("Never send them away or stop because of it.");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Never ask technical questions about services, addresses, keys or APIs");
   });
 
   it("treats a reply that is only the marker as empty (the worker then fails it with the neutral reply)", async () => {
@@ -124,7 +129,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
     const replies = [...must(s.table.replies.get("me-1")).values()];
     expect(replies.map((r) => r.offersSpec)).toEqual([undefined, true]);
     expect(replies[1]?.text).not.toContain("READY");
-    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v3", "clarify-v3"]);
+    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v4", "clarify-v4"]);
     // The history sent to the model holds the stored text, never the marker.
     s.model.push(verdictReply("on-path"), { text: "Sure.", inputTokens: 1, outputTokens: 1 });
     await s.call(send("one more thing"));

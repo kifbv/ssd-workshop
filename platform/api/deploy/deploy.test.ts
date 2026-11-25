@@ -143,7 +143,7 @@ describe("criterion 1: a commit that passes the check is published under apps/<n
 
 describe("criterion 2: a commit that fails the check uploads nothing, leaves the live version, and marks the build failed with the reasons", () => {
   const failing = () =>
-    gzip(githubTar({ "index.html": '<script src="https://evil.example/x.js"></script>', "shell.php": "<?php ?>", "app.js": "ok();\n" }));
+    gzip(githubTar({ "index.html": '<script src="http://evil.example/x.js"></script>', "shell.php": "<?php ?>", "app.js": "ok();\n" }));
 
   it("puts and removes nothing, invalidates nothing and leaves the live marker as it was", async () => {
     const t = setup(failing());
@@ -172,7 +172,7 @@ describe("criterion 2: a commit that fails the check uploads nothing, leaves the
     expect(build?.deployedCommit).toBeUndefined();
     expect(build?.finishedAt).toMatch(/^2026-11-24T/);
     expect(build?.failureReasons).toEqual([
-      expect.stringMatching(/^index\.html, line 1: It refers to an outside address \(https:\/\/evil\.example/),
+      expect.stringMatching(/^index\.html, line 1: It refers to an outside address that is not allowed \(http:\/\/evil\.example/),
       expect.stringMatching(/^shell\.php: /),
     ]);
     expect(t.logs).toEqual([{ event: "deployer", outcome: "failed", files: 3, bytes: expect.any(Number), problems: 2, durationMs: expect.any(Number) }]);
@@ -216,7 +216,7 @@ describe("criterion 2: a commit that fails the check uploads nothing, leaves the
     // 60 files with 2,000-character names (wrong type) and 100 with outside addresses: more than 50 problems, long reasons.
     const files: Record<string, string> = { "index.html": "x" };
     for (let i = 0; i < 60; i += 1) files[`${"d".repeat(90)}/${String(i).padStart(2000, "e")}.php`] = "x";
-    for (let i = 0; i < 100; i += 1) files[`f${i}.html`] = "https://evil.example/\n".repeat(3);
+    for (let i = 0; i < 100; i += 1) files[`f${i}.html`] = "http://evil.example/\n".repeat(3);
     const t = setup(gzip(githubTar(files)));
     await processDeploy(job(), 1, t.deps);
     const reasons = t.records.builds.get(BUILD)?.failureReasons ?? [];

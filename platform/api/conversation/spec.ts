@@ -18,7 +18,7 @@
 // The model writes a whole new version between a `<spec>` line and a `</spec>` line, after a short
 // answer; an answer to a question has no such block, so the spec stays as it is.
 
-export const SPEC_PROMPT_VERSION = "spec-v1";
+export const SPEC_PROMPT_VERSION = "spec-v2";
 
 /** The sections every spec has, in this order (criterion 1). */
 export const SPEC_SECTIONS = ["What it does", "Screens", "Data it keeps"] as const;
@@ -72,6 +72,7 @@ Rules for the spec:
 - The diagram is a Mermaid flowchart that starts with "flowchart TD". It shows the screens as boxes (id[Label]) and the data the app keeps as cylinders (id[(Label)]), with arrows for how the person moves between screens and where data is saved or shown, each arrow with a short label (-->|label|). Four to ten boxes and cylinders in all. Ids are short lower-case words without spaces. Labels are plain words: no quotes, brackets, parentheses, colons, semicolons, ampersands, hashes or other symbols. No styles, classes, links, comments or subgraphs.
 - Lists use "- " at the start of the line. No bold, italics, tables or code apart from the diagram.
 - Plain English for people who are not developers: no technical words (database, API, framework, server). About 300 words at most.
+- The app may show information from a free public service that needs no key (for example summaries and pictures from Wikipedia, film posters included, books and covers from Open Library, weather from Open-Meteo, exchange rates from Frankfurter, TV shows from TVMaze, facts about countries from REST Countries). When it does, name the information and its source in plain words where the app uses it (for example "movie posters and summaries from Wikipedia"), and say that the app shows a friendly message when the source does not answer. Never write web addresses, keys or technical words about it. Never use a service that needs a key, an account or a sign-in, or that costs money, and never send emails, texts or notifications.
 - Never invent personal data about real people, and never write code.`;
 
 /** A model answer split into the words shown in the conversation and, when there is one, a new spec. */

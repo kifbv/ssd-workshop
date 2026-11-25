@@ -15,10 +15,13 @@ import { addUsage, costOf, usageOf } from "./model.js";
 /** One sentence: no sentence break inside, one end mark at the end. */
 const isOneSentence = (text: string): boolean => /^[A-Z][^.!?]*(?:[.!?])$/.test(text) && !/[.!?]\s/.test(text);
 
-describe("the guardrail prompt (guardrail-v2)", () => {
+describe("the guardrail prompt (guardrail-v3)", () => {
   it("sends an idea that only wants an outside service on to the guide, and flags someone's own API key", () => {
-    expect(GUARDRAIL_PROMPT_VERSION).toBe("guardrail-v2");
+    expect(GUARDRAIL_PROMPT_VERSION).toBe("guardrail-v3");
     expect(GUARDRAIL_SYSTEM_PROMPT).toContain("wants information from an outside website or service (a free or paid API");
+    // Ticket 2.14: free keyless services are fine now; the guide helps pick one.
+    expect(GUARDRAIL_SYSTEM_PROMPT).toContain("apps may read information from free public services that need no key, and the assistant helps pick one");
+    expect(GUARDRAIL_SYSTEM_PROMPT).not.toContain("apps cannot reach outside services");
     expect(GUARDRAIL_SYSTEM_PROMPT).toContain("needs someone's own API key, password or account");
     expect(GUARDRAIL_SYSTEM_PROMPT).not.toContain("calls an external paid API");
   });

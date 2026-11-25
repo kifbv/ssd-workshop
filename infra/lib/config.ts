@@ -129,12 +129,16 @@ export const PAGES_CONTENT_SECURITY_POLICY = [
  * `data:`, and no inline scripts or styles. This blocks the outside addresses that the deploy check
  * cannot see (built from parts at run time). Ticket 2.3's Playwright test serves the template with it;
  * ticket 2.5's headers policy sends it.
+ * Ticket 2.14 (spec delta approved by Franck 2026-11-25): an app may also read data (`connect-src`) and show
+ * images (`img-src`) from any `https:` address, so it can use free keyless services (Wikipedia, Open-Meteo,
+ * ...). Scripts, styles and fonts still come only from its own files (`default-src 'self'`), forms still post
+ * only to itself, and `http:` stays blocked. Tested in Chromium in `platform/api/build/template.test.ts`.
  */
 export const APPS_CONTENT_SECURITY_POLICY = [
   "sandbox allow-scripts allow-forms allow-modals allow-popups",
   "default-src 'self'",
-  "connect-src 'self'",
-  "img-src 'self' data:",
+  "connect-src 'self' https:",
+  "img-src 'self' data: https:",
   "form-action 'self'",
 ].join("; ");
 /** Lambda function, role and log group of `GET /api/health`. */
@@ -244,8 +248,10 @@ export const DEPLOYER_LIVE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "nickname", 
 /**
  * Version of the apps' response headers policy (CloudFront `/apps/*`): the sandbox CSP, nosniff, HSTS and
  * referrer policy. Created, never updated, like the pages' policy: a change bumps this version.
+ * Version 2 (ticket 2.14): `https:` added to `connect-src` and `img-src`; `ssd-workshop-apps-v1` stays
+ * (retained) for Franck to delete once v2 is live.
  */
-export const APPS_HEADERS_POLICY_VERSION = 1;
+export const APPS_HEADERS_POLICY_VERSION = 2;
 export const APPS_HEADERS_POLICY_NAME = `${PREFIX}-apps-v${APPS_HEADERS_POLICY_VERSION}`;
 /** The CloudFront Function on `/apps/*` (viewer request): trailing slash and lower-case redirects, `index.html` for folders. */
 export const APPS_INDEX_FUNCTION_NAME = `${PREFIX}-apps-index`;
