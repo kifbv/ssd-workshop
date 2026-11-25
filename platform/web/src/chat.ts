@@ -36,6 +36,22 @@ export interface Conversation {
   budgetLeft?: number;
   /** Ticket 3.5: the workshop is paused (the admin's global Stop). */
   paused?: true;
+  /** Ticket 3.5: the server could not read whether it is paused (keep the line as it shows). */
+  pausedUnknown?: true;
+}
+
+/** Ticket 3.5: what an answer says of the global Stop: paused, unknown (the server's read failed), or neither (running). */
+export interface PausedFlags {
+  paused?: true;
+  pausedUnknown?: true;
+}
+
+/** Ticket 3.5: `paused` and `pausedUnknown` from an answer's body, kept only when exactly `true`. */
+export function pausedFlags(b: Record<string, unknown> | undefined): PausedFlags {
+  return {
+    ...(b?.["paused"] === true ? { paused: true as const } : {}),
+    ...(b?.["pausedUnknown"] === true ? { pausedUnknown: true as const } : {}),
+  };
 }
 
 export const CHAT_TEXTS = {
@@ -81,7 +97,7 @@ function parseMessage(value: unknown): ChatMessage | undefined {
 export function parseConversation(body: unknown): Conversation | undefined {
   const b = record(body);
   if (b === undefined) return undefined;
-  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft, paused } = b;
+  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft } = b;
   if (typeof step !== "string" || (state !== "open" && state !== "waiting") || !Array.isArray(messages)) return undefined;
   const parsed = messages.map(parseMessage);
   if (parsed.some((m) => m === undefined)) return undefined;
@@ -93,7 +109,7 @@ export function parseConversation(body: unknown): Conversation | undefined {
     ...(isVersion(latestSpecVersion) ? { latestSpecVersion } : {}),
     ...(isVersion(approvedSpecVersion) ? { approvedSpecVersion } : {}),
     ...(typeof budgetLeft === "number" && Number.isFinite(budgetLeft) && budgetLeft >= 0 ? { budgetLeft } : {}),
-    ...(paused === true ? { paused: true as const } : {}),
+    ...pausedFlags(b),
   };
 }
 
@@ -139,9 +155,9 @@ export function sendResult(
 export function pollResult(
   answer: ApiAnswer,
 ):
-  | { kind: "pending"; paused?: true }
-  | { kind: "flagged" }
-  | { kind: "answered"; status: string; reply: string }
+  | ({ kind: "pending" } & PausedFlags)
+  | ({ kind: "flagged" } & PausedFlags)
+  | ({ kind: "answered"; status: string; reply: string } & PausedFlags)
   | { kind: "signed-out" }
   | { kind: "lost" }
   | { kind: "retry" } {
@@ -149,10 +165,12 @@ export function pollResult(
     const b = record(answer.body);
     const status = b?.["status"];
     const reply = b?.["reply"];
-    // Ticket 3.5: a message held while the workshop is paused stays pending.
-    if (status === "pending") return b?.["paused"] === true ? { kind: "pending", paused: true } : { kind: "pending" };
-    if (status === "flagged") return { kind: "flagged" };
-    if ((status === "done" || status === "declined" || status === "failed") && typeof reply === "string") return { kind: "answered", status, reply };
+    // Ticket 3.5: every status carries the global Stop's flags (a held message stays pending; a flagged one waits for a
+    // facilitator while the workshop may be paused).
+    const flags = pausedFlags(b);
+    if (status === "pending") return { kind: "pending", ...flags };
+    if (status === "flagged") return { kind: "flagged", ...flags };
+    if ((status === "done" || status === "declined" || status === "failed") && typeof reply === "string") return { kind: "answered", status, reply, ...flags };
     return { kind: "retry" };
   }
   if (answer.status === 401) return { kind: "signed-out" };

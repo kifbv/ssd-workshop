@@ -41,6 +41,19 @@ describe("the workshop paused by the global Stop (ticket 3.5)", () => {
     expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: "yes" } })).toEqual({ kind: "pending" });
   });
 
+  it("keeps paused on every poll status (flagged and answered too), and reads pausedUnknown only as true", () => {
+    expect(pollResult({ status: 200, body: { id: "m", status: "flagged", paused: true } })).toEqual({ kind: "flagged", paused: true });
+    expect(pollResult({ status: 200, body: { id: "m", status: "flagged" } })).toEqual({ kind: "flagged" });
+    expect(pollResult({ status: 200, body: { id: "m", status: "done", reply: "Hi", paused: true } })).toEqual({ kind: "answered", status: "done", reply: "Hi", paused: true });
+    for (const status of ["pending", "flagged"]) {
+      expect(pollResult({ status: 200, body: { id: "m", status, pausedUnknown: true } })).toEqual({ kind: status, pausedUnknown: true });
+      expect(pollResult({ status: 200, body: { id: "m", status, pausedUnknown: "true" } })).toEqual({ kind: status });
+    }
+    const base = { step: "clarify", state: "open", messages: [] };
+    expect(parseConversation({ ...base, pausedUnknown: true })).toEqual({ ...base, pausedUnknown: true });
+    for (const bad of [false, "true", 1]) expect(parseConversation({ ...base, pausedUnknown: bad })).toEqual(base);
+  });
+
   it("reads GET /api/status: paused only as true, off on any other 200 body, and nothing to change on any other answer", () => {
     expect(statusResult({ status: 200, body: { paused: true } })).toBe(true);
     for (const body of [{}, { paused: false }, { paused: "true" }]) expect(statusResult({ status: 200, body })).toBe(false);

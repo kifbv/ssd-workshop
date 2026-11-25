@@ -189,14 +189,15 @@ async function poll(request: HttpRequest, participant: ParticipantRecord, deps: 
 }
 
 /**
- * Ticket 3.5: `{ paused: true }` while the global Stop is on, else nothing. A failed settings read leaves it out (the
- * page shows no banner; the answer is still 200) and is logged by name only.
+ * Ticket 3.5: `{ paused: true }` while the global Stop is on, else nothing. A failed settings read answers
+ * `{ pausedUnknown: true }` instead (the page keeps the line as it shows it; the answer is still 200) and is logged by
+ * name only.
  */
-async function pausedFlag(deps: ConversationDeps): Promise<{ flag: { paused?: true }; error?: string }> {
+async function pausedFlag(deps: ConversationDeps): Promise<{ flag: { paused?: true; pausedUnknown?: true }; error?: string }> {
   try {
     return { flag: (await deps.store.getSettings()).stopped ? { paused: true } : {} };
   } catch (error) {
-    return { flag: {}, error: errorName(error) };
+    return { flag: { pausedUnknown: true }, error: errorName(error) };
   }
 }
 
@@ -286,7 +287,11 @@ async function history(participant: ParticipantRecord, deps: ConversationDeps): 
   // Ticket 3.3: the caller's own budget left, in dollars (whole cents, never below 0); never their spend or anyone else's.
   const shaped = shapeHistory(participant.step, items, conversation, nowSeconds);
   // Ticket 3.5: the global Stop, from the same settings read as the budget.
-  const body = budget === undefined ? { ...shaped } : { ...shaped, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
+  // A failed read answers `pausedUnknown: true`, so the page keeps the paused line as it shows it.
+  const body =
+    budget === undefined
+      ? { ...shaped, pausedUnknown: true }
+      : { ...shaped, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
   return { outcome: "ok", response: jsonResponse(200, body), ...(budgetError === undefined ? {} : { error: budgetError }) };
 }
 

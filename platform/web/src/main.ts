@@ -110,6 +110,15 @@ function setPaused(paused: boolean): void {
   renderPaused();
 }
 
+/**
+ * Sets the paused line from a conversation, poll or build answer: `paused: true` shows it, `pausedUnknown: true` (the
+ * server could not read the settings) keeps it as it is, and neither clears it.
+ */
+function setPausedFrom(answer: { paused?: true; pausedUnknown?: true }): void {
+  if (answer.pausedUnknown === true) return;
+  setPaused(answer.paused === true);
+}
+
 function renderPaused(): void {
   const banner = byId("workshop-paused");
   banner.textContent = PHASE_3_TEXTS.workshopPaused;
@@ -334,7 +343,7 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
   pollTimer = undefined;
   const result = pollResult(await call("GET", `/api/conversation/messages/${encodeURIComponent(id)}`));
   if (round !== pollRound || waiting === null) return;
-  if (result.kind === "pending" || result.kind === "flagged") setPaused(result.kind === "pending" && result.paused === true);
+  if (result.kind === "pending" || result.kind === "flagged" || result.kind === "answered") setPausedFrom(result);
   if (result.kind === "pending" || result.kind === "flagged") {
     waiting.mode = result.kind;
     setStatus(id, result.kind);
@@ -384,7 +393,7 @@ async function loadConversation(): Promise<void> {
     return;
   }
   const { conversation } = result;
-  setPaused(conversation.paused === true);
+  setPausedFrom(conversation);
   if (conversation.step !== "clarify" && conversation.step !== "spec" && conversation.step !== "approved" && conversation.step !== "building") {
     await goToOwnStep(view.screen);
     return;
@@ -568,7 +577,7 @@ async function pollBuild(round: number): Promise<void> {
   if (result.kind === "show") say("build", result.message, result.tone);
   else clearMessage("build");
   if (result.kind === "build") {
-    setPaused(result.build.paused === true);
+    setPausedFrom(result.build);
     renderBuild(result.build);
     if (result.build.status === "live") {
       showLive(result.build);

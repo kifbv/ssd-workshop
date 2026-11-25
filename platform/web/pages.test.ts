@@ -400,7 +400,9 @@ const ME = { id: "p-1", nickname: "ada-l", role: "participant", group: "g1" };
  * a sent message stays pending until `answer()` (or `flag()`) is called. Polls are counted per id.
  */
 function fakeConversation(start: MockMessage[] = [], step = "clarify") {
-  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined, paused: false };
+  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined, paused: false, pausedUnknown: false };
+  /** Ticket 3.5: the Stop's flags as the API sends them; `pausedUnknown` stands for a failed settings read. */
+  const pausedBody = () => (state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true } : {});
   const answer = (reply: string, offersSpec = false, status = "done") => {
     const id = state.pendingId ?? "";
     const message = state.messages.find((m) => m.id === id);
@@ -424,7 +426,7 @@ function fakeConversation(start: MockMessage[] = [], step = "clarify") {
         messages: state.messages,
         ...(state.pendingId ? { pendingId: state.pendingId } : {}),
         ...(state.budgetLeft === undefined ? {} : { budgetLeft: state.budgetLeft }),
-        ...(state.paused ? { paused: true } : {}),
+        ...pausedBody(),
       },
     }),
     "POST /api/conversation/messages": (call) => {
@@ -447,7 +449,7 @@ function fakeConversation(start: MockMessage[] = [], step = "clarify") {
     const message = state.messages.find((m) => m.id === id);
     const reply = state.messages.find((m) => m.id === `${id}-r`);
     const status = message?.status ?? "pending";
-    return { status: 200, body: { id, status, ...(reply ? { reply: reply.text } : {}), ...(state.paused && status === "pending" ? { paused: true } : {}) } };
+    return { status: 200, body: { id, status, ...(reply ? { reply: reply.text } : {}), ...pausedBody() } };
   };
   for (let n = 1; n <= 9; n++) handlers[pollPath(`m${n}`)] = pollHandler(`m${n}`);
   return { state, handlers, answer, flag };
@@ -587,6 +589,74 @@ describe("step 1: Clarify (ticket 1.8)", () => {
     await expect.poll(() => banner.isVisible()).toBe(false);
     api.answer(QUESTIONS);
     await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A plant watering reminder.", QUESTIONS]);
+    expect(await banner.isVisible()).toBe(false);
+  }, 30_000);
+
+  it("ticket 3.5 criterion 4: WHEN a flagged message waits for a facilitator while Stop is on THEN the paused line stays across 10 s polls; WHEN Resume THEN it goes, at 375 px", async () => {
+    const api = fakeConversation();
+    api.state.paused = true;
+    await mockApi(api.handlers);
+    await page.clock.install();
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await pauseClock();
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    await page.getByRole("textbox", { name: "Your message" }).fill("An app that tells me which medicine to take.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    api.flag();
+    await pollAfter(2000);
+    expect(await page.locator("#waiting-notice").isVisible()).toBe(true);
+    expect(await banner.isVisible()).toBe(true);
+    for (let n = 0; n < 3; n++) {
+      const polls = api.state.polls;
+      await pollAfter(10_000);
+      expect(api.state.polls).toBe(polls + 1);
+      expect(await banner.isVisible()).toBe(true);
+    }
+    await expectNoSideScroll();
+    api.state.paused = false;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(false);
+    expect(await page.locator("#waiting-notice").isVisible()).toBe(true);
+  }, 30_000);
+
+  it("ticket 3.5: WHEN the server could not read the settings (pausedUnknown) THEN the poll and the conversation keep the paused line as shown; WHEN a read works THEN it follows it", async () => {
+    const api = fakeConversation();
+    api.state.paused = true;
+    await mockApi(api.handlers);
+    await page.clock.install();
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await pauseClock();
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    await page.getByRole("textbox", { name: "Your message" }).fill("A plant watering reminder.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    // The settings read fails: pending polls and the flagged ones keep the line.
+    api.state.pausedUnknown = true;
+    await pollAfter(2000);
+    await pollAfter(2000);
+    expect(await banner.isVisible()).toBe(true);
+    api.flag();
+    await pollAfter(2000);
+    await pollAfter(10_000);
+    expect(await page.locator("#waiting-notice").isVisible()).toBe(true);
+    expect(await banner.isVisible()).toBe(true);
+    // The read works again and still says paused: the line stays.
+    api.state.pausedUnknown = false;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(true);
+    // The read works again and says running: the line goes.
+    api.state.paused = false;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(false);
+    // pausedUnknown never shows the line by itself.
+    api.state.paused = true;
+    api.state.pausedUnknown = true;
+    await pollAfter(10_000);
     expect(await banner.isVisible()).toBe(false);
   }, 30_000);
 
@@ -1109,7 +1179,7 @@ const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-
 
 /** A participant at step building and their build, which the test moves on; every GET /api/build is counted. */
 function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html")]) {
-  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false };
+  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false };
   const handlers: Record<string, Handler> = {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
     "GET /api/build": () => {
@@ -1125,7 +1195,7 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
           appUrl: APP_URL,
           ...(state.failureReasons === undefined ? {} : { failureReasons: state.failureReasons }),
           ...(state.ahead === undefined ? {} : { ahead: state.ahead }),
-          ...(state.paused ? { paused: true } : {}),
+          ...(state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true } : {}),
         },
       };
     },
@@ -1194,6 +1264,12 @@ describe("step 3: Build (ticket 2.10)", () => {
     await expectNoSideScroll();
     await buildPollAfter(2000);
     expect(await banner.isVisible()).toBe(true);
+    // A build read whose settings read failed (pausedUnknown) keeps the line as shown.
+    api.state.pausedUnknown = true;
+    await buildPollAfter(2000);
+    await buildPollAfter(2000);
+    expect(await banner.isVisible()).toBe(true);
+    api.state.pausedUnknown = false;
     api.state.paused = false;
     await buildPollAfter(2000);
     await expect.poll(() => banner.isVisible()).toBe(false);

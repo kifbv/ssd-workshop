@@ -192,7 +192,7 @@ describe("ticket 3.5 criterion 4 (API part): the page's reads say the workshop i
     expect(json(await s.call(get(BUILD_ROUTE)))).toMatchObject({ status: "queued", paused: true });
   });
 
-  it("WHEN the settings read fails THEN the poll and the build still answer 200, without paused, logging the error name only", async () => {
+  it("WHEN the settings read fails THEN the poll and the build still answer 200 with pausedUnknown: true and no paused, logging the error name only", async () => {
     const s = setup("spec");
     await s.call(post(APPROVE_ROUTE, { version: 1 }));
     const id = must(s.queue.sent[0]).messageId;
@@ -200,8 +200,37 @@ describe("ticket 3.5 criterion 4 (API part): the page's reads say the workshop i
     s.table.conversationFailOn = "getSettings";
     const res = await s.call(get(POLL_ROUTE, id));
     expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ id, status: "pending" });
+    expect(json(res)).toEqual({ id, status: "pending", pausedUnknown: true });
     expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "poll", outcome: "ok", error: "InternalServerError" });
+    s.table.conversationFailOn = undefined;
+    s.model.push(readinessReply("ready"));
+    s.resume();
+    await s.drain();
+    s.stop();
+    s.table.conversationFailOn = "getSettings";
+    const build = await s.call(get(BUILD_ROUTE));
+    expect(build.statusCode).toBe(200);
+    expect(json(build)).toMatchObject({ status: "queued", pausedUnknown: true });
+    expect(json(build)).not.toHaveProperty("paused");
+    expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "build", outcome: "ok", error: "InternalServerError" });
+    // A read that works answers no pausedUnknown.
+    s.table.conversationFailOn = undefined;
+    expect(json(await s.call(get(BUILD_ROUTE)))).not.toHaveProperty("pausedUnknown");
+    expect(json(await s.call(get(POLL_ROUTE, id)))).not.toHaveProperty("pausedUnknown");
+  });
+
+  it("WHEN the settings read for GET /api/conversation fails THEN it answers 200 with pausedUnknown: true and no paused; WHEN it works THEN no pausedUnknown", async () => {
+    const s = setup();
+    s.stop();
+    s.table.conversationFailOn = "getBudgetFacts";
+    const res = await s.call(get(HISTORY_ROUTE));
+    expect(res.statusCode).toBe(200);
+    expect(json(res)).toMatchObject({ pausedUnknown: true });
+    expect(json(res)).not.toHaveProperty("paused");
+    s.table.conversationFailOn = undefined;
+    const ok = json(await s.call(get(HISTORY_ROUTE)));
+    expect(ok).toMatchObject({ paused: true });
+    expect(ok).not.toHaveProperty("pausedUnknown");
   });
 
   it("WHEN any signed-in person (the nickname screen included) asks GET /api/status THEN it answers paused: true while Stop is on and {} after Resume", async () => {
