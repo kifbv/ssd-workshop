@@ -161,3 +161,6 @@ paths:
 - ECS: RunTask's `startedBy` takes up to 128 letters, digits, `-`, `_` and `/` (StartTask's only 36); ListTasks with
   `startedBy` must use no other filter (the desired status defaults to `RUNNING`). Give RunTask the deadline's
   `abortSignal`; a cut-off RunTask may still have started a task, which the attempt id makes harmless.
+- Claude Code on Bedrock puts the model id in the path unencoded (`/model/<id with :>/invoke`), while the AWS SDK
+  encodes it (`%3A`): anything matching Bedrock paths must accept both. Its default extended thinking roughly
+  triples a coding agent's time and doubles its cost on Sonnet 4.6; the builder turns it off (`thinking: disabled`).

@@ -497,12 +497,16 @@ Resources:
               "Null":
                 route53:ChangeResourceRecordSetsNormalizedRecordNames: "false"
                 route53:ChangeResourceRecordSetsRecordTypes: "false"
+          # Any provider's model (not only Anthropic), so Claude sessions can benchmark other models
+          # for the builder role. Inference profiles only through EU (eu.*) or global (global.*) routing.
+          # The platform's own roles stay on Claude: the boundary's Bedrock statement is unchanged.
           - Sid: Bedrock
             Effect: Allow
             Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
             Resource:
-              - arn:aws:bedrock:*::foundation-model/anthropic.*
-              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
+              - arn:aws:bedrock:*::foundation-model/*
+              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.*
+              - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/global.*
           - Sid: SesForTesting
             Effect: Allow
             Action: [ses:SendEmail, ses:SendRawEmail]
