@@ -253,31 +253,30 @@ Spec delta (approved by Franck 2026-11-25):
 - **CHANGED, section 4 item 1.** Old: "No servers, no logins, no outside APIs, no payments." New: "No servers, no logins, no payments. An app may read data and show images from free public services that need no key, over HTTPS; its scripts, styles and fonts come only from its own files."
 - **CHANGED, section 4 item 3.** Old: "Before deploy, an automatic check rejects a build that adds files outside the template's allowed types, calls outside domains, or exceeds 5 MB." New: "Before deploy, an automatic check rejects a build that adds files outside the template's allowed types, uses an outside address that is not HTTPS, holds an API key or token, or exceeds 5 MB."
 
-### 2.15 The coding agent can try an outside service
+### 2.15 The coding agent can use the web
 
-Franck, 2026-11-25: without the web, the coding agent writes calls to outside services from memory and cannot see whether an address still answers, what its JSON looks like or whether it lets browsers call it. The agent gets one more tool, `try_service`, run by the runner (an in-process tool of the Claude Agent SDK), not a general web or shell tool: one `GET` of an `https://` address on the default port, no cookies, no credentials, no redirects followed, at most 10 seconds and 100 KB, at most 30 calls per build. Before connecting, the runner resolves the name and refuses any private, loopback, link-local or other special address (the task's credentials live at `169.254.170.x`), and it connects to exactly the address it checked. The answer the agent sees: the status, the content type, whether `Access-Control-Allow-Origin` lets a sandboxed app read it (`*`), and the first 100 KB of text (binary answers are described, not shown). The feed shows "Tried <host>" like any other step. The agent still has no shell, no general web tool and no credentials.
+Franck, 2026-11-25: without the web, the coding agent writes calls to outside services from memory and cannot see whether an address still answers or what its data looks like. Franck chose the full web tool over a narrow one. The agent gets Claude Code's own `WebFetch` (it reads a page or an API answer and summarises it with the build model), and `WebSearch` if Claude Code offers it on Bedrock (if not, the build notes say so and only `WebFetch` is added). The deny-by-default hook lets `WebFetch` through only for `https://` addresses with a host name: no IP addresses, no `localhost` or single-label names, no `.internal`/`.local` names, no user name, password or port. The task's credentials address (`169.254.170.x`) answers only plain `http` on a path the agent never sees, because the runner keeps that variable out of the agent's environment. Fetched pages are data for the agent, never instructions, and the system prompt says so. The agent still has no shell and no credentials, and the deploy check still decides what goes live.
 
 ```mermaid
 flowchart LR
-  agent[Coding agent<br/>file tools + try_service] -->|url| runner[Runner<br/>checks https, public address,<br/>size, time, call count]
-  runner -->|GET, no cookies| svc[Outside service]
-  runner -. refused .-> meta[169.254.x, 10.x, 127.x ...<br/>task credentials, VPC]
+  agent[Coding agent<br/>files + WebFetch] -->|hook: https, named host only| web[Public web<br/>docs, APIs]
+  agent -. refused by hook .-> meta[IP addresses, localhost,<br/>169.254.x, internal names]
+  agent --> files[Workspace files] --> check[Deploy check] --> live[Live app]
 ```
 
 Depends on: 2.14. Areas: platform (builder), docs.
 
 Acceptance criteria (each starts as FAIL):
 
-- WHEN the agent calls `try_service` with an `https://` address of a public server THEN it gets the status, content type, the CORS answer and at most 100 KB of text (test against a local HTTPS server with an injected resolver)
-- WHEN the address is not `https:`, has a user name, password or port, resolves to a private, loopback, link-local, multicast or other special IPv4 or IPv6 address (`169.254.170.2`, `10.42.0.5`, `127.0.0.1`, `::1`, `fd00::1`, `::ffff:169.254.170.2` and the like), or answers with a redirect THEN the tool refuses or reports the redirect without following it, and nothing connects to the special address (tests)
-- WHEN a name resolves to a public address first and to a special one on a second lookup THEN the tool connects only to the address it checked (test: DNS rebinding)
-- WHEN the answer is slower than 10 seconds or larger than 100 KB, or the build has made 30 calls THEN the call stops or is refused with a plain reason (tests)
-- WHEN the agent's tools are listed THEN they are Read, Write, Edit, Glob and `try_service`, and Bash, WebFetch and WebSearch stay disallowed (test in `agent.test.ts`)
-- WHEN `npm run eval -- build` runs the Wikipedia watchlist example THEN the agent tried the service at least once and the app passes as in 2.14 (eval)
+- WHEN the agent's tools are listed THEN they are Read, Write, Edit, Glob and WebFetch (plus WebSearch only if Bedrock offers it), and Bash and every other tool stay disallowed (test in `agent.test.ts`)
+- WHEN WebFetch is called with an `https://` address of a named public host THEN the hook allows it (test in `permissions.test.ts`)
+- WHEN WebFetch is called with `http:`, another scheme, an IPv4 or IPv6 address in any form (`169.254.170.2`, `[::1]`, `0x7f000001`, `2130706433`), `localhost`, a single-label or `.internal`/`.local` name, a user name, password or port THEN the hook denies it (tests)
+- WHEN the agent's environment is built THEN it holds no `AWS_CONTAINER_*` or `ECS_CONTAINER_METADATA_*` variable (existing test kept)
+- WHEN `npm run eval -- build` runs the Wikipedia watchlist example THEN the agent fetched at least one page and the app passes as in 2.14 (eval; the feed shows each fetch)
 
 Spec delta (Franck asked for it 2026-11-25):
 
-- **CHANGED, section 5 "Builder"** (wording approved with question 4 of this brief). Old: "The coding agent holds no AWS rights; the builder task may only call Claude, report progress and hand the result to the deployer." New: "The coding agent holds no AWS rights; besides its files it may only read public HTTPS addresses through the builder's checked `try_service` tool. The builder task may only call Claude, report progress and hand the result to the deployer."
+- **CHANGED, section 5 "Builder"** (wording approved with question 4 of this brief). Old: "The coding agent holds no AWS rights; the builder task may only call Claude, report progress and hand the result to the deployer." New: "The coding agent holds no AWS rights; besides its files it may read the public web (web fetch, and web search where available). The builder task may only call Claude, report progress and hand the result to the deployer."
 
 ## Questions for Franck
 
@@ -288,7 +287,7 @@ Spec delta (Franck asked for it 2026-11-25):
 5. **(Answered: sandboxed.) Apps run sandboxed** on `workshop.rankly.games/apps/<nickname>/`: no cookies and no `localStorage`, storage only through the data API, which anyone with the app's address can read and write (as the spec says). Suggested: yes. The alternative, a separate address such as `apps.workshop.rankly.games`, needs a DNS record and a spec delta.
 6. **(Answered: leave the files until the next build.) (2.13) Taking the old app offline on a reset.** Only the deployer's role may change app files (bucket policy). Suggested: leave the files until the next build, whose deploy already removes stale files; no access change. Alternatives: an undeploy job through the deployer, or adding Franck's principal to the bucket policy exception.
 7. **(Answered: yes, Franck 2026-11-25.) (2.14) Spec delta for outside services** (above): apps may read data and show images from any HTTPS address, and scripts, styles and fonts stay their own. Suggested: yes. Allowing scripts or styles from other sites (CDN libraries) would let an outside server run code in every app that uses it, so it stays out.
-8. **(Answered: yes, the suggested list; Franck also asked for the coding agent to get web access, ticket 2.15.) (2.14) Who picks the service.** The coding agent has no network, so it writes the calls from what it knows and cannot try them. Suggested: `AGENTS.md` lists a few well-known keyless services that answer browsers, and the agent prefers them: Wikipedia (summaries and images, film posters included), Open Library (books and covers), Open-Meteo (weather), Frankfurter (exchange rates), TVMaze (TV shows), REST Countries. The Clarify and spec steps name the information in plain words ("movie posters from Wikipedia"), and the app shows a friendly message when the service does not answer. Any other free keyless service stays allowed. Alternative: only the listed services, enforced in the sandbox header (safer, but narrower).
+8. **(Answered: yes, the suggested list; Franck also asked for the coding agent to get the full web tool, ticket 2.15.) (2.14) Who picks the service.** The coding agent has no network, so it writes the calls from what it knows and cannot try them. Suggested: `AGENTS.md` lists a few well-known keyless services that answer browsers, and the agent prefers them: Wikipedia (summaries and images, film posters included), Open Library (books and covers), Open-Meteo (weather), Frankfurter (exchange rates), TVMaze (TV shows), REST Countries. The Clarify and spec steps name the information in plain words ("movie posters from Wikipedia"), and the app shows a friendly message when the service does not answer. Any other free keyless service stays allowed. Alternative: only the listed services, enforced in the sandbox header (safer, but narrower).
 9. **(Answered: risk accepted.) (2.14) New accepted risk.** An app can send what its visitors type to any HTTPS address (a fake sign-in form, for example), and visitors' IP addresses and searches reach the services it uses. Forms still post only to the app itself. Suggested: accept it for the workshop. Apps are public code in GitHub, built from participants' own specs, and seen only by colleagues. Phase 5's read-only apps after the workshop apply. The alternative is the allow-list from question 8.
 
 ## Blocked
