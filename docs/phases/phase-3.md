@@ -1,6 +1,6 @@
 # Phase 3: Iterate and supervise
 
-Spec sections: 2 (Users and roles: facilitator, admin), 3 (step 4 Live: change requests, editing the spec on GitHub), 4 (Guardrails: flagged requests; Limits per participant; global Stop; Facilitator dashboard), 5 (Security: every call checks own data and own group), 7 (Build phases, row 3), 10 (items 5, 13, 14). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus). Status: draft, waiting for Franck's answers.
+Spec sections: 2 (Users and roles: facilitator, admin), 3 (step 4 Live: change requests, editing the spec on GitHub), 4 (Guardrails: flagged requests; Limits per participant; global Stop; Facilitator dashboard), 5 (Security: every call checks own data and own group), 7 (Build phases, row 3), 10 (items 5, 13, 14). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus). Status: questions answered 2026-11-25 (see `docs/decisions.md`); ready for approval.
 
 Goal: once an app is live, the participant sees a few suggested changes and can send up to 5 change requests in plain English; each one goes through the guardrail, a short spec update they can read, and a rebuild that edits their existing app. Every participant has an AI budget of about $5. At most 15 builds run at once and the others wait in a queue the page shows. Facilitators get a dashboard (nickname, step, time in step, stuck and failed builds highlighted, Retry and Pause, flagged requests with Approve and Reject at the top), and the admin gets caps and a global Stop button. Ready for the pitch.
 
@@ -85,7 +85,7 @@ Acceptance criteria (each starts as FAIL):
 
 ### 3.4 Build queue: at most N builds at once
 
-The launcher claims a build slot (a conditional counter, so two launchers never pass the cap) before it starts a task, and frees it when the build is live or failed; a build that finds no slot stays `queued` and its message comes back after 30 seconds. Step 3 shows "Your build is in the queue: 3 builds ahead of you." The stuck-build check repairs the counter from the real number of running builds every minute. A `npm run eval -- load --builds <n>` command starts n eval builds at once (no participant, no GitHub repository) and prints throttling, time and cost, so the cap can be set to what Bedrock's quota carries.
+The launcher claims a build slot (a conditional counter, so two launchers never pass the cap) before it starts a task, and frees it when the build is live or failed; a build that finds no slot stays `queued` and its message comes back after 30 seconds. Step 3 shows "Your build is in the queue: 3 builds ahead of you." The stuck-build check repairs the counter from the real number of running builds every minute. The load test is left for later (Franck, question 7); the cap starts at 15 and the admin can lower it on the day.
 
 Depends on: 3.2. Areas: launcher, builder, api, web, infra.
 
@@ -96,7 +96,6 @@ Acceptance criteria (each starts as FAIL):
 - WHEN a build ends live, failed or stuck THEN its slot is freed, and WHEN the counter is wrong THEN the minute check sets it to the number of builds in `building` or `deploying` (tests)
 - WHEN a participant's build is queued behind others THEN step 3 shows how many are ahead (Playwright, mocked API)
 - WHEN Bedrock throttles the coding agent THEN the build retries with backoff and does not fail before its 12-minute limit (test of the proxy)
-- WHEN `npm run eval -- load --builds 5` runs THEN it prints each build's time, cost and throttled calls (run once live, output in the pull request)
 
 ### 3.5 Global Stop
 
@@ -157,7 +156,7 @@ Acceptance criteria (each starts as FAIL):
 
 ### 3.9 Rebuild from the spec edited on GitHub
 
-For advanced participants: after editing `SPEC.md` in their repository, they press **Rebuild from my repository** on step 4. The platform reads `SPEC.md` from `main` (through the GitHub App), and if it differs from the stored spec, runs it through the guardrail and the readiness check and queues a change build that counts against the 5. See question 3 for the alternative, a GitHub webhook.
+For advanced participants: after editing `SPEC.md` in their repository, they press **Rebuild from my repository** on step 4. The platform reads `SPEC.md` from `main` (through the GitHub App), and if it differs from the stored spec, runs it through the guardrail and the readiness check and queues a change build that counts against the 5.
 
 Depends on: 3.6, 3.7. Areas: api, web.
 
@@ -170,7 +169,7 @@ Acceptance criteria (each starts as FAIL):
 
 ### 3.10 Facilitator API: dashboard data and actions
 
-`GET /api/facilitator/participants` answers one row per participant of the caller's scope (see question 1): nickname, group, step, time in step, build status, spend, changes used, paused, and the open flags with their text. Actions: Retry (a failed or stuck build is queued again, and the conversation's `updatedAt` moves so the page picks it up), Pause and Resume, Add budget ($2 a press), Approve and Reject a flag (replacing `npm run flags`), and reading a participant's conversation log. No answer holds an email address.
+`GET /api/facilitator/participants` answers one row per participant (every facilitator sees everyone, question 1): nickname, group, step, time in step, build status, spend, changes used, paused, and the open flags with their text. Actions: Retry (a failed or stuck build is queued again, and the conversation's `updatedAt` moves so the page picks it up), Pause and Resume, Add budget ($2 a press), Approve and Reject a flag (replacing `npm run flags`), and reading a participant's conversation log. No answer holds an email address.
 
 Depends on: 3.2, 3.4. Areas: api, infra.
 
@@ -178,7 +177,7 @@ Acceptance criteria (each starts as FAIL):
 
 - WHEN a facilitator asks for the list THEN each row has the fields above and no email or participant id appears in the answer (test)
 - WHEN a participant calls any facilitator route THEN the answer is 404 (test)
-- WHEN a facilitator acts on someone outside their scope THEN the answer is 404 and nothing changes (test; depends on question 1)
+- WHEN a facilitator or the admin acts on any participant THEN it works, and WHEN `?group=` is given THEN only that group's rows come back (test)
 - WHEN Retry is pressed on a build that is `building` for over 15 minutes THEN its task is stopped and a new build is queued on the same repository (test)
 - WHEN Approve is pressed on a flag THEN the held message or change continues exactly as `npm run flags -- approve` did, and Reject declines it (tests reusing the flags tests)
 - WHEN Pause is on THEN the participant's next message and build wait with the paused text, and Resume releases them (test)
@@ -186,7 +185,7 @@ Acceptance criteria (each starts as FAIL):
 
 ### 3.11 Facilitator dashboard page
 
-A page at `workshop.rankly.games/facilitator/`, for facilitators and the admin, polls the list every 5 seconds. Flags sit at the top as alerts with Approve and Reject; then one row per participant, with rows stuck over 15 minutes in Build or failed in red, and Retry, Pause or Resume, Add $2 and View conversation. Works on a phone, since facilitators walk around the room.
+A page at `workshop.rankly.games/facilitator/`, for facilitators and the admin, polls the list every 5 seconds. Flags sit at the top as alerts with Approve and Reject; then one row per participant, with rows stuck over 15 minutes in Build or failed in red, and Retry, Pause or Resume, Add $2 and View conversation. A group filter starts on the facilitator's own group and can show everyone. Works on a phone, since facilitators walk around the room.
 
 Depends on: 3.10. Areas: web.
 
@@ -210,7 +209,7 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the admin saves new caps THEN `PUT /api/admin/settings` is called with them (Playwright, mocked API)
 - WHEN Stop is pressed and confirmed THEN the page shows "Workshop paused" and a Resume button (Playwright)
 
-### 3.13 Cost and abuse safety nets (only if question 5 is yes)
+### 3.13 Cost and abuse safety nets
 
 An AWS WAF web ACL on the CloudFront distribution with one per-IP rate rule (for example 1,000 requests per 5 minutes on `/api/*`) and AWS Cost Anomaly Detection on the workshop's tag with an email to Franck, so a public-API abuse or a runaway build is cut off or noticed within hours. Both in CDK; the WAF ACL lives in `us-east-1`.
 
@@ -222,7 +221,7 @@ Acceptance criteria (each starts as FAIL):
 - WHEN one address sends more than the limit THEN it gets 403 until the window passes (live check in `infra/README.md`)
 - WHEN the synthesized stack is inspected THEN a cost anomaly monitor on `project=ssd-workshop` with a subscription to Franck's alert address exists (synth test; the address is a deploy setting, not in the repository)
 
-### 3.14 Auto-stop for build tasks outside the build subnets (only if question 6 is yes)
+### 3.14 Auto-stop for build tasks outside the build subnets
 
 An EventBridge rule on ECS task state changes in the builds cluster calls a small Lambda that stops any task not in the two build subnets, closing the narrowed risk 1 from 2.2 instead of relying on the CloudTrail check.
 
@@ -246,16 +245,16 @@ Acceptance criteria (each starts as FAIL):
 
 ## Questions for Franck
 
-1. **Who sees whom on the dashboard.** The spec says both "see their group's dashboard" (section 2) and "Global view" (section 4), and section 5 says "facilitators only see their own group". Suggested: global view for every facilitator, with a Group column and a filter that starts on their own group, so the three facilitators can cover for each other; this is a spec delta (CHANGED: section 2 facilitator row and section 5 "facilitators only see their own group" become "facilitators see every participant"). The alternative keeps each facilitator to their own group, and only the admin sees everyone.
-2. **The $5 budget counts builds too.** A first build now costs about $0.40 to $0.60 (thinking off), clarify and spec about $0.30 to $1, so a first build plus 5 changes fits in $5 for most people. Suggested: yes, all AI spend counts, checked before each AI call and before a build is queued; a running build always finishes.
-3. **Rebuild from GitHub: a button or a webhook.** Suggested: a **Rebuild from my repository** button on step 4 (no public webhook, no new secret, nothing for you to set up). Spec delta: CHANGED, section 3 step 4, "edit the spec file there to trigger a rebuild" becomes "edit the spec file there and press Rebuild from my repository". The alternative is a GitHub App webhook (a new public route with a signing secret you set in the App's settings) that rebuilds on every push to `SPEC.md`.
-4. **Allow-list management stays on your command line.** Spec section 2 says the admin manages the allow-list; an admin page would show participants' email addresses on a web page. Suggested: keep `npm run allowlist -- import` on your machine (emails never shown on a page), and put only caps and Stop on the admin page.
-5. **Safety nets before the dry-run (ticket 3.13), a new paid service.** AWS WAF with one rate rule costs about $6 to $8 a month; Cost Anomaly Detection is free. Suggested: yes, both (proposed as a follow-up in 2.4, not yet approved). Without it, the $20 Budgets alert stays the only safety net.
-6. **Auto-stop for tasks outside the build subnets (ticket 3.14).** About $0 (EventBridge and one Lambda), needs one access-stack update you apply. Suggested: yes.
-7. **Bedrock quota for 15 builds at once.** Sonnet 4.6 allows 50 requests a minute in this account; one coding agent sends roughly 15 to 30 a minute, so about 2 to 3 builds can run at full speed today. Suggested: ticket 3.4's load test (about $5 to $15 of Bedrock) measures it, then you request a raise of the Sonnet 4.6 EU requests-per-minute quota to the number it gives (I write the request text); until it is granted, builds at once starts at the measured safe number instead of 15, and the admin page can change it.
+1. **(Answered: yes, global view, spec delta approved.) Who sees whom on the dashboard.** The spec says both "see their group's dashboard" (section 2) and "Global view" (section 4), and section 5 says "facilitators only see their own group". Suggested: global view for every facilitator, with a Group column and a filter that starts on their own group, so the three facilitators can cover for each other; this is a spec delta (CHANGED: section 2 facilitator row and section 5 "facilitators only see their own group" become "facilitators see every participant"). The alternative keeps each facilitator to their own group, and only the admin sees everyone.
+2. **(Answered: yes.) The $5 budget counts builds too.** A first build now costs about $0.40 to $0.60 (thinking off), clarify and spec about $0.30 to $1, so a first build plus 5 changes fits in $5 for most people. Suggested: yes, all AI spend counts, checked before each AI call and before a build is queued; a running build always finishes.
+3. **(Answered: the button, spec delta approved.) Rebuild from GitHub: a button or a webhook.** Suggested: a **Rebuild from my repository** button on step 4 (no public webhook, no new secret, nothing for you to set up). Spec delta: CHANGED, section 3 step 4, "edit the spec file there to trigger a rebuild" becomes "edit the spec file there and press Rebuild from my repository". The alternative is a GitHub App webhook (a new public route with a signing secret you set in the App's settings) that rebuilds on every push to `SPEC.md`.
+4. **(Answered: yes.) Allow-list management stays on your command line.** Spec section 2 says the admin manages the allow-list; an admin page would show participants' email addresses on a web page. Suggested: keep `npm run allowlist -- import` on your machine (emails never shown on a page), and put only caps and Stop on the admin page.
+5. **(Answered: yes, both.) Safety nets before the dry-run (ticket 3.13), a new paid service.** AWS WAF with one rate rule costs about $6 to $8 a month; Cost Anomaly Detection is free. Suggested: yes, both (proposed as a follow-up in 2.4, not yet approved). Without it, the $20 Budgets alert stays the only safety net.
+6. **(Answered: yes.) Auto-stop for tasks outside the build subnets (ticket 3.14).** About $0 (EventBridge and one Lambda), needs one access-stack update you apply. Suggested: yes.
+7. **(Answered: no load test for now, maybe later.) Bedrock quota for 15 builds at once.** Sonnet 4.6 allows 50 requests a minute in this account; one coding agent sends roughly 15 to 30 a minute, so about 2 to 3 builds can run at full speed today. Suggested: ticket 3.4's load test (about $5 to $15 of Bedrock) measures it, then you request a raise of the Sonnet 4.6 EU requests-per-minute quota to the number it gives (I write the request text); until it is granted, builds at once starts at the measured safe number instead of 15, and the admin page can change it.
 
 ## Blocked
 
-- 3.13 waits on question 5, and 3.14 on question 6; each needs Franck to apply the access stack after its merge.
-- Running 15 builds at once on the workshop day waits on the Bedrock quota raise (question 7); everything else in this phase works with a lower cap.
+- 3.13 and 3.14 each need Franck to apply the access stack after their merge.
+- Running 15 builds at once on the workshop day likely needs a Bedrock requests-per-minute raise (question 7); the load test that would size it is deferred. Builds retry Bedrock throttling with backoff, and the admin can lower the cap.
 - Not in this phase: diagram-led explainer panels, intro pages, idea cards, removal workflow (phase 5), read-only app data after the workshop (phase 5), the advanced track (phase 4).

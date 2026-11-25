@@ -12,6 +12,18 @@ Choices made while building that the specification left open. Newest phase first
 - **Spec deltas:** a change to signed-off behaviour is recorded here as ADDED, CHANGED or REMOVED,
   with the date and the pull request.
 
+## Phase 3: iterate and supervise
+
+Franck's answers to the brief's questions (2026-11-25, `docs/phases/phase-3.md`, PR #49): all as suggested except the load test.
+
+- **Dashboard scope (spec delta, approved 2026-11-25):** every facilitator sees and acts on every participant; the dashboard has a Group column and a filter that starts on the facilitator's own group. CHANGED, section 2, facilitator row: "see their group's dashboard" becomes "see the dashboard of every participant (filtered to their own group by default)". CHANGED, section 5 Security: "facilitators only see their own group" becomes "facilitators see every participant, never their email addresses".
+- **Budget:** all AI spend counts toward the $5 (conversations and builds), checked before each AI call and before a build is queued; a running build always finishes.
+- **Rebuild from GitHub (spec delta, approved 2026-11-25):** CHANGED, section 3 step 4: "edit the spec file there to trigger a rebuild" becomes "edit the spec file there and press Rebuild from my repository". No webhook; the rebuild counts as a change request.
+- **Allow-list:** stays on Franck's command line (`npm run allowlist -- import`); the admin page holds only the caps and the global Stop, so no email address is shown on a page.
+- **Safety nets (new paid service, approved):** AWS WAF with one per-IP rate rule on `/api/*` (about $6 to $8 a month) and Cost Anomaly Detection on `project=ssd-workshop` (free), ticket 3.13.
+- **Auto-stop:** an EventBridge rule and Lambda stop any builds-cluster task outside the build subnets (about $0), ticket 3.14.
+- **Bedrock quota and load test:** no load test for now (Franck: "we'll see later"). Builds at once starts at 15, builds retry Bedrock throttling with backoff, and the admin can lower the cap on the day. The Sonnet 4.6 EU requests-per-minute raise stays open until a load test sizes it.
+
 ## Phase 2: build and go live
 
 - **(2.10) `GET /api/build` answer:** `{ buildId, status, feed, repositoryUrl, appUrl }`, plus `failureReasons` only when `failed` (as before). `feed` is the build's feed oldest first, only well-formed events (`readFeed` in `platform/api/conversation/store.ts`: a known step, a string path or host, a commit whose id is 40 hex characters; anything else is left out). `repositoryUrl` is `https://github.com/<APPS_GITHUB_OWNER>/<appRepositoryName(nickname)>` and `appUrl` `https://workshop.rankly.games/apps/<lower-cased nickname>/` (`appRepositoryUrl`, `appAddress` in `platform/api/settings.ts`, reusing the launcher's `appRepositoryName`; `SITE_DOMAIN` is checked against infra's `DOMAIN`), both left out when the stored nickname does not follow the nickname rules. No participant id, no email. The conversation role's `GetItem` on `BUILD#*` has no `dynamodb:Attributes` condition, so reading `nickname` and `feed` needs no infra change.
