@@ -426,11 +426,11 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     return [...this.conversations.entries()].filter(([, c]) => c.state === "waiting").map(([id]) => id);
   }
 
-  /** A participant with a nickname at the given step, signed in with the given token hash. */
-  addParticipant(id: string, nickname: string | undefined, tokenHash: string, expiresAt: number, step: Step = "clarify"): void {
+  /** A participant with a nickname at the given step, signed in with the given session token (and allow-listed). */
+  addParticipant(id: string, nickname: string | undefined, token: string, expiresAt: number, step: Step = "clarify"): void {
     this.profiles.set(id, { id, role: "participant", group: "blue", step, createdAt: "x", ...(nickname === undefined ? {} : { nickname }) });
     if (nickname !== undefined) this.nicknames.set(nickname.toLowerCase(), { nickname, participantId: id });
-    this.sessions.set(tokenHash, { participantId: id, expiresAt, createdAt: "x" });
+    this.addSession(token, id, expiresAt);
   }
 }
 

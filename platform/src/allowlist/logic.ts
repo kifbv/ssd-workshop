@@ -19,12 +19,22 @@ export const USAGE = `Usage: npm run -s allowlist -- <command>
 Commands:
   import </absolute/path/file.csv>   add or update the people in the file (header: email,group,role)
   list                               print how many people are allow-listed, per group and role
+  remove <email> [--yes]             say whether this address has an entry; with --yes, remove it
+                                     (the person is signed out at their next call)
 
 Give the CSV file as an absolute path, outside this repository and any other git work tree.
 The command prints counts, never addresses.
-Run it with your own AWS credentials (dynamodb:UpdateItem and dynamodb:Scan on ${TABLE_NAME}).`;
+Run it with your own AWS credentials (dynamodb:UpdateItem, dynamodb:Scan, dynamodb:GetItem and
+dynamodb:DeleteItem on ${TABLE_NAME}).`;
 
-export type AllowlistCommand = { command: "import"; file: string } | { command: "list" };
+export type AllowlistCommand =
+  | { command: "import"; file: string }
+  | { command: "list" }
+  /** `email` is normalized (trimmed, lower-cased) and valid; `confirmed` is true with `--yes`. */
+  | { command: "remove"; email: string; confirmed: boolean };
+
+/** The confirmation flag of `remove`: without it the command only looks. */
+export const CONFIRM_FLAG = "--yes";
 
 export function parseArgs(args: readonly string[]): AllowlistCommand | { error: string } {
   const [command, ...rest] = args;
@@ -37,10 +47,40 @@ export function parseArgs(args: readonly string[]): AllowlistCommand | { error: 
     }
     case "list":
       return rest.length === 0 ? { command: "list" } : { error: "list takes no arguments" };
+    case "remove":
+      return parseRemove(rest);
     case undefined:
       return { error: "no command given" };
     default:
       return { error: "unknown command" };
+  }
+}
+
+/**
+ * `remove <email> [--yes]`, the flag before or after the address. Refusals never repeat what was typed,
+ * so a mistyped address is not printed either.
+ */
+function parseRemove(rest: readonly string[]): AllowlistCommand | { error: string } {
+  const confirmed = rest.includes(CONFIRM_FLAG);
+  const others = rest.filter((arg) => arg !== CONFIRM_FLAG);
+  if (rest.length - others.length > 1) return { error: `remove takes ${CONFIRM_FLAG} once` };
+  const [raw, ...extra] = others;
+  if (raw === undefined || raw.trim() === "") return { error: "remove needs an email address" };
+  if (extra.length > 0) return { error: `remove takes one email address and optionally ${CONFIRM_FLAG}` };
+  const email = raw.trim().toLowerCase();
+  if (!isValidEmail(email)) return { error: "remove needs a valid email address" };
+  return { command: "remove", email: normalizeEmail(email), confirmed };
+}
+
+/** What `remove` prints: about "this address" only, never the address or anyone else's. */
+export function formatRemoveReport(result: "found" | "absent" | "removed"): string {
+  switch (result) {
+    case "found":
+      return `This address has an allow-list entry. Nothing was changed: run again with ${CONFIRM_FLAG} to remove it.`;
+    case "absent":
+      return "This address has no allow-list entry. Nothing was changed.";
+    case "removed":
+      return "Removed the allow-list entry for this address. Their sessions end at their next call; their profile and app are kept.";
   }
 }
 

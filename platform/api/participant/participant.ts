@@ -1,6 +1,7 @@
 // The protected participant routes (ticket 1.5): `GET /api/me`, `POST /api/me/nickname` and
-// `GET /api/participants/{id}`. Every one starts with the one session check (../session/session.ts)
-// and works only on the caller's own record: facilitator views of others come in phase 3.
+// `GET /api/participants/{id}`, and `POST /api/sign-out` (ticket 3.1). Every one starts with the one
+// session check (../session/session.ts) and works only on the caller's own record: facilitator views
+// of others come in phase 3.
 import {
   isJsonContentType,
   jsonResponse,
@@ -9,13 +10,14 @@ import {
   type HttpRequest,
   type HttpResponse,
 } from "../http.js";
-import { requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
+import { clearedSessionCookie, requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
 import { errorName } from "../sign-in/code-request.js";
 
 export const ME_ROUTE = "GET /api/me";
 export const NICKNAME_ROUTE = "POST /api/me/nickname";
 export const PARTICIPANT_ROUTE = "GET /api/participants/{id}";
-export const PARTICIPANT_ROUTES = [ME_ROUTE, NICKNAME_ROUTE, PARTICIPANT_ROUTE] as const;
+export const SIGN_OUT_ROUTE = "POST /api/sign-out";
+export const PARTICIPANT_ROUTES = [ME_ROUTE, NICKNAME_ROUTE, PARTICIPANT_ROUTE, SIGN_OUT_ROUTE] as const;
 
 /** 3 to 20 letters, digits or dashes (ASCII). */
 export const NICKNAME_PATTERN = /^[A-Za-z0-9-]{3,20}$/;
@@ -65,6 +67,7 @@ export function checkNickname(nickname: string): NicknameCheck {
 
 export const NOT_FOUND_MESSAGE = "Not found.";
 export const FAILED_MESSAGE = "Something went wrong. Please try again in a moment.";
+export const SIGNED_OUT_MESSAGE = "You're signed out.";
 export const BAD_NICKNAME_REQUEST_MESSAGE = "Send a JSON body with a nickname.";
 export const NICKNAME_MESSAGES = {
   rules: "A nickname has 3 to 20 letters, digits or dashes.",
@@ -84,10 +87,13 @@ export interface ParticipantStore extends SessionReader {
   claimNickname(participantId: string, nickname: string, nowIso: string): Promise<ClaimResult>;
 }
 
-export type ParticipantRoute = "me" | "nickname" | "participant" | "unknown";
+export type ParticipantRoute = "me" | "nickname" | "participant" | "sign-out" | "unknown";
 export type ParticipantOutcome =
   | "ok"
+  | "signed-out"
   | "unauthorized"
+  /** Refused because the person's allow-list entry is gone: their session was deleted (ticket 3.1). */
+  | "removed"
   | "not-found"
   | "rules"
   | "reserved"
@@ -128,6 +134,8 @@ function routeOf(request: HttpRequest): ParticipantRoute {
       return "nickname";
     case PARTICIPANT_ROUTE:
       return "participant";
+    case SIGN_OUT_ROUTE:
+      return "sign-out";
     default:
       return "unknown";
   }
@@ -154,21 +162,37 @@ async function setNickname(
   return { outcome: "ok", response: jsonResponse(200, recordBody({ ...participant, nickname: trimmed, step: "clarify" })) };
 }
 
-async function route(request: HttpRequest, deps: ParticipantDeps, which: ParticipantRoute) {
+/** The answer to `POST /api/sign-out` also clears the cookie, whatever it is (the browser drops it). */
+function withClearedCookie(response: HttpResponse): HttpResponse {
+  return { ...response, cookies: [clearedSessionCookie()] };
+}
+
+async function route(
+  request: HttpRequest,
+  deps: ParticipantDeps,
+  which: ParticipantRoute,
+): Promise<{ outcome: ParticipantOutcome; response: HttpResponse }> {
   const session = await requireSession(request, { sessions: deps.store, now: deps.now });
-  if (!session.ok) return { outcome: "unauthorized" as const, response: session.response };
+  if (!session.ok) {
+    const outcome = session.reason === "removed" ? "removed" : "unauthorized";
+    return { outcome, response: which === "sign-out" ? withClearedCookie(session.response) : session.response };
+  }
   const { participant } = session;
   switch (which) {
+    case "sign-out":
+      if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+      await deps.store.deleteSession(session.tokenHash);
+      return { outcome: "signed-out", response: withClearedCookie(jsonResponse(200, { message: SIGNED_OUT_MESSAGE })) };
     case "me":
-      return { outcome: "ok" as const, response: jsonResponse(200, recordBody(participant)) };
+      return { outcome: "ok", response: jsonResponse(200, recordBody(participant)) };
     case "participant":
       // Only the caller's own id: any other id, existing or not, gets the same 404 (no read).
-      if (request.pathParameters?.["id"] !== participant.id) return { outcome: "not-found" as const, response: notFoundResponse() };
-      return { outcome: "ok" as const, response: jsonResponse(200, recordBody(participant)) };
+      if (request.pathParameters?.["id"] !== participant.id) return { outcome: "not-found", response: notFoundResponse() };
+      return { outcome: "ok", response: jsonResponse(200, recordBody(participant)) };
     case "nickname":
       return setNickname(request, participant, deps);
     default:
-      return { outcome: "not-found" as const, response: notFoundResponse() };
+      return { outcome: "not-found", response: notFoundResponse() };
   }
 }
 

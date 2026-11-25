@@ -162,11 +162,13 @@ describe("sign-in screens (ticket 1.6)", () => {
     await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe("email-input");
     await askForCode(EMAIL);
 
-    // Code screen: neutral message, Junk-folder hint and resend link (criterion 2).
+    // Code screen: neutral message, Junk-folder hint (ticket 3.1 criterion 4) and resend link (criterion 2).
     await expect.poll(() => screen("code").isVisible()).toBe(true);
     expect(await screen("email").isVisible()).toBe(false);
     expect(await page.locator("#message-code").textContent()).toBe(MESSAGES.neutral);
-    expect(await page.getByText("Not in your inbox? Check your Junk folder.").isVisible()).toBe(true);
+    expect(await page.getByText("No code after a minute? Check your Junk or Spam folder.").isVisible()).toBe(true);
+    // No Sign out link before signing in.
+    expect(await page.locator("#account").isVisible()).toBe(false);
     expect(await page.getByRole("button", { name: "Send me a new code" }).isVisible()).toBe(true);
     expect(await page.getByRole("button", { name: "Use a different email" }).isVisible()).toBe(true);
     await expectNoSideScroll();
@@ -211,6 +213,72 @@ describe("sign-in screens (ticket 1.6)", () => {
     expect(page.url()).not.toContain("ada");
     expect(await page.evaluate(() => [localStorage.length, sessionStorage.length, document.cookie])).toEqual([0, 0, ""]);
     expect(await page.locator("#email-input").inputValue()).toBe("");
+  }, 30_000);
+
+  it("ticket 3.1 criterion 4: WHEN the sign-in screen asks for a code THEN it shows the Junk hint, at 375 px", async () => {
+    await mockApi(fakeApi());
+    await page.goto(origin);
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+    await askForCode(EMAIL);
+    await expect.poll(() => screen("code").isVisible()).toBe(true);
+    const hint = page.locator("#screen-code .hint");
+    expect(await hint.textContent()).toBe("No code after a minute? Check your Junk or Spam folder.");
+    expect(await hint.isVisible()).toBe(true);
+    const box = await hint.boundingBox();
+    expect(box !== null && box.x >= 0 && box.x + box.width <= PHONE.width).toBe(true);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("ticket 3.1: shows a small Sign out link once signed in; it signs out, stops polling and goes back to the email screen", async () => {
+    let signedIn = true;
+    const calls = await mockApi({
+      ...fakeApi(),
+      "GET /api/me": () =>
+        signedIn
+          ? { status: 200, body: { id: "p-1", nickname: "ada-l", role: "participant", group: "g1", step: "clarify" } }
+          : { status: 401, body: { message: "Please sign in." } },
+      "GET /api/conversation": () => (signedIn ? { status: 200, body: { step: "clarify", state: "open", messages: [] } } : { status: 401, body: {} }),
+      "POST /api/sign-out": () => {
+        const was = signedIn;
+        signedIn = false;
+        return was ? { status: 200, body: { message: "You're signed out." } } : { status: 401, body: { message: "Please sign in." } };
+      },
+    });
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    const link = page.getByRole("button", { name: "Sign out" });
+    expect(await link.isVisible()).toBe(true);
+    await expectNoSideScroll();
+
+    await link.click();
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+    expect(await page.locator("#message-email").textContent()).toBe("You're signed out.");
+    expect(await page.locator("#account").isVisible()).toBe(false);
+    const signOuts = calls.filter((c) => c.path === "/api/sign-out");
+    expect(signOuts.map((c) => [c.method, c.contentType, c.body])).toEqual([["POST", "application/json", {}]]);
+    // Nothing is asked of the API after signing out (no polling left running).
+    const after = calls.length;
+    await page.waitForTimeout(2500);
+    expect(calls.length).toBe(after);
+    await expectNoSideScroll();
+
+    // A reload stays signed out.
+    await page.reload();
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+  }, 30_000);
+
+  it("ticket 3.1: keeps the person on their step and says why when sign-out cannot reach the API", async () => {
+    await mockApi({
+      ...fakeApi(),
+      "GET /api/me": () => ({ status: 200, body: { id: "p-1", nickname: "ada-l", role: "participant", group: "g1", step: "clarify" } }),
+      "GET /api/conversation": () => ({ status: 200, body: { step: "clarify", state: "open", messages: [] } }),
+      "POST /api/sign-out": () => ({ status: 500, body: { message: "Something went wrong. Please try again in a moment." } }),
+    });
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect.poll(() => page.locator("#message-step").textContent()).toBe(MESSAGES.failed);
+    expect(await screen("step").isVisible()).toBe(true);
   }, 30_000);
 
   it("shows the same neutral message for an address that is not on the list (criterion 6)", async () => {

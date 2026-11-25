@@ -10,7 +10,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v2` (v1 retained until Franck deletes it, ticket 2.14) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
-| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check, own record, nickname) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push), GitHub App secret `ssd-workshop-github` (ticket 2.6), FIFO launch queue `ssd-workshop-builds.fifo` and its dead-letter queue (ticket 2.7; the AI worker is its only sender, the launcher its consumer), from ticket 2.9 the builder task definition `ssd-workshop-builder` (image by digest, logs `/ecs/ssd-workshop-builder`), the launcher Lambda `ssd-workshop-builds-launcher`, the check queue and schedule `ssd-workshop-builds-check`; see "Build network (ticket 2.1)" and "Builds: builder task and launcher (ticket 2.9)" | `CliCredentialsStackSynthesizer`, assets bucket (from ticket 2.9) |
 
@@ -587,6 +587,63 @@ curl -sS -I https://workshop.rankly.games/apps/<nickname>/ | grep -i '^content-s
 Then (Franck, on a phone): build an app whose spec reads an outside service (for example the readiness eval's
 "movie watchlist with posters from Wikipedia" example) and open it at `/apps/<nickname>/`. Expect: the posters and
 summaries show; with the phone offline (or the service down) the page shows its friendly message instead.
+
+## Check after the sign-out deploy (ticket 3.1)
+
+```mermaid
+flowchart LR
+  cookie[Session cookie] --> check[Session check]
+  check -->|reads| entry[Allow-list entry]
+  entry -->|there| ok[200, role and group from the entry]
+  entry -->|gone| out[401, session deleted]
+  signout[Sign out] -->|deletes session, clears cookie| out
+```
+
+Run by Franck on his own machine: the sign-in steps send his address and a code, and the removal step reads and
+deletes a table item, so it runs as `AWS_PROFILE=franck` (Claude sessions are read-only and never run it). Use a
+test address of his own that is on the allow-list and that he may take off and put back.
+
+1. On a phone, open https://workshop.rankly.games/, sign in, and press **Sign out** (under the title, on the right).
+   Expect the email screen with "You're signed out."; reloading the page stays on the email screen. The code screen
+   shows "No code after a minute? Check your Junk or Spam folder."
+2. The same with `curl`, signed in as in the 1.5 check (same `JAR` cookie jar and `verify` function), to see the
+   answers:
+
+```sh
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"id":"...","role":"<role from the allow-list>","group":"<group>",...} and 200
+cp "$JAR" "$JAR.old"   # keep the old cookie to try it after signing out
+curl -sS -b "$JAR" -c "$JAR" -H 'content-type: application/json' --data '{}' \
+  -w '\n%{http_code}\n' https://workshop.rankly.games/api/sign-out
+# expect: {"message":"You're signed out."} and 200
+curl -sS -b "$JAR.old" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"message":"Please sign in."} and 401 (the old cookie no longer opens a session)
+rm -f "$JAR.old"
+```
+
+3. Removal: sign in again (`verify` after a new code), then take the test address off the list. The command asks for
+   the address and prints only "this address", never an address; without `--yes` it only looks.
+
+```sh
+verify
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: 200
+AWS_PROFILE=franck npm run -s allowlist -- remove "$ADDRESS"
+# expect: "This address has an allow-list entry. Nothing was changed: run again with --yes to remove it."
+AWS_PROFILE=franck npm run -s allowlist -- remove "$ADDRESS" --yes
+# expect: "Removed the allow-list entry for this address. ..."
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/me
+# expect: {"message":"Please sign in."} and 401 (signed out at this call; the session item is deleted)
+curl -sS -b "$JAR" -w '\n%{http_code}\n' https://workshop.rankly.games/api/conversation
+# expect: {"message":"Please sign in."} and 401
+rm -f "$JAR"
+```
+
+Put the address back with `AWS_PROFILE=franck npm run -s allowlist -- import /absolute/path/outside/the/repo.csv`.
+Re-adding creates a new entry without a participant link, so the next sign-in starts a new participant (nickname
+screen); the old profile and app stay in the table (decision "(3.1) Removal command"). The log groups
+`ssd-workshop-api-participant` and `ssd-workshop-api-conversation` show `"outcome":"signed-out"`, `"removed"` and
+`"unauthorized"` lines and never an address.
 
 ## Build network (ticket 2.1)
 

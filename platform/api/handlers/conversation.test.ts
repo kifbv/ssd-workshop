@@ -39,7 +39,7 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
 
   it("logs one JSON line per request and job, never the text, the prompt, the reply, an id, the nickname or the token", async () => {
     const table = new FakeConversationTable();
-    table.addParticipant("p-secret-id", "Zephyrine-77", hashToken(TOKEN), NOW.getTime() / 1000 + 3600);
+    table.addParticipant("p-secret-id", "Zephyrine-77", TOKEN, NOW.getTime() / 1000 + 3600);
     const queue = new FakeQueue();
     const model = new FakeModel();
     let clock = NOW;

@@ -7,7 +7,7 @@ import { CLARIFY_SYSTEM_PROMPT } from "../../api/conversation/answer.js";
 import { DEFAULT_SUGGESTION } from "../../api/conversation/guardrail.js";
 import { processJob } from "../../api/conversation/worker.js";
 import type { HttpRequest } from "../../api/http.js";
-import { hashToken, SESSION_COOKIE } from "../../api/session/session.js";
+import { SESSION_COOKIE } from "../../api/session/session.js";
 import { MODEL_ID } from "../../api/settings.js";
 import { parseFlagsArgs, runFlags, terminalSafe, type FlagsDeps } from "./command.js";
 import { DynamoFlagsStore, type FlagsSender } from "./store.js";
@@ -19,8 +19,8 @@ const TEXT = "An app that tells my colleagues which pills to take";
 
 async function setupFlagged() {
   const table = new FakeConversationTable();
-  table.addParticipant("p-ada", "Ada", hashToken(TOKEN), NOW.getTime() / 1000 + 3600);
-  table.addParticipant("p-bob", "Bob", hashToken(OTHER), NOW.getTime() / 1000 + 3600);
+  table.addParticipant("p-ada", "Ada", TOKEN, NOW.getTime() / 1000 + 3600);
+  table.addParticipant("p-bob", "Bob", OTHER, NOW.getTime() / 1000 + 3600);
   const queue = new FakeQueue();
   const model = new FakeModel();
   let clock = NOW;

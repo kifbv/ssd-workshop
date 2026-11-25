@@ -40,6 +40,8 @@ export const MESSAGES = {
   wrongCode: "That code is not right or has expired. Ask for a new one.",
   checking: "Checking your code. This takes a few seconds.",
   signedOut: "Please sign in again.",
+  /** After Sign out (ticket 3.1). */
+  signOutDone: "You're signed out.",
   nicknameRules: "A nickname has 3 to 20 letters, digits or dashes.",
 } as const;
 
@@ -114,6 +116,15 @@ export function nicknameResult(
   if (answer.status === 409 && reasonOf(answer.body) === "already-set") return { kind: "refresh" };
   if (answer.status === 400 || answer.status === 409) return show(messageOf(answer.body) ?? MESSAGES.nicknameRules);
   if (answer.status === 401) return { kind: "signed-out" };
+  return common(answer);
+}
+
+/**
+ * `POST /api/sign-out` (ticket 3.1): 200 ends the session; 401 means there was none left (already signed out
+ * or taken off the list), which is signed out too. Anything else keeps the person where they are.
+ */
+export function signOutResult(answer: ApiAnswer): { kind: "signed-out" } | Show {
+  if (answer.status === 200 || answer.status === 401) return { kind: "signed-out" };
   return common(answer);
 }
 

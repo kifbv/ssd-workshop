@@ -16,6 +16,10 @@
       <header>
         <!-- The deploy smoke check looks for this heading on the live page. -->
         <h1>SSD Workshop</h1>
+        <!-- Ticket 3.1: shown once signed in. -->
+        <p id="account" class="account" hidden>
+          <button id="sign-out-button" type="button" class="link" data-busy-label="Signing out…">Sign out</button>
+        </p>
       </header>
 
       <!-- Every screen starts hidden; app.js shows one. Without JavaScript only the notice shows. -->
@@ -44,7 +48,7 @@
           <input id="code-input" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" required />
           <button type="submit" data-busy-label="Checking…">Sign in</button>
         </form>
-        <p class="hint">Not in your inbox? Check your Junk folder.</p>
+        <p class="hint">No code after a minute? Check your Junk or Spam folder.</p>
         <p class="links">
           <button id="resend-button" type="button" class="link" data-busy-label="Sending a new code…">Send me a new code</button>
           <button id="other-email-button" type="button" class="link">Use a different email</button>

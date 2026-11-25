@@ -16,7 +16,7 @@ import {
   type HttpResponse,
 } from "../http.js";
 import { newParticipantId } from "../keys.js";
-import { hashToken, newSessionToken, sessionCookie, SESSION_TTL_SECONDS } from "../session/session.js";
+import { hashToken, newSessionToken, sealAllowRef, sessionCookie, SESSION_TTL_SECONDS } from "../session/session.js";
 import type { Role, Step } from "../types.js";
 import { ANSWER_AFTER_MS, errorName, liveCodes, parseEmailField, verifyAnyCode, type StoredCodes } from "./code-request.js";
 
@@ -74,7 +74,8 @@ export interface VerifyStore {
    * one; returns the participant's step.
    */
   upsertProfile(participantId: string, role: Role, group: string, nowIso: string): Promise<Step>;
-  putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number): Promise<void>;
+  /** `allowRef`: the address sealed under the session's token, so the session check can re-read the entry (ticket 3.1). */
+  putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number, allowRef: string): Promise<void>;
 }
 
 export type VerifyOutcome =
@@ -191,7 +192,8 @@ async function signIn(email: string, code: string, deps: VerifyDeps, progress: P
 
     progress.step = "session";
     const token = newSessionToken(deps.randomBytes);
-    await deps.store.putSession(hashToken(token), participantId, now.toISOString(), nowSeconds + SESSION_TTL_SECONDS);
+    const allowRef = sealAllowRef(token, email, deps.randomBytes);
+    await deps.store.putSession(hashToken(token), participantId, now.toISOString(), nowSeconds + SESSION_TTL_SECONDS, allowRef);
     log({ event: "sign-in-verify", outcome: "signed-in" });
     return { next: step, cookie: sessionCookie(token) };
   } catch (error) {

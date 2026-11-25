@@ -1,6 +1,6 @@
 // Sessions (ticket 1.5): the cookie, its token, and the one session check every protected route
 // calls. The token lives only in the browser's HttpOnly cookie; the table keeps its SHA-256 hash.
-import { createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, hkdfSync } from "node:crypto";
 import { jsonResponse, type HttpRequest, type HttpResponse } from "../http.js";
 import type { Role, Step } from "../types.js";
 
@@ -44,6 +44,52 @@ export function sessionCookie(token: string): string {
   return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_SECONDS}`;
 }
 
+/**
+ * The `Set-Cookie` value that ends a session (ticket 3.1): same name and attributes, empty, expired
+ * at once, so the browser drops it.
+ */
+export function clearedSessionCookie(): string {
+  return `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+}
+
+/**
+ * The link from a session to its allow-list entry (ticket 3.1). The entry's key holds the email
+ * address and nothing else points from a participant to it, so the session item keeps the address
+ * sealed (AES-256-GCM) under a key derived from the session token, which only the browser's cookie
+ * holds (the table keeps the token's SHA-256). The table alone cannot open it; the session check opens
+ * it with the caller's cookie, re-reads the entry and forgets the address. Never logged.
+ */
+const SEAL_INFO = "ssd-workshop session allow-list link v1";
+const SEAL_IV_BYTES = 12;
+const SEAL_TAG_BYTES = 16;
+
+function sealKey(token: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", Buffer.from(token, "utf8"), Buffer.alloc(0), SEAL_INFO, 32));
+}
+
+/** The sealed address for a new session: base64url of IV, ciphertext and tag. */
+export function sealAllowRef(token: string, email: string, randomBytes: (size: number) => Buffer): string {
+  const iv = randomBytes(SEAL_IV_BYTES);
+  if (iv.length !== SEAL_IV_BYTES) throw new Error("random source gave the wrong length");
+  const cipher = createCipheriv("aes-256-gcm", sealKey(token), iv);
+  const sealed = Buffer.concat([cipher.update(email, "utf8"), cipher.final()]);
+  return Buffer.concat([iv, sealed, cipher.getAuthTag()]).toString("base64url");
+}
+
+/** The address sealed for this token, or undefined when the value is missing, malformed or another token's. */
+export function openAllowRef(token: string, allowRef: string | undefined): string | undefined {
+  if (allowRef === undefined) return undefined;
+  const raw = Buffer.from(allowRef, "base64url");
+  if (raw.length <= SEAL_IV_BYTES + SEAL_TAG_BYTES) return undefined;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", sealKey(token), raw.subarray(0, SEAL_IV_BYTES));
+    decipher.setAuthTag(raw.subarray(raw.length - SEAL_TAG_BYTES));
+    return Buffer.concat([decipher.update(raw.subarray(SEAL_IV_BYTES, raw.length - SEAL_TAG_BYTES)), decipher.final()]).toString("utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /** The session token from the request's cookies, if one is there and well formed. */
 export function readSessionToken(request: HttpRequest): string | undefined {
   const prefix = `${SESSION_COOKIE}=`;
@@ -70,12 +116,25 @@ export interface StoredSession {
   participantId: string;
   /** Epoch seconds. */
   expiresAt: number;
+  /** The allow-list entry's address, sealed under the token (`sealAllowRef`); missing on sessions from before ticket 3.1. */
+  allowRef?: string;
+}
+
+/** What the session check reads from an allow-list entry (never the address). */
+export interface SessionAllowEntry {
+  role: Role;
+  group: string;
+  participantId?: string;
 }
 
 /** What the session check needs from the table. */
 export interface SessionReader {
   getSession(tokenHash: string): Promise<StoredSession | undefined>;
+  /** The allow-list entry of this address (consistent read), or undefined when it is gone or malformed. */
+  getAllowEntry(email: string): Promise<SessionAllowEntry | undefined>;
   getParticipant(participantId: string): Promise<ParticipantRecord | undefined>;
+  /** Deletes the session item (no error when it is already gone). */
+  deleteSession(tokenHash: string): Promise<void>;
 }
 
 export interface SessionDeps {
@@ -83,27 +142,51 @@ export interface SessionDeps {
   now: () => Date;
 }
 
+/**
+ * Why a call was refused: `no-session` (no cookie, a malformed, unknown or expired token, or no
+ * profile) or `removed` (the person's allow-list entry is gone or no longer theirs: the session was deleted).
+ */
+export type SessionRefusal = "no-session" | "removed";
+
 export type SessionCheck =
-  | { ok: true; participant: ParticipantRecord; role: Role }
-  | { ok: false; response: HttpResponse };
+  | { ok: true; participant: ParticipantRecord; role: Role; tokenHash: string }
+  | { ok: false; response: HttpResponse; reason: SessionRefusal };
 
 export function signInRequiredResponse(): HttpResponse {
   return jsonResponse(401, { message: SIGN_IN_REQUIRED_MESSAGE });
 }
 
 /**
- * The one session check of every protected route: the caller's own participant record and role,
- * or a 401 for no cookie, a malformed or unknown (forged) token, an expired session (DynamoDB's
- * TTL deletes late, so the clock decides) or a session whose participant is gone. Table errors
- * are thrown to the caller (a failure is not a reason to sign someone out).
+ * The one session check of every protected route: the caller's own participant record, with role
+ * and group as the allow-list has them now (ticket 3.1), or a 401 for no cookie, a malformed or unknown
+ * (forged) token, an expired session (DynamoDB's TTL deletes late, so the clock decides) or a session
+ * whose participant is gone (that session is deleted too). A session whose allow-list entry is gone, or no longer linked to its
+ * participant (or that has no sealed link, from before ticket 3.1), is deleted and answered 401: a
+ * removed person is signed out at their next call. Table errors are thrown to the caller (a failure
+ * is not a reason to sign someone out). The address is never logged or returned.
  */
 export async function requireSession(request: HttpRequest, deps: SessionDeps): Promise<SessionCheck> {
+  const refused = (reason: SessionRefusal): SessionCheck => ({ ok: false, response: signInRequiredResponse(), reason });
   const token = readSessionToken(request);
-  if (token === undefined) return { ok: false, response: signInRequiredResponse() };
-  const session = await deps.sessions.getSession(hashToken(token));
+  if (token === undefined) return refused("no-session");
+  const tokenHash = hashToken(token);
+  const session = await deps.sessions.getSession(tokenHash);
   const nowSeconds = Math.floor(deps.now().getTime() / 1000);
-  if (session === undefined || !(session.expiresAt > nowSeconds)) return { ok: false, response: signInRequiredResponse() };
-  const participant = await deps.sessions.getParticipant(session.participantId);
-  if (participant === undefined) return { ok: false, response: signInRequiredResponse() };
-  return { ok: true, participant, role: participant.role };
+  if (session === undefined || !(session.expiresAt > nowSeconds)) return refused("no-session");
+  const email = openAllowRef(token, session.allowRef);
+  const [entry, participant] = await Promise.all([
+    email === undefined ? Promise.resolve(undefined) : deps.sessions.getAllowEntry(email),
+    deps.sessions.getParticipant(session.participantId),
+  ]);
+  if (entry === undefined || entry.participantId !== session.participantId) {
+    await deps.sessions.deleteSession(tokenHash);
+    return refused("removed");
+  }
+  if (participant === undefined) {
+    // No profile behind a valid entry: nothing can use this session, so it is not left behind (try 2).
+    await deps.sessions.deleteSession(tokenHash);
+    return refused("no-session");
+  }
+  const current = { ...participant, role: entry.role, group: entry.group };
+  return { ok: true, participant: current, role: entry.role, tokenHash };
 }

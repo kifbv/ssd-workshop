@@ -26,6 +26,14 @@ class FakeStore implements AllowListStore {
   async listAll(): Promise<GroupRole[]> {
     return [...this.items.values()].map(({ group, role }) => ({ group, role }));
   }
+
+  async exists(email: string): Promise<boolean> {
+    return this.items.has(email);
+  }
+
+  async remove(email: string): Promise<boolean> {
+    return this.items.delete(email);
+  }
 }
 
 const repoRoot = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
@@ -168,6 +176,8 @@ describe("allowlist import", () => {
         return "added";
       },
       listAll: async () => [],
+      exists: async () => false,
+      remove: async () => false,
     };
     expect(await runAllowlist(["import", join(dir, "people.csv")], deps({ createStore: () => failing }))).toBe(1);
     expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 0\nRejected: 0");
@@ -296,9 +306,79 @@ describe("allowlist path refusal", () => {
   });
 });
 
+describe("allowlist remove (ticket 3.1)", () => {
+  const JANE = "jane.doe@example.com";
+  const BOB = "bob@example.org";
+  function listed(): void {
+    for (const email of [JANE, BOB]) store.items.set(email, { email, group: "alpha", role: "participant", createdAt: "t", participantId: "p" });
+  }
+
+  it("without --yes only says whether the address has an entry, changes nothing and prints no address", async () => {
+    listed();
+    expect(await runAllowlist(["remove", "  Jane.Doe@Example.COM "], deps())).toBe(0);
+    expect(stdout).toEqual(["This address has an allow-list entry. Nothing was changed: run again with --yes to remove it."]);
+    expect(await runAllowlist(["remove", "carol@example.com"], deps())).toBe(0);
+    expect(stdout[1]).toBe("This address has no allow-list entry. Nothing was changed.");
+    expect([...store.items.keys()].sort()).toEqual([BOB, JANE]);
+    expect(output()).not.toContain("@");
+  });
+
+  it("criterion 1: with --yes deletes that one entry (normalized address), before or after the address, and prints no address", async () => {
+    listed();
+    expect(await runAllowlist(["remove", "Jane.Doe@Example.COM", "--yes"], deps())).toBe(0);
+    expect(stdout).toEqual([
+      "Removed the allow-list entry for this address. Their sessions end at their next call; their profile and app are kept.",
+    ]);
+    expect([...store.items.keys()]).toEqual([BOB]);
+    // Again: there is nothing left to remove.
+    expect(await runAllowlist(["remove", "--yes", JANE], deps())).toBe(0);
+    expect(stdout[1]).toBe("This address has no allow-list entry. Nothing was changed.");
+    expect([...store.items.keys()]).toEqual([BOB]);
+    expect(output()).not.toContain("@");
+  });
+
+  it("refuses a missing, invalid or extra argument before any AWS call, without repeating what was typed", async () => {
+    for (const args of [
+      ["remove"],
+      ["remove", "--yes"],
+      ["remove", "not-an-address"],
+      ["remove", "ja#ne@example.com"],
+      ["remove", JANE, BOB],
+      ["remove", JANE, "--yes", "--yes"],
+      ["remove", JANE, "--force"],
+    ]) {
+      expect(await runAllowlist(args, deps()), args.join(" ")).toBe(1);
+    }
+    expect(storesCreated).toBe(0);
+    expect(stdout).toEqual([]);
+    const text = output();
+    for (const typed of ["@", "not-an-address", "ja#ne", "--force"]) expect(text, typed).not.toContain(typed);
+  });
+
+  it("prints a store error redacted and exits 1", async () => {
+    const failing: AllowListStore = {
+      upsert: async () => "added",
+      listAll: async () => [],
+      exists: async (email) => {
+        throw new Error(`AccessDenied on EMAIL#${email}`);
+      },
+      remove: async (email) => {
+        throw new Error(`AccessDenied on EMAIL#${email}`);
+      },
+    };
+    expect(await runAllowlist(["remove", JANE], deps({ createStore: () => failing }))).toBe(1);
+    expect(await runAllowlist(["remove", JANE, "--yes"], deps({ createStore: () => failing }))).toBe(1);
+    expect(stderr).toEqual([
+      "Allow-list remove failed: Error: AccessDenied on E***@e***.com",
+      "Allow-list remove failed: Error: AccessDenied on E***@e***.com",
+    ]);
+    expect(output()).not.toContain(JANE);
+  });
+});
+
 describe("allowlist usage", () => {
   it("prints usage and exits 1 on an unknown command, before any AWS call", async () => {
-    expect(await runAllowlist(["remove"], deps())).toBe(1);
+    expect(await runAllowlist(["delete"], deps())).toBe(1);
     expect(stderr[0]).toMatch(/^unknown command\n\nUsage: npm run -s allowlist -- <command>/);
     expect(storesCreated).toBe(0);
   });

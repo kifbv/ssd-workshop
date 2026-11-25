@@ -3,7 +3,8 @@
 // same conditions as the DynamoDB adapters: an atomic wrong-try count, versioned code deletes, a link only when none exists,
 // and the nickname claim and profile update as one all-or-nothing step.
 import type { ClaimResult, ParticipantStore } from "./participant/participant.js";
-import type { ParticipantRecord, StoredSession } from "./session/session.js";
+import { randomBytes } from "node:crypto";
+import { hashToken, sealAllowRef, type ParticipantRecord, type StoredSession } from "./session/session.js";
 import type { StoredCodes } from "./sign-in/code-request.js";
 import type { AllowEntry, VerifyStore } from "./sign-in/verify.js";
 import type { Role, Step } from "./types.js";
@@ -14,6 +15,7 @@ export class FakeTable implements VerifyStore, ParticipantStore {
   readonly allow = new Map<string, AllowEntry>();
   readonly codes = new Map<string, StoredCodes>();
   readonly profiles = new Map<string, ParticipantRecord & { createdAt: string }>();
+  /** By token hash; `allowRef` is the address sealed under the token (as the verify function stores it). */
   readonly sessions = new Map<string, StoredSession & { createdAt: string }>();
   /** Nickname claims by lower-cased nickname. */
   readonly nicknames = new Map<string, { nickname: string; participantId: string }>();
@@ -77,16 +79,41 @@ export class FakeTable implements VerifyStore, ParticipantStore {
     return profile.step;
   }
 
-  async putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number): Promise<void> {
+  async putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number, allowRef: string): Promise<void> {
     this.maybeFail("putSession");
     if (this.sessions.has(tokenHash)) throw Object.assign(new Error("exists"), { name: "ConditionalCheckFailedException" });
-    this.sessions.set(tokenHash, { participantId, expiresAt, createdAt: createdAtIso });
+    this.sessions.set(tokenHash, { participantId, expiresAt, createdAt: createdAtIso, allowRef });
   }
 
   async getSession(tokenHash: string): Promise<StoredSession | undefined> {
     this.maybeFail("getSession");
     const session = this.sessions.get(tokenHash);
-    return session && { participantId: session.participantId, expiresAt: session.expiresAt };
+    if (session === undefined) return undefined;
+    const { participantId, expiresAt, allowRef } = session;
+    return { participantId, expiresAt, ...(allowRef === undefined ? {} : { allowRef }) };
+  }
+
+  async deleteSession(tokenHash: string): Promise<void> {
+    this.maybeFail("deleteSession");
+    this.sessions.delete(tokenHash);
+  }
+
+  /** The address tests use for a participant's allow-list entry. */
+  static emailOf(participantId: string): string {
+    return `${participantId.toLowerCase()}@example.test`;
+  }
+
+  /**
+   * Signs a participant in with `token`, as the verify function would: the session item (its address sealed under the
+   * token) and, unless the address already has one, an allow-list entry linked to the participant with the profile's
+   * role and group (participant, blue when there is no profile yet).
+   */
+  addSession(token: string, participantId: string, expiresAt: number, email = FakeTable.emailOf(participantId)): void {
+    if (!this.allow.has(email)) {
+      const profile = this.profiles.get(participantId);
+      this.allow.set(email, { role: profile?.role ?? "participant", group: profile?.group ?? "blue", participantId });
+    }
+    this.sessions.set(hashToken(token), { participantId, expiresAt, createdAt: "x", allowRef: sealAllowRef(token, email, randomBytes) });
   }
 
   async getParticipant(participantId: string): Promise<ParticipantRecord | undefined> {

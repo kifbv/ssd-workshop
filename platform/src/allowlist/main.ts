@@ -1,4 +1,5 @@
-// `npm run -s allowlist -- import <file.csv> | list`: loads and counts the allow-list (ticket 1.3).
+// `npm run -s allowlist -- import <file.csv> | list | remove <email> [--yes]`: loads, counts (ticket 1.3) and
+// removes (ticket 3.1) allow-list entries.
 // Franck runs it from his own machine with his own AWS credentials (default credential chain).
 // The flow lives in ./command.ts and the rules in ./logic.ts; this file only wires in the real world.
 import { Agent, type AgentOptions } from "node:https";

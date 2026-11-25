@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { handleConversationRequest, HISTORY_ROUTE, SEND_ROUTE, type ConversationDeps as ApiDeps } from "../../api/conversation/conversation.js";
 import { FakeConversationTable, FakeQueue } from "../../api/conversation/fakes.js";
 import { STALE_PENDING_SECONDS } from "../../api/conversation/state.js";
-import { hashToken, SESSION_COOKIE } from "../../api/session/session.js";
+import { SESSION_COOKIE } from "../../api/session/session.js";
 import { parseConversationArgs, runConversation, type ConversationDeps } from "./command.js";
 import { FakeResetStore } from "./fakes.js";
 import { DynamoResetStore, type ResetSender } from "./store.js";
@@ -23,8 +23,8 @@ const SECRET = "my secret app idea about the quarterly numbers";
 /** Ada and Bob, each with an answered message, a reply and a spec, Ada at the given step. */
 function setup(step: "clarify" | "spec" | "approved" | "building" = "spec") {
   const table = new FakeConversationTable();
-  table.addParticipant("p-ada", "Ada", hashToken(ADA), NOW_S + 3600, step);
-  table.addParticipant("p-bob", "Bob", hashToken(BOB), NOW_S + 3600, "spec");
+  table.addParticipant("p-ada", "Ada", ADA, NOW_S + 3600, step);
+  table.addParticipant("p-bob", "Bob", BOB, NOW_S + 3600, "spec");
   for (const id of ["p-ada", "p-bob"]) {
     const messageId = "2026-11-23T09:00:00.000Z-0101010101010101";
     table.messages.set(id, new Map([[messageId, { id: messageId, step: "clarify", text: SECRET, status: "done", pendingSince: NOW_S - 3600, createdAt: "x" }]]));

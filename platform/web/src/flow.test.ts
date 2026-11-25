@@ -7,6 +7,7 @@ import {
   nicknameResult,
   normalizeCode,
   screenFor,
+  signOutResult,
   verifyResult,
   type Me,
 } from "./flow.js";
@@ -148,5 +149,15 @@ describe("input checks before calling the API", () => {
     expect(normalizeCode("123456")).toBe("123456");
     expect(normalizeCode(" 123 456 ")).toBe("123456");
     for (const bad of ["", "12345", "1234567", "12345a", "١٢٣٤٥٦"]) expect(normalizeCode(bad), bad).toBeUndefined();
+  });
+});
+
+describe("sign-out answers (POST /api/sign-out, ticket 3.1)", () => {
+  it("is signed out on 200, and on 401 (no session left); otherwise it says why and stays", () => {
+    expect(signOutResult({ status: 200, body: { message: "You're signed out." } })).toEqual({ kind: "signed-out" });
+    expect(signOutResult({ status: 401, body: { message: "Please sign in." } })).toEqual({ kind: "signed-out" });
+    expect(signOutResult({ status: 0, body: null })).toEqual({ kind: "show", message: MESSAGES.offline, tone: "error" });
+    expect(signOutResult({ status: 429, body: null })).toEqual({ kind: "show", message: MESSAGES.retry, tone: "info" });
+    expect(signOutResult({ status: 500, body: null })).toEqual({ kind: "show", message: MESSAGES.failed, tone: "error" });
   });
 });

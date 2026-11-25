@@ -3,7 +3,7 @@
 // `GET /api/build` for the caller only.
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
-import { hashToken, SESSION_COOKIE } from "../session/session.js";
+import { SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
 import { APPROVE_ROUTE, BUILD_ROUTE, HISTORY_ROUTE, handleConversationRequest, SPEC_ROUTE, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
 import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, readinessReply } from "./fakes.js";
@@ -57,8 +57,8 @@ const LOGIN_REASON = "Your spec needs a login so each person sees only their own
 /** Ada (nickname typed "Ada-Runner") and Bob, both at step 2 with one spec version. */
 function setup() {
   const table = new FakeConversationTable();
-  table.addParticipant("me-1", "Ada-Runner", hashToken(MINE), START_S + 3600, "spec");
-  table.addParticipant("other-2", "Bob", hashToken(THEIRS), START_S + 3600, "spec");
+  table.addParticipant("me-1", "Ada-Runner", MINE, START_S + 3600, "spec");
+  table.addParticipant("other-2", "Bob", THEIRS, START_S + 3600, "spec");
   for (const id of ["me-1", "other-2"]) {
     table.conversations.set(id, { state: "open", latestSpecVersion: 1 });
     table.specs.set(id, [{ version: 1, text: SPEC, messageId: "m", createdAt: "x" }]);

@@ -23,7 +23,8 @@
  * | Launch watch entry   | `LAUNCHES`             | `BUILD#<build id>`   | never (removed by check)  |
  *
  * - `<email>` is trimmed and lower-cased (`normalizeEmail`). Email addresses are
- *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email`,
+ *   personal data: they live only in `EMAIL#` keys and in `AllowListEntry.email` (and, sealed
+ *   under the session token, in `SessionItem.allowRef`),
  *   and are never logged, shown to other participants or published.
  * - `<nickname>` in a `NICK#` key is lower-cased, so a nickname is unique regardless of case.
  * - `<nickname>` in `APP#` and `APPDATA#` keys is lower-cased too. The live marker (written by the
@@ -118,6 +119,12 @@ export interface SessionItem extends Keyed {
   expiresAt: number;
   /** ISO 8601. */
   createdAt: string;
+  /**
+   * The allow-list entry's address, sealed (AES-256-GCM) under a key derived from the session token, which only the
+   * browser's cookie holds (ticket 3.1, `sealAllowRef` in session/session.ts): the session check re-reads the entry
+   * at every call. Never readable from the table alone.
+   */
+  allowRef: string;
 }
 
 /** A person taking the workshop, facilitators and admins included (ticket 1.5). */

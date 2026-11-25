@@ -6,6 +6,7 @@ import {
   USAGE,
   formatImportReport,
   formatListReport,
+  formatRemoveReport,
   isInside,
   parseArgs,
   parseCsv,
@@ -72,6 +73,15 @@ export async function runAllowlist(args: readonly string[], deps: CommandDeps): 
   try {
     if (parsed.command === "list") {
       deps.out(formatListReport(await deps.createStore().listAll()));
+      return 0;
+    }
+    if (parsed.command === "remove") {
+      const store = deps.createStore();
+      // Without --yes the command only looks; with it, the delete itself says whether there was an entry.
+      const result = parsed.confirmed
+        ? (await store.remove(parsed.email)) ? "removed" : "absent"
+        : (await store.exists(parsed.email)) ? "found" : "absent";
+      deps.out(formatRemoveReport(result));
       return 0;
     }
     return await importFile(parsed.file, deps);

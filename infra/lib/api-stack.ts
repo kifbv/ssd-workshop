@@ -32,6 +32,7 @@ import {
   PARTICIPANT_NICK_PUT_ATTRIBUTES,
   PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES,
   SENDER_ADDRESS,
+  SESSION_ALLOW_READ_ATTRIBUTES,
   SES_SEND_RESOURCES,
   SIGN_IN_CODE_PUT_ATTRIBUTES,
   SIGN_IN_CODE_FUNCTION_NAME,
@@ -81,6 +82,8 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
   { path: "/api/me/nickname", method: HttpMethod.POST },
   { path: "/api/participants/{id}", method: HttpMethod.GET },
+  // Ticket 3.1: deletes the caller's own session and clears its cookie.
+  { path: "/api/sign-out", method: HttpMethod.POST },
 ] as const;
 
 /** The protected conversation routes (ticket 1.7; history and step from 1.8; spec and approve from 1.9), served by one function. */
@@ -314,6 +317,7 @@ export class ApiStack extends Stack {
         },
       }),
     );
+    addSessionCheckRights(participant, this.table);
     // One invoke permission for the function, scoped to this API (`<api id>/*/*/*`) instead of one
     // per route: CDK's per-route source ARN would hold `{id}` literally for the path parameter route.
     const participantIntegration = new HttpLambdaIntegration("ParticipantIntegration", participant, {
@@ -373,6 +377,7 @@ export class ApiStack extends Stack {
     conversation.addToRolePolicy(
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [aiQueue.queueArn] }),
     );
+    addSessionCheckRights(conversation, this.table);
     // One invoke permission scoped to this API, as for the participant routes (path parameter route).
     const conversationIntegration = new HttpLambdaIntegration("ConversationIntegration", conversation, {
       scopePermissionToRoute: false,
@@ -484,6 +489,38 @@ export class ApiStack extends Stack {
       value: this.api.apiEndpoint,
     });
   }
+}
+
+/**
+ * What the one session check needs beyond reading `SESSION#*` and `PARTICIPANT#*` (ticket 3.1): the caller's
+ * allow-list entry, re-read at every call (GetItem in `EMAIL#*` of `role`, `group` and `participantId` only, with a
+ * projection, so never `email`), and deleting a session (sign-out, or a person no longer on the list).
+ */
+export function addSessionCheckRights(fn: NodejsFunction, table: Table): void {
+  fn.addToRolePolicy(
+    new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:GetItem"],
+      resources: [table.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...SESSION_ALLOW_READ_ATTRIBUTES] },
+        StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    }),
+  );
+  fn.addToRolePolicy(
+    new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:DeleteItem"],
+      resources: [table.tableArn],
+      // The store's delete returns nothing (ticket 3.1 try 2): never the old session item (`ALL_OLD`).
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+        StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+      },
+    }),
+  );
 }
 
 /**

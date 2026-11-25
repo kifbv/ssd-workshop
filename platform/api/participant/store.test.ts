@@ -1,9 +1,9 @@
-import { GetItemCommand, TransactWriteItemsCommand, type AttributeValue } from "@aws-sdk/client-dynamodb";
+import { DeleteItemCommand, GetItemCommand, TransactWriteItemsCommand, type AttributeValue } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import { PARTICIPANT_NICK_PUT_ATTRIBUTES, PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES } from "../../../infra/lib/config.js";
+import { PARTICIPANT_NICK_PUT_ATTRIBUTES, PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES, SESSION_ALLOW_READ_ATTRIBUTES } from "../../../infra/lib/config.js";
 import { DynamoParticipantStore, type ParticipantSender } from "./store.js";
 
-type Sent = GetItemCommand | TransactWriteItemsCommand;
+type Sent = GetItemCommand | DeleteItemCommand | TransactWriteItemsCommand;
 
 function stubClient(answers: (Record<string, unknown> | Error)[]): { client: ParticipantSender; sent: Sent[] } {
   const sent: Sent[] = [];
@@ -27,13 +27,15 @@ const cancelled = (codes: string[]): Error =>
   });
 
 describe("DynamoParticipantStore", () => {
-  it("reads a session by its hash with a consistent read (participant and expiry only)", async () => {
+  it("reads a session by its hash with a consistent read (participant, expiry and the sealed allow-list link only)", async () => {
     const { client, sent } = stubClient([
+      { Item: { participantId: { S: "p-1" }, expiresAt: { N: "1800" }, allowRef: { S: "sealed" } } },
       { Item: { participantId: { S: "p-1" }, expiresAt: { N: "1800" } } },
       { Item: { participantId: { S: "p-1" } } },
       {},
     ]);
     const store = new DynamoParticipantStore(client, TABLE);
+    await expect(store.getSession("ab12")).resolves.toEqual({ participantId: "p-1", expiresAt: 1800, allowRef: "sealed" });
     await expect(store.getSession("ab12")).resolves.toEqual({ participantId: "p-1", expiresAt: 1800 });
     await expect(store.getSession("ab12")).resolves.toBeUndefined();
     await expect(store.getSession("ab12")).resolves.toBeUndefined();
@@ -41,9 +43,46 @@ describe("DynamoParticipantStore", () => {
       TableName: TABLE,
       Key: { pk: { S: "SESSION#ab12" }, sk: { S: "SESSION" } },
       ConsistentRead: true,
-      ProjectionExpression: "#participantId, #expiresAt",
-      ExpressionAttributeNames: { "#participantId": "participantId", "#expiresAt": "expiresAt" },
+      ProjectionExpression: "#participantId, #expiresAt, #allowRef",
+      ExpressionAttributeNames: { "#participantId": "participantId", "#expiresAt": "expiresAt", "#allowRef": "allowRef" },
     });
+  });
+
+  it("re-reads an allow-list entry with a consistent read of role, group and participant only, never the address (ticket 3.1)", async () => {
+    const entry = { role: { S: "facilitator" }, group: { S: "red" }, participantId: { S: "p-1" } };
+    const { client, sent } = stubClient([
+      { Item: entry },
+      { Item: { role: { S: "admin" }, group: { S: "green" } } },
+      { Item: { ...entry, role: { S: "boss" } } },
+      { Item: { role: { S: "participant" }, participantId: { S: "p-1" } } },
+      {},
+    ]);
+    const store = new DynamoParticipantStore(client, TABLE);
+    await expect(store.getAllowEntry("ada@example.test")).resolves.toEqual({ role: "facilitator", group: "red", participantId: "p-1" });
+    await expect(store.getAllowEntry("ada@example.test")).resolves.toEqual({ role: "admin", group: "green" });
+    await expect(store.getAllowEntry("ada@example.test")).resolves.toBeUndefined();
+    await expect(store.getAllowEntry("ada@example.test")).resolves.toBeUndefined();
+    await expect(store.getAllowEntry("ada@example.test")).resolves.toBeUndefined();
+    expect(sent[0]?.input).toEqual({
+      TableName: TABLE,
+      Key: { pk: { S: "EMAIL#ada@example.test" }, sk: { S: "ALLOW" } },
+      ConsistentRead: true,
+      ProjectionExpression: "#role, #group, #participantId",
+      ExpressionAttributeNames: { "#role": "role", "#group": "group", "#participantId": "participantId" },
+    });
+    // Within the role's GetItem condition on `EMAIL#*` (attribute names, with a projection).
+    const input = (sent[0] as GetItemCommand).input;
+    for (const name of [...Object.keys(input.Key ?? {}), ...Object.values(input.ExpressionAttributeNames ?? {})]) {
+      expect(SESSION_ALLOW_READ_ATTRIBUTES).toContain(name);
+    }
+    expect(SESSION_ALLOW_READ_ATTRIBUTES).not.toContain("email");
+  });
+
+  it("deletes a session by its hash (ticket 3.1)", async () => {
+    const { client, sent } = stubClient([{}]);
+    await new DynamoParticipantStore(client, TABLE).deleteSession("ab12");
+    expect(sent[0]).toBeInstanceOf(DeleteItemCommand);
+    expect(sent[0]?.input).toEqual({ TableName: TABLE, Key: { pk: { S: "SESSION#ab12" }, sk: { S: "SESSION" } } });
   });
 
   it("reads a profile with a consistent read, refusing a malformed one", async () => {

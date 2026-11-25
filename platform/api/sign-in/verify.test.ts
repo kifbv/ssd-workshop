@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeTable } from "../fakes.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
-import { hashToken, SESSION_COOKIE } from "../session/session.js";
+import { hashToken, openAllowRef, SESSION_COOKIE } from "../session/session.js";
 import { ANSWER_AFTER_MS, CODE_TTL_SECONDS, hashCode } from "./code-request.js";
 import { settle } from "./fakes.js";
 import {
@@ -128,6 +128,11 @@ describe("POST /api/sign-in/verify (ticket 1.5 criteria 1 to 3)", () => {
       participantId: UUIDS[0],
       expiresAt: START_S + CODE_TTL_SECONDS - 1 + 8 * 3600,
     });
+    // Ticket 3.1: the allow-list address is stored only sealed under the token, which the table never holds.
+    const allowRef = s.table.sessions.get(hashToken(token))?.allowRef;
+    expect(JSON.stringify([...s.table.sessions])).not.toContain(LISTED);
+    expect(openAllowRef(token, allowRef)).toBe(LISTED);
+    expect(openAllowRef(hashToken(token), allowRef)).toBeUndefined();
     // The code is gone: the same code is refused the second time.
     expect(s.table.codes.has(LISTED)).toBe(false);
     const again = await answer(verify(LISTED, CODE), s);

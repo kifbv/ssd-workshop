@@ -1,9 +1,14 @@
 // Where the allow-list lives: a small interface, implemented on the DynamoDB table.
 // The calls stay thin; the rules live in ./logic.ts and ./command.ts.
 import {
+  ConditionalCheckFailedException,
+  DeleteItemCommand,
+  GetItemCommand,
   ScanCommand,
   UpdateItemCommand,
   type AttributeValue,
+  type DeleteItemCommandOutput,
+  type GetItemCommandOutput,
   type ScanCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
@@ -23,12 +28,18 @@ export interface AllowListStore {
   upsert(entry: AllowListInput): Promise<"added" | "updated">;
   /** Group and role of every entry; the addresses are not read. */
   listAll(): Promise<GroupRole[]>;
+  /** True when this (normalized) address has an entry; reads only the key (consistent read). */
+  exists(email: string): Promise<boolean>;
+  /** Deletes this address's entry; false when there was none. Nothing else is touched. */
+  remove(email: string): Promise<boolean>;
 }
 
 /** The one method of DynamoDBClient this store uses, so tests can stub it. */
 export interface DynamoSender {
   send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
   send(command: ScanCommand): Promise<ScanCommandOutput>;
+  send(command: GetItemCommand): Promise<GetItemCommandOutput>;
+  send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -90,5 +101,36 @@ export class DynamoAllowListStore implements AllowListStore {
       startKey = page.LastEvaluatedKey;
     } while (startKey !== undefined);
     return items;
+  }
+
+  async exists(email: string): Promise<boolean> {
+    const key = allowListKey(email);
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: { pk: str(key.pk), sk: str(key.sk) },
+        ProjectionExpression: "pk",
+        ConsistentRead: true,
+      }),
+    );
+    return output.Item !== undefined;
+  }
+
+  async remove(email: string): Promise<boolean> {
+    const key = allowListKey(email);
+    try {
+      // The condition tells "removed" from "there was none" without returning the old item.
+      await this.client.send(
+        new DeleteItemCommand({
+          TableName: this.tableName,
+          Key: { pk: str(key.pk), sk: str(key.sk) },
+          ConditionExpression: "attribute_exists(pk)",
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof ConditionalCheckFailedException || (error as { name?: unknown } | null)?.name === "ConditionalCheckFailedException") return false;
+      throw error;
+    }
   }
 }
