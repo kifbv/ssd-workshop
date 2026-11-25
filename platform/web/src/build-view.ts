@@ -34,7 +34,7 @@ export interface Build {
   failureReasons?: string[];
   /** Ticket 3.4: while queued, how many builds wait ahead of it (once the launcher has placed it). */
   ahead?: number;
-  /** Ticket 3.5: the workshop is paused (the facilitators' global Stop). */
+  /** Ticket 3.5: the workshop is paused (the admin's global Stop). */
   paused?: true;
 }
 

@@ -6,6 +6,8 @@ import { MESSAGES, messageOf, type ApiAnswer, type Show, type Tone } from "./flo
 export const POLL_INTERVAL_MS = 2000;
 /** While a message waits for the facilitator, the page checks less often for their decision. */
 export const WAITING_POLL_INTERVAL_MS = 10_000;
+/** Ticket 3.5: every signed-in screen asks `GET /api/status` this often (while the tab is visible). */
+export const STATUS_POLL_INTERVAL_MS = 30_000;
 
 export interface ChatMessage {
   id: string;
@@ -32,7 +34,7 @@ export interface Conversation {
   approvedSpecVersion?: number;
   /** Ticket 3.3: the person's AI budget left, in dollars (never below 0). */
   budgetLeft?: number;
-  /** Ticket 3.5: the workshop is paused (the facilitators' global Stop). */
+  /** Ticket 3.5: the workshop is paused (the admin's global Stop). */
   paused?: true;
 }
 
@@ -156,6 +158,17 @@ export function pollResult(
   if (answer.status === 401) return { kind: "signed-out" };
   if (answer.status === 404) return { kind: "lost" };
   return { kind: "retry" };
+}
+
+/**
+ * Ticket 3.5: `GET /api/status`. True while the admin's global Stop is on, false when the answer says it is off, and
+ * undefined for any other answer (signed out, an error, no answer): the page then keeps what it showed.
+ */
+export function statusResult(answer: ApiAnswer): boolean | undefined {
+  if (answer.status !== 200) return undefined;
+  const b = record(answer.body);
+  if (b === undefined) return undefined;
+  return b["paused"] === true;
 }
 
 /** `POST /api/conversation/step` (Write my spec). */

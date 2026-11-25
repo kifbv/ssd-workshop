@@ -9,6 +9,7 @@ import {
   sendResult,
   specOffered,
   stageOf,
+  statusResult,
   writeSpecResult,
   type ChatMessage,
 } from "./chat.js";
@@ -38,6 +39,14 @@ describe("the workshop paused by the global Stop (ticket 3.5)", () => {
     for (const bad of [false, "true", 1, null]) expect(parseConversation({ ...base, paused: bad })).toEqual(base);
     expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: true } })).toEqual({ kind: "pending", paused: true });
     expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: "yes" } })).toEqual({ kind: "pending" });
+  });
+
+  it("reads GET /api/status: paused only as true, off on any other 200 body, and nothing to change on any other answer", () => {
+    expect(statusResult({ status: 200, body: { paused: true } })).toBe(true);
+    for (const body of [{}, { paused: false }, { paused: "true" }]) expect(statusResult({ status: 200, body })).toBe(false);
+    for (const answer of [{ status: 200, body: null }, { status: 200, body: [true] }, { status: 401, body: {} }, { status: 500, body: { paused: true } }, { status: 0, body: null }]) {
+      expect(statusResult(answer)).toBeUndefined();
+    }
   });
 });
 

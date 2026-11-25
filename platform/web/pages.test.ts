@@ -1452,6 +1452,122 @@ describe("step 4: Live (ticket 2.11)", () => {
   }, 30_000);
 });
 
+/** Ticket 3.5: `GET /api/status` as the API answers it, counted; `paused` is the admin's switch. */
+function fakeStatus() {
+  const state = { paused: false, polls: 0 };
+  const handler: Handler = () => {
+    state.polls++;
+    return { status: 200, body: state.paused ? { paused: true } : {} };
+  };
+  return { state, handler };
+}
+
+/** Like pollAfter, for the status poll: moves page time by `ms`, which must fire one GET /api/status, and lets the page handle it. */
+async function statusPollAfter(ms: number): Promise<void> {
+  const answered = page.waitForResponse((r) => r.url().endsWith("/api/status"));
+  await page.clock.runFor(ms);
+  await answered;
+  await settle();
+}
+
+/** Opens the page with its clock paused from the start (any screen), so only the test moves page time. */
+async function openWithPausedClock(): Promise<void> {
+  await page.clock.install({ time: new Date("2026-11-25T10:00:00.000Z") });
+  await page.clock.pauseAt(new Date("2026-11-25T10:00:01.000Z"));
+  await page.goto(origin);
+}
+
+/** Makes the page believe its tab was hidden or shown again (Chromium keeps a test page visible). */
+async function setTabHidden(hidden: boolean): Promise<void> {
+  await page.evaluate((h) => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+}
+
+describe("ticket 3.5: the paused line on idle signed-in screens (status poll every 30 s)", () => {
+  it("WHEN Stop is pressed while step 4 sits idle THEN the paused line shows within 30 s; WHEN Resume THEN it goes within 30 s, at 375 px", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    const status = fakeStatus();
+    api.handlers["GET /api/status"] = status.handler;
+    await mockApi(api.handlers);
+    await openWithPausedClock();
+    await expectLiveScreen();
+    await settle();
+    const builds = api.state.polls;
+    const banner = page.locator("#workshop-paused");
+    expect(await banner.isVisible()).toBe(false);
+
+    // Stop: nothing is asked before 30 s, then one status read shows the line.
+    status.state.paused = true;
+    await page.clock.runFor(29_000);
+    await settle();
+    expect(status.state.polls).toBe(0);
+    await statusPollAfter(1000);
+    expect(status.state.polls).toBe(1);
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    expect(await banner.getAttribute("role")).toBe("status");
+    await expectNoSideScroll();
+    await statusPollAfter(30_000);
+    expect(await banner.isVisible()).toBe(true);
+
+    // Resume: the next status read clears it; step 4 itself asks nothing else.
+    status.state.paused = false;
+    await statusPollAfter(30_000);
+    expect(status.state.polls).toBe(3);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    expect(api.state.polls).toBe(builds);
+    await expectLiveScreen();
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN Stop is pressed while the nickname screen is open THEN the paused line shows within 30 s and goes on Resume; a hidden tab and signing out stop the poll, at 375 px", async () => {
+    const status = fakeStatus();
+    const calls = await mockApi({
+      "GET /api/me": () => ({ status: 200, body: { id: "p-1", nickname: null, role: "participant", group: "g1", step: "nickname" } }),
+      "GET /api/status": status.handler,
+      "POST /api/sign-out": () => ({ status: 200, body: { message: "You're signed out." } }),
+    });
+    await openWithPausedClock();
+    await expect.poll(() => screen("nickname").isVisible()).toBe(true);
+    await settle();
+    const banner = page.locator("#workshop-paused");
+    expect(await banner.isVisible()).toBe(false);
+
+    status.state.paused = true;
+    await statusPollAfter(30_000);
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    await expectNoSideScroll();
+    status.state.paused = false;
+    await statusPollAfter(30_000);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    expect(status.state.polls).toBe(2);
+
+    // A hidden tab asks nothing; shown again, it asks within 30 s.
+    await setTabHidden(true);
+    await page.clock.runFor(90_000);
+    await settle();
+    expect(status.state.polls).toBe(2);
+    status.state.paused = true;
+    await setTabHidden(false);
+    await statusPollAfter(30_000);
+    expect(status.state.polls).toBe(3);
+    await expect.poll(() => banner.isVisible()).toBe(true);
+
+    // Signing out hides the line and stops the poll.
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+    expect(await banner.isVisible()).toBe(false);
+    const after = calls.length;
+    await page.clock.runFor(90_000);
+    await settle();
+    expect(calls.length).toBe(after);
+    expect(status.state.polls).toBe(3);
+  }, 30_000);
+});
+
 describe("built site", () => {
   it("holds only the page, its stylesheet, its two scripts and the 404 page, and the page has no inline script, style or handler", () => {
     expect(readdirSync(dir).sort()).toEqual(["404.html", "app.js", "diagram.js", "index.html", "style.css"]);

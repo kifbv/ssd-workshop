@@ -912,6 +912,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
       "GET /api/build",
+      "GET /api/status",
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
@@ -1861,6 +1862,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
       "GET /api/build",
+      "GET /api/status",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({

@@ -150,7 +150,7 @@ button.link {
   font-weight: 600;
 }
 
-/* The workshop paused by the facilitators' global Stop (ticket 3.5): one line above the screen. */
+/* The workshop paused by the admin's global Stop (ticket 3.5): one line above the screen. */
 .paused-banner {
   margin: 0 0 1rem;
   padding: 0.75rem 1rem;

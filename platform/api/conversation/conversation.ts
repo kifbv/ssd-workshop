@@ -9,7 +9,8 @@
 // ./readiness.ts), and `GET /api/build` returns the caller's own build. Ticket 3.3: `GET /api/conversation` also
 // answers `budgetLeft`, the caller's AI budget left in dollars (the AI worker enforces the budget). Ticket 3.5: while the
 // admin's global Stop is on, the three reads the page repeats (`GET /api/conversation`, the message poll and
-// `GET /api/build`) also answer `paused: true`, so every participant page shows the paused banner. Every route starts with the
+// `GET /api/build`) also answer `paused: true`, and `GET /api/status` answers only that (every signed-in screen asks it
+// every 30 s), so every participant page shows the paused banner. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -47,7 +48,8 @@ export const STEP_ROUTE = "POST /api/conversation/step";
 export const SPEC_ROUTE = "GET /api/conversation/spec";
 export const APPROVE_ROUTE = "POST /api/conversation/spec/approve";
 export const BUILD_ROUTE = "GET /api/build";
-export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE, BUILD_ROUTE] as const;
+export const STATUS_ROUTE = "GET /api/status";
+export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE, BUILD_ROUTE, STATUS_ROUTE] as const;
 
 /** A message holds 1 to 2000 characters (Unicode code points) after trimming. */
 export const MAX_MESSAGE_CHARS = 2000;
@@ -68,7 +70,7 @@ export const MESSAGES = {
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -423,6 +425,16 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
   };
 }
 
+/**
+ * Ticket 3.5: `GET /api/status`, the workshop's state for any signed-in person (`{ paused: true }` while the global
+ * Stop is on, else `{}`): one small `SETTINGS` read, which every signed-in screen repeats every 30 s so an idle page
+ * shows and clears the paused banner. A failed read is a 500 (the page keeps what it showed), not a false "running".
+ */
+async function workshopStatus(deps: ConversationDeps): Promise<Result> {
+  const settings = await deps.store.getSettings();
+  return { outcome: "ok", response: jsonResponse(200, settings.stopped ? { paused: true } : {}) };
+}
+
 function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === SEND_ROUTE) return "send";
   if (request.routeKey === POLL_ROUTE) return "poll";
@@ -431,6 +443,7 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === SPEC_ROUTE) return "spec";
   if (request.routeKey === APPROVE_ROUTE) return "approve";
   if (request.routeKey === BUILD_ROUTE) return "build";
+  if (request.routeKey === STATUS_ROUTE) return "status";
   return "unknown";
 }
 
@@ -449,6 +462,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "spec") result = await spec(request, session.participant, deps);
     else if (route === "approve") result = await approve(request, session.participant, deps);
     else if (route === "build") result = await build(session.participant, deps);
+    else if (route === "status") result = await workshopStatus(deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

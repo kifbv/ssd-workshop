@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
-import { APPROVE_ROUTE, BUILD_ROUTE, HISTORY_ROUTE, handleConversationRequest, POLL_ROUTE, SEND_ROUTE, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
+import { APPROVE_ROUTE, BUILD_ROUTE, HISTORY_ROUTE, handleConversationRequest, POLL_ROUTE, SEND_ROUTE, STATUS_ROUTE, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
 import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, readinessReply, verdictReply } from "./fakes.js";
 import { READINESS_REQUEST } from "./readiness.js";
 import { STALE_PENDING_SECONDS, STOP_HOLD_SECONDS, buildIdFor, jobBody, parseJob, type AiJob } from "./state.js";
@@ -19,6 +19,7 @@ function must<T>(value: T | undefined): T {
 const START = new Date("2026-11-25T10:00:00.000Z");
 const START_S = START.getTime() / 1000;
 const ADA = Buffer.alloc(32, 1).toString("base64url");
+const BOB = Buffer.alloc(32, 2).toString("base64url");
 const SPEC = "# Run log\n\n## What it does\nA log of your runs.";
 const ANSWER = { text: "Who is it for?", inputTokens: 1000, outputTokens: 100 };
 const STOPPED = { stopped: { BOOL: true } };
@@ -201,5 +202,40 @@ describe("ticket 3.5 criterion 4 (API part): the page's reads say the workshop i
     expect(res.statusCode).toBe(200);
     expect(json(res)).toEqual({ id, status: "pending" });
     expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "poll", outcome: "ok", error: "InternalServerError" });
+  });
+
+  it("WHEN any signed-in person (the nickname screen included) asks GET /api/status THEN it answers paused: true while Stop is on and {} after Resume", async () => {
+    const s = setup();
+    s.table.addParticipant("new-1", undefined, BOB, START_S + 8 * 3600, "nickname");
+    const bob: HttpRequest = { routeKey: STATUS_ROUTE, cookies: [`${SESSION_COOKIE}=${BOB}`] };
+    expect(json(await s.call(get(STATUS_ROUTE)))).toEqual({});
+    s.stop();
+    for (const request of [get(STATUS_ROUTE), bob]) {
+      const res = await s.call(request);
+      expect(res.statusCode).toBe(200);
+      expect(json(res)).toEqual({ paused: true });
+    }
+    s.resume();
+    expect(json(await s.call(bob))).toEqual({});
+    expect(s.logs.map((e) => [e.route, e.outcome])).toEqual(Array.from({ length: 4 }, () => ["status", "ok"]));
+  });
+
+  it("WHEN someone signed out asks GET /api/status THEN the answer is 401 and the settings are not read", async () => {
+    const s = setup();
+    s.stop();
+    s.table.conversationFailOn = "getSettings";
+    const res = await s.call({ routeKey: STATUS_ROUTE, cookies: [] });
+    expect(res.statusCode).toBe(401);
+    expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "status", outcome: "unauthorized" });
+  });
+
+  it("WHEN the settings read fails THEN GET /api/status answers 500 (the page keeps what it showed), logging the error name only", async () => {
+    const s = setup();
+    s.stop();
+    s.table.conversationFailOn = "getSettings";
+    const res = await s.call(get(STATUS_ROUTE));
+    expect(res.statusCode).toBe(500);
+    expect(json(res)).not.toHaveProperty("paused");
+    expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "status", outcome: "failed", error: "InternalServerError" });
   });
 });

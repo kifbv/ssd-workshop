@@ -113,6 +113,8 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/spec/approve", method: HttpMethod.POST },
   // Ticket 2.7: the caller's own build (the step 3 page polls it from ticket 2.10).
   { path: "/api/build", method: HttpMethod.GET },
+  // Ticket 3.5: the workshop's state (paused or not), asked every 30 s by every signed-in screen (one SETTINGS read).
+  { path: "/api/status", method: HttpMethod.GET },
 ] as const;
 
 /**

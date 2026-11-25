@@ -8,6 +8,7 @@ import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, QUEUE_SEE
 import { runBuilds } from "../../src/builds/command.js";
 import { FakeBuildsStore, FakeLaunchQueue, FakeTaskWatch } from "../../src/builds/fakes.js";
 import { FakeBuildTable, FakeDeadLetters, FakeTasks } from "./fakes.js";
+import { DynamoBuildRecords, type BuilderTableSender } from "../../builder/records.js";
 import {
   DEPLOY_DEAD_REASON,
   QUEUED_DEAD_REASON,
@@ -976,5 +977,70 @@ describe("global Stop (ticket 3.5)", () => {
     s.advance(QUEUE_WAIT_MAX_MS);
     await runCheck(s.check);
     expect(s.table.builds.get(waiting ?? "")).toMatchObject({ status: "failed", failureReasons: [QUEUE_TIMEOUT_REASON] });
+  }, 30_000);
+
+  /**
+   * The builder's own record writes (`DynamoBuildRecords`), their real conditions checked against `buildId` as the
+   * launcher's table holds it: the stub evaluates each `ConditionExpression` (only the clause forms the builder uses;
+   * any other throws) and answers ConditionalCheckFailed when it does not hold. Nothing is written: only refusals count.
+   */
+  function builderWrites(s: ReturnType<typeof setup>, buildId: string) {
+    const holds = (condition: string, names: Record<string, string>, values: Record<string, { S?: string }>): boolean => {
+      const build = s.table.builds.get(buildId) as unknown as Record<string, unknown> | undefined;
+      return condition.split(" AND ").every((clause) => {
+        if (clause === "attribute_exists(pk)") return build !== undefined;
+        const missing = /^attribute_not_exists\((#\w+)\)$/.exec(clause);
+        if (missing) return build?.[names[missing[1] ?? ""] ?? ""] === undefined;
+        const equal = /^(#\w+) = (:\w+)$/.exec(clause);
+        if (equal) return build !== undefined && build[names[equal[1] ?? ""] ?? ""] === values[equal[2] ?? ""]?.S;
+        throw new Error(`unexpected clause: ${clause}`);
+      });
+    };
+    const client = {
+      send: async (command: { input: { ConditionExpression?: string; ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, { S?: string }> } }) => {
+        const { ConditionExpression, ExpressionAttributeNames, ExpressionAttributeValues } = command.input;
+        if (ConditionExpression === undefined || !holds(ConditionExpression, ExpressionAttributeNames ?? {}, ExpressionAttributeValues ?? {})) {
+          throw Object.assign(new Error("The conditional request failed"), { name: "ConditionalCheckFailedException" });
+        }
+        return {};
+      },
+    } as unknown as BuilderTableSender;
+    const records = new DynamoBuildRecords(client, "ssd-workshop-test");
+    const at = new Date().toISOString();
+    const event = { kind: "step" as const, step: "writing" as const, at };
+    /** claim, addFeed, handOver and markFailed under `attemptId`: true for each one the table would accept. */
+    return async (attemptId: string): Promise<Record<string, boolean>> => ({
+      claim: await records.claim(buildId, attemptId, NICKNAME, event, at),
+      addFeed: await records.addFeed(buildId, attemptId, [event], at),
+      handOver: await records.handOver(buildId, attemptId, COMMIT, [event], at),
+      markFailed: await records.markFailed(buildId, attemptId, ["stale"], at),
+    });
+  }
+
+  it("WHEN a running build was stopped THEN its old attempt's writes (claim, feed, hand-over, failure) are refused, right after the requeue and after the relaunch's claim", async () => {
+    const s = setup();
+    const writes = builderWrites(s, BUILD);
+    const refused = { claim: false, addFeed: false, handOver: false, markFailed: false };
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    const old = must(s.tasks.started[0]).attemptId;
+    // Control: while it runs, the stub accepts the running attempt's writes (so a refusal below is the condition's).
+    expect(await writes(old)).toEqual({ claim: true, addFeed: true, handOver: true, markFailed: true });
+
+    s.table.stopped = true;
+    s.advance(20_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    expect(await writes(old)).toEqual(refused);
+
+    s.table.stopped = false;
+    s.table.resumedAt = "2026-11-24T10:00:30.000Z";
+    s.advance(60_000);
+    await runCheck(s.check);
+    const relaunched = must(s.tasks.started[1]);
+    expect(relaunched.attemptId).not.toBe(old);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "building", attemptId: relaunched.attemptId });
+    expect(await writes(old)).toEqual(refused);
+    // The new attempt's writes are the ones accepted.
+    expect(await writes(relaunched.attemptId)).toEqual({ claim: true, addFeed: true, handOver: true, markFailed: true });
   }, 30_000);
 });
