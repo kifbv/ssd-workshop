@@ -10,7 +10,7 @@ import type { HttpRequest, HttpResponse } from "../http.js";
 import { SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
 import { BUDGET_REPLY } from "../workshop/budget.js";
-import { APPROVE_ROUTE, BUILD_ROUTE, HISTORY_ROUTE, handleConversationRequest, POLL_ROUTE, SEND_ROUTE, STEP_ROUTE, type ConversationDeps } from "./conversation.js";
+import { APPROVE_ROUTE, BUILD_ROUTE, HISTORY_ROUTE, handleConversationRequest, POLL_ROUTE, SEND_ROUTE, STEP_ROUTE, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
 import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, readinessReply, verdictReply } from "./fakes.js";
 import { costOf } from "./model.js";
 import { READINESS_REQUEST } from "./readiness.js";
@@ -49,7 +49,8 @@ function setup(step: "clarify" | "spec" = "clarify") {
   let clock = START;
   let counter = 0;
   const workerLogs: WorkerLogEntry[] = [];
-  const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: () => undefined };
+  const logs: ConversationLogEntry[] = [];
+  const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
   const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
   const delivered: string[] = [];
   const drain = async () => {
@@ -67,7 +68,7 @@ function setup(step: "clarify" | "spec" = "clarify") {
   const setSpend = (costUsd: number) => table.usage.set("ada-1", spend(costUsd));
   const spent = () => table.usage.get("ada-1")?.costUsd ?? 0;
   const redeliver = () => processJob(parseJob(must(delivered.at(-1))), workerDeps);
-  return { table, queue, builds, model, workerLogs, drain, call, setSpend, spent, redeliver };
+  return { table, queue, builds, model, workerLogs, logs, drain, call, setSpend, spent, redeliver };
 }
 
 const cookie = (t: string) => [`${SESSION_COOKIE}=${t}`];
@@ -293,5 +294,22 @@ describe("ticket 3.3 criterion 4: the budget answer holds nobody else's amount a
     // Ada's own answer carries only her own budget left.
     expect(json(await s.call(get(HISTORY_ROUTE)))["budgetLeft"]).toBe(0);
     expect(json(await s.call(get(HISTORY_ROUTE, BOB)))["budgetLeft"]).toBe(5.77);
+  });
+});
+
+describe("ticket 3.3: a failed budget read does not break the conversation", () => {
+  it("WHEN the budget read fails THEN GET /api/conversation still answers 200 without budgetLeft and logs the error name only", async () => {
+    const s = setup();
+    s.table.conversationFailOn = "getBudgetFacts";
+    const res = await s.call(get(HISTORY_ROUTE));
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body).not.toHaveProperty("budgetLeft");
+    expect(body).toMatchObject({ step: "clarify", state: "open", messages: [] });
+    expect(s.logs).toEqual([{ event: "conversation", route: "history", outcome: "ok", error: "InternalServerError" }]);
+    // Once the read works again, budgetLeft is back.
+    s.table.conversationFailOn = undefined;
+    expect(json(await s.call(get(HISTORY_ROUTE)))["budgetLeft"]).toBe(5);
+    expect(s.logs.at(-1)).toEqual({ event: "conversation", route: "history", outcome: "ok" });
   });
 });

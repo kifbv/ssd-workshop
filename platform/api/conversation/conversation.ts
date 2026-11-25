@@ -250,15 +250,22 @@ export function hasAnsweredExchange(items: readonly ListedItem[]): boolean {
 }
 
 async function history(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  // A failed budget read does not break the history: `budgetLeft` is left out (the page shows nothing) and the
+  // error is logged by name only.
+  let budgetError: string | undefined;
   const [items, conversation, budget] = await Promise.all([
     deps.store.listItems(participant.id, HISTORY_PAGE_LIMIT),
     deps.store.getConversation(participant.id),
-    deps.store.getBudgetFacts(participant.id),
+    deps.store.getBudgetFacts(participant.id).catch((error: unknown) => {
+      budgetError = errorName(error);
+      return undefined;
+    }),
   ]);
   const nowSeconds = Math.floor(deps.now().getTime() / 1000);
   // Ticket 3.3: the caller's own budget left, in dollars (whole cents, never below 0); never their spend or anyone else's.
-  const budgetLeft = budgetOf(budget).leftUsd;
-  return { outcome: "ok", response: jsonResponse(200, { ...shapeHistory(participant.step, items, conversation, nowSeconds), budgetLeft }) };
+  const shaped = shapeHistory(participant.step, items, conversation, nowSeconds);
+  const body = budget === undefined ? { ...shaped } : { ...shaped, budgetLeft: budgetOf(budget).leftUsd };
+  return { outcome: "ok", response: jsonResponse(200, body), ...(budgetError === undefined ? {} : { error: budgetError }) };
 }
 
 /**

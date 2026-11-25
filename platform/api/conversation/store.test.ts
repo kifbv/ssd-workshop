@@ -12,7 +12,7 @@ import {
   MODEL_ID as INFRA_MODEL_ID,
   SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
-import { BUDGET_REPLY } from "../workshop/budget.js";
+import { BUDGET_REPLY, budgetOf } from "../workshop/budget.js";
 import { DEFAULT_SETTINGS } from "../workshop/settings.js";
 import { ACCOUNT, AI_QUEUE_NAME, AI_QUEUE_URL, BUILD_QUEUE_NAME, BUILD_QUEUE_URL, MODEL_ID, PRICE_PER_MILLION_TOKENS } from "../settings.js";
 import { DEFAULT_MODEL_ID } from "../../src/smoke/logic.js";
@@ -289,6 +289,11 @@ describe("DynamoConversationStore", () => {
       limits: { extraBudget: 0, paused: false, changeRequestsUsed: 0 },
       spentUsd: 0,
     });
+    // A USAGE item without costUsd is nothing spent; a broken (negative) costUsd is passed on, and budgetOf fails closed.
+    const noCost = stubClient([{}, {}, { Item: {} }]);
+    expect((await new DynamoConversationStore(noCost.client, TABLE).getBudgetFacts("p-1")).spentUsd).toBe(0);
+    const negative = stubClient([{}, {}, { Item: { costUsd: { N: "-1" } } }]);
+    expect(budgetOf(await new DynamoConversationStore(negative.client, TABLE).getBudgetFacts("p-1")).reached).toBe(true);
   });
 
   it("ends a message the queue refused with the conversation function's attributes only (no usage)", async () => {

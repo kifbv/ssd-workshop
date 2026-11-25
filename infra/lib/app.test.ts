@@ -1596,6 +1596,52 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
   });
 });
 
+describe("budget attributes (ticket 3.3)", () => {
+  /** Every DynamoDB write statement in every stack that can reach PARTICIPANT# items, by role name, with its attribute list ("*" when none). */
+  function participantWriters(): { role: string; attributes: string[] }[] {
+    const roleNames = new Map(ofType("AWS::IAM::Role").map(([s, id, r]) => [`${s}/${id}`, String(r.Properties?.RoleName ?? id)]));
+    const writers: { role: string; attributes: string[] }[] = [];
+    const documents: { roles: string[]; statements: Record<string, unknown>[] }[] = [];
+    for (const [s, id, policy] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      const roles = ((policy.Properties?.Roles ?? []) as unknown[]).map((r) => {
+        const ref = (r as { Ref?: unknown }).Ref;
+        return typeof ref === "string" ? (roleNames.get(`${s}/${ref}`) ?? ref) : JSON.stringify(r);
+      });
+      if (roles.length === 0) roles.push(`${s}/${id}`);
+      documents.push({ roles, statements: (policy.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement });
+    }
+    // Inline policies on the roles themselves count too.
+    for (const [s, id, role] of ofType("AWS::IAM::Role")) {
+      for (const inline of (role.Properties?.Policies ?? []) as { PolicyDocument: { Statement: Record<string, unknown>[] } }[]) {
+        documents.push({ roles: [roleNames.get(`${s}/${id}`) ?? id], statements: inline.PolicyDocument.Statement });
+      }
+    }
+    for (const { roles, statements } of documents) {
+      for (const st of statements) {
+        if (st.Effect !== "Allow") continue;
+        assertNoExclusions(JSON.stringify(roles), st);
+        if (!DYNAMODB_WRITE_ACTIONS.some((a) => ([] as unknown[]).concat(st.Action).some((g) => typeof g === "string" && actionCovers(g, a)))) continue;
+        const conditions = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
+        const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
+        if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, "PARTICIPANT#p-1"))) continue;
+        const attributes = Object.values(conditions).find((c) => c["dynamodb:Attributes"] !== undefined)?.["dynamodb:Attributes"];
+        for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String) });
+      }
+    }
+    return writers;
+  }
+
+  it("WHEN the synthesized stacks are inspected THEN no role may write extraBudget (until ticket 3.10), and only the AI worker and the builder task may write costUsd", () => {
+    const writers = participantWriters();
+    expect(writers.length).toBeGreaterThan(3);
+    // No write statement on participant items may leave its attributes open (that would cover both names).
+    for (const w of writers) expect(w.attributes, w.role).not.toContain("*");
+    for (const w of writers) expect(w.attributes, w.role).not.toContain("extraBudget");
+    const costWriters = [...new Set(writers.filter((w) => w.attributes.includes("costUsd")).map((w) => w.role))].sort();
+    expect(costWriters).toEqual([AI_WORKER_FUNCTION_NAME, BUILDER_TASK_ROLE_NAME].sort());
+  });
+});
+
 describe("api stack: data API for apps (ticket 2.4)", () => {
   const f = apiFunction(APP_DATA_FUNCTION_NAME);
 

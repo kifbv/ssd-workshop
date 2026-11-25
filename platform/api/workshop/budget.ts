@@ -19,7 +19,7 @@ export interface BudgetFacts {
 export interface Budget {
   /** The workshop's budget plus the extra budget, in whole cents. */
   budgetUsd: number;
-  /** Spend so far (0 when missing or broken). */
+  /** Spend so far (0 when missing; the whole budget when broken, so a broken spend fails closed). */
   spentUsd: number;
   /** Dollars left, in whole cents rounded down, never below 0: what `budgetLeft` shows. */
   leftUsd: number;
@@ -29,7 +29,10 @@ export interface Budget {
 
 export function budgetOf(facts: BudgetFacts): Budget {
   const budgetUsd = budgetFor(facts.settings, facts.limits);
-  const spentUsd = Number.isFinite(facts.spentUsd) && facts.spentUsd > 0 ? facts.spentUsd : 0;
+  // A spend that is present but broken (not a number, infinite or negative) fails closed: the budget reads as used.
+  // A missing spend is 0 already (the stores read no `USAGE` item, or no `costUsd`, as 0).
+  if (!Number.isFinite(facts.spentUsd) || facts.spentUsd < 0) return { budgetUsd, spentUsd: budgetUsd, leftUsd: 0, reached: true };
+  const spentUsd = facts.spentUsd;
   // Rounded down so the page never shows more than is left (a small epsilon keeps 0.7 from reading as 0.69).
   const leftUsd = Math.max(0, Math.floor((budgetUsd - spentUsd) * 100 + 1e-6) / 100);
   return { budgetUsd, spentUsd, leftUsd, reached: spentUsd >= budgetUsd };

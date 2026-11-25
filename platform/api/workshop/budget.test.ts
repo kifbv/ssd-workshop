@@ -37,9 +37,16 @@ describe("budgetOf (ticket 3.3)", () => {
     expect(budgetOf(facts(0.0001)).leftUsd).toBe(4.99);
   });
 
-  it("reads a missing, negative or broken spend as nothing spent", () => {
-    expect(budgetOf(facts(-3)).spentUsd).toBe(0);
-    expect(budgetOf(facts(Number.NaN))).toEqual({ budgetUsd: 5, spentUsd: 0, leftUsd: 5, reached: false });
+  it("WHEN the spend is present but negative, not a number or infinite THEN the budget reads as reached (fails closed)", () => {
+    for (const broken of [-3, -0.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(budgetOf(facts(broken)), String(broken)).toEqual({ budgetUsd: 5, spentUsd: 5, leftUsd: 0, reached: true });
+      expect(overBudget(budgetOf(facts(broken)))).toBe(true);
+    }
+    expect(budgetOf(facts(Number.NaN, 2)).reached).toBe(true);
+  });
+
+  it("WHEN no spend was recorded (read as 0) THEN nothing is spent", () => {
+    expect(budgetOf(facts(0))).toEqual({ budgetUsd: 5, spentUsd: 0, leftUsd: 5, reached: false });
   });
 
   it("counts the cost of calls already made in this job before the next one", () => {
