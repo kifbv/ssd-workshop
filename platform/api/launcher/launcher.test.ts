@@ -32,6 +32,10 @@ const PARTICIPANT = "6f1c2a9e-0000-4000-8000-000000000001";
 const NICKNAME = "Ada-L";
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const message = (buildId = BUILD): string => JSON.stringify({ buildId });
+function must<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("missing value");
+  return value;
+}
 
 function setup() {
   let now = Date.parse("2026-11-24T10:00:00.000Z");
@@ -58,8 +62,23 @@ function setup() {
   };
   const launchDeadLetters = new FakeDeadLetters();
   const deployDeadLetters = new FakeDeadLetters();
-  const check: CheckDeps = { records: table, tasks, launchDeadLetters, deployDeadLetters, now: clock, log: (entry) => logs.push(entry) };
+  // Ticket 3.5: the check's own launches (as the handler's, with this launcher's deps), unless "no time" is set.
+  const relaunch = { bodies: [] as string[], noTime: false };
+  const check: CheckDeps = {
+    records: table,
+    tasks,
+    launchDeadLetters,
+    deployDeadLetters,
+    relaunch: async (body) => {
+      if (relaunch.noTime) return undefined;
+      relaunch.bodies.push(body);
+      return processLaunch(body, deps);
+    },
+    now: clock,
+    log: (entry) => logs.push(entry),
+  };
   return {
+    relaunch,
     table,
     tasks,
     github,
@@ -778,5 +797,184 @@ describe("build slots: at most N builds at once (ticket 3.4)", () => {
     expect(await processLaunch(message(), s.deps)).toBe("duplicate");
     expect(s.tasks.started).toHaveLength(1);
     assertQuietLogs(s);
+  }, 30_000);
+});
+
+describe("global Stop (ticket 3.5)", () => {
+  /** Ada's build plus `count` more queued builds, each of its own participant, in this order. */
+  function withBuilds(s: ReturnType<typeof setup>, count: number): string[] {
+    const more = Array.from({ length: count }, (_, i) => {
+      const buildId = `2026-11-24T10-00-00-000Z-${String(i + 1).padStart(16, "0")}`;
+      s.table.addQueuedBuild({ buildId, participantId: `6f1c2a9e-0000-4000-8000-${String(i + 100).padStart(12, "0")}`, nickname: `Runner-${String(i + 1)}` });
+      return buildId;
+    });
+    return [BUILD, ...more];
+  }
+  it("criterion 1: WHEN Stop is on THEN the launcher starts no task: the build keeps its place in the line and waits", async () => {
+    const s = setup();
+    s.table.stopped = true;
+    for (let i = 0; i < 3; i += 1) {
+      expect(await processLaunch(message(), s.deps)).toBe("paused");
+      s.advance(30_000);
+    }
+    expect(s.tasks.started).toEqual([]);
+    expect(s.github.bearers.size).toBe(0);
+    expect(s.secretReads()).toBe(0);
+    const build = s.table.builds.get(BUILD);
+    expect(build?.status).toBe("queued");
+    expect(build?.queueKey).toBe(`2026-11-24T10:00:00.000Z#${BUILD}`);
+    expect([...s.table.queue.keys()]).toEqual([build?.queueKey]);
+    expect(s.table.slots.running).toBe(0);
+    expect(s.logs.map((l) => l.outcome)).toEqual(["paused", "paused", "paused"]);
+    assertQuietLogs(s);
+  });
+
+  it("criterion 2: WHEN Stop is pressed with builds running THEN the next minute check stops each task, puts its build back to queued from the beginning and frees its slot", async () => {
+    const s = setup();
+    const [ada, second, handedOver] = withBuilds(s, 2);
+    for (const buildId of [ada, second, handedOver]) {
+      expect(await processLaunch(message(buildId), s.deps)).toBe("started");
+      s.advance(1000);
+    }
+    expect(s.table.slots.running).toBe(3);
+    // The runner wrote its feed; the third pushed its commit and handed it over to the deployer.
+    for (const buildId of [ada, second]) must(s.table.builds.get(buildId ?? "")).feed = [{ kind: "step", step: "writing", at: "x" }];
+    must(s.table.builds.get(handedOver ?? "")).pushedCommit = COMMIT;
+    const taskOf = (buildId: string | undefined) => must(s.tasks.started.find((t) => t.buildId === buildId));
+    const claimedAt = must(s.table.launches.get(ada ?? "")).claimedAt;
+    const secondClaimedAt = must(s.table.launches.get(second ?? "")).claimedAt;
+    const beforeStop = new Map([ada, second].map((buildId) => [buildId, { ...must(s.table.launches.get(buildId ?? "")) }]));
+
+    s.table.stopped = true;
+    s.advance(20_000);
+    await runCheck(s.check);
+    // Each running task got StopTask, the one handed over did not (it finishes: no AI runs there).
+    expect(s.tasks.stopCalls).toEqual([taskOf(ada).taskArn, taskOf(second).taskArn]);
+    for (const buildId of [ada, second]) {
+      const build = must(s.table.builds.get(buildId ?? ""));
+      expect(build.status).toBe("queued");
+      for (const gone of ["attemptId", "taskArn", "launchedAt", "feed"] as const) expect(build[gone], gone).toBeUndefined();
+      expect(s.table.holders.has(buildId ?? "")).toBe(false);
+      // Its watch entry stays, with the stopped task: it marks a build with no launch message.
+      expect(s.table.launches.get(buildId ?? "")).toEqual(beforeStop.get(buildId));
+    }
+    // Its place in the line is its claim's time, ahead of anything queued after it.
+    expect(s.table.builds.get(ada ?? "")?.queueKey).toBe(`${claimedAt}#${ada ?? ""}`);
+    expect(s.table.builds.get(handedOver ?? "")).toMatchObject({ status: "building", taskArn: taskOf(handedOver).taskArn });
+    expect(s.table.slots.running).toBe(1);
+    expect([...s.table.holders.keys()]).toEqual([handedOver]);
+    // Nothing is launched while Stop is on.
+    expect(s.relaunch.bodies).toEqual([]);
+    // Each holds its place in the waiting line at once.
+    expect([...s.table.queue.keys()].sort()).toEqual([`${claimedAt}#${ada ?? ""}`, `${secondClaimedAt}#${second ?? ""}`]);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", requeued: 2, stopped: 2, failed: 0, relaunched: 0 });
+
+    // The stopped tasks are gone; the next checks (Stop still on) fail nothing, launch nothing and keep their places.
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(ada ?? "")?.status).toBe("queued");
+    expect(s.table.builds.get(second ?? "")?.status).toBe("queued");
+    expect(s.table.launches.size).toBe(3);
+    expect(Date.parse(must(s.table.queue.get(`${claimedAt}#${ada ?? ""}`)).lastSeenAt)).toBeGreaterThan(Date.parse(claimedAt) + 60_000);
+    expect(s.relaunch.bodies).toEqual([]);
+    expect(s.tasks.started).toHaveLength(3);
+    assertQuietLogs(s);
+  }, 30_000);
+
+  it("criterion 3: WHEN Resume is pressed THEN the queued builds start again from the beginning (a new attempt), the stopped ones first", async () => {
+    const s = setup();
+    s.table.buildsAtOnce = 1;
+    const [ada, later] = withBuilds(s, 1);
+    expect(await processLaunch(message(ada), s.deps)).toBe("started");
+    const first = must(s.tasks.started[0]);
+    s.advance(60_000);
+    // `later` arrives and waits for the one slot.
+    expect(await processLaunch(message(later), s.deps)).toBe("waiting");
+    s.table.stopped = true;
+    await runCheck(s.check);
+    expect(await processLaunch(message(later), s.deps)).toBe("paused");
+
+    s.table.stopped = false;
+    s.table.resumedAt = new Date(Date.parse("2026-11-24T10:05:00.000Z")).toISOString();
+    s.advance(30_000);
+    // The later build's message comes first: it still waits, behind the build that was running (an earlier place).
+    expect(await processLaunch(message(later), s.deps)).toBe("waiting");
+    // The next minute check launches the stopped build again.
+    await runCheck(s.check);
+    expect(s.relaunch.bodies).toEqual([message(ada)]);
+    const second = must(s.tasks.started[1]);
+    expect(second.buildId).toBe(ada);
+    expect(second.attemptId).not.toBe(first.attemptId);
+    expect(s.table.builds.get(ada ?? "")).toMatchObject({ status: "building", attemptId: second.attemptId, taskArn: second.taskArn });
+    // Its watch entry is the new launch's (the old one, with the stopped task, was replaced by the claim).
+    expect(s.table.launches.get(ada ?? "")?.taskArn).toBe(second.taskArn);
+    expect(s.logs.find((l) => l.event === "build-check" && l.relaunched === 1)).toBeDefined();
+    await s.table.endBuild(ada ?? "", "live", new Date().toISOString());
+    expect(await processLaunch(message(later), s.deps)).toBe("started");
+    expect(s.tasks.started).toHaveLength(3);
+  }, 30_000);
+
+  it("WHEN a stopped build cannot start at once after Resume (no slot, or too little time) THEN it keeps its watch entry and place, and a later check starts it", async () => {
+    const s = setup();
+    const [ada, second] = withBuilds(s, 1);
+    for (const buildId of [ada, second]) {
+      expect(await processLaunch(message(buildId), s.deps)).toBe("started");
+      s.advance(1000);
+    }
+    s.table.stopped = true;
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toHaveLength(2);
+    s.table.stopped = false;
+    // Too little time left in the check: nothing launched, nothing lost.
+    s.relaunch.noTime = true;
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.tasks.started).toHaveLength(2);
+    expect(s.table.launches.size).toBe(2);
+    expect(s.table.builds.get(ada ?? "")?.status).toBe("queued");
+    // One slot only: the oldest place starts, the other waits for the next minute.
+    s.relaunch.noTime = false;
+    s.table.buildsAtOnce = 1;
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.relaunch.bodies).toEqual([message(ada), message(second)]);
+    expect(s.table.builds.get(ada ?? "")?.status).toBe("building");
+    expect(s.table.builds.get(second ?? "")?.status).toBe("queued");
+    expect(s.table.launches.has(second ?? "")).toBe(true);
+    await s.table.endBuild(ada ?? "", "live", new Date().toISOString());
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(second ?? "")?.status).toBe("building");
+    expect(s.tasks.started.map((t) => t.buildId)).toEqual([ada, second, ada, second]);
+    assertQuietLogs(s);
+  }, 30_000);
+
+  it("WHEN Stop lasts longer than the queued time limit THEN no waiting build is failed, and after Resume the wait counts from Resume", async () => {
+    const s = setup();
+    s.table.buildsAtOnce = 1;
+    const [ada, waiting] = withBuilds(s, 1);
+    expect(await processLaunch(message(ada), s.deps)).toBe("started");
+    s.advance(1000);
+    expect(await processLaunch(message(waiting), s.deps)).toBe("waiting");
+    s.table.stopped = true;
+    await runCheck(s.check);
+    for (let i = 0; i < 5; i += 1) {
+      s.advance(QUEUE_WAIT_MAX_MS / 4);
+      expect(await processLaunch(message(waiting), s.deps)).toBe("paused");
+      await runCheck(s.check);
+    }
+    expect(s.table.builds.get(waiting ?? "")?.status).toBe("queued");
+    expect(s.table.builds.get(ada ?? "")?.status).toBe("queued");
+    s.table.stopped = false;
+    s.table.resumedAt = new Date(Date.parse("2026-11-24T10:00:00.000Z") + (5 * QUEUE_WAIT_MAX_MS) / 4).toISOString();
+    s.advance(60_000);
+    // The limit still applies after Resume, counted from it: the stopped build starts again, the other waits for its slot.
+    await runCheck(s.check);
+    expect(s.table.builds.get(waiting ?? "")?.status).toBe("queued");
+    expect(s.table.builds.get(ada ?? "")?.status).toBe("building");
+    expect(await processLaunch(message(waiting), s.deps)).toBe("waiting");
+    s.advance(QUEUE_WAIT_MAX_MS);
+    await runCheck(s.check);
+    expect(s.table.builds.get(waiting ?? "")).toMatchObject({ status: "failed", failureReasons: [QUEUE_TIMEOUT_REASON] });
   }, 30_000);
 });

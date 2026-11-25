@@ -7,7 +7,9 @@
 // `POST /api/conversation/spec/approve` (Approve spec), and Write my spec now also asks the AI worker
 // for the first version. Ticket 2.7: Approve spec also stores the readiness request for the AI worker (see
 // ./readiness.ts), and `GET /api/build` returns the caller's own build. Ticket 3.3: `GET /api/conversation` also
-// answers `budgetLeft`, the caller's AI budget left in dollars (the AI worker enforces the budget). Every route starts with the
+// answers `budgetLeft`, the caller's AI budget left in dollars (the AI worker enforces the budget). Ticket 3.5: while the
+// admin's global Stop is on, the three reads the page repeats (`GET /api/conversation`, the message poll and
+// `GET /api/build`) also answer `paused: true`, so every participant page shows the paused banner. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -176,7 +178,24 @@ async function poll(request: HttpRequest, participant: ParticipantRecord, deps: 
   } else if (status === "done" || status === "declined" || status === "failed") {
     reply = (await deps.store.getReplyText(participant.id, id)) ?? (status === "failed" ? FAILURE_REPLY : undefined);
   }
-  return { outcome: "ok", response: jsonResponse(200, { id, status, ...(reply === undefined ? {} : { reply }) }) };
+  const paused = await pausedFlag(deps);
+  return {
+    outcome: "ok",
+    response: jsonResponse(200, { id, status, ...(reply === undefined ? {} : { reply }), ...paused.flag }),
+    ...(paused.error === undefined ? {} : { error: paused.error }),
+  };
+}
+
+/**
+ * Ticket 3.5: `{ paused: true }` while the global Stop is on, else nothing. A failed settings read leaves it out (the
+ * page shows no banner; the answer is still 200) and is logged by name only.
+ */
+async function pausedFlag(deps: ConversationDeps): Promise<{ flag: { paused?: true }; error?: string }> {
+  try {
+    return { flag: (await deps.store.getSettings()).stopped ? { paused: true } : {} };
+  } catch (error) {
+    return { flag: {}, error: errorName(error) };
+  }
 }
 
 /** One message of the conversation as the page shows it (ticket 1.8). */
@@ -264,7 +283,8 @@ async function history(participant: ParticipantRecord, deps: ConversationDeps): 
   const nowSeconds = Math.floor(deps.now().getTime() / 1000);
   // Ticket 3.3: the caller's own budget left, in dollars (whole cents, never below 0); never their spend or anyone else's.
   const shaped = shapeHistory(participant.step, items, conversation, nowSeconds);
-  const body = budget === undefined ? { ...shaped } : { ...shaped, budgetLeft: budgetOf(budget).leftUsd };
+  // Ticket 3.5: the global Stop, from the same settings read as the budget.
+  const body = budget === undefined ? { ...shaped } : { ...shaped, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
   return { outcome: "ok", response: jsonResponse(200, body), ...(budgetError === undefined ? {} : { error: budgetError }) };
 }
 
@@ -386,6 +406,8 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       return undefined;
     });
   }
+  const paused = await pausedFlag(deps);
+  const error = aheadError ?? paused.error;
   return {
     outcome: "ok",
     response: jsonResponse(200, {
@@ -395,8 +417,9 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       ...(nickname === undefined ? {} : { repositoryUrl: appRepositoryUrl(nickname), appUrl: appAddress(nickname) }),
       ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
       ...(ahead === undefined ? {} : { ahead }),
+      ...paused.flag,
     }),
-    ...(aheadError === undefined ? {} : { error: aheadError }),
+    ...(error === undefined ? {} : { error }),
   };
 }
 

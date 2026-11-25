@@ -31,6 +31,16 @@ describe("AI budget left (ticket 3.3)", () => {
   });
 });
 
+describe("the workshop paused by the global Stop (ticket 3.5)", () => {
+  it("reads paused only as true, on the conversation and on a pending poll", () => {
+    const base = { step: "clarify", state: "open", messages: [] };
+    expect(parseConversation({ ...base, paused: true })).toEqual({ ...base, paused: true });
+    for (const bad of [false, "true", 1, null]) expect(parseConversation({ ...base, paused: bad })).toEqual(base);
+    expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: true } })).toEqual({ kind: "pending", paused: true });
+    expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: "yes" } })).toEqual({ kind: "pending" });
+  });
+});
+
 describe("conversation (GET /api/conversation)", () => {
   it("reads the conversation, its state and the message in flight", () => {
     const body = { step: "clarify", state: "waiting", messages: [...asked, { id: "m2", author: "participant", text: "x", status: "flagged" }], pendingId: "m2" };

@@ -7,8 +7,8 @@ import { TABLE_NAME } from "../settings.js";
 import { DynamoSettingsStore } from "../workshop/store.js";
 
 /**
- * The admin routes (ticket 3.2): `GET` and `PUT /api/admin/settings`, behind the one session check and for the admin
- * only. Rules in ../admin/. Its own function, so only this role may write the `SETTINGS` item.
+ * The admin routes (ticket 3.2): `GET` and `PUT /api/admin/settings` (and, ticket 3.5, `POST /api/admin/stop` and
+ * `/api/admin/resume`), behind the one session check and for the admin only. Rules in ../admin/. Its own function, so only this role may write the `SETTINGS` item.
  */
 
 /** One JSON line per request: route and outcome only (never a token, an id, a value or the body). */

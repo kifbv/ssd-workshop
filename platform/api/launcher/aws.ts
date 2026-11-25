@@ -51,10 +51,23 @@ import {
   specKey,
   type ItemKey,
 } from "../keys.js";
+import type { WorkshopSettings } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
-import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
+import type {
+  BuildTasks,
+  ClaimResult,
+  DeadLetter,
+  DeadLetters,
+  LaunchBuild,
+  LaunchEntry,
+  LaunchRecords,
+  SlotCount,
+  SlotItem,
+  TaskStart,
+  TaskState,
+} from "./launcher.js";
 
 const str = (value: string): AttributeValue => ({ S: value });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
@@ -63,6 +76,12 @@ const STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "li
 const conditionFailed = (error: unknown): boolean =>
   error instanceof ConditionalCheckFailedException || (error as { name?: unknown } | null)?.name === "ConditionalCheckFailedException";
 
+/**
+ * Ticket 3.5 (the gap left by 3.4): an UpdateItem of the slot counter that meets a claim or release transaction in flight
+ * is refused with TransactionConflictException. For the check's repair that is a lost race like a moved version: the
+ * repair counts as refused (and the miss count waits for the next minute), never an error that aborts the check.
+ */
+const transactionConflict = (error: unknown): boolean => (error as { name?: unknown } | null)?.name === "TransactionConflictException";
 
 /** The DynamoDBClient methods the launcher uses. */
 export interface LauncherTableSender {
@@ -138,8 +157,8 @@ export class DynamoLaunchRecords implements LaunchRecords {
     return { nickname, participantId, status: status as BuildStatus, ...(queueKey === undefined ? {} : { queueKey }) };
   }
 
-  async readBuildsAtOnce(): Promise<number> {
-    return (await readSettings(this.client, this.table)).buildsAtOnce;
+  readSettings(): Promise<WorkshopSettings> {
+    return readSettings(this.client, this.table);
   }
 
   enqueue(buildId: string, queueKey: string): Promise<boolean> {
@@ -201,32 +220,42 @@ export class DynamoLaunchRecords implements LaunchRecords {
     const expression = "SET #running = :running, #repairMisses = :zero ADD #version :one";
     const names = { "#running": "running", "#repairMisses": "repairMisses", "#version": "version" };
     const values = { ":running": { N: String(running) }, ":zero": { N: "0" }, ":one": { N: "1" } };
-    if (force) {
-      await this.client.send(
-        new UpdateItemCommand({ TableName: this.table, Key: keyOf(slotCountKey()), UpdateExpression: expression, ExpressionAttributeNames: names, ExpressionAttributeValues: values, ReturnValues: "NONE" }),
+    try {
+      if (force) {
+        await this.client.send(
+          new UpdateItemCommand({ TableName: this.table, Key: keyOf(slotCountKey()), UpdateExpression: expression, ExpressionAttributeNames: names, ExpressionAttributeValues: values, ReturnValues: "NONE" }),
+        );
+        return true;
+      }
+      return await this.update(
+        slotCountKey(),
+        expression,
+        seen.version === 0 ? "attribute_not_exists(#version)" : "#version = :seen",
+        names,
+        { ...values, ...(seen.version === 0 ? {} : { ":seen": { N: String(seen.version) } }) },
       );
-      return true;
+    } catch (error) {
+      if (transactionConflict(error)) return false;
+      throw error;
     }
-    return this.update(
-      slotCountKey(),
-      expression,
-      seen.version === 0 ? "attribute_not_exists(#version)" : "#version = :seen",
-      names,
-      { ...values, ...(seen.version === 0 ? {} : { ":seen": { N: String(seen.version) } }) },
-    );
   }
 
   async noteRepairRefused(): Promise<void> {
-    await this.client.send(
-      new UpdateItemCommand({
-        TableName: this.table,
-        Key: keyOf(slotCountKey()),
-        UpdateExpression: "ADD #repairMisses :one",
-        ExpressionAttributeNames: { "#repairMisses": "repairMisses" },
-        ExpressionAttributeValues: { ":one": { N: "1" } },
-        ReturnValues: "NONE",
-      }),
-    );
+    try {
+      await this.client.send(
+        new UpdateItemCommand({
+          TableName: this.table,
+          Key: keyOf(slotCountKey()),
+          UpdateExpression: "ADD #repairMisses :one",
+          ExpressionAttributeNames: { "#repairMisses": "repairMisses" },
+          ExpressionAttributeValues: { ":one": { N: "1" } },
+          ReturnValues: "NONE",
+        }),
+      );
+    } catch (error) {
+      // A claim or release in flight: this miss is not counted (the next refused repair counts).
+      if (!transactionConflict(error)) throw error;
+    }
   }
 
   async listQueueEntries(): Promise<{ queueKey: string; buildId: string }[]> {
@@ -417,6 +446,26 @@ export class DynamoLaunchRecords implements LaunchRecords {
       "#status = :building AND #taskArn = :taskArn AND attribute_exists(#pushedCommit)",
       { ...failedNames, "#taskArn": "taskArn", "#pushedCommit": "pushedCommit" },
       { ...failedValues(reasons, nowIso), ":building": str("building"), ":taskArn": str(taskArn) },
+    ));
+  }
+
+  requeueStopped(buildId: string, taskArn: string, queueKey: string, nowIso: string): Promise<boolean> {
+    // Like a failure write, it ends the build's run: its slot is freed after it.
+    return this.failAndRelease(buildId, this.update(
+      buildKey(buildId),
+      "SET #status = :queued, #queueKey = :queueKey, #updatedAt = :now REMOVE #attemptId, #launchedAt, #taskArn, #feed",
+      "#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)",
+      {
+        "#status": "status",
+        "#queueKey": "queueKey",
+        "#updatedAt": "updatedAt",
+        "#attemptId": "attemptId",
+        "#launchedAt": "launchedAt",
+        "#taskArn": "taskArn",
+        "#feed": "feed",
+        "#pushedCommit": "pushedCommit",
+      },
+      { ":queued": str("queued"), ":queueKey": str(queueKey), ":now": str(nowIso), ":building": str("building"), ":taskArn": str(taskArn) },
     ));
   }
 

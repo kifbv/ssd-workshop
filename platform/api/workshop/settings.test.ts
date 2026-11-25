@@ -32,6 +32,11 @@ describe("workshop settings (ticket 3.2)", () => {
     expect(settingsFromItem({ aiBudgetUsd: { S: "7" }, buildsAtOnce: { N: "x" } })).toEqual(DEFAULT_SETTINGS);
   });
 
+  it("reads the last Resume's time (ticket 3.5) only when it is a time", () => {
+    expect(settingsFromItem({ resumedAt: { S: "2026-11-25T10:00:00.000Z" } })).toEqual({ ...DEFAULT_SETTINGS, resumedAt: "2026-11-25T10:00:00.000Z" });
+    for (const bad of [{ S: "soon" }, { N: "1" }, { S: "" }]) expect(settingsFromItem({ resumedAt: bad })).toEqual(DEFAULT_SETTINGS);
+  });
+
   it("accepts caps in range, the ends included, keeping the budget to whole cents", () => {
     expect(parseCaps(VALID)).toEqual({ ok: true, caps: VALID });
     expect(parseCaps({ aiBudgetUsd: 0, changeRequestsPerPerson: 0, buildsAtOnce: 1 })).toEqual({ ok: true, caps: { aiBudgetUsd: 0, changeRequestsPerPerson: 0, buildsAtOnce: 1 } });

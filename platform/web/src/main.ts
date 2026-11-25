@@ -39,6 +39,7 @@ import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
 import { qrModules, qrSvgPath } from "./qr.js";
 import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, stageStates, type Build } from "./build-view.js";
+import { PHASE_3_TEXTS } from "../../api/workshop/texts.js";
 
 type ScreenName = Screen | "loading";
 
@@ -93,7 +94,23 @@ function show(name: ScreenName, focusId?: string): void {
     section.hidden = section.id !== `screen-${name}`;
   }
   byId("account").hidden = !SIGNED_IN_SCREENS.includes(name);
+  renderPaused();
   if (focusId) byId(focusId).focus();
+}
+
+/** Ticket 3.5: the workshop is paused (the facilitators' global Stop), as the last conversation, poll or build read said. */
+let workshopPaused = false;
+
+/** Shows the paused line above the signed-in screens while the last read said so; the next read without it clears it. */
+function setPaused(paused: boolean): void {
+  workshopPaused = paused;
+  renderPaused();
+}
+
+function renderPaused(): void {
+  const banner = byId("workshop-paused");
+  banner.textContent = PHASE_3_TEXTS.workshopPaused;
+  banner.hidden = !(workshopPaused && SIGNED_IN_SCREENS.includes(current));
 }
 
 /** Disables a button while its request runs and shows its waiting label. */
@@ -283,6 +300,7 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
   pollTimer = undefined;
   const result = pollResult(await call("GET", `/api/conversation/messages/${encodeURIComponent(id)}`));
   if (round !== pollRound || waiting === null) return;
+  if (result.kind === "pending" || result.kind === "flagged") setPaused(result.kind === "pending" && result.paused === true);
   if (result.kind === "pending" || result.kind === "flagged") {
     waiting.mode = result.kind;
     setStatus(id, result.kind);
@@ -332,6 +350,7 @@ async function loadConversation(): Promise<void> {
     return;
   }
   const { conversation } = result;
+  setPaused(conversation.paused === true);
   if (conversation.step !== "clarify" && conversation.step !== "spec" && conversation.step !== "approved" && conversation.step !== "building") {
     await goToOwnStep(view.screen);
     return;
@@ -515,6 +534,7 @@ async function pollBuild(round: number): Promise<void> {
   if (result.kind === "show") say("build", result.message, result.tone);
   else clearMessage("build");
   if (result.kind === "build") {
+    setPaused(result.build.paused === true);
     renderBuild(result.build);
     if (result.build.status === "live") {
       showLive(result.build);

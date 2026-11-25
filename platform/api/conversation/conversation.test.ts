@@ -56,6 +56,7 @@ function setup() {
     model,
     modelId: MODEL_ID,
     builds: new FakeBuildQueue(),
+    held: queue,
     now: () => clock,
     log: (e) => workerLogs.push(e),
     sleep: async (ms) => {

@@ -1,5 +1,6 @@
 // The admin routes (ticket 3.2): `GET /api/admin/settings` and `PUT /api/admin/settings` read and change the
-// workshop's caps. Only the admin may use them: the role comes from the allow-list through the one session check
+// workshop's caps; ticket 3.5: `POST /api/admin/stop` and `POST /api/admin/resume` turn the global Stop on and off (the
+// AI worker, the launcher and its minute check read it; see docs/decisions.md "(3.5)"). Only the admin may use them: the role comes from the allow-list through the one session check
 // (ticket 3.1), never from the profile, and anyone else gets the same 404 as an unknown route.
 import {
   isJsonContentType,
@@ -17,7 +18,9 @@ import type { SettingsStore } from "../workshop/store.js";
 
 export const SETTINGS_GET_ROUTE = "GET /api/admin/settings";
 export const SETTINGS_PUT_ROUTE = "PUT /api/admin/settings";
-export const ADMIN_ROUTES = [SETTINGS_GET_ROUTE, SETTINGS_PUT_ROUTE] as const;
+export const STOP_ROUTE = "POST /api/admin/stop";
+export const RESUME_ROUTE = "POST /api/admin/resume";
+export const ADMIN_ROUTES = [SETTINGS_GET_ROUTE, SETTINGS_PUT_ROUTE, STOP_ROUTE, RESUME_ROUTE] as const;
 
 /** The 400 answer, naming the allowed ranges (never echoing what was sent). */
 export const BAD_SETTINGS_MESSAGE =
@@ -25,8 +28,8 @@ export const BAD_SETTINGS_MESSAGE =
   `changeRequestsPerPerson (${CAP_RANGES.changeRequestsPerPerson.min} to ${CAP_RANGES.changeRequestsPerPerson.max}) and ` +
   `buildsAtOnce (${CAP_RANGES.buildsAtOnce.min} to ${CAP_RANGES.buildsAtOnce.max}), as numbers.`;
 
-export type AdminRoute = "settings-get" | "settings-put" | "unknown";
-export type AdminOutcome = "ok" | "saved" | "unauthorized" | "removed" | "not-found" | "invalid-request" | "unsupported-media-type" | "failed";
+export type AdminRoute = "settings-get" | "settings-put" | "stop" | "resume" | "unknown";
+export type AdminOutcome = "ok" | "saved" | "stopped" | "resumed" | "unauthorized" | "removed" | "not-found" | "invalid-request" | "unsupported-media-type" | "failed";
 
 /** The only things ever logged: route and outcome (no id, no values, no body). */
 export interface AdminLogEntry {
@@ -56,6 +59,8 @@ export function settingsBody(settings: WorkshopSettings): Record<string, unknown
 function routeOf(request: HttpRequest): AdminRoute {
   if (request.routeKey === SETTINGS_GET_ROUTE) return "settings-get";
   if (request.routeKey === SETTINGS_PUT_ROUTE) return "settings-put";
+  if (request.routeKey === STOP_ROUTE) return "stop";
+  if (request.routeKey === RESUME_ROUTE) return "resume";
   return "unknown";
 }
 
@@ -65,7 +70,13 @@ async function route(request: HttpRequest, deps: AdminDeps, which: AdminRoute): 
   // Participants and facilitators see the same 404 as for an unknown route; nothing is read or written.
   if (session.role !== "admin" || which === "unknown") return { outcome: "not-found", response: notFoundResponse() };
   if (which === "settings-get") return { outcome: "ok", response: jsonResponse(200, settingsBody(await deps.settings.getSettings())) };
+  // Writes need a JSON body, like every other write of the API (a plain form post cannot send one).
   if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  if (which === "stop" || which === "resume") {
+    // The body is not read: pressing Stop (or Resume) twice is harmless.
+    await deps.settings.setStopped(which === "stop", deps.now().toISOString());
+    return { outcome: which === "stop" ? "stopped" : "resumed", response: jsonResponse(200, settingsBody(await deps.settings.getSettings())) };
+  }
   const body = readJsonObject(request);
   const parsed = body === undefined ? undefined : parseCaps(body);
   if (parsed === undefined || !parsed.ok) {

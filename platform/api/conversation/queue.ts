@@ -2,14 +2,14 @@
 // stored participant message, holding only the participant id and the message id (never the text).
 // Ticket 2.7: the hand-off from the AI worker to the build launcher, holding only the build id.
 import { SendMessageCommand, type SendMessageCommandOutput } from "@aws-sdk/client-sqs";
-import { buildJobBody, jobBody, type AiJob, type BuildJob, type BuildQueue, type MessageQueue } from "./state.js";
+import { buildJobBody, jobBody, type AiJob, type BuildJob, type BuildQueue, type HeldJobs, type MessageQueue } from "./state.js";
 
 /** The one method of SQSClient the queue uses, so tests can stub it. */
 export interface SqsSender {
   send(command: SendMessageCommand): Promise<SendMessageCommandOutput>;
 }
 
-export class SqsMessageQueue implements MessageQueue {
+export class SqsMessageQueue implements MessageQueue, HeldJobs {
   constructor(
     private readonly client: SqsSender,
     private readonly queueUrl: string,
@@ -17,6 +17,11 @@ export class SqsMessageQueue implements MessageQueue {
 
   async send(job: AiJob): Promise<void> {
     await this.client.send(new SendMessageCommand({ QueueUrl: this.queueUrl, MessageBody: jobBody(job) }));
+  }
+
+  /** Ticket 3.5: the same job again, delivered after `delaySeconds` (a new message: its receive count starts again). */
+  async sendLater(job: AiJob, delaySeconds: number): Promise<void> {
+    await this.client.send(new SendMessageCommand({ QueueUrl: this.queueUrl, MessageBody: jobBody(job), DelaySeconds: delaySeconds }));
   }
 }
 

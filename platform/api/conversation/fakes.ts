@@ -5,7 +5,7 @@
 import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 import { FakeTable } from "../fakes.js";
 import type { BudgetFacts } from "../workshop/budget.js";
-import { limitsFromItem, settingsFromItem } from "../workshop/settings.js";
+import { limitsFromItem, settingsFromItem, type WorkshopSettings } from "../workshop/settings.js";
 import type { BuildStatus, ConversationState, MessageStatus, ReplyKind, Step, TokenUsage } from "../types.js";
 import type { Exchange } from "./answer.js";
 import type { ModelClient, ModelReply, ModelRequest } from "./model.js";
@@ -18,6 +18,7 @@ import {
   type BuildJob,
   type BuildQueue,
   type ConversationStore,
+  type HeldJobs,
   type ParticipantInfo,
   type ReadinessFinish,
   type ReadinessRequestResult,
@@ -423,6 +424,21 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     };
   }
 
+  async getSettings(): Promise<WorkshopSettings> {
+    this.fail("getSettings");
+    return settingsFromItem(this.settingsItem);
+  }
+
+  async holdMessage(participantId: string, messageId: string, nowSeconds: number): Promise<boolean> {
+    this.fail("holdMessage");
+    const message = this.messages.get(participantId)?.get(messageId);
+    const conversation = this.conversations.get(participantId);
+    if (message?.status !== "pending" || conversation?.pendingId !== messageId || conversation.state !== "open") return false;
+    this.messagesOf(participantId).set(messageId, { ...message, pendingSince: nowSeconds });
+    this.conversations.set(participantId, { ...conversation, pendingSince: nowSeconds });
+    return true;
+  }
+
   private add(participantId: string, u: TokenUsage): void {
     const total = this.usage.get(participantId) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
     this.usage.set(participantId, {
@@ -463,13 +479,20 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   }
 }
 
-export class FakeQueue implements MessageQueue {
+export class FakeQueue implements MessageQueue, HeldJobs {
   readonly sent: AiJob[] = [];
+  /** Ticket 3.5: jobs held by the global Stop, with their delay, in order. */
+  readonly later: { job: AiJob; delaySeconds: number }[] = [];
   failure: Error | undefined;
 
   async send(job: AiJob): Promise<void> {
     if (this.failure !== undefined) throw this.failure;
     this.sent.push({ ...job });
+  }
+
+  async sendLater(job: AiJob, delaySeconds: number): Promise<void> {
+    if (this.failure !== undefined) throw this.failure;
+    this.later.push({ job: { ...job }, delaySeconds });
   }
 }
 

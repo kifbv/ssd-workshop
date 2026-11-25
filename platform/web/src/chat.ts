@@ -32,6 +32,8 @@ export interface Conversation {
   approvedSpecVersion?: number;
   /** Ticket 3.3: the person's AI budget left, in dollars (never below 0). */
   budgetLeft?: number;
+  /** Ticket 3.5: the workshop is paused (the facilitators' global Stop). */
+  paused?: true;
 }
 
 export const CHAT_TEXTS = {
@@ -77,7 +79,7 @@ function parseMessage(value: unknown): ChatMessage | undefined {
 export function parseConversation(body: unknown): Conversation | undefined {
   const b = record(body);
   if (b === undefined) return undefined;
-  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft } = b;
+  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft, paused } = b;
   if (typeof step !== "string" || (state !== "open" && state !== "waiting") || !Array.isArray(messages)) return undefined;
   const parsed = messages.map(parseMessage);
   if (parsed.some((m) => m === undefined)) return undefined;
@@ -89,6 +91,7 @@ export function parseConversation(body: unknown): Conversation | undefined {
     ...(isVersion(latestSpecVersion) ? { latestSpecVersion } : {}),
     ...(isVersion(approvedSpecVersion) ? { approvedSpecVersion } : {}),
     ...(typeof budgetLeft === "number" && Number.isFinite(budgetLeft) && budgetLeft >= 0 ? { budgetLeft } : {}),
+    ...(paused === true ? { paused: true as const } : {}),
   };
 }
 
@@ -134,7 +137,7 @@ export function sendResult(
 export function pollResult(
   answer: ApiAnswer,
 ):
-  | { kind: "pending" }
+  | { kind: "pending"; paused?: true }
   | { kind: "flagged" }
   | { kind: "answered"; status: string; reply: string }
   | { kind: "signed-out" }
@@ -144,7 +147,8 @@ export function pollResult(
     const b = record(answer.body);
     const status = b?.["status"];
     const reply = b?.["reply"];
-    if (status === "pending") return { kind: "pending" };
+    // Ticket 3.5: a message held while the workshop is paused stays pending.
+    if (status === "pending") return b?.["paused"] === true ? { kind: "pending", paused: true } : { kind: "pending" };
     if (status === "flagged") return { kind: "flagged" };
     if ((status === "done" || status === "declined" || status === "failed") && typeof reply === "string") return { kind: "answered", status, reply };
     return { kind: "retry" };

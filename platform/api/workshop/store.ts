@@ -21,6 +21,11 @@ export interface SettingsStore {
   getSettings(): Promise<WorkshopSettings>;
   /** Stores the three caps (creating the item when it is missing); leaves Stop as it is. */
   putCaps(caps: WorkshopCaps, nowIso: string): Promise<void>;
+  /**
+   * Ticket 3.5: turns the global Stop on (noting `stoppedAt`) or off (noting `resumedAt`), creating the item when it is
+   * missing; leaves the caps as they are.
+   */
+  setStopped(stopped: boolean, nowIso: string): Promise<void>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -32,7 +37,7 @@ const key = (): Record<string, AttributeValue> => {
 
 /**
  * The settings now, for any store that can send a GetItem (the conversation store reads them for the AI budget, ticket
- * 3.3): a consistent read projected to the caps and Stop (`SETTINGS_READ_ATTRIBUTES` in infra/lib/config.ts, which a
+ * 3.3): a consistent read projected to the caps, Stop and the last Resume's time (`SETTINGS_READ_ATTRIBUTES` in infra/lib/config.ts, which a
  * reader's role is limited to), so an admin's change applies at the very next read.
  */
 export async function readSettings(client: { send(command: GetItemCommand): Promise<GetItemCommandOutput> }, tableName: string): Promise<WorkshopSettings> {
@@ -41,12 +46,13 @@ export async function readSettings(client: { send(command: GetItemCommand): Prom
       TableName: tableName,
       Key: key(),
       ConsistentRead: true,
-      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped",
+      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped, #resumedAt",
       ExpressionAttributeNames: {
         "#aiBudgetUsd": "aiBudgetUsd",
         "#changeRequestsPerPerson": "changeRequestsPerPerson",
         "#buildsAtOnce": "buildsAtOnce",
         "#stopped": "stopped",
+        "#resumedAt": "resumedAt",
       },
     }),
   );
@@ -85,6 +91,20 @@ export class DynamoSettingsStore implements SettingsStore {
           ":buildsAtOnce": num(caps.buildsAtOnce),
           ":updatedAt": str(nowIso),
         },
+      }),
+    );
+  }
+
+  async setStopped(stopped: boolean, nowIso: string): Promise<void> {
+    // One UpdateItem of the switch and its time only (the caps keep their values); nothing comes back.
+    const at = stopped ? "stoppedAt" : "resumedAt";
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.tableName,
+        Key: key(),
+        UpdateExpression: `SET #type = :type, #stopped = :stopped, #${at} = :now, #updatedAt = :now`,
+        ExpressionAttributeNames: { "#type": "type", "#stopped": "stopped", [`#${at}`]: at, "#updatedAt": "updatedAt" },
+        ExpressionAttributeValues: { ":type": str("settings"), ":stopped": { BOOL: stopped }, ":now": str(nowIso) },
       }),
     );
   }

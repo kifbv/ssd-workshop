@@ -38,12 +38,13 @@ describe("DynamoSettingsStore (ticket 3.2)", () => {
       TableName: TABLE,
       Key: KEY,
       ConsistentRead: true,
-      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped",
+      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped, #resumedAt",
       ExpressionAttributeNames: {
         "#aiBudgetUsd": "aiBudgetUsd",
         "#changeRequestsPerPerson": "changeRequestsPerPerson",
         "#buildsAtOnce": "buildsAtOnce",
         "#stopped": "stopped",
+        "#resumedAt": "resumedAt",
       },
     });
     expect(SETTINGS_PK).toBe(SETTINGS_PARTITION);
@@ -86,7 +87,35 @@ describe("DynamoSettingsStore (ticket 3.2)", () => {
       },
     });
     for (const name of ["pk", "sk", ...Object.values(input.ExpressionAttributeNames ?? {})]) expect(SETTINGS_UPDATE_ATTRIBUTES, name).toContain(name);
-    expect(SETTINGS_UPDATE_ATTRIBUTES).not.toContain("stopped");
+    // The caps' write never names the Stop switch (ticket 3.5 writes it with setStopped).
+    expect(Object.values(input.ExpressionAttributeNames ?? {})).not.toContain("stopped");
     await expect(store.putCaps({ aiBudgetUsd: 1, changeRequestsPerPerson: 1, buildsAtOnce: 1 }, "x")).rejects.toThrow("down");
+  });
+
+  it("turns Stop on and off (ticket 3.5) with one UpdateItem of the switch and its time, naming only SETTINGS_UPDATE_ATTRIBUTES", async () => {
+    const { client, sent } = stubClient([{}, {}, new Error("down")]);
+    const store = new DynamoSettingsStore(client, TABLE);
+    await store.setStopped(true, "2026-11-25T10:00:00.000Z");
+    await store.setStopped(false, "2026-11-25T10:05:00.000Z");
+    expect(sent.map((c) => c.input)).toEqual([
+      {
+        TableName: TABLE,
+        Key: KEY,
+        UpdateExpression: "SET #type = :type, #stopped = :stopped, #stoppedAt = :now, #updatedAt = :now",
+        ExpressionAttributeNames: { "#type": "type", "#stopped": "stopped", "#stoppedAt": "stoppedAt", "#updatedAt": "updatedAt" },
+        ExpressionAttributeValues: { ":type": { S: "settings" }, ":stopped": { BOOL: true }, ":now": { S: "2026-11-25T10:00:00.000Z" } },
+      },
+      {
+        TableName: TABLE,
+        Key: KEY,
+        UpdateExpression: "SET #type = :type, #stopped = :stopped, #resumedAt = :now, #updatedAt = :now",
+        ExpressionAttributeNames: { "#type": "type", "#stopped": "stopped", "#resumedAt": "resumedAt", "#updatedAt": "updatedAt" },
+        ExpressionAttributeValues: { ":type": { S: "settings" }, ":stopped": { BOOL: false }, ":now": { S: "2026-11-25T10:05:00.000Z" } },
+      },
+    ]);
+    for (const command of sent) {
+      for (const name of ["pk", "sk", ...Object.values((command as UpdateItemCommand).input.ExpressionAttributeNames ?? {})]) expect(SETTINGS_UPDATE_ATTRIBUTES, name).toContain(name);
+    }
+    await expect(store.setStopped(true, "x")).rejects.toThrow("down");
   });
 });

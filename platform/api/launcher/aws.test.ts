@@ -103,7 +103,7 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.readConversation("p-1")).toEqual({ buildId: "b-1", approvedSpecVersion: 2 });
     expect(await records.readApprovedSpec("p-1", 2)).toBe("# Spec");
     // Ticket 3.4: the cap, the waiting line and the slots.
-    expect(await records.readBuildsAtOnce()).toBe(15);
+    expect((await records.readSettings()).buildsAtOnce).toBe(15);
     expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);
     await records.touchQueueEntry(QUEUE_KEY, "b-1", NOW);
     expect(await records.countAhead(QUEUE_KEY, NOW)).toBe(0);
@@ -123,6 +123,7 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.failStopped("b-1", ARN, ["x"], NOW)).toBe(true);
     expect(await records.failHandedOver("b-1", ARN, ["x"], NOW)).toBe(true);
     expect(await records.failQueued("b-1", ["x"], NOW)).toBe(true);
+    expect(await records.requeueStopped("b-1", ARN, QUEUE_KEY, NOW)).toBe(true);
     expect(await records.failDeploy("b-1", "Ada", COMMIT, ["x"], NOW)).toBe(true);
     expect(await records.listLaunches()).toEqual([]);
     await records.removeLaunch("b-1", ARN);
@@ -278,6 +279,50 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(forced?.ConditionExpression).toBeUndefined();
     expect(missed?.UpdateExpression).toBe("ADD #repairMisses :one");
     expect(missed?.ConditionExpression).toBeUndefined();
+  });
+
+  it("ticket 3.5: puts a running build back to queued from the beginning (only while building with that task and no pushed commit), then frees its slot", async () => {
+    const { client, sent } = stub();
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.requeueStopped("b-1", ARN, QUEUE_KEY, NOW)).toBe(true);
+    const update = sent[0]?.input as UpdateItemCommandInput;
+    expect(update).toEqual({
+      TableName: TABLE,
+      Key: { pk: { S: "BUILD#b-1" }, sk: { S: "BUILD" } },
+      UpdateExpression: "SET #status = :queued, #queueKey = :queueKey, #updatedAt = :now REMOVE #attemptId, #launchedAt, #taskArn, #feed",
+      ConditionExpression: "#status = :building AND #taskArn = :taskArn AND attribute_not_exists(#pushedCommit)",
+      ExpressionAttributeNames: {
+        "#status": "status",
+        "#queueKey": "queueKey",
+        "#updatedAt": "updatedAt",
+        "#attemptId": "attemptId",
+        "#launchedAt": "launchedAt",
+        "#taskArn": "taskArn",
+        "#feed": "feed",
+        "#pushedCommit": "pushedCommit",
+      },
+      ExpressionAttributeValues: { ":queued": { S: "queued" }, ":queueKey": { S: QUEUE_KEY }, ":now": { S: NOW }, ":building": { S: "building" }, ":taskArn": { S: ARN } },
+      ReturnValues: "NONE",
+    });
+    placeholdersMatch(update as Named);
+    // Then the release transaction (the build is no longer running).
+    expect(sent[1]).toBeInstanceOf(TransactWriteItemsCommand);
+    // Refused (handed over, deploying, another task, gone): nothing more.
+    const refused = stub([Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" })]);
+    expect(await new DynamoLaunchRecords(refused.client, TABLE).requeueStopped("b-1", ARN, QUEUE_KEY, NOW)).toBe(false);
+    expect(refused.sent).toHaveLength(1);
+  });
+
+  it("ticket 3.5 (3.4's gap): WHEN a repair or its miss count meets a claim or release in flight (TransactionConflictException) THEN the repair counts as refused, not an error", async () => {
+    const conflict = () => Object.assign(new Error("x"), { name: "TransactionConflictException" });
+    const { client, sent } = stub([conflict(), conflict(), conflict(), Object.assign(new Error("x"), { name: "InternalServerError" })]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.repairSlots({ running: 9, version: 7, misses: 0 }, 2, false)).toBe(false);
+    expect(await records.repairSlots({ running: -1, version: 7, misses: 0 }, 2, true)).toBe(false);
+    await expect(records.noteRepairRefused()).resolves.toBeUndefined();
+    // Any other error still fails the check, as before.
+    await expect(records.noteRepairRefused()).rejects.toThrow();
+    expect(sent).toHaveLength(4);
   });
 
   it("try 2: reads the counter as missing (no claim) when it or its running is absent or not a whole number, and lists malformed slot items without a build id", async () => {

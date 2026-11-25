@@ -33,7 +33,7 @@ import {
 import { isStep } from "../session/session.js";
 import type { BuildStatus, ConversationState, MessageStatus, TokenUsage } from "../types.js";
 import type { BudgetFacts } from "../workshop/budget.js";
-import { limitsFromItem } from "../workshop/settings.js";
+import { limitsFromItem, type WorkshopSettings } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
 import { countQueuedAhead } from "../build/slots.js";
 import type { Exchange } from "./answer.js";
@@ -786,6 +786,35 @@ export class DynamoConversationStore implements ConversationStore {
       ),
     ]);
     return { settings, limits: limitsFromItem(profile.Item), spentUsd: Number(usage.Item?.["costUsd"]?.N ?? 0) };
+  }
+
+  getSettings(): Promise<WorkshopSettings> {
+    return readSettings(this.client, this.tableName);
+  }
+
+  async holdMessage(participantId: string, messageId: string, nowSeconds: number): Promise<boolean> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(this.tableName, conversationKey(participantId), { pendingSince: num(nowSeconds) }, {
+              expression: "#pendingId = :messageId AND #state = :open",
+              names: { "#pendingId": "pendingId", "#state": "state" },
+              values: { ":messageId": str(messageId), ":open": str("open") },
+            }),
+            setItem(this.tableName, messageKey(participantId, messageId), { pendingSince: num(nowSeconds) }, {
+              expression: "#status = :pending",
+              names: { "#status": "status" },
+              values: { ":pending": str("pending") },
+            }),
+          ],
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
   }
 
   /** The atomic ADD of tokens and cost to the participant's `USAGE` totals. */

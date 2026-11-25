@@ -2,7 +2,7 @@
 // source mapping someone added) are ignored without any AWS call.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LAUNCH_WAIT_SECONDS } from "../settings.js";
-import { answerLaunch, handler, sourceOf } from "./builds-launcher.js";
+import { answerLaunch, handler, hasTimeFor, LAUNCH_RESERVE_MS, RELAUNCH_MIN_LEFT_MS, sourceOf } from "./builds-launcher.js";
 
 const QUEUE = (name: string) => `arn:aws:sqs:eu-central-1:360206963848:${name}`;
 
@@ -54,5 +54,21 @@ describe("the builds launcher handler (ticket 2.9)", () => {
     // Setting the visibility failed: the message still comes back (after the queue's own visibility timeout).
     const broken = { comeBackAfter: async () => Promise.reject(new Error("sqs down")) };
     expect(await answerLaunch(record, "waiting", broken)).toEqual({ batchItemFailures: [{ itemIdentifier: "m-1" }] });
+  });
+
+  it("ticket 3.5: WHEN a build is held by the global Stop THEN its message comes back after 30 seconds, as a waiting one", async () => {
+    const calls: [string, number][] = [];
+    const visibility = { comeBackAfter: async (handle: string, seconds: number) => void calls.push([handle, seconds]) };
+    const record = { body: "{}", eventSourceARN: QUEUE("ssd-workshop-builds.fifo"), messageId: "m-2", receiptHandle: "h-2" };
+    expect(await answerLaunch(record, "paused", visibility)).toEqual({ batchItemFailures: [{ itemIdentifier: "m-2" }] });
+    expect(calls).toEqual([["h-2", 30]]);
+  });
+
+  it("ticket 3.5: the check starts a relaunch only with RELAUNCH_MIN_LEFT_MS of the invocation left (more than the launch reserve)", () => {
+    expect(RELAUNCH_MIN_LEFT_MS).toBeGreaterThan(LAUNCH_RESERVE_MS);
+    const left = (ms: number) => ({ getRemainingTimeInMillis: () => ms });
+    expect(hasTimeFor(left(RELAUNCH_MIN_LEFT_MS), RELAUNCH_MIN_LEFT_MS)).toBe(true);
+    expect(hasTimeFor(left(RELAUNCH_MIN_LEFT_MS - 1), RELAUNCH_MIN_LEFT_MS)).toBe(false);
+    expect(hasTimeFor(undefined, RELAUNCH_MIN_LEFT_MS)).toBe(true);
   });
 });
