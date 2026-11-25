@@ -2,22 +2,28 @@
 // ./participant.ts and ../session/session.ts.
 //
 // The function's role (infra/lib/api-stack.ts) may read `SESSION#*` and `PARTICIPANT#*` items,
-// update in `PARTICIPANT#*` only `nickname` and `step`, and put in `NICK#*` only the claim's
-// attribute names. A transaction is authorized item by item as PutItem and UpdateItem.
+// read in `EMAIL#*` only the allow-list entry's `role`, `group` and `participantId` (ticket 3.1, never
+// `email`), delete in `SESSION#*` (sign-out and removed people, ticket 3.1), update in `PARTICIPANT#*`
+// only `nickname` and `step`, and put in `NICK#*` only the claim's attribute names. A transaction is
+// authorized item by item as PutItem and UpdateItem. The conversation function reads sessions through
+// this store too, with the same session rights.
 import {
+  DeleteItemCommand,
   GetItemCommand,
   TransactWriteItemsCommand,
   type AttributeValue,
+  type DeleteItemCommandOutput,
   type GetItemCommandOutput,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { nicknameKey, participantKey, sessionKey, type ItemKey } from "../keys.js";
-import { isRole, isStep, type ParticipantRecord, type StoredSession } from "../session/session.js";
+import { allowListKey, nicknameKey, participantKey, sessionKey, type ItemKey } from "../keys.js";
+import { isRole, isStep, type ParticipantRecord, type SessionAllowEntry, type StoredSession } from "../session/session.js";
 import type { ClaimResult, ParticipantStore } from "./participant.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
 export interface ParticipantSender {
   send(command: GetItemCommand): Promise<GetItemCommandOutput>;
+  send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
 }
 
@@ -44,14 +50,37 @@ export class DynamoParticipantStore implements ParticipantStore {
         Key: keyOf(sessionKey(tokenHash)),
         // The session was written moments before the first call that uses it.
         ConsistentRead: true,
-        ProjectionExpression: "#participantId, #expiresAt",
-        ExpressionAttributeNames: { "#participantId": "participantId", "#expiresAt": "expiresAt" },
+        ProjectionExpression: "#participantId, #expiresAt, #allowRef",
+        ExpressionAttributeNames: { "#participantId": "participantId", "#expiresAt": "expiresAt", "#allowRef": "allowRef" },
       }),
     );
     const participantId = output.Item?.["participantId"]?.S;
     const expiresAt = Number(output.Item?.["expiresAt"]?.N);
     if (participantId === undefined || !Number.isFinite(expiresAt)) return undefined;
-    return { participantId, expiresAt };
+    const allowRef = output.Item?.["allowRef"]?.S;
+    return { participantId, expiresAt, ...(allowRef === undefined ? {} : { allowRef }) };
+  }
+
+  async getAllowEntry(email: string): Promise<SessionAllowEntry | undefined> {
+    // Consistent, so a removal or a new role applies at the very next call. Never projects `email`.
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: keyOf(allowListKey(email)),
+        ConsistentRead: true,
+        ProjectionExpression: "#role, #group, #participantId",
+        ExpressionAttributeNames: { "#role": "role", "#group": "group", "#participantId": "participantId" },
+      }),
+    );
+    const role = output.Item?.["role"]?.S;
+    const group = output.Item?.["group"]?.S;
+    if (!isRole(role) || group === undefined) return undefined;
+    const participantId = output.Item?.["participantId"]?.S;
+    return { role, group, ...(participantId === undefined ? {} : { participantId }) };
+  }
+
+  async deleteSession(tokenHash: string): Promise<void> {
+    await this.client.send(new DeleteItemCommand({ TableName: this.tableName, Key: keyOf(sessionKey(tokenHash)) }));
   }
 
   async getParticipant(participantId: string): Promise<ParticipantRecord | undefined> {

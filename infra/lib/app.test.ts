@@ -890,6 +890,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/me",
       "POST /api/me/nickname",
       "GET /api/participants/{id}",
+      "POST /api/sign-out",
       "POST /api/conversation/messages",
       "GET /api/conversation/messages/{id}",
       "GET /api/conversation",
@@ -1302,7 +1303,8 @@ describe("api stack: sign-in verify function (ticket 1.5)", () => {
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
           "ForAllValues:StringEquals": {
-            "dynamodb:Attributes": ["pk", "sk", "type", "tokenHash", "participantId", "createdAt", "expiresAt"],
+            // `allowRef` (ticket 3.1): the allow-list address sealed under the session token.
+            "dynamodb:Attributes": ["pk", "sk", "type", "tokenHash", "participantId", "createdAt", "expiresAt", "allowRef"],
           },
         },
       },
@@ -1312,6 +1314,66 @@ describe("api stack: sign-in verify function (ticket 1.5)", () => {
   it("bundles the handler into a self-contained index.js that answers a request without the JSON content type 415", async () => {
     const bundle = f.bundle<{ handler: (event: { body?: string }) => Promise<{ statusCode: number }> }>();
     await expect(quietly(() => bundle.handler({ body: "{}" }))).resolves.toMatchObject({ statusCode: 415 });
+  });
+});
+
+/**
+ * The session check's rights (ticket 3.1), on the participant and conversation functions: the caller's allow-list
+ * entry without its address (GetItem of role, group and participantId only, with a projection) and session deletes.
+ */
+function sessionCheckStatements(tableArn: unknown): unknown[] {
+  return [
+    {
+      Effect: "Allow",
+      Action: "dynamodb:GetItem",
+      Resource: tableArn,
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["EMAIL#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "role", "group", "participantId"] },
+        StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    },
+    {
+      Effect: "Allow",
+      Action: "dynamodb:DeleteItem",
+      Resource: tableArn,
+      Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] } },
+    },
+  ];
+}
+
+describe("api stack: session check (ticket 3.1)", () => {
+  it("lets only the participant and conversation functions read allow-list entries without their address, and delete sessions", () => {
+    const readers: string[] = [];
+    for (const [, , policy] of ofType("AWS::IAM::Policy")) {
+      const statements = (policy.Properties?.PolicyDocument as { Statement: { Action: unknown; Condition?: unknown }[] }).Statement;
+      const roles = JSON.stringify(policy.Properties?.Roles);
+      for (const st of statements) {
+        const actions = ([] as unknown[]).concat(st.Action);
+        const condition = JSON.stringify(st.Condition ?? {});
+        if (actions.includes("dynamodb:DeleteItem") && condition.includes("SESSION#")) readers.push(`delete ${roles}`);
+        if (actions.includes("dynamodb:GetItem") && condition.includes("EMAIL#")) {
+          if (condition.includes('"participantId"')) {
+            // Never the address: the attribute list holds no `email`, and a projection is required.
+            expect(condition).not.toContain('"email"');
+            expect(condition).toContain("SPECIFIC_ATTRIBUTES");
+          }
+          readers.push(`read ${roles}`);
+        }
+      }
+    }
+    const roleOf = (name: string) => JSON.stringify([{ Ref: apiFunction(name).roleEntry()?.[0] }]);
+    const verify = roleOf(SIGN_IN_VERIFY_FUNCTION_NAME);
+    expect(readers.sort()).toEqual(
+      [
+        `read ${roleOf(SIGN_IN_CODE_FUNCTION_NAME)}`,
+        `read ${verify}`,
+        `read ${roleOf(PARTICIPANT_FUNCTION_NAME)}`,
+        `read ${roleOf(CONVERSATION_FUNCTION_NAME)}`,
+        `delete ${roleOf(PARTICIPANT_FUNCTION_NAME)}`,
+        `delete ${roleOf(CONVERSATION_FUNCTION_NAME)}`,
+      ].sort(),
+    );
   });
 });
 
@@ -1334,8 +1396,8 @@ describe("api stack: participant function (ticket 1.5)", () => {
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("routes GET /api/me, POST /api/me/nickname and GET /api/participants/{id} to it, invoked only by this API", () => {
-    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}"]);
+  it("routes GET /api/me, POST /api/me/nickname, GET /api/participants/{id} and POST /api/sign-out (ticket 3.1) to it, invoked only by this API", () => {
+    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}", "POST /api/sign-out"]);
     for (const routeKey of PARTICIPANT_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
         IntegrationType: "AWS_PROXY",
@@ -1349,7 +1411,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
     expect(source).toContain('"/*/*/*"');
   });
 
-  it("allows only its logs, GetItem on sessions and profiles, nickname claim puts and profile updates of nickname and step", () => {
+  it("allows only its logs, GetItem on sessions and profiles, nickname claim puts, profile updates of nickname and step, and the session check's rights (ticket 3.1)", () => {
     expect(f.statements()).toEqual([
       {
         Effect: "Allow",
@@ -1382,6 +1444,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
           "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "nickname", "step"] },
         },
       },
+      ...sessionCheckStatements(f.tableArn()),
     ]);
   });
 
@@ -1618,6 +1681,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
         },
       },
       { Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn() },
+      ...sessionCheckStatements(f.tableArn()),
     ]);
   });
 

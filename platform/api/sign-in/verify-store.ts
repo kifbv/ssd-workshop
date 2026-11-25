@@ -164,7 +164,7 @@ export class DynamoVerifyStore implements VerifyStore {
     return isStep(step) ? step : FIRST_STEP;
   }
 
-  async putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number): Promise<void> {
+  async putSession(tokenHash: string, participantId: string, createdAtIso: string, expiresAt: number, allowRef: string): Promise<void> {
     await this.client.send(
       new PutItemCommand({
         TableName: this.tableName,
@@ -175,6 +175,7 @@ export class DynamoVerifyStore implements VerifyStore {
           participantId: str(participantId),
           createdAt: str(createdAtIso),
           expiresAt: num(expiresAt),
+          allowRef: str(allowRef),
         },
         ConditionExpression: "attribute_not_exists(#pk)",
         ExpressionAttributeNames: { "#pk": "pk" },

@@ -189,7 +189,13 @@ export const SIGN_IN_VERIFY_SESSION_PUT_ATTRIBUTES = [
   "participantId",
   "createdAt",
   "expiresAt",
+  "allowRef",
 ] as const;
+/**
+ * What the session check (ticket 3.1, participant and conversation functions) may read of an allow-list entry
+ * (GetItem in `EMAIL#*` with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES): never `email`.
+ */
+export const SESSION_ALLOW_READ_ATTRIBUTES = ["pk", "sk", "role", "group", "participantId"] as const;
 /** Lambda function, role and log group of the protected participant routes (ticket 1.5). */
 export const PARTICIPANT_FUNCTION_NAME = `${PREFIX}-api-participant`;
 /** The nickname claim's attribute names the participant function may put in `NICK#*`. */

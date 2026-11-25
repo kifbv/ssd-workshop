@@ -2,7 +2,7 @@
 // routes, and the end of changes after approval.
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
-import { hashToken, SESSION_COOKIE } from "../session/session.js";
+import { SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
 import { answerMessage, readSpecAnswer, SPEC_MAX_TOKENS } from "./answer.js";
 import {
@@ -175,8 +175,8 @@ const historyOf = (t: string = MINE): HttpRequest => ({ routeKey: HISTORY_ROUTE,
 /** Ada and Bob, both at step 1 with one answered exchange. */
 async function setup() {
   const table = new FakeConversationTable();
-  table.addParticipant("me-1", "Ada", hashToken(MINE), START_S + 3600);
-  table.addParticipant("other-2", "Bob", hashToken(THEIRS), START_S + 3600);
+  table.addParticipant("me-1", "Ada", MINE, START_S + 3600);
+  table.addParticipant("other-2", "Bob", THEIRS, START_S + 3600);
   const queue = new FakeQueue();
   const model = new FakeModel();
   let clock = START;

@@ -10,6 +10,7 @@ import {
   NICKNAME_ROUTE,
   PARTICIPANT_ROUTE,
   RESERVED_NICKNAMES,
+  SIGN_OUT_ROUTE,
   type ParticipantDeps,
   type ParticipantLogEntry,
 } from "./participant.js";
@@ -25,8 +26,8 @@ function setup(role: Role = "participant") {
   table.profiles.set("me-1", { id: "me-1", role, group: "blue", step: "nickname", createdAt: "x" });
   table.profiles.set("other-2", { id: "other-2", role: "participant", group: "red", step: "clarify", nickname: "Bob", createdAt: "x" });
   table.nicknames.set("bob", { nickname: "Bob", participantId: "other-2" });
-  table.sessions.set(hashToken(MINE), { participantId: "me-1", expiresAt: NOW_S + 3600, createdAt: "x" });
-  table.sessions.set(hashToken(THEIRS), { participantId: "other-2", expiresAt: NOW_S + 3600, createdAt: "x" });
+  table.addSession(MINE, "me-1", NOW_S + 3600);
+  table.addSession(THEIRS, "other-2", NOW_S + 3600);
   const logs: ParticipantLogEntry[] = [];
   const deps: ParticipantDeps = { store: table, now: () => NOW, log: (e) => logs.push(e) };
   return { table, logs, deps };
@@ -192,5 +193,101 @@ describe("protected routes (ticket 1.5 criteria 5 and 6)", () => {
     const s = setup();
     expect((await handleParticipantRequest({ routeKey: "GET /api/other" }, s.deps)).statusCode).toBe(401);
     expect((await handleParticipantRequest({ routeKey: "GET /api/other", cookies: cookie(MINE) }, s.deps)).statusCode).toBe(404);
+  });
+});
+
+describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
+  const signOut = (cookies?: string[], contentType = "application/json"): HttpRequest => ({
+    routeKey: SIGN_OUT_ROUTE,
+    headers: { "content-type": contentType },
+    body: "{}",
+    ...(cookies ? { cookies } : {}),
+  });
+  const CLEARED = "__Host-ssd_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
+
+  it("criterion 1: WHEN a signed-in person's allow-list entry is removed THEN their next protected call answers 401 and the session item is deleted", async () => {
+    for (const build of [() => me(cookie(MINE)), () => byId("me-1", cookie(MINE)), () => nickname("Ada")]) {
+      const s = setup();
+      s.table.allow.delete(FakeTable.emailOf("me-1"));
+      const res = await handleParticipantRequest(build(), s.deps);
+      expect(res.statusCode).toBe(401);
+      expect(json(res.body)).toEqual({ message: "Please sign in." });
+      expect(s.table.sessions.has(hashToken(MINE))).toBe(false);
+      // Nothing else changed, and the other person is still signed in.
+      expect(s.table.profiles.get("me-1")?.nickname).toBeUndefined();
+      expect(s.table.sessions.has(hashToken(THEIRS))).toBe(true);
+      expect(s.logs.at(-1)?.outcome).toBe("removed");
+      expect((await handleParticipantRequest(me(cookie(MINE)), s.deps)).statusCode).toBe(401);
+      expect(s.logs.at(-1)?.outcome).toBe("unauthorized");
+    }
+  });
+
+  it("criterion 2: WHEN a person's role or group changes in the allow-list THEN their next call uses the new role and group", async () => {
+    const s = setup();
+    s.table.allow.set(FakeTable.emailOf("me-1"), { role: "admin", group: "green", participantId: "me-1" });
+    const res = await handleParticipantRequest(me(cookie(MINE)), s.deps);
+    expect(res.statusCode).toBe(200);
+    expect(json(res.body)).toEqual({ id: "me-1", nickname: null, role: "admin", group: "green", step: "nickname" });
+    const own = await handleParticipantRequest(byId("me-1", cookie(MINE)), s.deps);
+    expect(json(own.body)).toMatchObject({ role: "admin", group: "green" });
+  });
+
+  it("criterion 3: WHEN POST /api/sign-out is called THEN the session item is deleted, the cookie is cleared, and the old cookie answers 401", async () => {
+    const s = setup();
+    const res = await handleParticipantRequest(signOut(cookie(MINE)), s.deps);
+    expect(res.statusCode).toBe(200);
+    expect(json(res.body)).toEqual({ message: "You're signed out." });
+    expect(res.cookies).toEqual([CLEARED]);
+    expect(res.headers).toEqual({ "content-type": "application/json", "cache-control": "no-store" });
+    expect(s.table.sessions.has(hashToken(MINE))).toBe(false);
+    expect(s.table.sessions.has(hashToken(THEIRS))).toBe(true);
+    expect(s.logs.at(-1)).toEqual({ event: "participant", route: "sign-out", outcome: "signed-out" });
+    for (const build of [() => me(cookie(MINE)), () => byId("me-1", cookie(MINE)), () => nickname("Ada"), () => signOut(cookie(MINE))]) {
+      const again = await handleParticipantRequest(build(), s.deps);
+      expect(again.statusCode).toBe(401);
+      expect(json(again.body)).toEqual({ message: "Please sign in." });
+    }
+    // The other person's session still works.
+    expect((await handleParticipantRequest(me(cookie(THEIRS)), s.deps)).statusCode).toBe(200);
+  });
+
+  it("answers sign-out without a session, with a forged, expired or removed one 401 (clearing the cookie), deleting no other session", async () => {
+    const s = setup();
+    const expired = token(9);
+    s.table.sessions.set(hashToken(expired), { participantId: "me-1", expiresAt: NOW_S, createdAt: "x" });
+    for (const [label, cookies] of [
+      ["no cookie", undefined],
+      ["forged token", cookie(token(7))],
+      ["session hash as token", cookie(hashToken(THEIRS))],
+      ["expired", cookie(expired)],
+    ] as const) {
+      const res = await handleParticipantRequest(signOut(cookies), s.deps);
+      expect(res.statusCode, label).toBe(401);
+      expect(res.cookies, label).toEqual([CLEARED]);
+      expect(json(res.body)).toEqual({ message: "Please sign in." });
+    }
+    expect(s.table.sessions.has(hashToken(MINE))).toBe(true);
+    expect(s.table.sessions.has(hashToken(THEIRS))).toBe(true);
+    s.table.allow.delete(FakeTable.emailOf("me-1"));
+    const removed = await handleParticipantRequest(signOut(cookie(MINE)), s.deps);
+    expect([removed.statusCode, removed.cookies]).toEqual([401, [CLEARED]]);
+    expect(s.table.sessions.has(hashToken(MINE))).toBe(false);
+    expect(s.logs.at(-1)?.outcome).toBe("removed");
+  });
+
+  it("refuses a sign-out that is not sent as JSON 415, keeping the session", async () => {
+    const s = setup();
+    const res = await handleParticipantRequest(signOut(cookie(MINE), "text/plain"), s.deps);
+    expect(res.statusCode).toBe(415);
+    expect(res.cookies).toBeUndefined();
+    expect(s.table.sessions.has(hashToken(MINE))).toBe(true);
+  });
+
+  it("answers 500 when the session delete fails, logging the error name only", async () => {
+    const s = setup();
+    s.table.failOn = "deleteSession";
+    const res = await handleParticipantRequest(signOut(cookie(MINE)), s.deps);
+    expect(res.statusCode).toBe(500);
+    expect(s.logs).toEqual([{ event: "participant", route: "sign-out", outcome: "failed", error: "Error" }]);
   });
 });

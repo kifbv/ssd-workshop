@@ -13,6 +13,7 @@ import {
   nicknameResult,
   normalizeCode,
   screenFor,
+  signOutResult,
   verifyResult,
   type ApiAnswer,
   type Me,
@@ -79,12 +80,18 @@ function clearMessage(screen: Screen): void {
   byId(`message-${screen}`).textContent = "";
 }
 
+/** The screens of a signed-in person: they show the Sign out link (ticket 3.1). */
+const SIGNED_IN_SCREENS: readonly ScreenName[] = ["nickname", "step", "spec", "build", "live"];
+let current: ScreenName = "loading";
+
 /** Shows one screen and moves the focus to its first field, or to its heading. Leaving step 3 stops its polling. */
 function show(name: ScreenName, focusId?: string): void {
   if (name !== "build") stopBuildPolling();
+  current = name;
   for (const section of document.querySelectorAll<HTMLElement>("[data-screen]")) {
     section.hidden = section.id !== `screen-${name}`;
   }
+  byId("account").hidden = !SIGNED_IN_SCREENS.includes(name);
   if (focusId) byId(focusId).focus();
 }
 
@@ -780,6 +787,18 @@ function wire(): void {
       else say("spec", result.message, result.tone);
     }).finally(() => {
       if (!byId("screen-spec").hidden) render();
+    });
+  });
+
+  // Sign out (ticket 3.1): the API deletes the session and clears the cookie; the page stops polling.
+  const signOutButton = byId<HTMLButtonElement>("sign-out-button");
+  signOutButton.addEventListener("click", () => {
+    void whileBusy(signOutButton, async () => {
+      const result = signOutResult(await call("POST", "/api/sign-out", {}));
+      if (result.kind === "signed-out") {
+        stopPolling();
+        showEmail(MESSAGES.signOutDone);
+      } else if (current !== "loading") say(current, result.message, result.tone);
     });
   });
 

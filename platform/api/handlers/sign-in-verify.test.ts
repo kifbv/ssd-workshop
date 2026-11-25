@@ -136,6 +136,92 @@ describe("sign-in verify and participant logs (ticket 1.5)", () => {
   });
 });
 
+describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
+  let captured: string[];
+  let logged = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    logged = 0;
+    captured = captureOutput();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("criterion 5: WHEN the API logs a refused or signed-out call THEN no email address is in the log line", async () => {
+    const table = new FakeTable();
+    table.allow.set(LISTED, { group: "blue", role: "participant" });
+    let n = 0;
+    const deps: VerifyDeps = {
+      store: table,
+      now: () => START,
+      // A different token for every sign-in.
+      randomBytes: (size) => Buffer.alloc(size, ++n),
+      randomUUID: () => "a1b2c3d4-0000-4000-8000-000000000001",
+      log: (entry) => {
+        logged++;
+        logEntry(entry);
+      },
+      sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    };
+    const run = createHandler(deps);
+    const signIn = async (): Promise<string> => {
+      table.codes.set(LISTED, {
+        codes: [{ codeHash: await hashCode(CODE, Buffer.alloc(16, 1)), expiresAt: START_S + CODE_TTL_SECONDS }],
+        attempts: 0,
+        version: 1,
+      });
+      const before = logged;
+      const pending = run(verify(LISTED, CODE));
+      await settle(() => logged > before);
+      await vi.advanceTimersByTimeAsync(ANSWER_AFTER_MS);
+      const signed = await pending;
+      expect(signed.statusCode).toBe(200);
+      return signed.cookies?.[0]?.split(";")[0] ?? "";
+    };
+    const participant = createParticipantHandler({ store: table, now: () => START, log: participantLogEntry });
+    const me = (cookie: string): HttpRequest => ({ routeKey: "GET /api/me", cookies: [cookie] });
+    const signOut = (cookie: string): HttpRequest => ({
+      routeKey: "POST /api/sign-out",
+      cookies: [cookie],
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+
+    // Signed in: the session item keeps the address only sealed.
+    const first = await signIn();
+    const stored = JSON.stringify([...table.sessions.values()]);
+    expect(stored).not.toContain(LISTED);
+    expect(stored).not.toContain("franck.tester");
+    expect((await participant(me(first))).statusCode).toBe(200);
+    // A role change applies at the next call.
+    table.allow.set(LISTED, { group: "red", role: "facilitator", participantId: "a1b2c3d4-0000-4000-8000-000000000001" });
+    expect(JSON.parse((await participant(me(first))).body ?? "")).toMatchObject({ role: "facilitator", group: "red" });
+    // Signed out, then refused.
+    const out = await participant(signOut(first));
+    expect(out.statusCode).toBe(200);
+    expect((await participant(me(first))).statusCode).toBe(401);
+    expect((await participant(signOut(first))).statusCode).toBe(401);
+    // Signed in again, then taken off the list: removed at the next call.
+    const second = await signIn();
+    table.allow.delete(LISTED);
+    expect((await participant(me(second))).statusCode).toBe(401);
+    expect(table.sessions.size).toBe(0);
+    expect((await participant(me(second))).statusCode).toBe(401);
+
+    const lines = captured.filter((line) => line.includes('"event":"participant"'));
+    for (const outcome of ["signed-out", "removed", "unauthorized"]) expect(lines.join("\n"), outcome).toContain(`"outcome":"${outcome}"`);
+    const logs = captured.join("\n").toLowerCase();
+    expect(logs).not.toContain("@");
+    for (const secret of [LISTED, "franck.tester", "example.com", first.split("=")[1] ?? "?", second.split("=")[1] ?? "?"]) {
+      expect(logs, secret).not.toContain(secret.toLowerCase());
+    }
+  });
+});
+
 describe("handler (live wiring)", () => {
   it("answers a request without the JSON content type 415 before any AWS call", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);

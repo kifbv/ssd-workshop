@@ -1,7 +1,7 @@
 // Ticket 1.8 (Step 1: Clarify): the ready marker, the page's history route and Write my spec.
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
-import { hashToken, SESSION_COOKIE } from "../session/session.js";
+import { SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
 import { answerMessage, CLARIFY_PROMPT_VERSION, CLARIFY_SYSTEM_PROMPT, parseReadyMarker, READY_MARKER } from "./answer.js";
 import {
@@ -33,9 +33,9 @@ const NEWBIE = token(3);
 
 function setup() {
   const table = new FakeConversationTable();
-  table.addParticipant("me-1", "Ada", hashToken(MINE), START_S + 3600);
-  table.addParticipant("other-2", "Bob", hashToken(THEIRS), START_S + 3600);
-  table.addParticipant("new-3", undefined, hashToken(NEWBIE), START_S + 3600, "nickname");
+  table.addParticipant("me-1", "Ada", MINE, START_S + 3600);
+  table.addParticipant("other-2", "Bob", THEIRS, START_S + 3600);
+  table.addParticipant("new-3", undefined, NEWBIE, START_S + 3600, "nickname");
   const queue = new FakeQueue();
   const model = new FakeModel();
   let clock = START;

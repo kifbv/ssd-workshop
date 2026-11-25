@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
+import { FakeTable } from "../fakes.js";
 import { hashToken, SESSION_COOKIE } from "../session/session.js";
 import { MODEL_ID } from "../settings.js";
 import { CLARIFY_PROMPT_VERSION, CLARIFY_SYSTEM_PROMPT } from "./answer.js";
@@ -32,9 +33,9 @@ const NEWBIE = token(3);
 
 function setup() {
   const table = new FakeConversationTable();
-  table.addParticipant("me-1", "Ada", hashToken(MINE), START_S + 3600);
-  table.addParticipant("other-2", "Bob", hashToken(THEIRS), START_S + 3600);
-  table.addParticipant("new-3", undefined, hashToken(NEWBIE), START_S + 3600, "nickname");
+  table.addParticipant("me-1", "Ada", MINE, START_S + 3600);
+  table.addParticipant("other-2", "Bob", THEIRS, START_S + 3600);
+  table.addParticipant("new-3", undefined, NEWBIE, START_S + 3600, "nickname");
   const queue = new FakeQueue();
   const model = new FakeModel();
   let clock = START;
@@ -461,5 +462,19 @@ describe("criterion 6: another participant's message id is not found", () => {
     }
     expect((await handleConversationRequest({ routeKey: POLL_ROUTE, cookies: [`${SESSION_COOKIE}=${MINE}`] }, s.deps)).statusCode).toBe(404);
     expect(s.logs.filter((l) => l.outcome === "not-found")).toHaveLength(7);
+  });
+});
+
+describe("the conversation routes follow the allow-list (ticket 3.1)", () => {
+  it("criterion 1: WHEN a signed-in person's allow-list entry is removed THEN their next conversation call answers 401, the session is deleted and nothing is sent", async () => {
+    const s = setup();
+    s.table.allow.delete(FakeTable.emailOf("me-1"));
+    const res = await handleConversationRequest(send("A plant watering app"), s.deps);
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.body ?? "")).toEqual({ message: "Please sign in." });
+    expect(s.table.sessions.has(hashToken(MINE))).toBe(false);
+    expect(s.table.sessions.has(hashToken(THEIRS))).toBe(true);
+    expect(s.queue.sent).toEqual([]);
+    expect(s.logs.at(-1)?.outcome).toBe("unauthorized");
   });
 });

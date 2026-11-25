@@ -162,9 +162,9 @@ describe("DynamoVerifyStore", () => {
     await expect(store.upsertProfile("p-1", "participant", "g", "x")).resolves.toBe("nickname");
   });
 
-  it("puts a new session (hash, participant, times; never the token) only if absent", async () => {
+  it("puts a new session (hash, participant, times, sealed allow-list link; never the token) only if absent", async () => {
     const { client, sent } = stubClient([{}]);
-    await new DynamoVerifyStore(client, TABLE).putSession("ab12", "p-1", "2026-11-23T10:00:00.000Z", 1800);
+    await new DynamoVerifyStore(client, TABLE).putSession("ab12", "p-1", "2026-11-23T10:00:00.000Z", 1800, "sealed");
     expect(sent[0]?.input).toEqual({
       TableName: TABLE,
       Item: {
@@ -175,6 +175,7 @@ describe("DynamoVerifyStore", () => {
         participantId: { S: "p-1" },
         createdAt: { S: "2026-11-23T10:00:00.000Z" },
         expiresAt: { N: "1800" },
+        allowRef: { S: "sealed" },
       },
       ConditionExpression: "attribute_not_exists(#pk)",
       ExpressionAttributeNames: { "#pk": "pk" },
@@ -199,7 +200,7 @@ describe("DynamoVerifyStore", () => {
     await store.deleteCode(EMAIL, 1);
     await store.linkParticipant(EMAIL, "p-1");
     await store.upsertProfile("p-1", "participant", "g", "x");
-    await store.putSession("ab", "p-1", "x", 1);
+    await store.putSession("ab", "p-1", "x", 1, "sealed");
     const allowed = (command: Sent): readonly string[] => {
       const pk = (command.input as { Key?: { pk?: { S?: string } }; Item?: { pk?: { S?: string } } }).Key?.pk?.S ??
         (command.input as { Item?: { pk?: { S?: string } } }).Item?.pk?.S ?? "";
