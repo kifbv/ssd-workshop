@@ -164,12 +164,20 @@ describe("the linked profile follows the allow-list (ticket 3.10)", () => {
     const { client, sent } = stubClient([linked, meta, meta]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
     await expect(store.remove("jane@example.com")).resolves.toBe(true);
-    expect((sent[1] as DeleteItemCommand).input.Key).toEqual(KEY);
-    expect((sent[2] as UpdateItemCommand).input).toMatchObject({
+    expect((sent[1] as UpdateItemCommand).input).toMatchObject({
       Key: PROFILE,
       UpdateExpression: "SET #role = :role",
       ExpressionAttributeValues: { ":role": { S: "removed" } },
     });
+    expect((sent[2] as DeleteItemCommand).input.Key).toEqual(KEY);
+  });
+
+  it("WHEN the profile update fails THEN the entry stays, so running remove again finishes the job", async () => {
+    const { client, sent } = stubClient([linked, Object.assign(new Error("throttled"), { name: "ThrottlingException" })]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).rejects.toThrow("throttled");
+    expect(sent).toHaveLength(2);
+    expect(sent.map((command) => command.constructor.name)).not.toContain("DeleteItemCommand");
   });
 
   it("WHEN there was no entry THEN no profile is touched", async () => {

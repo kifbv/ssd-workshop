@@ -174,6 +174,9 @@ export class DynamoAllowListStore implements AllowListStore {
     const key = allowListKey(email);
     // Read the link before the entry goes (the delete itself returns no old values).
     const participantId = await this.linkedParticipant(email);
+    // Profile first: if the delete then fails, a second `remove` still finds the entry and finishes; the other order
+    // would leave a person off the list but still on the dashboard, with nothing left to rerun.
+    if (participantId !== undefined) await this.updateProfile(participantId, { role: REMOVED_ROLE });
     try {
       // The condition tells "removed" from "there was none" without returning the old item.
       await this.client.send(
@@ -187,7 +190,6 @@ export class DynamoAllowListStore implements AllowListStore {
       if (isConditionFailed(error)) return false;
       throw error;
     }
-    if (participantId !== undefined) await this.updateProfile(participantId, { role: REMOVED_ROLE });
     return true;
   }
 }

@@ -722,6 +722,9 @@ flowchart LR
    index is sparse: `AWS_PROFILE=franck aws dynamodb scan --table-name ssd-workshop-data --index-name
    ssd-workshop-by-type --select COUNT --region eu-central-1` counts only those items (compare with the four kinds'
    numbers; never print the items).
+   Then re-run the allow-list import once with the current list (`AWS_PROFILE=franck npm run -s allowlist -- import <absolute path of the
+   current CSV>`), so every linked profile gets its role and group from the list (before this deploy, import did not
+   copy them, so someone promoted or moved since their last sign-in would show wrongly until they sign in again).
 
 Run by Franck, signed in as a facilitator (or the admin) in one browser and as a test participant in another. The
 dashboard page comes with ticket 3.11; until then call the routes with the facilitator's session cookie copied from
