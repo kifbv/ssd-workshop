@@ -556,9 +556,8 @@ describe("dashboard link on the workshop page (ticket 3.11)", () => {
 });
 
 describe("dashboard screenshots (ticket 3.11)", () => {
-  it("takes the 375 px and 1280 px screenshots: a flag alert, a highlighted row and a normal row", async () => {
-    const target = SHOTS;
-    if (target === undefined || target === "") return;
+  it.skipIf(SHOTS === undefined || SHOTS === "")("takes the 375 px and 1280 px screenshots: a flag alert, a highlighted row and a normal row", async () => {
+    const target = SHOTS as string;
     mkdirSync(target, { recursive: true });
     for (const [viewport, name] of [[PHONE, "dashboard-375.png"], [LAPTOP, "dashboard-1280.png"]] as const) {
       await context.close();
