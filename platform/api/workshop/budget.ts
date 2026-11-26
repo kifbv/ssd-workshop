@@ -45,3 +45,12 @@ export function budgetOf(facts: BudgetFacts): Budget {
 export function overBudget(budget: Budget, spentInJobUsd = 0): boolean {
   return budget.spentUsd + Math.max(0, spentInJobUsd) >= budget.budgetUsd;
 }
+
+/**
+ * Ticket 3.5 and 3.10: whether the AI must wait instead of running: the admin's global Stop, or a facilitator's Pause of
+ * this participant. Either way the worker holds the job (no AI call; it comes back after STOP_HOLD_SECONDS) until it is
+ * released.
+ */
+export function mustHold(facts: Pick<BudgetFacts, "settings" | "limits">): boolean {
+  return facts.settings.stopped || facts.limits.paused;
+}

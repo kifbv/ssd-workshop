@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import { type CfnStage, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
-import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
+import { AttributeType, BillingMode, ProjectionType, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
 import { Effect, PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
@@ -25,7 +25,17 @@ import {
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   BUILD_QUEUE_NAME,
   BUILD_QUEUE_PARTITION,
+  BUILD_RETRIES_PARTITION,
   BUILD_SLOTS_PARTITION,
+  BY_TYPE_INDEX_ATTRIBUTES,
+  BY_TYPE_INDEX_NAME,
+  FACILITATOR_BUILD_READ_ATTRIBUTES,
+  FACILITATOR_FUNCTION_NAME,
+  FACILITATOR_INDEX_READ_ATTRIBUTES,
+  FACILITATOR_INDEX_TYPES,
+  FACILITATOR_NICK_READ_ATTRIBUTES,
+  FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES,
+  RETRY_REQUEST_ATTRIBUTES,
   CONVERSATION_FUNCTION_NAME,
   CONVERSATION_UPDATE_ATTRIBUTES,
   FOUNDATION_MODEL_ID,
@@ -102,6 +112,21 @@ export const ADMIN_ROUTES = [
   { path: "/api/admin/settings", method: HttpMethod.PUT },
   { path: "/api/admin/stop", method: HttpMethod.POST },
   { path: "/api/admin/resume", method: HttpMethod.POST },
+] as const;
+
+/**
+ * The facilitator routes (ticket 3.10), served by their own function: the dashboard's list, a participant's conversation
+ * log and the actions, a participant named by nickname (platform/api/facilitator/facilitator.ts).
+ */
+export const FACILITATOR_ROUTES = [
+  { path: "/api/facilitator/participants", method: HttpMethod.GET },
+  { path: "/api/facilitator/participants/{nickname}/conversation", method: HttpMethod.GET },
+  { path: "/api/facilitator/participants/{nickname}/retry", method: HttpMethod.POST },
+  { path: "/api/facilitator/participants/{nickname}/pause", method: HttpMethod.POST },
+  { path: "/api/facilitator/participants/{nickname}/resume", method: HttpMethod.POST },
+  { path: "/api/facilitator/participants/{nickname}/budget", method: HttpMethod.POST },
+  { path: "/api/facilitator/participants/{nickname}/flag/approve", method: HttpMethod.POST },
+  { path: "/api/facilitator/participants/{nickname}/flag/reject", method: HttpMethod.POST },
 ] as const;
 
 /** The protected conversation routes (ticket 1.7; history and step from 1.8; spec and approve from 1.9), served by one function. */
@@ -186,6 +211,15 @@ export class ApiStack extends Stack {
       // table cannot be deleted by a direct API call either.
       removalPolicy: RemovalPolicy.RETAIN,
       deletionProtection: true,
+    });
+    // Ticket 3.10: the one secondary index, by item `type`, for the facilitators' list (a Query per type, never a Scan).
+    // INCLUDE only what a dashboard row needs (never `email`, a message's text or a spec); only the facilitator role may
+    // query it, and only the types FACILITATOR_INDEX_TYPES.
+    this.table.addGlobalSecondaryIndex({
+      indexName: BY_TYPE_INDEX_NAME,
+      partitionKey: { name: "type", type: AttributeType.STRING },
+      projectionType: ProjectionType.INCLUDE,
+      nonKeyAttributes: [...BY_TYPE_INDEX_ATTRIBUTES],
     });
 
     this.api = new HttpApi(this, "Api", {
@@ -516,6 +550,101 @@ export class ApiStack extends Stack {
     // One job per invocation, at most AI_WORKER_MAX_CONCURRENCY at once; the source grants the role the
     // consume rights on this queue only.
     worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1, maxConcurrency: AI_WORKER_MAX_CONCURRENCY }));
+
+    // Ticket 3.10: the facilitator routes. Reads sessions, profiles, conversations and messages (`PARTICIPANT#*`), a
+    // nickname's participant id and a build's status (projected), lists by type through the index (projected, four
+    // types only), puts Retry requests (`BUILD_RETRIES`), and updates in `PARTICIPANT#*` only the names Pause, Add budget,
+    // Retry's note and a flag's decision need. The facilitator check is in the code (the role comes from the allow-list).
+    const facilitator = workshopFunction(this, "Facilitator", FACILITATOR_FUNCTION_NAME, "facilitator.ts");
+    facilitator.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] } },
+      }),
+    );
+    facilitator.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] } },
+      }),
+    );
+    for (const [prefix, names] of [
+      ["NICK#*", FACILITATOR_NICK_READ_ATTRIBUTES],
+      ["BUILD#*", FACILITATOR_BUILD_READ_ATTRIBUTES],
+    ] as const) {
+      facilitator.addToRolePolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ["dynamodb:GetItem"],
+          resources: [this.table.tableArn],
+          conditions: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [prefix] },
+            "ForAllValues:StringEquals": { "dynamodb:Attributes": [...names] },
+            StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+          },
+        }),
+      );
+    }
+    // The index: a Query only, for the four types only (the index's partition key, `type`, is the LeadingKeys value; the
+    // Null guard refuses a request without one), projected.
+    facilitator.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [`${this.table.tableArn}/index/${BY_TYPE_INDEX_NAME}`],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [...FACILITATOR_INDEX_TYPES], "dynamodb:Attributes": [...FACILITATOR_INDEX_READ_ATTRIBUTES] },
+          Null: { "dynamodb:LeadingKeys": "false" },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    facilitator.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_RETRIES_PARTITION], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    facilitator.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_RETRIES_PARTITION], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    facilitator.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": participantPartitions,
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    // An approved flag goes to the AI worker, exactly as `npm run flags -- approve` sends it.
+    facilitator.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [aiQueue.queueArn] }));
+    addSettingsReadRights(facilitator, this.table);
+    addSessionCheckRights(facilitator, this.table);
+    const facilitatorIntegration = new HttpLambdaIntegration("FacilitatorIntegration", facilitator, { scopePermissionToRoute: false });
+    for (const route of FACILITATOR_ROUTES) {
+      this.api.addRoutes({ path: route.path, methods: [route.method], integration: facilitatorIntegration });
+    }
 
     // Ticket 2.4: the data API for apps, reachable without sign-in by anyone with an app's address.
     // It reads the live marker (`APP#*`, written only by the deployer) and the app's data

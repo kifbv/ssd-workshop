@@ -62,7 +62,8 @@ paths:
   one transaction conditional on it still being pending (ticket 1.7). DynamoDB refuses an expression with an undefined
   `:value`/`#name` (or an unused one): `store.test.ts` checks every transaction item's placeholders both ways.
 - An approval that lets something skip a check is tied to the content, not the record: store a hash of the approved
-  content (`approvedTextHash`, SHA-256 of the text) in an attribute no Lambda role may write, and skip only while the
+  content (`approvedTextHash`, SHA-256 of the text) in an attribute only the deciding role may write (since 3.10 the
+  facilitator function, beside Franck's `npm run flags`), and skip only while the
   current content has that hash (ticket 1.7).
 - The Lambda runtime writes an uncaught error's message and stack to CloudWatch: a handler whose errors may carry
   personal data logs only `errorName(error)` and throws a bare `new Error(...)` (no `cause`), as `ai-worker.ts` does.
@@ -261,3 +262,10 @@ paths:
   accepts it only with a content tie to input only it wrote (`repositorySpec`); one shared approval attribute would let
   that writer approve anything. A `GetItem` that lists its own `ExpressionAttributeNames` beside a shared projection
   (`getSpec`) must gain every new name too: test placeholders both ways on reads as well as writes.
+- Listing items across participants (3.10's dashboard): never a Scan (its keys and `LastEvaluatedKey` hold the
+  allow-list's `EMAIL#<address>`); query the `ssd-workshop-by-type` index by item `type`, projected to names in its
+  INCLUDE list, from a role limited to those types (`dynamodb:LeadingKeys` is the index's partition key there, plus a
+  `Null` guard). A new attribute a list needs goes into `BY_TYPE_INDEX_ATTRIBUTES` (an index update) first. Work a
+  facilitator asks of a build (Retry) is a request item the launcher's minute check acts on, never a StopTask or a
+  launch-queue send from another role. A single-item write's failed condition is `ConditionalCheckFailedException`;
+  the conversation store's `conditionFailed` only recognises a cancelled transaction.

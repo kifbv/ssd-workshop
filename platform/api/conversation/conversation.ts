@@ -255,7 +255,7 @@ async function poll(request: HttpRequest, participant: ParticipantRecord, deps: 
   } else if (status === "done" || status === "declined" || status === "failed") {
     reply = (await deps.store.getReplyText(participant.id, id)) ?? (status === "failed" ? FAILURE_REPLY : undefined);
   }
-  const paused = await pausedFlag(deps);
+  const paused = await pausedFlag(participant.id, deps);
   return {
     outcome: "ok",
     response: jsonResponse(200, { id, status, ...(reply === undefined ? {} : { reply }), ...paused.flag }),
@@ -266,14 +266,24 @@ async function poll(request: HttpRequest, participant: ParticipantRecord, deps: 
 /**
  * Ticket 3.5: `{ paused: true }` while the global Stop is on, else nothing. A failed settings read answers
  * `{ pausedUnknown: true }` instead (the page keeps the line as it shows it; the answer is still 200) and is logged by
- * name only.
+ * name only. Ticket 3.10: while a facilitator paused the caller, `{ paused: true, pausedBy: "facilitator" }` (the page
+ * then says "Your facilitator paused your session.").
  */
-async function pausedFlag(deps: ConversationDeps): Promise<{ flag: { paused?: true; pausedUnknown?: true }; error?: string }> {
+async function pausedFlag(participantId: string, deps: ConversationDeps): Promise<{ flag: PausedFlag; error?: string }> {
   try {
-    return { flag: (await deps.store.getSettings()).stopped ? { paused: true } : {} };
+    return { flag: pausedFlagOf(await deps.store.getPauseState(participantId)) };
   } catch (error) {
     return { flag: { pausedUnknown: true }, error: errorName(error) };
   }
+}
+
+/** What a participant's page is told about holds (ticket 3.5, 3.10). */
+export type PausedFlag = { paused?: true; pausedBy?: "facilitator"; pausedUnknown?: true };
+
+/** Ticket 3.10: a facilitator's Pause of the caller wins over the global Stop (it lasts until that facilitator's Resume). */
+export function pausedFlagOf(state: { stopped: boolean; paused: boolean }): PausedFlag {
+  if (state.paused) return { paused: true, pausedBy: "facilitator" };
+  return state.stopped ? { paused: true } : {};
 }
 
 /** One message of the conversation as the page shows it (ticket 1.8). */
@@ -380,7 +390,7 @@ async function history(participant: ParticipantRecord, deps: ConversationDeps): 
   const body =
     budget === undefined
       ? { ...shaped, ...step4, pausedUnknown: true }
-      : { ...shaped, ...step4, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
+      : { ...shaped, ...step4, budgetLeft: budgetOf(budget).leftUsd, ...pausedFlagOf({ stopped: budget.settings.stopped, paused: budget.limits.paused }) };
   const error = budgetError ?? suggestionsError;
   return { outcome: "ok", response: jsonResponse(200, body), ...(error === undefined ? {} : { error }) };
 }
@@ -542,7 +552,7 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       return undefined;
     });
   }
-  const paused = await pausedFlag(deps);
+  const paused = await pausedFlag(participant.id, deps);
   const error = aheadError ?? paused.error ?? suggestionsError;
   return {
     outcome: "ok",
@@ -645,10 +655,10 @@ async function rebuildFromRepository(request: HttpRequest, participant: Particip
  * Ticket 3.5: `GET /api/status`, the workshop's state for any signed-in person (`{ paused: true }` while the global
  * Stop is on, else `{}`): one small `SETTINGS` read, which every signed-in screen repeats every 30 s so an idle page
  * shows and clears the paused banner. A failed read is a 500 (the page keeps what it showed), not a false "running".
+ * Ticket 3.10: also the caller's own Pause (`{ paused: true, pausedBy: "facilitator" }`), from their profile.
  */
-async function workshopStatus(deps: ConversationDeps): Promise<Result> {
-  const settings = await deps.store.getSettings();
-  return { outcome: "ok", response: jsonResponse(200, settings.stopped ? { paused: true } : {}) };
+async function workshopStatus(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  return { outcome: "ok", response: jsonResponse(200, pausedFlagOf(await deps.store.getPauseState(participant.id))) };
 }
 
 function routeOf(request: HttpRequest): ConversationRoute {
@@ -681,7 +691,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "spec") result = await spec(request, session.participant, deps);
     else if (route === "approve") result = await approve(request, session.participant, deps);
     else if (route === "build") result = await build(session.participant, deps);
-    else if (route === "status") result = await workshopStatus(deps);
+    else if (route === "status") result = await workshopStatus(session.participant, deps);
     else if (route === "change-build") result = await buildChange(request, session.participant, deps);
     else if (route === "change-discard") result = await discardChange(request, session.participant, deps);
     else if (route === "change-rebuild") result = await rebuildFromRepository(request, session.participant, deps);

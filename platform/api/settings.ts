@@ -188,3 +188,18 @@ export const QUEUE_WAIT_MAX_MS = 4 * 60 * 60 * 1000;
  * keeps moving the version cannot hold a wrong counter forever.
  */
 export const SLOT_REPAIR_FORCE_AFTER = 3;
+
+/**
+ * Ticket 3.10: the table's index by item `type` (infra/lib/config.ts BY_TYPE_INDEX_NAME), which only the facilitator
+ * function queries (profiles, conversations, usage totals and builds, never the allow-list).
+ */
+export const BY_TYPE_INDEX_NAME = "ssd-workshop-by-type";
+/** Ticket 3.10: a build `building` for longer than this is stuck: the dashboard marks it and Retry may restart it. */
+export const STUCK_BUILD_MS = 15 * 60 * 1000;
+/**
+ * Ticket 3.10: a retry request the launcher's check could not act on yet (a build still handing over or deploying) is
+ * dropped after this long, so a build that later fails is never restarted by a forgotten press.
+ */
+export const RETRY_REQUEST_MAX_MS = 30 * 60 * 1000;
+/** Ticket 3.10: what one press of Add budget grants, in dollars (set by the server, never read from the request). */
+export const BUDGET_STEP_USD = 2;

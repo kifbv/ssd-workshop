@@ -16,6 +16,8 @@ import type {
   LaunchEntry,
   LaunchRecords,
   RebuildRequestState,
+  RetryBuildState,
+  RetryRequest,
   SlotCount,
   SlotItem,
   TaskStart,
@@ -384,6 +386,45 @@ export class FakeBuildTable implements LaunchRecords {
   async removeLaunch(buildId: string, taskArn: string | undefined): Promise<void> {
     const entry = this.launches.get(buildId);
     if (entry !== undefined && entry.taskArn === taskArn) this.launches.delete(buildId);
+  }
+
+  /** Ticket 3.10: participants a facilitator paused. */
+  readonly paused = new Set<string>();
+  /** Ticket 3.10: the facilitators' Retry requests, build id -> requestedAt. */
+  readonly retryRequests = new Map<string, string>();
+
+  async readPaused(participantId: string): Promise<boolean> {
+    return this.paused.has(participantId);
+  }
+
+  async listRetryRequests(): Promise<RetryRequest[]> {
+    return [...this.retryRequests].map(([buildId, requestedAt]) => ({ buildId, requestedAt }));
+  }
+
+  async removeRetryRequest(buildId: string): Promise<void> {
+    this.retryRequests.delete(buildId);
+  }
+
+  async readRetryBuild(buildId: string): Promise<RetryBuildState | undefined> {
+    const build = this.builds.get(buildId);
+    return (
+      build && {
+        status: build.status,
+        ...(build.taskArn === undefined ? {} : { taskArn: build.taskArn }),
+        ...(build.launchedAt === undefined ? {} : { launchedAt: build.launchedAt }),
+        handedOver: build.pushedCommit !== undefined,
+      }
+    );
+  }
+
+  /** As DynamoLaunchRecords.requeueFailed: only while `failed`; back to queued from the beginning at a new place. */
+  async requeueFailed(buildId: string, queueKey: string, nowIso: string): Promise<boolean> {
+    const build = this.builds.get(buildId);
+    if (!build || build.status !== "failed") return false;
+    const { failureReasons, finishedAt, pushedCommit, taskArn, launchedAt, attemptId, feed, ...kept } = build;
+    void [failureReasons, finishedAt, pushedCommit, taskArn, launchedAt, attemptId, feed];
+    this.builds.set(buildId, { ...kept, status: "queued", queueKey, updatedAt: nowIso });
+    return true;
   }
 }
 

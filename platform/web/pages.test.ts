@@ -403,9 +403,10 @@ const ME = { id: "p-1", nickname: "ada-l", role: "participant", group: "g1" };
  * a sent message stays pending until `answer()` (or `flag()`) is called. Polls are counted per id.
  */
 function fakeConversation(start: MockMessage[] = [], step = "clarify") {
-  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined, paused: false, pausedUnknown: false };
-  /** Ticket 3.5: the Stop's flags as the API sends them; `pausedUnknown` stands for a failed settings read. */
-  const pausedBody = () => (state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true } : {});
+  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined, paused: false, pausedUnknown: false, pausedBy: undefined as "facilitator" | undefined };
+  /** Ticket 3.5: the Stop's flags as the API sends them; `pausedUnknown` stands for a failed settings read; 3.10's `pausedBy`. */
+  const pausedBody = () =>
+    state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true, ...(state.pausedBy === undefined ? {} : { pausedBy: state.pausedBy }) } : {};
   const answer = (reply: string, offersSpec = false, status = "done") => {
     const id = state.pendingId ?? "";
     const message = state.messages.find((m) => m.id === id);
@@ -593,6 +594,30 @@ describe("step 1: Clarify (ticket 1.8)", () => {
     api.answer(QUESTIONS);
     await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A plant watering reminder.", QUESTIONS]);
     expect(await banner.isVisible()).toBe(false);
+  }, 30_000);
+
+  it("ticket 3.10 criterion 6: WHEN a facilitator paused the participant THEN step 1 says so while a message waits; WHEN resumed THEN the line goes and the answer comes, at 375 px", async () => {
+    const api = fakeConversation();
+    api.state.paused = true;
+    api.state.pausedBy = "facilitator";
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.paused);
+    await page.getByRole("textbox", { name: "Your message" }).fill("A plant watering reminder.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => api.state.polls, { timeout: 6000 }).toBeGreaterThan(0);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.paused);
+    await expectNoSideScroll();
+    api.state.paused = false;
+    api.state.pausedBy = undefined;
+    const polls = api.state.polls;
+    await expect.poll(() => api.state.polls, { timeout: 6000 }).toBeGreaterThan(polls);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    api.answer(QUESTIONS);
+    await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A plant watering reminder.", QUESTIONS]);
   }, 30_000);
 
   it("ticket 3.5 criterion 4: WHEN a flagged message waits for a facilitator while Stop is on THEN the paused line stays across 10 s polls; WHEN Resume THEN it goes, at 375 px", async () => {

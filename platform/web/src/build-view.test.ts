@@ -112,6 +112,9 @@ describe("stages, lines and the behind-the-scenes part", () => {
     for (const ahead of [-1, 1.5, "3", null]) expect(parseBuild({ buildId: "b-1", status: "queued", ahead })).not.toHaveProperty("ahead");
     // Ticket 3.5: the global Stop.
     expect(parseBuild({ buildId: "b-1", status: "queued", paused: true })).toEqual({ buildId: "b-1", status: "queued", feed: [], paused: true });
+    // Ticket 3.10: a facilitator's Pause of this person, only with paused.
+    expect(parseBuild({ buildId: "b-1", status: "queued", paused: true, pausedBy: "facilitator" })).toEqual({ buildId: "b-1", status: "queued", feed: [], paused: true, pausedBy: "facilitator" });
+    expect(parseBuild({ buildId: "b-1", status: "queued", pausedBy: "facilitator" })).toEqual({ buildId: "b-1", status: "queued", feed: [] });
     for (const paused of [false, "true", 1]) expect(parseBuild({ buildId: "b-1", status: "queued", paused })).not.toHaveProperty("paused");
     expect(parseBuild({ buildId: "b-1", status: "queued", pausedUnknown: true })).toEqual({ buildId: "b-1", status: "queued", feed: [], pausedUnknown: true });
     for (const pausedUnknown of [false, "true", 1]) expect(parseBuild({ buildId: "b-1", status: "queued", pausedUnknown })).not.toHaveProperty("pausedUnknown");

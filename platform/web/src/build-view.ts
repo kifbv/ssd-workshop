@@ -38,6 +38,8 @@ export interface Build {
   paused?: true;
   /** Ticket 3.5: the server could not read whether it is paused (keep the line as it shows). */
   pausedUnknown?: true;
+  /** Ticket 3.10: a facilitator paused this person (not the whole workshop). */
+  pausedBy?: "facilitator";
   /** Ticket 3.8 (from 3.6): a change build, with its number (1 for the participant's first change). */
   kind?: "change";
   changeNumber?: number;
@@ -105,6 +107,7 @@ export function parseBuild(body: unknown): Build | undefined {
     ...(typeof b["ahead"] === "number" && Number.isInteger(b["ahead"]) && b["ahead"] >= 0 ? { ahead: b["ahead"] } : {}),
     ...(b["paused"] === true ? { paused: true as const } : {}),
     ...(b["pausedUnknown"] === true ? { pausedUnknown: true as const } : {}),
+    ...(b["paused"] === true && b["pausedBy"] === "facilitator" ? { pausedBy: "facilitator" as const } : {}),
     ...(b["kind"] === "change" ? { kind: "change" as const } : {}),
     ...(b["kind"] === "change" && typeof b["changeNumber"] === "number" && Number.isInteger(b["changeNumber"]) && b["changeNumber"] >= 1
       ? { changeNumber: b["changeNumber"] }

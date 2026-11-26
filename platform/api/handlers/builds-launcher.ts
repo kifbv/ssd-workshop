@@ -43,6 +43,8 @@ import {
  * global Stop (outcome `paused`) waits the same way. A running build the Stop put back in the queue has no launch message
  * (the access boundary lets only the AI worker and the scheduler send to the launch queue): after Resume the check
  * launches it itself, with the same deps as a launch, while at least RELAUNCH_MIN_LEFT_MS of the invocation is left.
+ * Ticket 3.10: a build held by a facilitator's Pause (outcome `held`) waits the same way; builds a facilitator's Retry
+ * put back in the queue are launched by the check like the Stop's.
  *
  * Ticket 3.9: the launch queue also carries spec-read requests (`{"readSpec": {...}}`, from the AI worker, the queue's
  * only sender) for Rebuild from my repository: the launcher, the GitHub App key's only reader, reads the participant's
@@ -75,7 +77,8 @@ export interface LaunchVisibility {
  * comes back after LAUNCH_WAIT_SECONDS (if setting that fails, after the queue's own visibility timeout).
  */
 export async function answerLaunch(record: LauncherRecord, outcome: LaunchOutcome, visibility: LaunchVisibility): Promise<LauncherResult> {
-  if ((outcome !== "waiting" && outcome !== "paused") || record.messageId === undefined) return { batchItemFailures: [] };
+  // Ticket 3.10: a build held by a facilitator's Pause of its participant (`held`) waits the same way.
+  if ((outcome !== "waiting" && outcome !== "paused" && outcome !== "held") || record.messageId === undefined) return { batchItemFailures: [] };
   if (record.receiptHandle !== undefined) await visibility.comeBackAfter(record.receiptHandle, LAUNCH_WAIT_SECONDS).catch(() => undefined);
   return { batchItemFailures: [{ itemIdentifier: record.messageId }] };
 }

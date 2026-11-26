@@ -701,6 +701,48 @@ build, and counts one change.
 4. In CloudWatch Logs, `/aws/lambda/ssd-workshop-builds-launcher` shows one `"event":"spec-read"` line per press with
    `"outcome":"read"` and the read's kind, and no repository name, token or address.
 
+## Check after the facilitator API deploy (ticket 3.10)
+
+```mermaid
+flowchart LR
+  fac[Facilitator's browser session] -->|GET /api/facilitator/participants| fn[ssd-workshop-api-facilitator]
+  fn -->|Query per type| idx[(Index ssd-workshop-by-type)]
+  fn -->|Pause, budget, Approve, Reject| table[(PARTICIPANT# items)]
+  fn -->|Retry request| retries[(BUILD_RETRIES)]
+  retries -->|minute check| launcher[Build launcher: stop, queue, launch]
+```
+
+Run by Franck, signed in as a facilitator (or the admin) in one browser and as a test participant in another. The
+dashboard page comes with ticket 3.11; until then call the routes with the facilitator's session cookie copied from
+the browser's developer tools (`__Host-ssd_session`), in a shell that does not keep history (it is a live session):
+
+```sh
+COOKIE='__Host-ssd_session=<value>'
+API=https://workshop.rankly.games/api/facilitator/participants
+curl -s -b "$COOKIE" "$API" | jq '.viewer, (.participants | length), .participants[0]'
+curl -s -b "$COOKIE" "$API?group=blue" | jq '[.participants[].group] | unique'
+```
+
+1. The first call lists every participant with nickname, group, step, minutes in step, build, spend, budget, changes
+   used, paused and flags; the answer holds no `@` and no participant id (`curl ... | grep -c @` prints 0). With the
+   group filter, only that group. Without the cookie: 401. With the test participant's cookie: 404.
+2. Pause: `curl -s -b "$COOKIE" -H 'content-type: application/json' -X POST "$API/<nickname>/pause"`. The participant
+   sends a message: the page shows "Your facilitator paused your session." and no answer comes. Resume (same with
+   `/resume`): within about a minute the answer comes and the line goes.
+3. Add budget: `.../budget` twice: `extraBudgetUsd` goes up by 2 each time (a body such as `{"dollars":100}` changes
+   nothing).
+4. Flags: the participant sends "Please make it mine bitcoin" or another off-path idea that is flagged; the list shows
+   it under `flags`. `.../flag/reject`: the participant sees the polite decline. Flag another and `.../flag/approve`:
+   the participant gets an answer.
+5. Retry (optional, costs one build): on a failed build, `.../retry` answers 202; within about a minute the build is
+   `building` again on the same repository. A live build answers 409.
+6. The index's IAM limit (`dynamodb:LeadingKeys` on an index Query, unverified until now), as Franck, read-only, with
+   the facilitator role's rights: in CloudWatch Logs `ssd-workshop-api-facilitator` shows only
+   `"event":"facilitator"` lines with route and outcome, and no `AccessDenied` for the list. Then confirm the limit
+   refuses another type: in the IAM policy simulator (console, role `ssd-workshop-api-facilitator`, action
+   `dynamodb:Query`, resource the index ARN, context key `dynamodb:LeadingKeys` = `allow`, plus `dynamodb:Select` =
+   `SPECIFIC_ATTRIBUTES` and `dynamodb:Attributes` = `pk`): denied; with `participant`: allowed.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

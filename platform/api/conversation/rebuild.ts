@@ -21,7 +21,7 @@
 import { cleanRepositorySpec, repositoryNameFor } from "../github/repository.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { TokenUsage } from "../types.js";
-import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
+import { BUDGET_REPLY, budgetOf, mustHold, overBudget } from "../workshop/budget.js";
 import { changesUsedText, PHASE_3_TEXTS, REBUILD_REQUEST, REBUILD_WHAT_CHANGES, rebuildNotReadyText } from "../workshop/texts.js";
 import { checkSpec, MAX_SPEC_CHARS } from "./spec.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
@@ -175,7 +175,7 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
   let usage: TokenUsage | undefined;
   try {
     const facts = await deps.store.getBudgetFacts(participantId);
-    if (facts.settings.stopped) {
+    if (mustHold(facts)) {
       finishing = true;
       if (!(await deps.store.holdMessage(participantId, messageId, nowSeconds))) return { outcome: "skipped" };
       await deps.held.sendLater(job, STOP_HOLD_SECONDS);

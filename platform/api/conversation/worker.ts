@@ -25,6 +25,9 @@
 // job already past that read finishes. A redelivered readiness job that only re-sends its build id calls no AI and is
 // not held (the launcher holds the build).
 //
+// Ticket 3.10: a facilitator's Pause of one participant (the profile's `paused`, read with the budget) holds that
+// participant's jobs the same way, until Resume.
+//
 // Ticket 3.6, change requests: a participant message at step `building` (step 4, sent once the app is live) goes
 // through the same Stop hold, budget check and guardrail, and is refused without an AI call when every change request is
 // used; on path, the change prompt writes the next spec version and its "What changes" list, stored as the proposal.
@@ -36,7 +39,7 @@
 // Ticket 3.9: Rebuild from my repository stores REBUILD_REQUEST marked `rebuild-from-repo`; ./rebuild.ts runs it (the
 // launcher reads SPEC.md in between, then the guardrail, the readiness check and the same change-build transaction).
 import { errorName } from "../sign-in/code-request.js";
-import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
+import { BUDGET_REPLY, budgetOf, mustHold, overBudget } from "../workshop/budget.js";
 import { changesUsedText } from "../workshop/texts.js";
 import { answerMessage } from "./answer.js";
 import { answerChange, CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY, CHANGE_READY_REPLY, changeNotReadyReply } from "./change.js";
@@ -180,7 +183,7 @@ async function run(
   try {
     const facts = await deps.store.getBudgetFacts(participantId);
     // Ticket 3.5: no AI call while the global Stop is on; a failed hold is thrown (SQS delivers the job again).
-    if (facts.settings.stopped) {
+    if (mustHold(facts)) {
       finishing = true;
       return await hold(job, deps);
     }
@@ -355,7 +358,7 @@ async function runReadiness(
   try {
     const facts = await deps.store.getBudgetFacts(participantId);
     // Ticket 3.5: no readiness check while the global Stop is on (held as any message).
-    if (facts.settings.stopped) {
+    if (mustHold(facts)) {
       finishing = true;
       return await hold(job, deps);
     }
@@ -464,7 +467,7 @@ async function runChangeBuild(
   let usage: ReturnType<typeof usageOf> | undefined;
   try {
     const facts = await deps.store.getBudgetFacts(participantId);
-    if (facts.settings.stopped) {
+    if (mustHold(facts)) {
       finishing = true;
       return await hold(job, deps);
     }
@@ -527,7 +530,7 @@ async function runSuggestions(participantId: string, deps: WorkerDeps, signal: A
   const conversation = await deps.store.getConversation(participantId);
   if (conversation === undefined || conversation.suggestions !== undefined || conversation.approvedSpecVersion === undefined) return { outcome: "skipped" };
   const facts = await deps.store.getBudgetFacts(participantId);
-  if (facts.settings.stopped) {
+  if (mustHold(facts)) {
     await deps.held.sendSuggestions(participantId, STOP_HOLD_SECONDS);
     return { outcome: "held" };
   }

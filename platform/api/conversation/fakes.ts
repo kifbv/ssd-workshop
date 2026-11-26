@@ -39,6 +39,7 @@ import {
   type MessageQueue,
   type MoveResult,
   type NewMessage,
+  type PauseState,
   type StoredConversation,
   type StoredMessage,
   type StoredSpec,
@@ -91,6 +92,8 @@ export interface FakeBuild {
   kind?: "first" | "change";
   changeNumber?: number;
   specVersion?: number;
+  /** Ticket 3.10: when the launcher started its task (the facilitator's Retry reads it). */
+  launchedAt?: string;
 }
 
 export interface FakeSpec {
@@ -479,6 +482,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     const item: Record<string, AttributeValue> = {};
     if (profile?.extraBudget !== undefined) item["extraBudget"] = { N: String(profile.extraBudget) };
     if (profile?.changeRequestsUsed !== undefined) item["changeRequestsUsed"] = { N: String(profile.changeRequestsUsed) };
+    if (profile?.paused !== undefined) item["paused"] = { BOOL: profile.paused };
     return {
       settings: settingsFromItem(this.settingsItem),
       limits: limitsFromItem(item),
@@ -489,6 +493,13 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   async getSettings(): Promise<WorkshopSettings> {
     this.fail("getSettings");
     return settingsFromItem(this.settingsItem);
+  }
+
+  async getPauseState(participantId: string): Promise<PauseState> {
+    // It reads the settings too: a failing settings read fails it (ticket 3.5's tests).
+    this.fail("getSettings");
+    this.fail("getPauseState");
+    return { stopped: settingsFromItem(this.settingsItem).stopped, paused: this.profiles.get(participantId)?.paused === true };
   }
 
   async holdMessage(participantId: string, messageId: string, nowSeconds: number): Promise<boolean> {

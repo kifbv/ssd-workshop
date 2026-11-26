@@ -236,6 +236,89 @@ export const SETTINGS_UPDATE_ATTRIBUTES = [
  */
 export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"] as const;
 
+/**
+ * Ticket 3.10: Lambda function, role and log group of the facilitator routes (`/api/facilitator/...`: the dashboard's
+ * list and its actions), for facilitators and the admin. Its own function, so its writes (pause, extra budget, flag
+ * decisions, retry requests) are on a role no participant route runs as.
+ */
+export const FACILITATOR_FUNCTION_NAME = `${PREFIX}-api-facilitator`;
+/**
+ * Ticket 3.10: the table's one global secondary index, keyed by the items' `type` (platform/api/settings.ts
+ * BY_TYPE_INDEX_NAME). The dashboard lists profiles, conversations, usage totals and builds by type with a Query, never a
+ * Scan (a Scan's keys would include the allow-list's `EMAIL#<address>`). Only the facilitator role may query it, and
+ * only these four types (`dynamodb:LeadingKeys`), so the allow-list's partition of the index is out of its reach.
+ */
+export const BY_TYPE_INDEX_NAME = `${PREFIX}-by-type`;
+/** Ticket 3.10: the item types the facilitator role may query in BY_TYPE_INDEX_NAME. */
+export const FACILITATOR_INDEX_TYPES = ["participant", "conversation", "usage", "build"] as const;
+/**
+ * Ticket 3.10: the non-key attributes BY_TYPE_INDEX_NAME projects (INCLUDE): what one dashboard row needs from a profile
+ * (`id`, `nickname`, `role`, `group`, `step`, `stepSince`, `createdAt`, `paused`, `extraBudget`, `changeRequestsUsed`),
+ * a conversation (`buildId`, `state`, `pendingId`), a usage total (`participantId`, `costUsd`) and a build (`buildId`,
+ * `participantId`, `status`, `launchedAt`, `kind`, `changeNumber`). Never `email`, a message's `text` or a spec.
+ */
+export const BY_TYPE_INDEX_ATTRIBUTES = [
+  "id",
+  "nickname",
+  "role",
+  "group",
+  "step",
+  "stepSince",
+  "createdAt",
+  "paused",
+  "extraBudget",
+  "changeRequestsUsed",
+  "participantId",
+  "costUsd",
+  "buildId",
+  "state",
+  "pendingId",
+  "status",
+  "launchedAt",
+  "kind",
+  "changeNumber",
+] as const;
+/** Ticket 3.10: what the facilitator role may name in a Query of BY_TYPE_INDEX_NAME (projected, `SPECIFIC_ATTRIBUTES`). */
+export const FACILITATOR_INDEX_READ_ATTRIBUTES = ["pk", "sk", "type", ...BY_TYPE_INDEX_ATTRIBUTES] as const;
+/**
+ * Ticket 3.10: the names the facilitator role may name in `PARTICIPANT#*` (UpdateItem, also in transactions): Pause and
+ * Resume (`paused`), Add budget (`extraBudget`, the server's $2 step), Retry's note on the conversation (`updatedAt`),
+ * and a flag's decision exactly as `npm run flags` makes it: Approve (the message back to `pending` with
+ * `approvedTextHash` and `pendingSince`; the conversation `open` with it in flight) and Reject (the decline: the message's
+ * `status`, the reply message's `type`, `author`, `text`, `kind`, `replyTo`, `createdAt`, the conversation's `state`,
+ * `updatedAt`, `pendingId` and `pendingSince` removed). Only this role may write `approvedTextHash`, `paused` and
+ * `extraBudget` (synth test). Never `step`, `role`, `group`, `nickname`, `id`, `costUsd` or `changeRequestsUsed`.
+ */
+export const FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "paused",
+  "extraBudget",
+  "updatedAt",
+  "status",
+  "approvedTextHash",
+  "pendingSince",
+  "state",
+  "pendingId",
+  "type",
+  "author",
+  "text",
+  "kind",
+  "replyTo",
+  "createdAt",
+] as const;
+/**
+ * Ticket 3.10: Retry's requests (`BUILD_RETRIES` / `BUILD#<id>`, platform/api/keys.ts retryRequestKey): the facilitator
+ * role puts one (PutItem of these names only); the launcher's minute check reads them, puts the build back in the queue,
+ * stops a stuck task (only the launcher may StopTask) and launches it, then deletes the request.
+ */
+/** Ticket 3.10: what the facilitator role may read of a nickname claim (`NICK#*`, projected): the participant id only. */
+export const FACILITATOR_NICK_READ_ATTRIBUTES = ["pk", "sk", "participantId"] as const;
+/** Ticket 3.10: what the facilitator role may read of a build (`BUILD#*`, projected) before it asks for a Retry. */
+export const FACILITATOR_BUILD_READ_ATTRIBUTES = ["pk", "sk", "participantId", "status", "launchedAt"] as const;
+export const BUILD_RETRIES_PARTITION = "BUILD_RETRIES";
+export const RETRY_REQUEST_ATTRIBUTES = ["pk", "sk", "type", "buildId", "requestedAt"] as const;
+
 /** Lambda function, role and log group of the data API for apps (ticket 2.4). */
 export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
 /**
@@ -546,6 +629,12 @@ export const LAUNCHER_READ_ATTRIBUTES = [
   "messageId",
   "repositorySpec",
   "repositoryName",
+  // Ticket 3.10: Retry of a stuck build (the build's task, launch time and whether it handed a commit over) and a
+  // facilitator's Pause (the profile's `paused`: a paused participant's build waits).
+  "taskArn",
+  "launchedAt",
+  "pushedCommit",
+  "paused",
 ] as const;
 /**
  * Ticket 3.9: the names the launcher may name in `PARTICIPANT#*` (UpdateItem of a Rebuild from my repository request

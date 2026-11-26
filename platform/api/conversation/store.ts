@@ -48,6 +48,7 @@ import {
   type ListedItem,
   type MoveResult,
   type StoredSpec,
+  type PauseState,
   type NewMessage,
   type StoredConversation,
   type StoredMessage,
@@ -871,8 +872,9 @@ export class DynamoConversationStore implements ConversationStore {
           Key: keyOf(participantKey(participantId)),
           ConsistentRead: true,
           // Ticket 3.6: also the change requests used (the send route and the worker compare them with the cap).
-          ProjectionExpression: "#extraBudget, #changeRequestsUsed",
-          ExpressionAttributeNames: { "#extraBudget": "extraBudget", "#changeRequestsUsed": "changeRequestsUsed" },
+          // Ticket 3.10: and whether a facilitator paused them (the worker then holds their jobs).
+          ProjectionExpression: "#extraBudget, #changeRequestsUsed, #paused",
+          ExpressionAttributeNames: { "#extraBudget": "extraBudget", "#changeRequestsUsed": "changeRequestsUsed", "#paused": "paused" },
         }),
       ),
       this.client.send(
@@ -890,6 +892,22 @@ export class DynamoConversationStore implements ConversationStore {
 
   getSettings(): Promise<WorkshopSettings> {
     return readSettings(this.client, this.tableName);
+  }
+
+  async getPauseState(participantId: string): Promise<PauseState> {
+    const [settings, profile] = await Promise.all([
+      readSettings(this.client, this.tableName),
+      this.client.send(
+        new GetItemCommand({
+          TableName: this.tableName,
+          Key: keyOf(participantKey(participantId)),
+          ConsistentRead: true,
+          ProjectionExpression: "#paused",
+          ExpressionAttributeNames: { "#paused": "paused" },
+        }),
+      ),
+    ]);
+    return { stopped: settings.stopped, paused: limitsFromItem(profile.Item).paused };
   }
 
   async holdMessage(participantId: string, messageId: string, nowSeconds: number): Promise<boolean> {

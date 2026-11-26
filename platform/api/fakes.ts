@@ -16,9 +16,10 @@ export class FakeTable implements VerifyStore, ParticipantStore {
   readonly codes = new Map<string, StoredCodes>();
   /**
    * `stepSince` is set with every step change, as the stores do (ticket 3.2); `extraBudget` as a facilitator grants it
-   * (ticket 3.3 tests); `changeRequestsUsed` as the AI worker counts a queued change build (ticket 3.6).
+   * (ticket 3.3 tests); `changeRequestsUsed` as the AI worker counts a queued change build (ticket 3.6); `paused` as a
+   * facilitator's Pause sets it (ticket 3.10).
    */
-  readonly profiles = new Map<string, ParticipantRecord & { createdAt: string; stepSince?: string; extraBudget?: number; changeRequestsUsed?: number }>();
+  readonly profiles = new Map<string, ParticipantRecord & { createdAt: string; stepSince?: string; extraBudget?: number; changeRequestsUsed?: number; paused?: boolean }>();
   /** By token hash; `allowRef` is the address sealed under the token (as the verify function stores it). */
   readonly sessions = new Map<string, StoredSession & { createdAt: string }>();
   /** Nickname claims by lower-cased nickname. */

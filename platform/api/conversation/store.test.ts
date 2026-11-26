@@ -265,6 +265,19 @@ describe("DynamoConversationStore", () => {
     for (const name of namesUsed(sent[1])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
   });
 
+  it("reads the pause state (ticket 3.10): the settings' Stop and the profile's paused, each projected and consistent", async () => {
+    const { client, sent } = stubClient([{ Item: { stopped: { BOOL: false } } }, { Item: { paused: { BOOL: true } } }]);
+    await expect(new DynamoConversationStore(client, TABLE).getPauseState("p-1")).resolves.toEqual({ stopped: false, paused: true });
+    const inputs = sent.map((c) => c.input as GetItemCommand["input"]);
+    expect(inputs.map((i) => [i.Key?.["pk"]?.S, i.Key?.["sk"]?.S, i.ConsistentRead])).toEqual([
+      ["SETTINGS", "SETTINGS", true],
+      ["PARTICIPANT#p-1", "PROFILE", true],
+    ]);
+    expect(Object.values(inputs[1]?.ExpressionAttributeNames ?? {})).toEqual(["paused"]);
+    const none = stubClient([{}, {}]);
+    await expect(new DynamoConversationStore(none.client, TABLE).getPauseState("p-1")).resolves.toEqual({ stopped: false, paused: false });
+  });
+
   it("reads the budget facts (ticket 3.3): the settings, the profile's extraBudget and the usage's costUsd, each projected and consistent", async () => {
     const { client, sent } = stubClient([
       { Item: { aiBudgetUsd: { N: "8" }, stopped: { BOOL: false } } },
@@ -287,7 +300,8 @@ describe("DynamoConversationStore", () => {
     expect(inputs.map((i) => Object.values(i.ExpressionAttributeNames ?? {}))).toEqual([
       ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
       // Ticket 3.6: also the change requests used (compared with the cap before a change is taken or built).
-      ["extraBudget", "changeRequestsUsed"],
+      // Ticket 3.10: and a facilitator's Pause (the worker holds a paused participant's jobs).
+      ["extraBudget", "changeRequestsUsed", "paused"],
       ["costUsd"],
     ]);
     for (const name of Object.values(inputs[0]?.ExpressionAttributeNames ?? {})) expect(SETTINGS_READ_ATTRIBUTES, name).toContain(name);

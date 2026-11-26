@@ -115,10 +115,13 @@ function show(name: ScreenName, focusId?: string): void {
 
 /** Ticket 3.5: the workshop is paused (the admin's global Stop), as the last status, conversation, poll or build read said. */
 let workshopPaused = false;
+/** Ticket 3.10: that pause is a facilitator's, for this person only. */
+let pausedByFacilitator = false;
 
 /** Shows the paused line above the signed-in screens while the last read said so; the next read without it clears it. */
-function setPaused(paused: boolean): void {
+function setPaused(paused: boolean, byFacilitator = false): void {
   workshopPaused = paused;
+  pausedByFacilitator = paused && byFacilitator;
   renderPaused();
 }
 
@@ -126,14 +129,14 @@ function setPaused(paused: boolean): void {
  * Sets the paused line from a conversation, poll or build answer: `paused: true` shows it, `pausedUnknown: true` (the
  * server could not read the settings) keeps it as it is, and neither clears it.
  */
-function setPausedFrom(answer: { paused?: true; pausedUnknown?: true }): void {
+function setPausedFrom(answer: { paused?: true; pausedUnknown?: true; pausedBy?: "facilitator" }): void {
   if (answer.pausedUnknown === true) return;
-  setPaused(answer.paused === true);
+  setPaused(answer.paused === true, answer.pausedBy === "facilitator");
 }
 
 function renderPaused(): void {
   const banner = byId("workshop-paused");
-  banner.textContent = PHASE_3_TEXTS.workshopPaused;
+  banner.textContent = pausedByFacilitator ? PHASE_3_TEXTS.paused : PHASE_3_TEXTS.workshopPaused;
   banner.hidden = !(workshopPaused && SIGNED_IN_SCREENS.includes(current));
 }
 
@@ -162,9 +165,9 @@ function scheduleStatus(round: number): void {
 
 async function statusOnce(round: number): Promise<void> {
   statusTimer = undefined;
-  const paused = statusResult(await call("GET", "/api/status"));
+  const status = statusResult(await call("GET", "/api/status"));
   if (round !== statusRound) return;
-  if (paused !== undefined) setPaused(paused);
+  if (status !== undefined) setPausedFrom(status);
   scheduleStatus(round);
 }
 

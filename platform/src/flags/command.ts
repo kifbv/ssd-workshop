@@ -3,7 +3,7 @@
 // output), so it is tested against in-memory fakes; ./main.ts wires in the real ones. `list` prints,
 // on the owner's own terminal only, each waiting nickname with the flagged message's text and the
 // guardrail's reason, so a decision is never blind; nothing prints an email address or an id.
-import { declineReply } from "../../api/conversation/guardrail.js";
+import { decideFlag } from "../../api/flags/flags.js";
 import type { MessageQueue } from "../../api/conversation/state.js";
 import { redactError } from "../smoke/logic.js";
 import type { FlagsStore } from "./store.js";
@@ -83,37 +83,26 @@ async function decide(command: "approve" | "reject", nickname: string, deps: Fla
     deps.err(`No participant has the nickname ${nickname}.`);
     return 1;
   }
-  const conversation = await store.getConversation(participantId);
-  const messageId = conversation?.pendingId;
-  const message = conversation?.state === "waiting" && messageId !== undefined ? await store.getMessage(participantId, messageId) : undefined;
-  if (messageId === undefined || message?.status !== "flagged") {
-    deps.err(`${nickname} has no message waiting for a decision.`);
-    return 1;
-  }
-  const now = deps.now();
-  if (command === "reject") {
-    const done = await store.finish(participantId, messageId, { kind: "declined", reply: declineReply(message.suggestion) }, "flagged", now.toISOString());
-    if (!done) {
+  // Ticket 3.10: the same rule as the dashboard's Approve and Reject (platform/api/flags/flags.ts).
+  const decision = await decideFlag(participantId, command, { store, queue: deps.createQueue, now: deps.now });
+  switch (decision.outcome) {
+    case "nothing-waiting":
+      deps.err(`${nickname} has no message waiting for a decision.`);
+      return 1;
+    case "decided-meanwhile":
       deps.err(`${nickname}'s message was decided meanwhile; nothing changed.`);
       return 1;
-    }
-    deps.out(`Rejected: ${nickname}'s message got a polite decline, and ${nickname} can write again.`);
-    return 0;
+    case "rejected":
+      deps.out(`Rejected: ${nickname}'s message got a polite decline, and ${nickname} can write again.`);
+      return 0;
+    case "approved-not-queued":
+      deps.err(`Approved, but the queue refused the message (${redactError(errorText(decision.error))}).`);
+      deps.err(`${nickname} sees it fail within 20 minutes and can send it again.`);
+      return 1;
+    case "approved":
+      deps.out(`Approved: ${nickname}'s message goes to the AI now; the answer appears on their page.`);
+      return 0;
   }
-  const approved = await store.approve(participantId, messageId, message.text, Math.floor(now.getTime() / 1000), now.toISOString());
-  if (!approved) {
-    deps.err(`${nickname}'s message was decided meanwhile; nothing changed.`);
-    return 1;
-  }
-  try {
-    await deps.createQueue().send({ participantId, messageId });
-  } catch (error) {
-    deps.err(`Approved, but the queue refused the message (${redactError(errorText(error))}).`);
-    deps.err(`${nickname} sees it fail within 20 minutes and can send it again.`);
-    return 1;
-  }
-  deps.out(`Approved: ${nickname}'s message goes to the AI now; the answer appears on their page.`);
-  return 0;
 }
 
 function errorText(error: unknown): string {
