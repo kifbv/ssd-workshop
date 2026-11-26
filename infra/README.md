@@ -834,7 +834,7 @@ flowchart LR
 
 ### One-time steps before merging (Franck)
 
-The deploy fails (and rolls back the edge stack's WAF change, or the alerts stack) until steps 1 and 2 are done.
+The deploy fails (and rolls back the edge stack's WAF change, or the alerts stack) until steps 1 and 2 are done; do step 3 before the first deploy too, in case Cost Explorer refuses a monitor on a tag that is not active yet (not verified). If the alerts stack fails, read the reason in the CloudFormation console, not in the public Actions log: a rejected subscriber could name the address. Check the stored value with `get-parameter` before merging.
 
 1. Add the access rights listed in `docs/decisions.md`, "3.13 Cost and abuse safety nets", "Access stack rights needed
    (Franck)", to `infra/access/access-stack.yaml` and apply it.
@@ -852,7 +852,8 @@ The deploy fails (and rolls back the edge stack's WAF change, or the alerts stac
    `ALERT_EMAIL_PARAMETER_VERSION = 2`; the deploy after its merge switches the subscription.
 3. Activate the cost allocation tag `project` (Billing and Cost Management > Cost allocation tags, or the command below).
    It is listed only once billing data has seen it (up to 24 hours after the first tagged resource), and costs are
-   grouped by it only from activation onwards.
+   grouped by it only from activation onwards. If `rankly.games` is a member of an AWS Organization, only the
+   management account can activate it.
 
    ```sh
    aws ce update-cost-allocation-tags-status --cost-allocation-tags-status TagKey=project,Status=Active

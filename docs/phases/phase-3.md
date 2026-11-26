@@ -218,7 +218,7 @@ Depends on: none. Areas: infra (and access stack, Franck applies).
 Acceptance criteria (each starts as FAIL):
 
 - WHEN the synthesized edge stack is inspected THEN the distribution has the web ACL with one rate rule on `/api/*` and the ACL is tagged `project=ssd-workshop` (synth test)
-- WHEN one address sends more than the limit THEN it gets 403 until the window passes (live check in `infra/README.md`)
+- WHEN one address sends more than the limit THEN it gets 403 until the window passes (live check in `infra/README.md`) (changed to 429 during the build, see `docs/decisions.md` 3.13)
 - WHEN the synthesized stack is inspected THEN a cost anomaly monitor on `project=ssd-workshop` with a subscription to Franck's alert address exists (synth test; the address is a deploy setting, not in the repository)
 
 ### 3.14 Auto-stop for build tasks outside the build subnets
