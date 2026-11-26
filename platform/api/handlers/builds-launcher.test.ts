@@ -64,6 +64,14 @@ describe("the builds launcher handler (ticket 2.9)", () => {
     expect(calls).toEqual([["h-2", 30]]);
   });
 
+  it("ticket 3.10: WHEN a build is held by a facilitator's Pause of its participant THEN its message comes back after 30 seconds too", async () => {
+    const calls: [string, number][] = [];
+    const visibility = { comeBackAfter: async (handle: string, seconds: number) => void calls.push([handle, seconds]) };
+    const record = { body: "{}", eventSourceARN: QUEUE("ssd-workshop-builds.fifo"), messageId: "m-3", receiptHandle: "h-3" };
+    expect(await answerLaunch(record, "held", visibility)).toEqual({ batchItemFailures: [{ itemIdentifier: "m-3" }] });
+    expect(calls).toEqual([["h-3", 30]]);
+  });
+
   it("ticket 3.5: the check starts a relaunch only with RELAUNCH_MIN_LEFT_MS of the invocation left (more than the launch reserve)", () => {
     expect(RELAUNCH_MIN_LEFT_MS).toBeGreaterThan(LAUNCH_RESERVE_MS);
     const left = (ms: number) => ({ getRemainingTimeInMillis: () => ms });

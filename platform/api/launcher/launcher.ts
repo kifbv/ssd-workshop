@@ -58,6 +58,11 @@
  * queued time limit is not applied, and afterwards a build's wait counts from its place or from the last Resume,
  * whichever is later.
  *
+ * Ticket 3.10 (facilitator dashboard): a build whose participant a facilitator paused waits (outcome `held`, like
+ * `waiting`, without a place in the line and never failed for waiting). A facilitator's Retry leaves a request
+ * (`BUILD_RETRIES`); the check puts that failed build, or that build stuck `building` for over STUCK_BUILD_MS (then it
+ * stops its task), back in the queue at a new place and launches it like the Stop's builds. The change count is untouched.
+ *
  * Logs: one JSON line per launch or check, with an outcome, counts and an error name; never a token, nickname, build id,
  * repository name or error message.
  */
@@ -87,7 +92,9 @@ import {
   QUEUE_SEEN_MS,
   QUEUE_WAIT_MAX_MS,
   REGION,
+  RETRY_REQUEST_MAX_MS,
   SLOT_REPAIR_FORCE_AFTER,
+  STUCK_BUILD_MS,
 } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { BuildStatus } from "../types.js";
@@ -258,6 +265,36 @@ export interface LaunchRecords {
   listLaunches(): Promise<LaunchEntry[]>;
   /** Removes a watch-list entry, only while it still names this task (or none, for `undefined`). */
   removeLaunch(buildId: string, taskArn: string | undefined): Promise<void>;
+  /** Ticket 3.10: whether a facilitator paused the participant (their profile's `paused`): their build waits. */
+  readPaused(participantId: string): Promise<boolean>;
+  /** Ticket 3.10: the facilitators' Retry requests (`BUILD_RETRIES`), oldest or newest in any order. */
+  listRetryRequests(): Promise<RetryRequest[]>;
+  removeRetryRequest(buildId: string): Promise<void>;
+  /** Ticket 3.10: what Retry needs to know of a build: its status, task, launch time and whether it handed a commit over. */
+  readRetryBuild(buildId: string): Promise<RetryBuildState | undefined>;
+  /**
+   * Ticket 3.10: puts a build still `failed` back to `queued` from the beginning, at the place `queueKey` (a new place: the
+   * end of the line), removing the earlier run's reasons, times, task, attempt, pushed commit and feed. False when it was
+   * no longer failed (nothing written).
+   */
+  requeueFailed(buildId: string, queueKey: string, nowIso: string): Promise<boolean>;
+}
+
+/** Ticket 3.10: a facilitator's Retry request. */
+export interface RetryRequest {
+  buildId: string;
+  /** ISO 8601. */
+  requestedAt: string;
+}
+
+/** Ticket 3.10: a build as Retry sees it. */
+export interface RetryBuildState {
+  status: BuildStatus;
+  taskArn?: string;
+  /** ISO 8601: when the launcher claimed it (its task started right after). */
+  launchedAt?: string;
+  /** The builder stored its pushed commit (handed over to the deployer). */
+  handedOver: boolean;
 }
 
 /** Ticket 3.9: what the launcher reads of a Rebuild from my repository request. */
@@ -327,8 +364,11 @@ export function ecsRefusal(error: unknown): string | undefined {
   return message.slice(0, 300);
 }
 
-/** `paused` (ticket 3.5): the global Stop is on; the build waits, as `waiting`, without asking for a slot. */
-export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "failed" | "waiting" | "paused";
+/**
+ * `paused` (ticket 3.5): the global Stop is on; the build waits, as `waiting`, without asking for a slot. `held` (ticket
+ * 3.10): a facilitator paused the participant; the build waits the same way, without taking a place in the line.
+ */
+export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "failed" | "waiting" | "paused" | "held";
 
 /**
  * Ticket 3.9, a spec-read request: `read` (stored and handed back to the AI worker), `resent` (a read already stored:
@@ -355,6 +395,8 @@ export interface LauncherLogEntry {
   /** Check (ticket 3.5): running builds put back in the queue by the global Stop, and such builds launched again. */
   requeued?: number;
   relaunched?: number;
+  /** Check (ticket 3.10): builds a facilitator's Retry put back in the queue. */
+  retried?: number;
   durationMs: number;
 }
 
@@ -544,6 +586,12 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
       log("ignored");
       return "ignored";
     }
+    // Ticket 3.10: a facilitator paused the participant: the build waits (its message comes back), without a place in
+    // the line, so it never holds back the builds behind it; it takes its place at the first delivery after Resume.
+    if (await deps.records.readPaused(build.participantId)) {
+      log("held");
+      return "held";
+    }
     // Ticket 3.4: the build's place in the waiting line, then a slot only when no earlier waiting build needs it.
     const settings = await deps.records.readSettings();
     const cap = settings.buildsAtOnce;
@@ -675,6 +723,7 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
   let unqueued = 0;
   let requeued = 0;
   let relaunched = 0;
+  let retried = 0;
   try {
     const settings = await deps.records.readSettings();
     /**
@@ -753,6 +802,51 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
         stopped += 1;
       }
     }
+    // Ticket 3.10: the facilitators' Retry requests. Only this role may stop a build task and launch a build, so the
+    // facilitator function only asks; here a failed build goes back to the queue, and a build stuck `building` for over
+    // STUCK_BUILD_MS without having handed its commit over goes back too (one conditional write, its slot freed), then its
+    // task is stopped; both get a new place at the end of the line and are launched below (no launch message: only the
+    // AI worker and the scheduler may send to the launch queue). A request for a build still handing over or deploying is
+    // kept until it ends (at most RETRY_REQUEST_MAX_MS); any other is dropped. The change count is never touched.
+    const retryLaunches: { buildId: string; queueKey: string }[] = [];
+    for (const request of await deps.records.listRetryRequests()) {
+      // Only the participant's current build: if they queued a newer one meanwhile (a change after this build failed),
+      // the conversation names that one, and the request is dropped (retrying the old build would rebuild an older spec
+      // over the newer change). Read just before acting, from the build's own participant.
+      const record = await deps.records.readBuild(request.buildId);
+      const current = record === undefined ? undefined : (await deps.records.readConversation(record.participantId)).buildId;
+      if (current !== request.buildId) {
+        await deps.records.removeRetryRequest(request.buildId);
+        continue;
+      }
+      const build = await deps.records.readRetryBuild(request.buildId);
+      const place = newQueueKey(nowIso(), request.buildId);
+      if (build?.status === "failed") {
+        if (await deps.records.requeueFailed(request.buildId, place, nowIso())) retried += 1;
+      } else if (
+        build?.status === "building" &&
+        build.taskArn !== undefined &&
+        !build.handedOver &&
+        build.launchedAt !== undefined &&
+        started - Date.parse(build.launchedAt) > STUCK_BUILD_MS
+      ) {
+        if (await deps.records.requeueStopped(request.buildId, build.taskArn, place, nowIso())) {
+          retried += 1;
+          if (BUILD_TASK_ARN.test(build.taskArn)) {
+            await deps.tasks.stop(build.taskArn);
+            stopped += 1;
+          }
+        }
+      }
+      const now = await deps.records.readBuild(request.buildId);
+      if (now?.status === "queued" && now.queueKey !== undefined) {
+        await deps.records.touchQueueEntry(now.queueKey, request.buildId, nowIso());
+        retryLaunches.push({ buildId: request.buildId, queueKey: now.queueKey });
+        continue;
+      }
+      const waitForIt = (now?.status === "building" || now?.status === "deploying") && started - Date.parse(request.requestedAt) < RETRY_REQUEST_MAX_MS;
+      if (!waitForIt) await deps.records.removeRetryRequest(request.buildId);
+    }
     deadLetters += await drain(deps.launchDeadLetters, async (body) => {
       const buildId = parseLaunchMessage(body);
       if (buildId !== undefined && (await deps.records.failQueued(buildId, [QUEUED_DEAD_REASON], nowIso()))) failed += 1;
@@ -798,6 +892,10 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
         const placedAt = Date.parse(entry.queueKey.slice(0, entry.queueKey.indexOf("#")));
         const waitingSince = Number.isFinite(resumedAt) && resumedAt > placedAt ? resumedAt : placedAt;
         if (!(started - waitingSince > QUEUE_WAIT_MAX_MS)) continue;
+        // Ticket 3.10: a build a facilitator's Pause holds is not failed for waiting (Resume releases it), nor one a Retry
+        // put back (no launch message: this check launches it below, however long it waited for a slot or a Resume).
+        if (retryLaunches.some((item) => item.buildId === entry.buildId)) continue;
+        if (await deps.records.readPaused(build.participantId)) continue;
         if (await deps.records.failQueued(entry.buildId, [QUEUE_TIMEOUT_REASON], nowIso())) failed += 1;
       }
       await deps.records.removeQueueEntry(entry.queueKey);
@@ -807,12 +905,19 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
     // above were freed. A launch that must wait (no slot, or Stop pressed again) leaves the later ones for the next minute,
     // as does too little time left; any other outcome means the build left `queued`, so its old watch entry goes (a new
     // claim's entry has no task yet and is kept by the condition).
+    // Ticket 3.10: with the builds a facilitator's Retry put back, in one line by place; a build held by its
+    // participant's Pause keeps its entry and request, and the ones after it still start.
     if (!settings.stopped) {
-      for (const item of toRelaunch.sort((a, b) => (a.queueKey < b.queueKey ? -1 : a.queueKey > b.queueKey ? 1 : 0))) {
+      const byBuild = new Map<string, { buildId: string; queueKey: string; taskArn?: string; retry?: true }>();
+      for (const item of toRelaunch) byBuild.set(item.buildId, item);
+      for (const item of retryLaunches) byBuild.set(item.buildId, { ...byBuild.get(item.buildId), ...item, retry: true });
+      for (const item of [...byBuild.values()].sort((a, b) => (a.queueKey < b.queueKey ? -1 : a.queueKey > b.queueKey ? 1 : 0))) {
         const outcome = await deps.relaunch(JSON.stringify({ buildId: item.buildId }));
         if (outcome === undefined || outcome === "waiting" || outcome === "paused") break;
+        if (outcome === "held") continue;
         if (outcome === "started") relaunched += 1;
-        await deps.records.removeLaunch(item.buildId, item.taskArn);
+        if (item.taskArn !== undefined) await deps.records.removeLaunch(item.buildId, item.taskArn);
+        if (item.retry === true) await deps.records.removeRetryRequest(item.buildId);
       }
     }
   } catch (error) {
@@ -830,10 +935,11 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
       unqueued,
       requeued,
       relaunched,
+      retried,
       durationMs: Math.max(0, deps.now().getTime() - started),
     });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
     throw new Error("check failed");
   }
-  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, requeued, relaunched, durationMs: Math.max(0, deps.now().getTime() - started) });
+  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, requeued, relaunched, retried, durationMs: Math.max(0, deps.now().getTime() - started) });
 }

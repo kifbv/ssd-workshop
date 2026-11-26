@@ -54,9 +54,20 @@ describe("the workshop paused by the global Stop (ticket 3.5)", () => {
     for (const bad of [false, "true", 1]) expect(parseConversation({ ...base, pausedUnknown: bad })).toEqual(base);
   });
 
+  it("ticket 3.10: reads pausedBy: facilitator on a poll and a conversation, only with paused", () => {
+    expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: true, pausedBy: "facilitator" } })).toEqual({ kind: "pending", paused: true, pausedBy: "facilitator" });
+    expect(pollResult({ status: 200, body: { id: "m", status: "pending", pausedBy: "facilitator" } })).toEqual({ kind: "pending" });
+    const base = { step: "clarify", state: "open", messages: [] };
+    expect(parseConversation({ ...base, paused: true, pausedBy: "facilitator" })).toEqual({ ...base, paused: true, pausedBy: "facilitator" });
+    expect(parseConversation({ ...base, paused: true, pausedBy: "someone" })).toEqual({ ...base, paused: true });
+  });
+
   it("reads GET /api/status: paused only as true, off on any other 200 body, and nothing to change on any other answer", () => {
-    expect(statusResult({ status: 200, body: { paused: true } })).toBe(true);
-    for (const body of [{}, { paused: false }, { paused: "true" }]) expect(statusResult({ status: 200, body })).toBe(false);
+    expect(statusResult({ status: 200, body: { paused: true } })).toEqual({ paused: true });
+    for (const body of [{}, { paused: false }, { paused: "true" }, { pausedBy: "facilitator" }]) expect(statusResult({ status: 200, body })).toEqual({});
+    // Ticket 3.10: a facilitator's Pause of this person.
+    expect(statusResult({ status: 200, body: { paused: true, pausedBy: "facilitator" } })).toEqual({ paused: true, pausedBy: "facilitator" });
+    expect(statusResult({ status: 200, body: { paused: true, pausedBy: "admin" } })).toEqual({ paused: true });
     for (const answer of [{ status: 200, body: null }, { status: 200, body: [true] }, { status: 401, body: {} }, { status: 500, body: { paused: true } }, { status: 0, body: null }]) {
       expect(statusResult(answer)).toBeUndefined();
     }

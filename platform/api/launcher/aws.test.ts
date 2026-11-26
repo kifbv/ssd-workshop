@@ -21,6 +21,8 @@ import {
   BUILDS_CLUSTER_NAME as INFRA_BUILDS_CLUSTER_NAME,
   BUILDS_SUBNET_IDS as INFRA_BUILDS_SUBNET_IDS,
   BUILD_QUEUE_PARTITION,
+  BUILD_RETRIES_PARTITION,
+  RETRY_REQUEST_ATTRIBUTES,
   BUILD_SLOTS_PARTITION,
   DEPLOY_DLQ_NAME,
   LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
@@ -32,7 +34,7 @@ import {
   LAUNCHES_PARTITION,
   SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
-import { BUILD_QUEUE_PK, BUILD_SLOTS_PK, LAUNCHES_PK, SETTINGS_PK } from "../keys.js";
+import { BUILD_QUEUE_PK, BUILD_RETRIES_PK, BUILD_SLOTS_PK, LAUNCHES_PK, SETTINGS_PK } from "../keys.js";
 import { REBUILD_REQUEST } from "../workshop/texts.js";
 import {
   BUILD_CHECK_QUEUE_NAME,
@@ -205,13 +207,19 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.failDeploy("b-1", "Ada", COMMIT, ["x"], NOW)).toBe(true);
     expect(await records.listLaunches()).toEqual([]);
     await records.removeLaunch("b-1", ARN);
+    // Ticket 3.10: a facilitator's Pause and Retry.
+    expect(await records.readPaused("p-1")).toBe(false);
+    expect(await records.readRetryBuild("b-1")).toBeUndefined();
+    expect(await records.listRetryRequests()).toEqual([]);
+    await records.removeRetryRequest("b-1");
+    expect(await records.requeueFailed("b-1", QUEUE_KEY, NOW)).toBe(true);
     return sent;
   }
 
   it("reads only LAUNCHER_READ_ATTRIBUTES (SETTINGS_READ_ATTRIBUTES, LAUNCHER_SLOT_ATTRIBUTES), consistently, with a projection (so dynamodb:Select is SPECIFIC_ATTRIBUTES)", async () => {
     const sent = await everyRequest();
     const reads = sent.filter((command) => command instanceof GetItemCommand).map((command) => command.input as GetItemCommandInput);
-    expect(reads).toHaveLength(9);
+    expect(reads).toHaveLength(11);
     const names = { records: new Set<string>(), settings: new Set<string>(), slots: new Set<string>() };
     for (const input of reads) {
       placeholdersMatch(input as Named);
@@ -248,12 +256,19 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
         // Try 2: IAM requires a projection (or a count, for the line) on every read of the slots and the line.
         const input = command.input as QueryCommandInput;
         const pk = pkOf(input as Named);
-        if (pk === BUILD_SLOTS_PK) expect(input.Select).toBe("SPECIFIC_ATTRIBUTES");
+        if (pk === BUILD_SLOTS_PK || pk === BUILD_RETRIES_PK) expect(input.Select).toBe("SPECIFIC_ATTRIBUTES");
         if (pk === BUILD_QUEUE_PK) expect(["SPECIFIC_ATTRIBUTES", "COUNT"]).toContain(input.Select);
         if (input.Select === "SPECIFIC_ATTRIBUTES") expect(input.ProjectionExpression).toBeTruthy();
       }
     }
-    const names: Record<string, Set<string>> = { build: new Set(), participant: new Set(), [LAUNCHES_PK]: new Set(), [BUILD_SLOTS_PK]: new Set(), [BUILD_QUEUE_PK]: new Set() };
+    const names: Record<string, Set<string>> = {
+      build: new Set(),
+      participant: new Set(),
+      [LAUNCHES_PK]: new Set(),
+      [BUILD_SLOTS_PK]: new Set(),
+      [BUILD_QUEUE_PK]: new Set(),
+      [BUILD_RETRIES_PK]: new Set(),
+    };
     for (const input of writes) {
       placeholdersMatch(input);
       const pk = pkOf(input);
@@ -267,11 +282,40 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect([...(names[LAUNCHES_PK] ?? [])].sort()).toEqual([...LAUNCHER_LAUNCH_ATTRIBUTES].sort());
     expect([...(names[BUILD_SLOTS_PK] ?? [])].sort()).toEqual([...LAUNCHER_SLOT_ATTRIBUTES].sort());
     expect([...(names[BUILD_QUEUE_PK] ?? [])].sort()).toEqual([...LAUNCHER_QUEUE_ATTRIBUTES].sort());
+    // Ticket 3.10: the Retry requests, read (projected) and deleted, naming only their own attributes.
+    for (const name of names[BUILD_RETRIES_PK] ?? []) expect(RETRY_REQUEST_ATTRIBUTES as readonly string[], name).toContain(name);
+    expect(BUILD_RETRIES_PK).toBe(BUILD_RETRIES_PARTITION);
     expect(LAUNCHES_PK).toBe(LAUNCHES_PARTITION);
     expect(BUILD_SLOTS_PK).toBe(BUILD_SLOTS_PARTITION);
     expect(BUILD_QUEUE_PK).toBe(BUILD_QUEUE_PARTITION);
     // Partitions no `BUILD#*` or `PARTICIPANT#*` pattern can match.
-    for (const pk of [BUILD_SLOTS_PK, BUILD_QUEUE_PK]) expect(pk).not.toMatch(/^(BUILD|PARTICIPANT)#/);
+    for (const pk of [BUILD_SLOTS_PK, BUILD_QUEUE_PK, BUILD_RETRIES_PK]) expect(pk).not.toMatch(/^(BUILD|PARTICIPANT)#/);
+  });
+
+  it("ticket 3.10: puts only a failed build back in the queue at a new place, and lists only well-formed Retry requests", async () => {
+    const { client, sent } = stub([
+      {},
+      Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" }),
+      {
+        Items: [
+          { pk: { S: "BUILD_RETRIES" }, sk: { S: "BUILD#b-1" }, buildId: { S: "b-1" }, requestedAt: { S: NOW } },
+          { pk: { S: "BUILD_RETRIES" }, sk: { S: "BUILD#b-2" }, buildId: { S: "b-3" }, requestedAt: { S: NOW } },
+          { pk: { S: "BUILD_RETRIES" }, sk: { S: "BUILD#b-4" }, buildId: { S: "b-4" } },
+        ],
+      },
+      { Item: { status: { S: "building" }, taskArn: { S: ARN }, launchedAt: { S: NOW }, pushedCommit: { S: COMMIT } } },
+    ]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.requeueFailed("b-1", QUEUE_KEY, NOW)).toBe(true);
+    expect(await records.requeueFailed("b-1", QUEUE_KEY, NOW)).toBe(false);
+    const update = (sent[0] as UpdateItemCommand).input;
+    expect(update.ConditionExpression).toBe("#status = :failed");
+    expect(update.UpdateExpression).toBe(
+      "SET #status = :queued, #queueKey = :queueKey, #updatedAt = :now REMOVE #failureReasons, #finishedAt, #pushedCommit, #taskArn, #launchedAt, #attemptId, #feed",
+    );
+    expect(update.ExpressionAttributeValues?.[":queueKey"]).toEqual({ S: QUEUE_KEY });
+    expect(await records.listRetryRequests()).toEqual([{ buildId: "b-1", requestedAt: NOW }]);
+    expect(await records.readRetryBuild("b-1")).toEqual({ status: "building", taskArn: ARN, launchedAt: NOW, handedOver: true });
   });
 
   it("claims only a queued build of the read nickname and participant, with its watch-list entry and a slot, in one transaction", async () => {

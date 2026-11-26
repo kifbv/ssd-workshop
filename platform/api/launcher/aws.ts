@@ -39,6 +39,7 @@ import { cancellationCodes, countQueuedAhead, releaseSlot, releaseSlotQuietly, s
 import {
   BUILD_ID_PATTERN,
   BUILD_QUEUE_PK,
+  BUILD_RETRIES_PK,
   BUILD_SLOTS_PK,
   buildKey,
   conversationKey,
@@ -47,6 +48,7 @@ import {
   messageKey,
   participantKey,
   queueEntryKey,
+  retryRequestKey,
   slotCountKey,
   slotHolderKey,
   specKey,
@@ -74,6 +76,8 @@ import type {
   LaunchEntry,
   LaunchRecords,
   RebuildRequestState,
+  RetryBuildState,
+  RetryRequest,
   SlotCount,
   SlotItem,
   TaskStart,
@@ -605,6 +609,49 @@ export class DynamoLaunchRecords implements LaunchRecords {
     } catch (error) {
       if (!conditionFailed(error)) throw error;
     }
+  }
+
+  async readPaused(participantId: string): Promise<boolean> {
+    return (await this.get(participantKey(participantId), ["paused"]))?.paused?.BOOL === true;
+  }
+
+  async listRetryRequests(): Promise<RetryRequest[]> {
+    return (await this.queryAll(BUILD_RETRIES_PK, ["buildId", "requestedAt"])).flatMap((item): RetryRequest[] => {
+      const buildId = item.buildId?.S;
+      const requestedAt = item.requestedAt?.S;
+      // Only a well-formed request at its own key (`BUILD#<buildId>`); anything else is left alone (and never acted on).
+      if (buildId === undefined || requestedAt === undefined || !BUILD_ID_PATTERN.test(buildId) || item.sk?.S !== `BUILD#${buildId}`) return [];
+      return [{ buildId, requestedAt }];
+    });
+  }
+
+  async removeRetryRequest(buildId: string): Promise<void> {
+    await this.client.send(new DeleteItemCommand({ TableName: this.table, Key: keyOf(retryRequestKey(buildId)), ReturnValues: "NONE" }));
+  }
+
+  async readRetryBuild(buildId: string): Promise<RetryBuildState | undefined> {
+    const item = await this.get(buildKey(buildId), ["status", "taskArn", "launchedAt", "pushedCommit"]);
+    const status = item?.status?.S;
+    if (!(STATUSES as readonly string[]).includes(status ?? "")) return undefined;
+    const taskArn = item?.taskArn?.S;
+    const launchedAt = item?.launchedAt?.S;
+    return {
+      status: status as BuildStatus,
+      ...(taskArn === undefined ? {} : { taskArn }),
+      ...(launchedAt === undefined ? {} : { launchedAt }),
+      handedOver: item?.pushedCommit !== undefined,
+    };
+  }
+
+  requeueFailed(buildId: string, queueKey: string, nowIso: string): Promise<boolean> {
+    const removed = ["failureReasons", "finishedAt", "pushedCommit", "taskArn", "launchedAt", "attemptId", "feed"] as const;
+    return this.update(
+      buildKey(buildId),
+      `SET #status = :queued, #queueKey = :queueKey, #updatedAt = :now REMOVE ${removed.map((name) => `#${name}`).join(", ")}`,
+      "#status = :failed",
+      { "#status": "status", "#queueKey": "queueKey", "#updatedAt": "updatedAt", ...Object.fromEntries(removed.map((name) => [`#${name}`, name])) },
+      { ":queued": str("queued"), ":queueKey": str(queueKey), ":now": str(nowIso), ":failed": str("failed") },
+    );
   }
 }
 

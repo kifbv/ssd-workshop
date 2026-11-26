@@ -40,6 +40,7 @@ import {
   BUILDER_TASK_ROLE_NAME,
   BUILDER_USAGE_UPDATE_ATTRIBUTES,
   BUILD_QUEUE_PARTITION,
+  BUILD_RETRIES_PARTITION,
   BUILD_SLOTS_PARTITION,
   BUILDER_IMAGES_KEPT,
   BUILDER_REPOSITORY_NAME,
@@ -65,6 +66,7 @@ import {
   SETTINGS_PARTITION,
   SETTINGS_READ_ATTRIBUTES,
   TABLE_NAME,
+  RETRY_REQUEST_ATTRIBUTES,
 } from "./config.js";
 
 
@@ -417,6 +419,30 @@ export class BuildsStack extends Stack {
         conditions: {
           "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [LAUNCHES_PARTITION], "dynamodb:Attributes": [...LAUNCHER_LAUNCH_ATTRIBUTES] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    // Ticket 3.10: a facilitator's Retry requests (the facilitator role puts them; only the launcher may stop a task or
+    // start one): read projected, deleted once acted on.
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_RETRIES_PARTITION], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:DeleteItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_RETRIES_PARTITION], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
         },
       }),
     );

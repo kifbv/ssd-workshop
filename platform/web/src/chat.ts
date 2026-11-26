@@ -38,6 +38,8 @@ export interface Conversation {
   paused?: true;
   /** Ticket 3.5: the server could not read whether it is paused (keep the line as it shows). */
   pausedUnknown?: true;
+  /** Ticket 3.10: a facilitator paused this person (not the whole workshop). */
+  pausedBy?: "facilitator";
   /** Ticket 3.8 (from 3.6): at step 4, the changes built so far and the cap ("Changes left: 3 of 5"). */
   changeRequestsUsed?: number;
   changeRequestsPerPerson?: number;
@@ -47,16 +49,21 @@ export interface Conversation {
   proposedSpecVersion?: number;
 }
 
-/** Ticket 3.5: what an answer says of the global Stop: paused, unknown (the server's read failed), or neither (running). */
+/**
+ * Ticket 3.5: what an answer says of the global Stop: paused, unknown (the server's read failed), or neither (running).
+ * Ticket 3.10: `pausedBy: "facilitator"` when a facilitator paused this person (the page says so instead).
+ */
 export interface PausedFlags {
   paused?: true;
   pausedUnknown?: true;
+  pausedBy?: "facilitator";
 }
 
-/** Ticket 3.5: `paused` and `pausedUnknown` from an answer's body, kept only when exactly `true`. */
+/** Ticket 3.5: `paused` and `pausedUnknown` from an answer's body, kept only when exactly `true`; 3.10's `pausedBy` only with `paused`. */
 export function pausedFlags(b: Record<string, unknown> | undefined): PausedFlags {
   return {
     ...(b?.["paused"] === true ? { paused: true as const } : {}),
+    ...(b?.["paused"] === true && b["pausedBy"] === "facilitator" ? { pausedBy: "facilitator" as const } : {}),
     ...(b?.["pausedUnknown"] === true ? { pausedUnknown: true as const } : {}),
   };
 }
@@ -208,14 +215,16 @@ export function pollResult(
 }
 
 /**
- * Ticket 3.5: `GET /api/status`. True while the admin's global Stop is on, false when the answer says it is off, and
- * undefined for any other answer (signed out, an error, no answer): the page then keeps what it showed.
+ * Ticket 3.5: `GET /api/status`. `{ paused: true }` while the admin's global Stop is on (3.10: with `pausedBy:
+ * "facilitator"` while a facilitator paused this person), `{}` when the answer says neither, and undefined for any other
+ * answer (signed out, an error, no answer): the page then keeps what it showed.
  */
-export function statusResult(answer: ApiAnswer): boolean | undefined {
+export function statusResult(answer: ApiAnswer): PausedFlags | undefined {
   if (answer.status !== 200) return undefined;
   const b = record(answer.body);
   if (b === undefined) return undefined;
-  return b["paused"] === true;
+  const { paused, pausedBy } = pausedFlags(b);
+  return { ...(paused === undefined ? {} : { paused }), ...(pausedBy === undefined ? {} : { pausedBy }) };
 }
 
 /** `POST /api/conversation/step` (Write my spec). */

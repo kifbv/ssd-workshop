@@ -180,6 +180,12 @@ export type ApproveResult = "approved" | "busy" | "waiting" | "wrong-step" | "st
  * status it expects and the conversation's message in flight, all in one transaction, so a message
  * delivered twice (SQS is at-least-once) or decided twice is handled once.
  */
+/** Ticket 3.10: the global Stop (`stopped`) and a facilitator's Pause of one participant (`paused`). */
+export interface PauseState {
+  stopped: boolean;
+  paused: boolean;
+}
+
 export interface ConversationStore {
   /**
    * Stores a pending message and makes it the conversation's message in flight, only if none is
@@ -257,6 +263,11 @@ export interface ConversationStore {
   getBudgetFacts(participantId: string): Promise<BudgetFacts>;
   /** Ticket 3.5: the workshop settings (consistent read), for the global Stop's `paused` on the page's reads. */
   getSettings(): Promise<WorkshopSettings>;
+  /**
+   * Ticket 3.10: what holds the caller's AI jobs and builds now (consistent reads): the admin's global Stop and a
+   * facilitator's Pause of this participant (their profile's `paused`).
+   */
+  getPauseState(participantId: string): Promise<PauseState>;
   /**
    * Ticket 3.5: while the global Stop is on, the AI worker holds a pending message instead of answering it: its
    * `pendingSince` and the conversation's are set to now (so a long Stop never makes it stale), in one transaction,

@@ -117,6 +117,14 @@ export const BUILD_QUEUE_PK = "BUILD_QUEUE";
 export const queueEntryKey = (queueKey: string): ItemKey => ({ pk: BUILD_QUEUE_PK, sk: queueKey });
 export const newQueueKey = (nowIso: string, buildId: string): string => `${nowIso}#${buildId}`;
 
+/**
+ * Retry requests (ticket 3.10): one item per build a facilitator asked to retry, at `BUILD_RETRIES` / `BUILD#<id>`. Only
+ * the facilitator function puts them; the launcher's minute check (the one role that may stop a build task and launch
+ * a build) acts on them and deletes them. Not `BUILD#...` (IAM's `BUILD#*` never matches it).
+ */
+export const BUILD_RETRIES_PK = "BUILD_RETRIES";
+export const retryRequestKey = (buildId: string): ItemKey => ({ pk: BUILD_RETRIES_PK, sk: buildKey(buildId).pk });
+
 /** Prefix of every stored value's sort key in an app's data partition (ticket 2.4). */
 export const APP_DATA_PREFIX = "DATA#";
 

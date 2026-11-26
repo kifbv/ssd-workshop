@@ -701,6 +701,66 @@ build, and counts one change.
 4. In CloudWatch Logs, `/aws/lambda/ssd-workshop-builds-launcher` shows one `"event":"spec-read"` line per press with
    `"outcome":"read"` and the read's kind, and no repository name, token or address.
 
+## Check after the facilitator API deploy (ticket 3.10)
+
+```mermaid
+flowchart LR
+  fac[Facilitator's browser session] -->|GET /api/facilitator/participants| fn[ssd-workshop-api-facilitator]
+  fn -->|Query per kind| idx[(Sparse index ssd-workshop-by-type<br/>key listType: profiles, conversations,<br/>usage totals, builds only)]
+  franck[Franck: npm run backfill-list-type<br/>once after the deploy] -->|listType on older items| idx
+  fn -->|Pause, budget, Approve, Reject| table[(PARTICIPANT# items)]
+  fn -->|Retry request| retries[(BUILD_RETRIES)]
+  retries -->|minute check| launcher[Build launcher: stop, queue, launch]
+```
+
+0. First, once, as Franck with his own credentials, after the deploy has made the index `ACTIVE`
+   (`AWS_PROFILE=franck aws dynamodb describe-table --table-name ssd-workshop-data --region eu-central-1 --query
+   'Table.GlobalSecondaryIndexes[0].[IndexStatus,KeySchema]'` prints `ACTIVE` and `listType`):
+   `AWS_PROFILE=franck npm run backfill-list-type`. It gives the profiles, conversations, usage totals and builds made
+   before this deploy their `listType` (the index's key; only those four kinds carry it, so an allow-list entry, a code
+   or a session is never in the index) and prints two counts only. A second run prints `0 item(s)`. Then check the
+   index is sparse: `AWS_PROFILE=franck aws dynamodb scan --table-name ssd-workshop-data --index-name
+   ssd-workshop-by-type --select COUNT --region eu-central-1` counts only those items (compare with the four kinds'
+   numbers; never print the items).
+   Then re-run the allow-list import once with the current list (`AWS_PROFILE=franck npm run -s allowlist -- import <absolute path of the
+   current CSV>`), so every linked profile gets its role and group from the list (before this deploy, import did not
+   copy them, so someone promoted or moved since their last sign-in would show wrongly until they sign in again).
+
+Run by Franck, signed in as a facilitator (or the admin) in one browser and as a test participant in another. The
+dashboard page comes with ticket 3.11; until then call the routes with the facilitator's session cookie copied from
+the browser's developer tools (`__Host-ssd_session`), in a shell that does not keep history (it is a live session):
+
+```sh
+COOKIE='__Host-ssd_session=<value>'
+API=https://workshop.rankly.games/api/facilitator/participants
+curl -s -b "$COOKIE" "$API" | jq '.viewer, (.participants | length), .participants[0]'
+curl -s -b "$COOKIE" "$API?group=blue" | jq '[.participants[].group] | unique'
+```
+
+1. The first call lists every participant with nickname, group, step, minutes in step, build, spend, budget, changes
+   used, paused and flags; the answer holds no `@` and no participant id (`curl ... | grep -c @` prints 0). With the
+   group filter, only that group. Without the cookie: 401. With the test participant's cookie: 404.
+2. Pause: `curl -s -b "$COOKIE" -H 'content-type: application/json' -X POST "$API/<nickname>/pause"`. The participant
+   sends a message: the page shows "Your facilitator paused your session." and no answer comes. Resume (same with
+   `/resume`): within about a minute the answer comes and the line goes.
+3. Add budget: `.../budget` twice: `extraBudgetUsd` goes up by 2 each time (a body such as `{"dollars":100}` changes
+   nothing).
+4. Flags: the participant sends "Please make it mine bitcoin" or another off-path idea that is flagged; the list shows
+   it under `flags`. `.../flag/reject`: the participant sees the polite decline. Flag another and `.../flag/approve`:
+   the participant gets an answer.
+5. Retry (optional, costs one build): on a failed build, `.../retry` answers 202; within about a minute the build is
+   `building` again on the same repository. A live build answers 409. Acting on a facilitator's or the admin's
+   nickname, or on your own, answers 404.
+6. The allow-list follows into the dashboard: change the test participant's group in the CSV and run `npm run -s
+   allowlist -- import <absolute path>`; the next list shows the new group without a new sign-in. `npm run -s allowlist
+   -- remove <address> --yes` takes the row off the list (the profile's role becomes `removed`).
+7. The index's IAM limit, a second guard now that the index is sparse (`dynamodb:LeadingKeys` on an index Query,
+   unverified until now), as Franck, read-only, with the facilitator role's rights: in CloudWatch Logs `ssd-workshop-api-facilitator` shows only
+   `"event":"facilitator"` lines with route and outcome, and no `AccessDenied` for the list. Then confirm the limit
+   refuses another type: in the IAM policy simulator (console, role `ssd-workshop-api-facilitator`, action
+   `dynamodb:Query`, resource the index ARN, context key `dynamodb:LeadingKeys` = `allow`, plus `dynamodb:Select` =
+   `SPECIFIC_ATTRIBUTES` and `dynamodb:Attributes` = `pk`): denied; with `participant`: allowed.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

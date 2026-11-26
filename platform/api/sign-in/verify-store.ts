@@ -134,9 +134,11 @@ export class DynamoVerifyStore implements VerifyStore {
         TableName: this.tableName,
         Key: keyOf(participantKey(participantId)),
         UpdateExpression:
-          "SET #type = :type, #id = :id, #role = :role, #group = :group, #createdAt = if_not_exists(#createdAt, :now), #step = if_not_exists(#step, :first)",
+          "SET #type = :type, #listType = :type, #id = :id, #role = :role, #group = :group, #createdAt = if_not_exists(#createdAt, :now), #step = if_not_exists(#step, :first)",
         ExpressionAttributeNames: {
           "#type": "type",
+          // Ticket 3.10: the dashboard index's key (the index holds only the four listed kinds of item).
+          "#listType": "listType",
           "#id": "id",
           "#role": "role",
           "#group": "group",

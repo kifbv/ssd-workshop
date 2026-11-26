@@ -141,7 +141,7 @@ describe("DynamoVerifyStore", () => {
     expect(sent[0]?.input).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
       UpdateExpression:
-        "SET #type = :type, #id = :id, #role = :role, #group = :group, #createdAt = if_not_exists(#createdAt, :now), #step = if_not_exists(#step, :first)",
+        "SET #type = :type, #listType = :type, #id = :id, #role = :role, #group = :group, #createdAt = if_not_exists(#createdAt, :now), #step = if_not_exists(#step, :first)",
       ExpressionAttributeValues: {
         ":type": { S: "participant" },
         ":id": { S: "p-1" },

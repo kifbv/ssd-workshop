@@ -29,6 +29,17 @@ import { buildApp } from "./app.js";
 import {
   ACCOUNT,
   ADMIN_FUNCTION_NAME,
+  BUILD_RETRIES_PARTITION,
+  BY_TYPE_INDEX_ATTRIBUTES,
+  BY_TYPE_INDEX_KEY,
+  BY_TYPE_INDEX_NAME,
+  FACILITATOR_BUILD_READ_ATTRIBUTES,
+  FACILITATOR_FUNCTION_NAME,
+  FACILITATOR_INDEX_READ_ATTRIBUTES,
+  FACILITATOR_INDEX_TYPES,
+  FACILITATOR_NICK_READ_ATTRIBUTES,
+  FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES,
+  RETRY_REQUEST_ATTRIBUTES,
   SETTINGS_PARTITION,
   SETTINGS_READ_ATTRIBUTES,
   SETTINGS_UPDATE_ATTRIBUTES,
@@ -105,7 +116,9 @@ import {
 } from "./config.js";
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
 import { ADMIN_ROUTES as ADMIN_ROUTE_KEYS } from "../../platform/api/admin/admin.js";
-import { SETTINGS_PK } from "../../platform/api/keys.js";
+import { BUILD_RETRIES_PK, SETTINGS_PK } from "../../platform/api/keys.js";
+import { FACILITATOR_ROUTES as FACILITATOR_ROUTE_KEYS } from "../../platform/api/facilitator/facilitator.js";
+import { BY_TYPE_INDEX_KEY as PLATFORM_BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME } from "../../platform/api/settings.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 import {
@@ -848,12 +861,58 @@ describe("api stack: table (ticket 1.1 criterion 4)", () => {
     expect(table?.AttributeDefinitions).toEqual([
       { AttributeName: "pk", AttributeType: "S" },
       { AttributeName: "sk", AttributeType: "S" },
+      { AttributeName: "listType", AttributeType: "S" },
     ]);
     expect(table?.TimeToLiveSpecification).toEqual({ AttributeName: TTL_ATTRIBUTE, Enabled: true });
     expect(TTL_ATTRIBUTE).toBe("expiresAt");
     // No customer managed key (KMS costs and key policy rights): the AWS-owned default.
     expect(table?.SSESpecification).toEqual({ SSEEnabled: false });
     expect(ofType("AWS::KMS::Key")).toEqual([]);
+  });
+});
+
+describe("api stack: the index by type (ticket 3.10)", () => {
+  it("has one secondary index, ssd-workshop-by-type, keyed by listType (sparse), projecting only what a dashboard row needs (never an email address or a text)", () => {
+    const table = ofType("AWS::DynamoDB::Table")[0]?.[2].Properties;
+    expect(BY_TYPE_INDEX_NAME).toBe("ssd-workshop-by-type");
+    expect(BY_TYPE_INDEX_NAME).toBe(PLATFORM_BY_TYPE_INDEX_NAME);
+    expect(BY_TYPE_INDEX_KEY).toBe("listType");
+    expect(BY_TYPE_INDEX_KEY).toBe(PLATFORM_BY_TYPE_INDEX_KEY);
+    expect(table?.GlobalSecondaryIndexes).toEqual([
+      {
+        IndexName: BY_TYPE_INDEX_NAME,
+        KeySchema: [{ AttributeName: BY_TYPE_INDEX_KEY, KeyType: "HASH" }],
+        Projection: { ProjectionType: "INCLUDE", NonKeyAttributes: [...BY_TYPE_INDEX_ATTRIBUTES] },
+      },
+    ]);
+    expect(table?.LocalSecondaryIndexes).toBeUndefined();
+    for (const name of ["email", "text", "allowRef", "prompt", "suggestion", "verdictReason", "failureReasons", "changeSpec"]) {
+      expect(BY_TYPE_INDEX_ATTRIBUTES as readonly string[], name).not.toContain(name);
+    }
+  });
+
+  it("WHEN the synthesized stacks are inspected THEN only the facilitator role may query the index, only for its four types, projected", () => {
+    const readers: { role: string; statement: Record<string, unknown> }[] = [];
+    for (const [, , policy] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (policy.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow" || !JSON.stringify(st.Action).includes("dynamodb")) continue;
+        const resources = JSON.stringify(st.Resource);
+        if (!resources.includes("/index/") && !resources.includes('"*"') && !resources.includes("table/*")) continue;
+        readers.push({ role: JSON.stringify(policy.Properties?.Roles), statement: st });
+      }
+    }
+    expect(readers).toHaveLength(1);
+    expect(readers[0]?.role).toBe(JSON.stringify([{ Ref: apiFunction(FACILITATOR_FUNCTION_NAME).roleEntry()?.[0] }]));
+    expect(readers[0]?.statement).toMatchObject({
+      Action: "dynamodb:Query",
+      Condition: {
+        "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["participant", "conversation", "usage", "build"], "dynamodb:Attributes": [...FACILITATOR_INDEX_READ_ATTRIBUTES] },
+        Null: { "dynamodb:LeadingKeys": "false" },
+        StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    });
+    expect(FACILITATOR_INDEX_TYPES as readonly string[]).not.toContain("allow");
+    expect(FACILITATOR_INDEX_TYPES as readonly string[]).not.toContain("session");
   });
 });
 
@@ -916,6 +975,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/change/build",
       "POST /api/conversation/change/discard",
       "POST /api/conversation/change/rebuild",
+      ...FACILITATOR_ROUTE_KEYS,
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
@@ -926,7 +986,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(7);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(8);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -981,6 +1041,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       ADMIN_FUNCTION_NAME,
       CONVERSATION_FUNCTION_NAME,
       AI_WORKER_FUNCTION_NAME,
+      FACILITATOR_FUNCTION_NAME,
       APP_DATA_FUNCTION_NAME,
     ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
@@ -1311,7 +1372,7 @@ describe("api stack: sign-in verify function (ticket 1.5)", () => {
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
           "ForAllValues:StringEquals": {
-            "dynamodb:Attributes": ["pk", "sk", "type", "id", "role", "group", "step", "createdAt"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "listType", "id", "role", "group", "step", "createdAt"],
           },
         },
       },
@@ -1366,7 +1427,7 @@ function sessionCheckStatements(tableArn: unknown): unknown[] {
 }
 
 describe("api stack: session check (ticket 3.1)", () => {
-  it("lets only the participant, conversation and (ticket 3.2) admin functions read allow-list entries without their address, and delete sessions", () => {
+  it("lets only the participant, conversation (ticket 3.2) admin and (ticket 3.10) facilitator functions read allow-list entries without their address, and delete sessions", () => {
     const readers: string[] = [];
     for (const [, , policy] of ofType("AWS::IAM::Policy")) {
       const statements = (policy.Properties?.PolicyDocument as { Statement: { Action: unknown; Condition?: unknown }[] }).Statement;
@@ -1397,6 +1458,9 @@ describe("api stack: session check (ticket 3.1)", () => {
         `delete ${roleOf(CONVERSATION_FUNCTION_NAME)}`,
         `read ${roleOf(ADMIN_FUNCTION_NAME)}`,
         `delete ${roleOf(ADMIN_FUNCTION_NAME)}`,
+        // Ticket 3.10: the facilitator routes run the same session check.
+        `read ${roleOf(FACILITATOR_FUNCTION_NAME)}`,
+        `delete ${roleOf(FACILITATOR_FUNCTION_NAME)}`,
       ].sort(),
     );
   });
@@ -1542,6 +1606,104 @@ describe("api stack: admin function (ticket 3.2)", () => {
   });
 });
 
+describe("api stack: facilitator function (ticket 3.10)", () => {
+  const f = apiFunction(FACILITATOR_FUNCTION_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-facilitator; Node.js 22 arm64, 256 MB, 10 s", () => {
+    expect(FACILITATOR_FUNCTION_NAME).toBe("ssd-workshop-api-facilitator");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({ Runtime: "nodejs22.x", Architectures: ["arm64"], MemorySize: 256, Timeout: 10, Code: { S3Bucket: ASSETS_BUCKET_NAME } });
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({ LogGroupName: FACILITATOR_FUNCTION_NAME, RetentionInDays: 14 });
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+  });
+
+  it("routes the list, the conversation log and the six actions to it, invoked only by this API (one permission)", () => {
+    expect(FACILITATOR_ROUTE_KEYS).toHaveLength(8);
+    for (const routeKey of FACILITATOR_ROUTE_KEYS) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({ IntegrationType: "AWS_PROXY", PayloadFormatVersion: "2.0", IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] } });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
+    expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
+    expect(source).toContain('"/*/*/*"');
+  });
+
+  it("criterion 7: WHEN the synthesized stack is inspected THEN the facilitator role reads participants, builds and flags (projected where it can be) and writes only the attributes the actions need", () => {
+    expect(BUILD_RETRIES_PK).toBe(BUILD_RETRIES_PARTITION);
+    const queueId = ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1];
+    const indexArn = { "Fn::Join": ["", [f.tableArn(), `/index/${BY_TYPE_INDEX_NAME}`]] };
+    const projected = (prefix: string, names: readonly string[]) => ({
+      Effect: "Allow",
+      Action: "dynamodb:GetItem",
+      Resource: f.tableArn(),
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [prefix] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...names] },
+        StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    });
+    expect([...FACILITATOR_NICK_READ_ATTRIBUTES]).toEqual(["pk", "sk", "participantId"]);
+    expect([...FACILITATOR_BUILD_READ_ATTRIBUTES]).toEqual(["pk", "sk", "participantId", "status", "launchedAt"]);
+    expect([...RETRY_REQUEST_ATTRIBUTES]).toEqual(["pk", "sk", "type", "buildId", "requestedAt"]);
+    expect(f.statements()).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
+      // Profiles, conversations and messages (a flag's text, the conversation log): the participants' own partitions.
+      { Effect: "Allow", Action: ["dynamodb:GetItem", "dynamodb:Query"], Resource: f.tableArn(), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] } } },
+      { Effect: "Allow", Action: "dynamodb:GetItem", Resource: f.tableArn(), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] } } },
+      projected("NICK#*", FACILITATOR_NICK_READ_ATTRIBUTES),
+      projected("BUILD#*", FACILITATOR_BUILD_READ_ATTRIBUTES),
+      {
+        Effect: "Allow",
+        Action: "dynamodb:Query",
+        Resource: indexArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["participant", "conversation", "usage", "build"], "dynamodb:Attributes": [...FACILITATOR_INDEX_READ_ATTRIBUTES] },
+          Null: { "dynamodb:LeadingKeys": "false" },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:Query",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_RETRIES"], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["BUILD_RETRIES"], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
+        },
+      },
+      { Effect: "Allow", Action: "sqs:SendMessage", Resource: { "Fn::GetAtt": [queueId, "Arn"] } },
+      settingsReadStatement(f.tableArn()),
+      ...sessionCheckStatements(f.tableArn()),
+    ]);
+    // No ECS, no launch queue, no allow-list read beyond the session check's projection, no Scan.
+    const text = JSON.stringify(f.statements());
+    for (const forbidden of ["ecs:", "Scan", "ssd-workshop-builds", "secretsmanager", "PartiQL", "BatchGetItem"]) expect(text, forbidden).not.toContain(forbidden);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number }> }>();
+    await expect(quietly(() => bundle.handler({ routeKey: "GET /api/facilitator/participants" }))).resolves.toMatchObject({ statusCode: 401 });
+  });
+});
+
 /** The DynamoDB actions that write items (TransactWriteItems is authorized item by item as these). */
 const DYNAMODB_WRITE_ACTIONS = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem", "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate", "dynamodb:PartiQLDelete"];
 
@@ -1636,9 +1798,9 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
 
 describe("budget attributes (ticket 3.3)", () => {
   /** Every DynamoDB write statement in every stack that can reach PARTICIPANT# items, by role name, with its attribute list ("*" when none). */
-  function participantWriters(sampleKey = "PARTICIPANT#p-1"): { role: string; attributes: string[] }[] {
+  function participantWriters(sampleKey = "PARTICIPANT#p-1"): { role: string; attributes: string[]; actions: string[] }[] {
     const roleNames = new Map(ofType("AWS::IAM::Role").map(([s, id, r]) => [`${s}/${id}`, String(r.Properties?.RoleName ?? id)]));
-    const writers: { role: string; attributes: string[] }[] = [];
+    const writers: { role: string; attributes: string[]; actions: string[] }[] = [];
     const documents: { roles: string[]; statements: Record<string, unknown>[] }[] = [];
     for (const [s, id, policy] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       const roles = ((policy.Properties?.Roles ?? []) as unknown[]).map((r) => {
@@ -1663,20 +1825,42 @@ describe("budget attributes (ticket 3.3)", () => {
         const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
         if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, sampleKey))) continue;
         const attributes = Object.values(conditions).find((c) => c["dynamodb:Attributes"] !== undefined)?.["dynamodb:Attributes"];
-        for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String) });
+        const actions = ([] as unknown[]).concat(st.Action).map(String);
+        for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String), actions });
       }
     }
     return writers;
   }
 
-  it("WHEN the synthesized stacks are inspected THEN no role may write extraBudget (until ticket 3.10), and only the AI worker and the builder task may write costUsd", () => {
+  it("WHEN the synthesized stacks are inspected THEN only the facilitator role may write extraBudget (ticket 3.10), and only the AI worker and the builder task may write costUsd", () => {
     const writers = participantWriters();
     expect(writers.length).toBeGreaterThan(3);
     // No write statement on participant items may leave its attributes open (that would cover both names).
     for (const w of writers) expect(w.attributes, w.role).not.toContain("*");
-    for (const w of writers) expect(w.attributes, w.role).not.toContain("extraBudget");
+    expect([...new Set(writers.filter((w) => w.attributes.includes("extraBudget")).map((w) => w.role))]).toEqual([FACILITATOR_FUNCTION_NAME]);
     const costWriters = [...new Set(writers.filter((w) => w.attributes.includes("costUsd")).map((w) => w.role))].sort();
     expect(costWriters).toEqual([AI_WORKER_FUNCTION_NAME, BUILDER_TASK_ROLE_NAME].sort());
+  });
+
+  it("ticket 3.10 (sparse index): WHEN the synthesized stacks are inspected THEN only the four listed kinds' writers may write listType, and no role may write it outside PARTICIPANT# and BUILD#", () => {
+    // A delete writes no attribute; every other write statement counts when it names listType or has no attribute list.
+    const listTypeWriters = (sampleKey: string) =>
+      [
+        ...new Set(
+          participantWriters(sampleKey)
+            .filter((w) => w.actions.some((a) => a !== "dynamodb:DeleteItem"))
+            .filter((w) => w.attributes.includes(BY_TYPE_INDEX_KEY) || w.attributes.includes("*"))
+            .map((w) => w.role),
+        ),
+      ].sort();
+    // Profiles (sign-in verify), conversations (conversation function), usage totals and builds (AI worker).
+    expect(listTypeWriters("PARTICIPANT#p-1")).toEqual([AI_WORKER_FUNCTION_NAME, CONVERSATION_FUNCTION_NAME, SIGN_IN_VERIFY_FUNCTION_NAME].sort());
+    expect(listTypeWriters("BUILD#b-1")).toEqual([AI_WORKER_FUNCTION_NAME]);
+    // The allow-list, codes and code requests (EMAIL#), sessions, nickname claims and every platform partition: no writer
+    // may name listType (nor write without an attribute list), so none of their items can enter the index.
+    for (const key of ["EMAIL#ada@example.org", "SESSION#x", "NICK#ada", "SETTINGS", "BUILD_QUEUE", "BUILD_SLOTS", "BUILD_RETRIES", "APP#ada", "APPDATA#ada", "SPEC#1"]) {
+      expect(listTypeWriters(key), key).toEqual([]);
+    }
   });
 
   it("WHEN the synthesized stacks are inspected THEN only the AI worker may write changeRequestsUsed (the change count) and whatChanges (ticket 3.6)", () => {
@@ -1708,12 +1892,24 @@ describe("budget attributes (ticket 3.3)", () => {
     }
   });
 
-  it("WHEN the synthesized stacks are inspected THEN only the conversation function, the AI worker and (ticket 3.9) the launcher may send to the AI worker's queue", () => {
+  it("criterion 7 (ticket 3.10): WHEN the synthesized stacks are inspected THEN only the facilitator role may write paused (Pause) and approvedTextHash (Approve), and it writes nothing else that decides a participant's limits or identity", () => {
+    const writers = participantWriters();
+    for (const name of ["paused", "approvedTextHash", "extraBudget"]) {
+      expect([...new Set(writers.filter((w) => w.attributes.includes(name)).map((w) => w.role))], name).toEqual([FACILITATOR_FUNCTION_NAME]);
+    }
+    const names = [...new Set(writers.filter((w) => w.role === FACILITATOR_FUNCTION_NAME).flatMap((w) => w.attributes))].sort();
+    expect(names).toEqual([...FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES].sort());
+    for (const forbidden of ["step", "stepSince", "role", "group", "nickname", "id", "costUsd", "changeRequestsUsed", "approvedAt", "rebuildApprovedAt", "specVersion", "email"]) {
+      expect(names, forbidden).not.toContain(forbidden);
+    }
+  });
+
+  it("WHEN the synthesized stacks are inspected THEN only the conversation function, the AI worker, (ticket 3.9) the launcher and (ticket 3.10, an approved flag) the facilitator role may send to the AI worker's queue", () => {
     const queueId = ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1];
     const queueArn = `arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}`;
     const reaches = (resource: unknown): boolean => resourceReaches(resource, [queueArn], [must(queueId)], [AI_QUEUE_NAME]);
     expect(reaches(queueArn)).toBe(true);
-    const roleIds = [CONVERSATION_FUNCTION_NAME, AI_WORKER_FUNCTION_NAME].map((name) => apiFunction(name).roleEntry()?.[0]);
+    const roleIds = [CONVERSATION_FUNCTION_NAME, AI_WORKER_FUNCTION_NAME, FACILITATOR_FUNCTION_NAME].map((name) => apiFunction(name).roleEntry()?.[0]);
     const launcherRoleId = ofType("AWS::IAM::Role").find(([, , r]) => r.Properties?.RoleName === BUILD_LAUNCHER_FUNCTION_NAME)?.[1];
     expect(launcherRoleId).toBeDefined();
     const senders = new Set<string>();
@@ -1727,7 +1923,7 @@ describe("budget attributes (ticket 3.3)", () => {
         senders.add(roles);
       }
     }
-    expect(senders.size).toBe(3);
+    expect(senders.size).toBe(4);
   });
 
   it("WHEN the synthesized stacks are inspected THEN only the launcher may write a change build's input (changeSpec, changeList) and the builder task may read it (ticket 3.7)", () => {
@@ -1977,7 +2173,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
           "ForAllValues:StringEquals": {
             "dynamodb:Attributes": [
-              "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
+              "pk", "sk", "type", "listType", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
               "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId", "stepSince",
               // Ticket 3.6.
               "proposedSpecVersion", "request", "suggestions", "suggestionsRequestedAt",
@@ -2037,7 +2233,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
           "ForAllValues:StringEquals": {
-            "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt", "kind", "changeNumber", "specVersion"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "listType", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt", "kind", "changeNumber", "specVersion"],
           },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
@@ -2572,6 +2768,25 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
         Condition: {
           "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [LAUNCHES_PARTITION], "dynamodb:Attributes": [...LAUNCHER_LAUNCH_ATTRIBUTES] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
+        },
+      },
+      // Ticket 3.10: a facilitator's Retry requests, read projected and deleted once acted on.
+      {
+        Effect: "Allow",
+        Action: "dynamodb:Query",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_RETRIES_PARTITION], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:DeleteItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [BUILD_RETRIES_PARTITION], "dynamodb:Attributes": [...RETRY_REQUEST_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
         },
       },
       {

@@ -35,9 +35,10 @@ const fixedNow = () => new Date("2026-11-23T10:00:00.000Z");
 
 describe("DynamoAllowListStore.upsert", () => {
   it("criterion 1: writes the allow-list item by its key and keeps createdAt of an existing entry", async () => {
-    const { client, sent } = stubClient([meta]);
+    const { client, sent } = stubClient([meta, meta]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data", fixedNow);
     await expect(store.upsert({ email: "jane@example.com", group: "g", role: "participant" })).resolves.toBe("added");
+    expect(sent).toHaveLength(2);
 
     const input = (sent[0] as UpdateItemCommand).input;
     expect(input.TableName).toBe("ssd-workshop-data");
@@ -55,7 +56,7 @@ describe("DynamoAllowListStore.upsert", () => {
   });
 
   it("reports an existing entry as updated", async () => {
-    const { client } = stubClient([{ ...meta, Attributes: { group: { S: "old" } } }]);
+    const { client } = stubClient([{ ...meta, Attributes: { group: { S: "old" } } }, meta]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data", fixedNow);
     await expect(store.upsert({ email: "jane@example.com", group: "g", role: "admin" })).resolves.toBe("updated");
   });
@@ -98,10 +99,11 @@ describe("DynamoAllowListStore.exists and remove (ticket 3.1)", () => {
   });
 
   it("criterion 1: deletes only the EMAIL#/ALLOW item, conditional on it existing, and returns no old values", async () => {
-    const { client, sent } = stubClient([meta]);
+    const { client, sent } = stubClient([meta, meta]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
     await expect(store.remove("jane@example.com")).resolves.toBe(true);
-    expect((sent[0] as DeleteItemCommand).input).toEqual({
+    expect(sent).toHaveLength(2);
+    expect((sent[1] as DeleteItemCommand).input).toEqual({
       TableName: "ssd-workshop-data",
       Key: KEY,
       ConditionExpression: "attribute_exists(pk)",
@@ -110,9 +112,79 @@ describe("DynamoAllowListStore.exists and remove (ticket 3.1)", () => {
 
   it("says false when there was no entry, and passes other errors on", async () => {
     const missing = new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} });
-    const { client } = stubClient([missing, Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
+    const { client } = stubClient([meta, missing, meta, Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
     await expect(store.remove("jane@example.com")).resolves.toBe(false);
     await expect(store.remove("jane@example.com")).rejects.toThrow("denied");
+  });
+});
+
+describe("the linked profile follows the allow-list (ticket 3.10)", () => {
+  const KEY = { pk: { S: "EMAIL#jane@example.com" }, sk: { S: "ALLOW" } };
+  const PROFILE = { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } };
+  const linked = { ...meta, Item: { participantId: { S: "p-1" } } };
+
+  it("WHEN a linked entry is imported THEN the profile's group and role are updated too, reading only the link", async () => {
+    const { client, sent } = stubClient([{ ...meta, Attributes: { group: { S: "blue" } } }, linked, meta]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data", fixedNow);
+    await expect(store.upsert({ email: "jane@example.com", group: "green", role: "facilitator" })).resolves.toBe("updated");
+    expect((sent[1] as GetItemCommand).input).toEqual({
+      TableName: "ssd-workshop-data",
+      Key: KEY,
+      ProjectionExpression: "#participantId",
+      ExpressionAttributeNames: { "#participantId": "participantId" },
+      ConsistentRead: true,
+    });
+    expect((sent[2] as UpdateItemCommand).input).toEqual({
+      TableName: "ssd-workshop-data",
+      Key: PROFILE,
+      UpdateExpression: "SET #group = :group, #role = :role",
+      ConditionExpression: "attribute_exists(#pk)",
+      ExpressionAttributeNames: { "#pk": "pk", "#group": "group", "#role": "role" },
+      ExpressionAttributeValues: { ":group": { S: "green" }, ":role": { S: "facilitator" } },
+      ReturnValues: "NONE",
+    });
+  });
+
+  it("WHEN the linked profile does not exist yet THEN the import still succeeds (the sign-in creates it)", async () => {
+    const missing = new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} });
+    const { client, sent } = stubClient([meta, linked, missing]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data", fixedNow);
+    await expect(store.upsert({ email: "jane@example.com", group: "green", role: "participant" })).resolves.toBe("added");
+    expect(sent).toHaveLength(3);
+  });
+
+  it("WHEN the profile update fails otherwise THEN the error is passed on", async () => {
+    const { client } = stubClient([meta, linked, Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data", fixedNow);
+    await expect(store.upsert({ email: "jane@example.com", group: "green", role: "participant" })).rejects.toThrow("denied");
+  });
+
+  it("WHEN a linked entry is removed THEN the profile's role becomes `removed` (off the dashboard); its group is kept", async () => {
+    const { client, sent } = stubClient([linked, meta, meta]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).resolves.toBe(true);
+    expect((sent[1] as UpdateItemCommand).input).toMatchObject({
+      Key: PROFILE,
+      UpdateExpression: "SET #role = :role",
+      ExpressionAttributeValues: { ":role": { S: "removed" } },
+    });
+    expect((sent[2] as DeleteItemCommand).input.Key).toEqual(KEY);
+  });
+
+  it("WHEN the profile update fails THEN the entry stays, so running remove again finishes the job", async () => {
+    const { client, sent } = stubClient([linked, Object.assign(new Error("throttled"), { name: "ThrottlingException" })]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).rejects.toThrow("throttled");
+    expect(sent).toHaveLength(2);
+    expect(sent.map((command) => command.constructor.name)).not.toContain("DeleteItemCommand");
+  });
+
+  it("WHEN there was no entry THEN no profile is touched", async () => {
+    const missing = new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} });
+    const { client, sent } = stubClient([meta, missing]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).resolves.toBe(false);
+    expect(sent).toHaveLength(2);
   });
 });

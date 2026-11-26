@@ -3,7 +3,7 @@
 import {
   GetItemCommand,
   ScanCommand,
-  TransactWriteItemsCommand,
+  type TransactWriteItemsCommand,
   type AttributeValue,
   type GetItemCommandOutput,
   type QueryCommand,
@@ -11,23 +11,16 @@ import {
   type ScanCommandOutput,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { conversationKey, messageKey, nicknameKey, participantKey } from "../../api/keys.js";
-import { textHash, type ConversationStore } from "../../api/conversation/state.js";
-import { conditionFailed, DynamoConversationStore, setItem } from "../../api/conversation/store.js";
+import { nicknameKey, participantKey } from "../../api/keys.js";
+import type { ConversationStore } from "../../api/conversation/state.js";
+import { DynamoFlagDecisions, type FlagDecisionStore } from "../../api/flags/flags.js";
 
-export interface FlagsStore extends ConversationStore {
+export interface FlagsStore extends ConversationStore, FlagDecisionStore {
   /** The participant id that claimed the nickname (any letter case), if any. */
   findParticipantId(nickname: string): Promise<string | undefined>;
   getNickname(participantId: string): Promise<string | undefined>;
   /** Ids of the participants whose conversation waits for a decision. */
   listWaiting(): Promise<string[]>;
-  /**
-   * The flagged message goes back to pending, approved for the given text: its SHA-256 is stored as
-   * `approvedTextHash` (no Lambda role may write it), and the worker answers without a new check only
-   * while the message's text still has that hash. The conversation is open again with it in flight.
-   * False when it was no longer flagged or no longer waiting (nothing written).
-   */
-  approve(participantId: string, messageId: string, text: string, nowSeconds: number, nowIso: string): Promise<boolean>;
 }
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -39,9 +32,12 @@ export interface FlagsSender {
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
-const num = (value: number): AttributeValue => ({ N: String(value) });
 
-export class DynamoFlagsStore extends DynamoConversationStore implements FlagsStore {
+/**
+ * The approval transaction is the dashboard's (ticket 3.10, platform/api/flags/flags.ts DynamoFlagDecisions): the
+ * message's text hash goes in `approvedTextHash`, which only the facilitator function and the owner's credentials may write.
+ */
+export class DynamoFlagsStore extends DynamoFlagDecisions implements FlagsStore {
   constructor(
     private readonly sender: FlagsSender,
     private readonly table: string,
@@ -96,36 +92,5 @@ export class DynamoFlagsStore extends DynamoConversationStore implements FlagsSt
       startKey = page.LastEvaluatedKey;
     } while (startKey !== undefined);
     return ids;
-  }
-
-  async approve(participantId: string, messageId: string, text: string, nowSeconds: number, nowIso: string): Promise<boolean> {
-    try {
-      await this.sender.send(
-        new TransactWriteItemsCommand({
-          TransactItems: [
-            setItem(
-              this.table,
-              messageKey(participantId, messageId),
-              { status: str("pending"), approvedTextHash: str(textHash(text)), pendingSince: num(nowSeconds) },
-              { expression: "#status = :flagged", values: { ":flagged": str("flagged") } },
-            ),
-            setItem(
-              this.table,
-              conversationKey(participantId),
-              { state: str("open"), pendingSince: num(nowSeconds), updatedAt: str(nowIso) },
-              {
-                expression: "#state = :waiting AND #pendingId = :messageId",
-                names: { "#pendingId": "pendingId" },
-                values: { ":waiting": str("waiting"), ":messageId": str(messageId) },
-              },
-            ),
-          ],
-        }),
-      );
-      return true;
-    } catch (error) {
-      if (conditionFailed(error)) return false;
-      throw error;
-    }
   }
 }

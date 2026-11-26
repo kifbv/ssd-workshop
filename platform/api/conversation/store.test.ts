@@ -100,6 +100,9 @@ describe("DynamoConversationStore", () => {
         "attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
       ExpressionAttributeValues: { ":open": { S: "open" }, ":pendingId": { S: ID }, ":staleBefore": { N: "800" } },
     });
+    // Ticket 3.10: the conversation carries the dashboard index's key; the message does not (it is never listed).
+    expect(items[0]?.Update?.ExpressionAttributeValues?.[":listType"]).toEqual({ S: "conversation" });
+    expect(items[1]?.Update?.ExpressionAttributeValues?.[":listType"]).toBeUndefined();
     expect(items[1]?.Update).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: `MSG#${ID}` } },
       ConditionExpression: "attribute_not_exists(#pk)",
@@ -204,7 +207,7 @@ describe("DynamoConversationStore", () => {
     });
     expect(items[3]).toMatchObject({
       Key: { sk: { S: "USAGE" } },
-      UpdateExpression: "SET #type = :type, #participantId = :participantId, #updatedAt = :updatedAt ADD #inputTokens :add_inputTokens, #outputTokens :add_outputTokens, #costUsd :add_costUsd",
+      UpdateExpression: "SET #type = :type, #listType = :listType, #participantId = :participantId, #updatedAt = :updatedAt ADD #inputTokens :add_inputTokens, #outputTokens :add_outputTokens, #costUsd :add_costUsd",
       ExpressionAttributeValues: { ":add_inputTokens": { N: "1300" }, ":add_outputTokens": { N: "150" }, ":add_costUsd": { N: "0.006765" } },
     });
     expect(items[3]?.ConditionExpression).toBeUndefined();
@@ -231,7 +234,7 @@ describe("DynamoConversationStore", () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "USAGE" } },
-      UpdateExpression: "SET #type = :type, #participantId = :participantId, #updatedAt = :updatedAt ADD #inputTokens :add_inputTokens, #outputTokens :add_outputTokens, #costUsd :add_costUsd",
+      UpdateExpression: "SET #type = :type, #listType = :listType, #participantId = :participantId, #updatedAt = :updatedAt ADD #inputTokens :add_inputTokens, #outputTokens :add_outputTokens, #costUsd :add_costUsd",
       ExpressionAttributeValues: { ":add_inputTokens": { N: "400" }, ":add_outputTokens": { N: "30" } },
     });
     expect(items[0]?.ConditionExpression).toBeUndefined();
@@ -265,6 +268,19 @@ describe("DynamoConversationStore", () => {
     for (const name of namesUsed(sent[1])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
   });
 
+  it("reads the pause state (ticket 3.10): the settings' Stop and the profile's paused, each projected and consistent", async () => {
+    const { client, sent } = stubClient([{ Item: { stopped: { BOOL: false } } }, { Item: { paused: { BOOL: true } } }]);
+    await expect(new DynamoConversationStore(client, TABLE).getPauseState("p-1")).resolves.toEqual({ stopped: false, paused: true });
+    const inputs = sent.map((c) => c.input as GetItemCommand["input"]);
+    expect(inputs.map((i) => [i.Key?.["pk"]?.S, i.Key?.["sk"]?.S, i.ConsistentRead])).toEqual([
+      ["SETTINGS", "SETTINGS", true],
+      ["PARTICIPANT#p-1", "PROFILE", true],
+    ]);
+    expect(Object.values(inputs[1]?.ExpressionAttributeNames ?? {})).toEqual(["paused"]);
+    const none = stubClient([{}, {}]);
+    await expect(new DynamoConversationStore(none.client, TABLE).getPauseState("p-1")).resolves.toEqual({ stopped: false, paused: false });
+  });
+
   it("reads the budget facts (ticket 3.3): the settings, the profile's extraBudget and the usage's costUsd, each projected and consistent", async () => {
     const { client, sent } = stubClient([
       { Item: { aiBudgetUsd: { N: "8" }, stopped: { BOOL: false } } },
@@ -287,7 +303,8 @@ describe("DynamoConversationStore", () => {
     expect(inputs.map((i) => Object.values(i.ExpressionAttributeNames ?? {}))).toEqual([
       ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
       // Ticket 3.6: also the change requests used (compared with the cap before a change is taken or built).
-      ["extraBudget", "changeRequestsUsed"],
+      // Ticket 3.10: and a facilitator's Pause (the worker holds a paused participant's jobs).
+      ["extraBudget", "changeRequestsUsed", "paused"],
       ["costUsd"],
     ]);
     for (const name of Object.values(inputs[0]?.ExpressionAttributeNames ?? {})) expect(SETTINGS_READ_ATTRIBUTES, name).toContain(name);
@@ -541,6 +558,7 @@ describe("DynamoConversationStore", () => {
         ConditionExpression: "attribute_not_exists(#pk)",
         ExpressionAttributeValues: {
           ":type": { S: "build" },
+          ":listType": { S: "build" },
           ":buildId": { S: BUILD_ID },
           ":nickname": { S: "Ada-Lovelace" },
           ":participantId": { S: "p-1" },
@@ -926,6 +944,9 @@ describe("change requests in the conversation store (ticket 3.6)", () => {
       "BUILD",
       "USAGE",
     ]);
+    // Ticket 3.10: the change build and the usage total carry the dashboard index's key.
+    expect(list[5]?.Update?.ExpressionAttributeValues?.[":listType"]).toEqual({ S: "build" });
+    expect(list[6]?.Update?.ExpressionAttributeValues?.[":listType"]).toEqual({ S: "usage" });
     expect(list[2]?.Update).toMatchObject({
       UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt, #buildId = :buildId, #approvedSpecVersion = :approvedSpecVersion REMOVE #pendingId, #pendingSince, #proposedSpecVersion",
       ConditionExpression: "#pendingId = :messageId AND #proposedSpecVersion = :version AND #buildId = :previousBuildId",

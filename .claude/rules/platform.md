@@ -62,7 +62,8 @@ paths:
   one transaction conditional on it still being pending (ticket 1.7). DynamoDB refuses an expression with an undefined
   `:value`/`#name` (or an unused one): `store.test.ts` checks every transaction item's placeholders both ways.
 - An approval that lets something skip a check is tied to the content, not the record: store a hash of the approved
-  content (`approvedTextHash`, SHA-256 of the text) in an attribute no Lambda role may write, and skip only while the
+  content (`approvedTextHash`, SHA-256 of the text) in an attribute only the deciding role may write (since 3.10 the
+  facilitator function, beside Franck's `npm run flags`), and skip only while the
   current content has that hash (ticket 1.7).
 - The Lambda runtime writes an uncaught error's message and stack to CloudWatch: a handler whose errors may carry
   personal data logs only `errorName(error)` and throws a bare `new Error(...)` (no `cause`), as `ai-worker.ts` does.
@@ -261,3 +262,16 @@ paths:
   accepts it only with a content tie to input only it wrote (`repositorySpec`); one shared approval attribute would let
   that writer approve anything. A `GetItem` that lists its own `ExpressionAttributeNames` beside a shared projection
   (`getSpec`) must gain every new name too: test placeholders both ways on reads as well as writes.
+- Listing items across participants (3.10's dashboard): never a Scan (its keys and `LastEvaluatedKey` hold the
+  allow-list's `EMAIL#<address>`); query the sparse `ssd-workshop-by-type` index, keyed by `listType`, which only the
+  listed kinds carry (profiles, conversations, usage totals, builds; set by their own writers), so items that must never
+  be listed are not in it at all, whatever IAM does on an index Query; project to names in its INCLUDE list, from a
+  role limited to those values (`dynamodb:LeadingKeys`, plus a `Null` guard, as a second guard). A new listed kind
+  needs its writer to set `listType` (name in that role's list; synth test) and a backfill of older items
+  (`npm run backfill-list-type`, Franck). A new attribute a list needs goes into `BY_TYPE_INDEX_ATTRIBUTES` first.
+  A facilitator action reads the target profile's `role` first and acts only on `participant`, never on the caller.
+  A copy of allow-list data on the profile (`group`, `role`) is kept in step by the allow-list command itself
+  (`import` and `remove` update the linked profile), never by a Lambda reading `EMAIL#` items. Work a
+  facilitator asks of a build (Retry) is a request item the launcher's minute check acts on, never a StopTask or a
+  launch-queue send from another role. A single-item write's failed condition is `ConditionalCheckFailedException`;
+  the conversation store's `conditionFailed` only recognises a cancelled transaction.

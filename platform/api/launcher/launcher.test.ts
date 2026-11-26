@@ -1195,3 +1195,142 @@ describe("global Stop (ticket 3.5)", () => {
     expect(await writes(relaunched.attemptId)).toEqual({ claim: true, addFeed: true, handOver: true, markFailed: true });
   }, 30_000);
 });
+
+describe("facilitator Retry and Pause (ticket 3.10)", () => {
+  const STUCK = 15 * 60 * 1000;
+
+  it("criterion 4: WHEN Retry is pressed on a build that is building for over 15 minutes THEN the check stops its task and queues a new build on the same repository", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    const first = must(s.tasks.started[0]);
+    must(s.table.builds.get(BUILD)).feed = [{ kind: "step", step: "writing", at: "x" }];
+    s.advance(STUCK + 60_000);
+    // The facilitator function's request (it may not stop tasks or send to the launch queue itself).
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:00:00.000Z") + STUCK + 60_000).toISOString());
+    await runCheck(s.check);
+    // The stuck task got StopTask; the build was put back in the queue and launched again, a new task on the same repository.
+    expect(s.tasks.stopCalls).toEqual([first.taskArn]);
+    expect(s.tasks.started).toHaveLength(2);
+    const second = must(s.tasks.started[1]);
+    expect(second.buildId).toBe(BUILD);
+    expect(second.taskArn).not.toBe(first.taskArn);
+    expect(second.attemptId).not.toBe(first.attemptId);
+    const build = must(s.table.builds.get(BUILD));
+    expect(build).toMatchObject({ status: "building", taskArn: second.taskArn, nickname: NICKNAME, participantId: PARTICIPANT });
+    expect(build.feed).toBeUndefined();
+    // Same repository: the only one the token and the preparation name is the participant's.
+    expect([...s.github.repositories.keys()]).toEqual(["ssd-ada-l"]);
+    expect(s.github.grants.get(second.token)?.repositories).toEqual(["ssd-ada-l"]);
+    // One slot, held by the new run; the request is done.
+    expect(s.table.slots.running).toBe(1);
+    expect(s.table.retryRequests.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", retried: 1, stopped: 1, relaunched: 1, failed: 0 });
+    assertQuietLogs(s);
+  });
+
+  it("WHEN the participant queued a newer build after Retry was pressed THEN the check drops the request and leaves the old build failed (race with the minute check)", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    const first = must(s.tasks.started[0]);
+    s.tasks.exit(first.taskArn);
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed" });
+    // A facilitator presses Retry; before the next minute check, the participant's change build is queued: the
+    // conversation now names the new build.
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:01:00.000Z")).toISOString());
+    s.table.conversations.set(PARTICIPANT, { ...s.table.conversations.get(PARTICIPANT), buildId: "b-newer" });
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+    expect(s.tasks.started).toHaveLength(1);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.table.retryRequests.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", retried: 0, relaunched: 0 });
+  });
+
+  it("WHEN the stuck build is no longer the conversation's THEN its task is not stopped by a Retry and the request is dropped", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    s.advance(STUCK + 60_000);
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:00:00.000Z") + STUCK + 60_000).toISOString());
+    s.table.conversations.set(PARTICIPANT, { ...s.table.conversations.get(PARTICIPANT), buildId: "b-newer" });
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.table.retryRequests.size).toBe(0);
+  });
+
+  it("WHEN Retry is pressed on a failed build THEN the check queues it again and launches it; a build running under 15 minutes is left alone", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    const first = must(s.tasks.started[0]);
+    s.tasks.exit(first.taskArn);
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:01:00.000Z")).toISOString());
+    s.advance(60_000);
+    await runCheck(s.check);
+    const build = must(s.table.builds.get(BUILD));
+    expect(build.status).toBe("building");
+    expect(build.failureReasons).toBeUndefined();
+    expect(s.tasks.started).toHaveLength(2);
+    expect(s.table.retryRequests.size).toBe(0);
+
+    // Running for 2 minutes only: not stuck. The request waits (the build may still fail), nothing is stopped.
+    s.advance(2 * 60_000);
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:04:00.000Z")).toISOString());
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.table.retryRequests.has(BUILD)).toBe(true);
+    // A request older than RETRY_REQUEST_MAX_MS for a build that never failed is dropped.
+    s.advance(31 * 60_000);
+    s.tasks.states.set(must(s.tasks.started[1]).taskArn, { stopped: false, createdAt: new Date(Date.parse("2026-11-24T10:35:00.000Z")) });
+    must(s.table.builds.get(BUILD)).pushedCommit = COMMIT;
+    await runCheck(s.check);
+    expect(s.table.retryRequests.size).toBe(0);
+    expect(s.tasks.started).toHaveLength(2);
+  });
+
+  it("WHEN the participant is paused THEN their build waits (held, no place in the line, no slot, no GitHub call), and Resume releases it", async () => {
+    const s = setup();
+    s.table.paused.add(PARTICIPANT);
+    for (let i = 0; i < 2; i += 1) {
+      expect(await processLaunch(message(), s.deps)).toBe("held");
+      s.advance(30_000);
+    }
+    expect(s.tasks.started).toEqual([]);
+    expect(s.secretReads()).toBe(0);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "queued" });
+    expect(s.table.builds.get(BUILD)?.queueKey).toBeUndefined();
+    expect(s.table.queue.size).toBe(0);
+    expect(s.table.slots.running).toBe(0);
+    s.table.paused.delete(PARTICIPANT);
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    assertQuietLogs(s);
+  });
+
+  it("a paused participant's build already in the line is never failed for waiting, and builds after it still start", async () => {
+    const s = setup();
+    // Ada's build failed; a Retry puts it back while she is paused: it keeps its request and its place.
+    must(s.table.builds.get(BUILD)).status = "failed";
+    s.table.paused.add(PARTICIPANT);
+    s.table.retryRequests.set(BUILD, "2026-11-24T10:00:00.000Z");
+    s.table.addQueuedBuild({ buildId: "b-other", participantId: "6f1c2a9e-0000-4000-8000-000000000002", nickname: "Grace" });
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    expect(s.table.retryRequests.has(BUILD)).toBe(true);
+    expect(s.tasks.started).toEqual([]);
+    expect(await processLaunch(message("b-other"), s.deps)).toBe("started");
+    s.advance(QUEUE_WAIT_MAX_MS + 60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("queued");
+    s.table.paused.delete(PARTICIPANT);
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.table.retryRequests.size).toBe(0);
+  });
+});
