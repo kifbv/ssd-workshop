@@ -139,6 +139,8 @@ export interface FacilitatorStore extends FlagDecisionStore, Pick<ConversationSt
   roster(): Promise<Roster>;
   /** The participant id holding the nickname (its claim, any letter case). */
   findParticipantId(nickname: string): Promise<string | undefined>;
+  /** The profile's `role` (written from the allow-list by the sign-in and the allow-list command), or undefined. */
+  getProfileRole(participantId: string): Promise<string | undefined>;
   getSettings(): Promise<WorkshopSettings>;
   getRetryBuild(buildId: string): Promise<RetryBuild | undefined>;
   /** Sets the profile's `paused`; false when there is no profile. */
@@ -261,12 +263,15 @@ type Result = { outcome: FacilitatorOutcome; response: HttpResponse; error?: str
 
 const refused = (message: string, status = 409): Result => ({ outcome: "refused", response: jsonResponse(status, { message }) });
 
-async function act(which: FacilitatorRoute, request: HttpRequest, deps: FacilitatorDeps): Promise<Result> {
+async function act(which: FacilitatorRoute, request: HttpRequest, deps: FacilitatorDeps, callerId: string): Promise<Result> {
   const nickname = request.pathParameters?.["nickname"];
   // An unknown nickname, or one that cannot be one, is the plain 404 (nothing else is read).
   if (typeof nickname !== "string" || !NICKNAME_PATTERN.test(nickname)) return { outcome: "not-found", response: notFoundResponse() };
   const participantId = await deps.store.findParticipantId(nickname);
-  if (participantId === undefined) return { outcome: "not-found", response: notFoundResponse() };
+  // Actions and the log reach participants only: never the caller, a facilitator or the admin (their profile's role, a
+  // copy of the allow-list's), nor a removed person. Each is the same plain 404 as an unknown nickname.
+  if (participantId === undefined || participantId === callerId) return { outcome: "not-found", response: notFoundResponse() };
+  if ((await deps.store.getProfileRole(participantId)) !== "participant") return { outcome: "not-found", response: notFoundResponse() };
   if (which === "conversation") {
     const items = await deps.store.listItems(participantId, CONVERSATION_LOG_LIMIT);
     return { outcome: "ok", response: jsonResponse(200, { nickname, messages: items.map(logLine) }) };
@@ -328,7 +333,7 @@ async function route(request: HttpRequest, deps: FacilitatorDeps, which: Facilit
       response: jsonResponse(200, { viewer: { role: session.role, group: session.participant.group }, stopped: settings.stopped, participants }),
     };
   }
-  return act(which, request, deps);
+  return act(which, request, deps, session.participant.id);
 }
 
 /** Routes one request; table failures give a 500 with a generic message (logged by error name only). */

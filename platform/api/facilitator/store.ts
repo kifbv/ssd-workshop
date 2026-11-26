@@ -1,5 +1,5 @@
 // The facilitator routes' table access (ticket 3.10). The list reads profiles, conversations, usage totals and builds
-// through the table's index by `type` (BY_TYPE_INDEX_NAME): a Query per type, projected, never a Scan, so the
+// through the table's sparse index keyed by `listType` (BY_TYPE_INDEX_NAME): a Query per type, projected, never a Scan, so the
 // allow-list's keys (which hold email addresses) are never read. Every request names only what the facilitator role's
 // IAM statements allow (infra/lib/config.ts FACILITATOR_INDEX_READ_ATTRIBUTES, FACILITATOR_PARTICIPANT_UPDATE_ATTRIBUTES,
 // RETRY_REQUEST_ATTRIBUTES; checked by ./store.test.ts).
@@ -18,7 +18,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { DynamoFlagDecisions } from "../flags/flags.js";
 import { BUILD_ID_PATTERN, BUILD_RETRIES_PK, buildKey, conversationKey, nicknameKey, participantKey, retryRequestKey, type ItemKey } from "../keys.js";
-import { BY_TYPE_INDEX_NAME } from "../settings.js";
+import { BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME } from "../settings.js";
 import type { BuildStatus } from "../types.js";
 import { limitsFromItem } from "../workshop/settings.js";
 import type { FacilitatorStore, RetryBuild, Roster, RosterBuild, RosterProfile } from "./facilitator.js";
@@ -65,9 +65,9 @@ export class DynamoFacilitatorStore extends DynamoFlagDecisions implements Facil
         new QueryCommand({
           TableName: this.table,
           IndexName: BY_TYPE_INDEX_NAME,
-          KeyConditionExpression: "#type = :type",
+          KeyConditionExpression: "#listType = :type",
           ProjectionExpression: names.map((name) => `#${name}`).join(", "),
-          ExpressionAttributeNames: { "#type": "type", ...Object.fromEntries(names.map((name) => [`#${name}`, name])) },
+          ExpressionAttributeNames: { "#listType": BY_TYPE_INDEX_KEY, ...Object.fromEntries(names.map((name) => [`#${name}`, name])) },
           ExpressionAttributeValues: { ":type": str(type) },
           Select: "SPECIFIC_ATTRIBUTES",
           ...(start === undefined ? {} : { ExclusiveStartKey: start }),
@@ -171,6 +171,19 @@ export class DynamoFacilitatorStore extends DynamoFlagDecisions implements Facil
       }),
     );
     return answer.Item?.participantId?.S;
+  }
+
+  async getProfileRole(participantId: string): Promise<string | undefined> {
+    const answer = await this.sender.send(
+      new GetItemCommand({
+        TableName: this.table,
+        Key: keyOf(participantKey(participantId)),
+        ConsistentRead: true,
+        ProjectionExpression: "#role",
+        ExpressionAttributeNames: { "#role": "role" },
+      }),
+    );
+    return answer.Item?.role?.S;
   }
 
   async getRetryBuild(buildId: string): Promise<RetryBuild | undefined> {

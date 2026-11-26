@@ -31,6 +31,7 @@ import {
   ADMIN_FUNCTION_NAME,
   BUILD_RETRIES_PARTITION,
   BY_TYPE_INDEX_ATTRIBUTES,
+  BY_TYPE_INDEX_KEY,
   BY_TYPE_INDEX_NAME,
   FACILITATOR_BUILD_READ_ATTRIBUTES,
   FACILITATOR_FUNCTION_NAME,
@@ -117,7 +118,7 @@ import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api
 import { ADMIN_ROUTES as ADMIN_ROUTE_KEYS } from "../../platform/api/admin/admin.js";
 import { BUILD_RETRIES_PK, SETTINGS_PK } from "../../platform/api/keys.js";
 import { FACILITATOR_ROUTES as FACILITATOR_ROUTE_KEYS } from "../../platform/api/facilitator/facilitator.js";
-import { BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME } from "../../platform/api/settings.js";
+import { BY_TYPE_INDEX_KEY as PLATFORM_BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME } from "../../platform/api/settings.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 import {
@@ -860,7 +861,7 @@ describe("api stack: table (ticket 1.1 criterion 4)", () => {
     expect(table?.AttributeDefinitions).toEqual([
       { AttributeName: "pk", AttributeType: "S" },
       { AttributeName: "sk", AttributeType: "S" },
-      { AttributeName: "type", AttributeType: "S" },
+      { AttributeName: "listType", AttributeType: "S" },
     ]);
     expect(table?.TimeToLiveSpecification).toEqual({ AttributeName: TTL_ATTRIBUTE, Enabled: true });
     expect(TTL_ATTRIBUTE).toBe("expiresAt");
@@ -871,14 +872,16 @@ describe("api stack: table (ticket 1.1 criterion 4)", () => {
 });
 
 describe("api stack: the index by type (ticket 3.10)", () => {
-  it("has one secondary index, ssd-workshop-by-type, keyed by type, projecting only what a dashboard row needs (never an email address or a text)", () => {
+  it("has one secondary index, ssd-workshop-by-type, keyed by listType (sparse), projecting only what a dashboard row needs (never an email address or a text)", () => {
     const table = ofType("AWS::DynamoDB::Table")[0]?.[2].Properties;
     expect(BY_TYPE_INDEX_NAME).toBe("ssd-workshop-by-type");
     expect(BY_TYPE_INDEX_NAME).toBe(PLATFORM_BY_TYPE_INDEX_NAME);
+    expect(BY_TYPE_INDEX_KEY).toBe("listType");
+    expect(BY_TYPE_INDEX_KEY).toBe(PLATFORM_BY_TYPE_INDEX_KEY);
     expect(table?.GlobalSecondaryIndexes).toEqual([
       {
         IndexName: BY_TYPE_INDEX_NAME,
-        KeySchema: [{ AttributeName: "type", KeyType: "HASH" }],
+        KeySchema: [{ AttributeName: BY_TYPE_INDEX_KEY, KeyType: "HASH" }],
         Projection: { ProjectionType: "INCLUDE", NonKeyAttributes: [...BY_TYPE_INDEX_ATTRIBUTES] },
       },
     ]);
@@ -1369,7 +1372,7 @@ describe("api stack: sign-in verify function (ticket 1.5)", () => {
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
           "ForAllValues:StringEquals": {
-            "dynamodb:Attributes": ["pk", "sk", "type", "id", "role", "group", "step", "createdAt"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "listType", "id", "role", "group", "step", "createdAt"],
           },
         },
       },
@@ -1795,9 +1798,9 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
 
 describe("budget attributes (ticket 3.3)", () => {
   /** Every DynamoDB write statement in every stack that can reach PARTICIPANT# items, by role name, with its attribute list ("*" when none). */
-  function participantWriters(sampleKey = "PARTICIPANT#p-1"): { role: string; attributes: string[] }[] {
+  function participantWriters(sampleKey = "PARTICIPANT#p-1"): { role: string; attributes: string[]; actions: string[] }[] {
     const roleNames = new Map(ofType("AWS::IAM::Role").map(([s, id, r]) => [`${s}/${id}`, String(r.Properties?.RoleName ?? id)]));
-    const writers: { role: string; attributes: string[] }[] = [];
+    const writers: { role: string; attributes: string[]; actions: string[] }[] = [];
     const documents: { roles: string[]; statements: Record<string, unknown>[] }[] = [];
     for (const [s, id, policy] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       const roles = ((policy.Properties?.Roles ?? []) as unknown[]).map((r) => {
@@ -1822,7 +1825,8 @@ describe("budget attributes (ticket 3.3)", () => {
         const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
         if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, sampleKey))) continue;
         const attributes = Object.values(conditions).find((c) => c["dynamodb:Attributes"] !== undefined)?.["dynamodb:Attributes"];
-        for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String) });
+        const actions = ([] as unknown[]).concat(st.Action).map(String);
+        for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String), actions });
       }
     }
     return writers;
@@ -1836,6 +1840,27 @@ describe("budget attributes (ticket 3.3)", () => {
     expect([...new Set(writers.filter((w) => w.attributes.includes("extraBudget")).map((w) => w.role))]).toEqual([FACILITATOR_FUNCTION_NAME]);
     const costWriters = [...new Set(writers.filter((w) => w.attributes.includes("costUsd")).map((w) => w.role))].sort();
     expect(costWriters).toEqual([AI_WORKER_FUNCTION_NAME, BUILDER_TASK_ROLE_NAME].sort());
+  });
+
+  it("ticket 3.10 (sparse index): WHEN the synthesized stacks are inspected THEN only the four listed kinds' writers may write listType, and no role may write it outside PARTICIPANT# and BUILD#", () => {
+    // A delete writes no attribute; every other write statement counts when it names listType or has no attribute list.
+    const listTypeWriters = (sampleKey: string) =>
+      [
+        ...new Set(
+          participantWriters(sampleKey)
+            .filter((w) => w.actions.some((a) => a !== "dynamodb:DeleteItem"))
+            .filter((w) => w.attributes.includes(BY_TYPE_INDEX_KEY) || w.attributes.includes("*"))
+            .map((w) => w.role),
+        ),
+      ].sort();
+    // Profiles (sign-in verify), conversations (conversation function), usage totals and builds (AI worker).
+    expect(listTypeWriters("PARTICIPANT#p-1")).toEqual([AI_WORKER_FUNCTION_NAME, CONVERSATION_FUNCTION_NAME, SIGN_IN_VERIFY_FUNCTION_NAME].sort());
+    expect(listTypeWriters("BUILD#b-1")).toEqual([AI_WORKER_FUNCTION_NAME]);
+    // The allow-list, codes and code requests (EMAIL#), sessions, nickname claims and every platform partition: no writer
+    // may name listType (nor write without an attribute list), so none of their items can enter the index.
+    for (const key of ["EMAIL#ada@example.org", "SESSION#x", "NICK#ada", "SETTINGS", "BUILD_QUEUE", "BUILD_SLOTS", "BUILD_RETRIES", "APP#ada", "APPDATA#ada", "SPEC#1"]) {
+      expect(listTypeWriters(key), key).toEqual([]);
+    }
   });
 
   it("WHEN the synthesized stacks are inspected THEN only the AI worker may write changeRequestsUsed (the change count) and whatChanges (ticket 3.6)", () => {
@@ -2148,7 +2173,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
           "ForAllValues:StringEquals": {
             "dynamodb:Attributes": [
-              "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
+              "pk", "sk", "type", "listType", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
               "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId", "stepSince",
               // Ticket 3.6.
               "proposedSpecVersion", "request", "suggestions", "suggestionsRequestedAt",
@@ -2208,7 +2233,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
           "ForAllValues:StringEquals": {
-            "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt", "kind", "changeNumber", "specVersion"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "listType", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt", "kind", "changeNumber", "specVersion"],
           },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },

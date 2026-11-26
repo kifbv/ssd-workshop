@@ -46,6 +46,10 @@ export class FakeFacilitatorTable extends FakeConversationTable implements Facil
     return roster;
   }
 
+  async getProfileRole(participantId: string): Promise<string | undefined> {
+    return this.profiles.get(participantId)?.role;
+  }
+
   async getRetryBuild(buildId: string): Promise<RetryBuild | undefined> {
     const b = this.builds.get(buildId);
     return b && { participantId: b.participantId, status: b.status, ...(b.launchedAt === undefined ? {} : { launchedAt: b.launchedAt }) };

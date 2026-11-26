@@ -810,6 +810,15 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
     // kept until it ends (at most RETRY_REQUEST_MAX_MS); any other is dropped. The change count is never touched.
     const retryLaunches: { buildId: string; queueKey: string }[] = [];
     for (const request of await deps.records.listRetryRequests()) {
+      // Only the participant's current build: if they queued a newer one meanwhile (a change after this build failed),
+      // the conversation names that one, and the request is dropped (retrying the old build would rebuild an older spec
+      // over the newer change). Read just before acting, from the build's own participant.
+      const record = await deps.records.readBuild(request.buildId);
+      const current = record === undefined ? undefined : (await deps.records.readConversation(record.participantId)).buildId;
+      if (current !== request.buildId) {
+        await deps.records.removeRetryRequest(request.buildId);
+        continue;
+      }
       const build = await deps.records.readRetryBuild(request.buildId);
       const place = newQueueKey(nowIso(), request.buildId);
       if (build?.status === "failed") {

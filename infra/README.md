@@ -706,11 +706,22 @@ build, and counts one change.
 ```mermaid
 flowchart LR
   fac[Facilitator's browser session] -->|GET /api/facilitator/participants| fn[ssd-workshop-api-facilitator]
-  fn -->|Query per type| idx[(Index ssd-workshop-by-type)]
+  fn -->|Query per kind| idx[(Sparse index ssd-workshop-by-type<br/>key listType: profiles, conversations,<br/>usage totals, builds only)]
+  franck[Franck: npm run backfill-list-type<br/>once after the deploy] -->|listType on older items| idx
   fn -->|Pause, budget, Approve, Reject| table[(PARTICIPANT# items)]
   fn -->|Retry request| retries[(BUILD_RETRIES)]
   retries -->|minute check| launcher[Build launcher: stop, queue, launch]
 ```
+
+0. First, once, as Franck with his own credentials, after the deploy has made the index `ACTIVE`
+   (`AWS_PROFILE=franck aws dynamodb describe-table --table-name ssd-workshop-data --region eu-central-1 --query
+   'Table.GlobalSecondaryIndexes[0].[IndexStatus,KeySchema]'` prints `ACTIVE` and `listType`):
+   `AWS_PROFILE=franck npm run backfill-list-type`. It gives the profiles, conversations, usage totals and builds made
+   before this deploy their `listType` (the index's key; only those four kinds carry it, so an allow-list entry, a code
+   or a session is never in the index) and prints two counts only. A second run prints `0 item(s)`. Then check the
+   index is sparse: `AWS_PROFILE=franck aws dynamodb scan --table-name ssd-workshop-data --index-name
+   ssd-workshop-by-type --select COUNT --region eu-central-1` counts only those items (compare with the four kinds'
+   numbers; never print the items).
 
 Run by Franck, signed in as a facilitator (or the admin) in one browser and as a test participant in another. The
 dashboard page comes with ticket 3.11; until then call the routes with the facilitator's session cookie copied from
@@ -735,9 +746,13 @@ curl -s -b "$COOKIE" "$API?group=blue" | jq '[.participants[].group] | unique'
    it under `flags`. `.../flag/reject`: the participant sees the polite decline. Flag another and `.../flag/approve`:
    the participant gets an answer.
 5. Retry (optional, costs one build): on a failed build, `.../retry` answers 202; within about a minute the build is
-   `building` again on the same repository. A live build answers 409.
-6. The index's IAM limit (`dynamodb:LeadingKeys` on an index Query, unverified until now), as Franck, read-only, with
-   the facilitator role's rights: in CloudWatch Logs `ssd-workshop-api-facilitator` shows only
+   `building` again on the same repository. A live build answers 409. Acting on a facilitator's or the admin's
+   nickname, or on your own, answers 404.
+6. The allow-list follows into the dashboard: change the test participant's group in the CSV and run `npm run -s
+   allowlist -- import <absolute path>`; the next list shows the new group without a new sign-in. `npm run -s allowlist
+   -- remove <address> --yes` takes the row off the list (the profile's role becomes `removed`).
+7. The index's IAM limit, a second guard now that the index is sparse (`dynamodb:LeadingKeys` on an index Query,
+   unverified until now), as Franck, read-only, with the facilitator role's rights: in CloudWatch Logs `ssd-workshop-api-facilitator` shows only
    `"event":"facilitator"` lines with route and outcome, and no `AccessDenied` for the list. Then confirm the limit
    refuses another type: in the IAM policy simulator (console, role `ssd-workshop-api-facilitator`, action
    `dynamodb:Query`, resource the index ARN, context key `dynamodb:LeadingKeys` = `allow`, plus `dynamodb:Select` =

@@ -109,7 +109,8 @@ describe("DynamoFacilitatorStore (ticket 3.10)", () => {
         for (const name of attributeNames(query)) expect(RETRY_REQUEST_ATTRIBUTES as readonly string[], name).toContain(name);
       } else {
         expect(query.IndexName).toBe(BY_TYPE_INDEX_NAME);
-        expect(query.KeyConditionExpression).toBe("#type = :type");
+        expect(query.KeyConditionExpression).toBe("#listType = :type");
+        expect(query.ExpressionAttributeNames?.["#listType"]).toBe("listType");
         expect(FACILITATOR_INDEX_TYPES as readonly string[]).toContain((query.ExpressionAttributeValues?.[":type"] as { S: string }).S);
         for (const name of attributeNames(query)) expect(FACILITATOR_INDEX_READ_ATTRIBUTES as readonly string[], name).toContain(name);
       }
@@ -175,9 +176,12 @@ describe("DynamoFacilitatorStore (ticket 3.10)", () => {
     );
     const store = new DynamoFacilitatorStore(client, TABLE);
     expect(await store.findParticipantId("Ada")).toBe("p-1");
+    expect(await store.getProfileRole("p-1")).toBeUndefined();
     expect(await store.getRetryBuild(BUILD)).toEqual({ participantId: "p-1", status: "failed" });
     expect(await store.getRetryBuild("../x")).toBeUndefined();
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
+    // Item 4 of try 2: the target's role, projected, from its profile (consistent).
+    expect(sent[1]?.input).toMatchObject({ Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } }, ProjectionExpression: "#role", ConsistentRead: true });
     for (const { input } of sent) {
       placeholdersMatch(input as Named);
       expect(input["ProjectionExpression"]).toBeDefined();

@@ -190,10 +190,15 @@ export const QUEUE_WAIT_MAX_MS = 4 * 60 * 60 * 1000;
 export const SLOT_REPAIR_FORCE_AFTER = 3;
 
 /**
- * Ticket 3.10: the table's index by item `type` (infra/lib/config.ts BY_TYPE_INDEX_NAME), which only the facilitator
+ * Ticket 3.10: the table's sparse index by `listType` (infra/lib/config.ts BY_TYPE_INDEX_NAME), which only the facilitator
  * function queries (profiles, conversations, usage totals and builds, never the allow-list).
  */
 export const BY_TYPE_INDEX_NAME = "ssd-workshop-by-type";
+/**
+ * Ticket 3.10: the index's partition key: the same value as `type`, written only on profiles, conversations, usage
+ * totals and builds (the index is sparse; an allow-list entry, a code or a session is never in it).
+ */
+export const BY_TYPE_INDEX_KEY = "listType";
 /** Ticket 3.10: a build `building` for longer than this is stuck: the dashboard marks it and Retry may restart it. */
 export const STUCK_BUILD_MS = 15 * 60 * 1000;
 /**

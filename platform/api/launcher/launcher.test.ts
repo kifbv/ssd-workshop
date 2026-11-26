@@ -1228,6 +1228,39 @@ describe("facilitator Retry and Pause (ticket 3.10)", () => {
     assertQuietLogs(s);
   });
 
+  it("WHEN the participant queued a newer build after Retry was pressed THEN the check drops the request and leaves the old build failed (race with the minute check)", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    const first = must(s.tasks.started[0]);
+    s.tasks.exit(first.taskArn);
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed" });
+    // A facilitator presses Retry; before the next minute check, the participant's change build is queued: the
+    // conversation now names the new build.
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:01:00.000Z")).toISOString());
+    s.table.conversations.set(PARTICIPANT, { ...s.table.conversations.get(PARTICIPANT), buildId: "b-newer" });
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+    expect(s.tasks.started).toHaveLength(1);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.table.retryRequests.size).toBe(0);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", retried: 0, relaunched: 0 });
+  });
+
+  it("WHEN the stuck build is no longer the conversation's THEN its task is not stopped by a Retry and the request is dropped", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    s.advance(STUCK + 60_000);
+    s.table.retryRequests.set(BUILD, new Date(Date.parse("2026-11-24T10:00:00.000Z") + STUCK + 60_000).toISOString());
+    s.table.conversations.set(PARTICIPANT, { ...s.table.conversations.get(PARTICIPANT), buildId: "b-newer" });
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.table.retryRequests.size).toBe(0);
+  });
+
   it("WHEN Retry is pressed on a failed build THEN the check queues it again and launches it; a build running under 15 minutes is left alone", async () => {
     const s = setup();
     expect(await processLaunch(message(), s.deps)).toBe("started");

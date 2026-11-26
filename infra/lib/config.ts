@@ -174,6 +174,8 @@ export const SIGN_IN_VERIFY_PROFILE_UPDATE_ATTRIBUTES = [
   "pk",
   "sk",
   "type",
+  // Ticket 3.10: the dashboard index's key (BY_TYPE_INDEX_KEY), `participant`, set at every sign-in.
+  "listType",
   "id",
   "role",
   "group",
@@ -243,12 +245,16 @@ export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeReque
  */
 export const FACILITATOR_FUNCTION_NAME = `${PREFIX}-api-facilitator`;
 /**
- * Ticket 3.10: the table's one global secondary index, keyed by the items' `type` (platform/api/settings.ts
- * BY_TYPE_INDEX_NAME). The dashboard lists profiles, conversations, usage totals and builds by type with a Query, never a
- * Scan (a Scan's keys would include the allow-list's `EMAIL#<address>`). Only the facilitator role may query it, and
- * only these four types (`dynamodb:LeadingKeys`), so the allow-list's partition of the index is out of its reach.
+ * Ticket 3.10: the table's one global secondary index (platform/api/settings.ts BY_TYPE_INDEX_NAME). The dashboard lists
+ * profiles, conversations, usage totals and builds with a Query per kind, never a Scan (a Scan's keys would include the
+ * allow-list's `EMAIL#<address>`). It is keyed by BY_TYPE_INDEX_KEY, an attribute only those four kinds of item carry
+ * (written by their own writers: the sign-in verify function, the conversation function and the AI worker), so the
+ * index is sparse: the allow-list, codes, sessions and every other item are never in it. Only the facilitator role may
+ * query it, for these four values only (`dynamodb:LeadingKeys`, kept as a second guard).
  */
 export const BY_TYPE_INDEX_NAME = `${PREFIX}-by-type`;
+/** Ticket 3.10: the partition key of BY_TYPE_INDEX_NAME (same value as the item's `type`, on the four listed kinds only). */
+export const BY_TYPE_INDEX_KEY = "listType";
 /** Ticket 3.10: the item types the facilitator role may query in BY_TYPE_INDEX_NAME. */
 export const FACILITATOR_INDEX_TYPES = ["participant", "conversation", "usage", "build"] as const;
 /**
@@ -279,7 +285,7 @@ export const BY_TYPE_INDEX_ATTRIBUTES = [
   "changeNumber",
 ] as const;
 /** Ticket 3.10: what the facilitator role may name in a Query of BY_TYPE_INDEX_NAME (projected, `SPECIFIC_ATTRIBUTES`). */
-export const FACILITATOR_INDEX_READ_ATTRIBUTES = ["pk", "sk", "type", ...BY_TYPE_INDEX_ATTRIBUTES] as const;
+export const FACILITATOR_INDEX_READ_ATTRIBUTES = ["pk", "sk", BY_TYPE_INDEX_KEY, ...BY_TYPE_INDEX_ATTRIBUTES] as const;
 /**
  * Ticket 3.10: the names the facilitator role may name in `PARTICIPANT#*` (UpdateItem, also in transactions): Pause and
  * Resume (`paused`), Add budget (`extraBudget`, the server's $2 step), Retry's note on the conversation (`updatedAt`),
@@ -399,6 +405,8 @@ export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "pk",
   "sk",
   "type",
+  // Ticket 3.10: the dashboard index's key (BY_TYPE_INDEX_KEY), `conversation`, set with the first message.
+  "listType",
   "author",
   "step",
   "text",
@@ -448,6 +456,8 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",
   "sk",
   "type",
+  // Ticket 3.10: the dashboard index's key (BY_TYPE_INDEX_KEY), `usage`, set with every usage total.
+  "listType",
   "author",
   "text",
   "status",
@@ -495,6 +505,8 @@ export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = [
   "pk",
   "sk",
   "type",
+  // Ticket 3.10: the dashboard index's key (BY_TYPE_INDEX_KEY), `build`, set when the build is created.
+  "listType",
   "buildId",
   "nickname",
   "participantId",

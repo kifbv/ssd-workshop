@@ -10,7 +10,8 @@
     "eval": "tsx src/eval/main.ts",
     "conversation": "tsx src/conversation/main.ts",
     "builds": "tsx src/builds/main.ts",
-    "participant": "tsx src/participant/main.ts"
+    "participant": "tsx src/participant/main.ts",
+    "backfill-list-type": "tsx src/list-type/main.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.331",

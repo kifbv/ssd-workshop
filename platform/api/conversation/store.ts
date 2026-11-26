@@ -253,6 +253,7 @@ export class DynamoConversationStore implements ConversationStore {
               conversationKey(participantId),
               {
                 type: str("conversation"),
+                listType: str("conversation"),
                 state: str("open"),
                 pendingId: str(message.id),
                 pendingSince: num(message.nowSeconds),
@@ -671,6 +672,7 @@ export class DynamoConversationStore implements ConversationStore {
           buildKey(outcome.build.buildId),
           {
             type: str("build"),
+            listType: str("build"),
             buildId: str(outcome.build.buildId),
             nickname: str(outcome.build.nickname),
             participantId: str(participantId),
@@ -1104,6 +1106,7 @@ export class DynamoConversationStore implements ConversationStore {
         buildKey(build.buildId),
         {
           type: str("build"),
+          listType: str("build"),
           buildId: str(build.buildId),
           nickname: str(build.nickname),
           participantId: str(participantId),
@@ -1261,7 +1264,7 @@ export class DynamoConversationStore implements ConversationStore {
     return setItem(
       this.tableName,
       usageKey(participantId),
-      { type: str("usage"), participantId: str(participantId), updatedAt: str(nowIso) },
+      { type: str("usage"), listType: str("usage"), participantId: str(participantId), updatedAt: str(nowIso) },
       undefined,
       { add: { inputTokens: num(usage.inputTokens), outputTokens: num(usage.outputTokens), costUsd: num(usage.costUsd) } },
     );

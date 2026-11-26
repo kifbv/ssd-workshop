@@ -28,6 +28,7 @@ import {
   BUILD_RETRIES_PARTITION,
   BUILD_SLOTS_PARTITION,
   BY_TYPE_INDEX_ATTRIBUTES,
+  BY_TYPE_INDEX_KEY,
   BY_TYPE_INDEX_NAME,
   FACILITATOR_BUILD_READ_ATTRIBUTES,
   FACILITATOR_FUNCTION_NAME,
@@ -212,12 +213,13 @@ export class ApiStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       deletionProtection: true,
     });
-    // Ticket 3.10: the one secondary index, by item `type`, for the facilitators' list (a Query per type, never a Scan).
+    // Ticket 3.10: the one secondary index, sparse: keyed by `listType`, which only profiles, conversations, usage totals and
+    // builds carry, for the facilitators' list (a Query per kind, never a Scan; the allow-list is never in it).
     // INCLUDE only what a dashboard row needs (never `email`, a message's text or a spec); only the facilitator role may
     // query it, and only the types FACILITATOR_INDEX_TYPES.
     this.table.addGlobalSecondaryIndex({
       indexName: BY_TYPE_INDEX_NAME,
-      partitionKey: { name: "type", type: AttributeType.STRING },
+      partitionKey: { name: BY_TYPE_INDEX_KEY, type: AttributeType.STRING },
       projectionType: ProjectionType.INCLUDE,
       nonKeyAttributes: [...BY_TYPE_INDEX_ATTRIBUTES],
     });
@@ -589,7 +591,7 @@ export class ApiStack extends Stack {
         }),
       );
     }
-    // The index: a Query only, for the four types only (the index's partition key, `type`, is the LeadingKeys value; the
+    // The index: a Query only, for the four types only (the index's partition key, `listType`, is the LeadingKeys value; the
     // Null guard refuses a request without one), projected.
     facilitator.addToRolePolicy(
       new PolicyStatement({

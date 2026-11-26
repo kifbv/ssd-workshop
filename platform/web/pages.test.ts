@@ -1209,7 +1209,7 @@ const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-
 
 /** A participant at step building and their build, which the test moves on; every GET /api/build is counted. */
 function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html")]) {
-  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false };
+  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false, pausedBy: undefined as "facilitator" | undefined };
   const handlers: Record<string, Handler> = {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
     // Ticket 3.8: step 4 reads the change conversation: none yet, no change used, the three suggestions written.
@@ -1230,7 +1230,7 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
           appUrl: APP_URL,
           ...(state.failureReasons === undefined ? {} : { failureReasons: state.failureReasons }),
           ...(state.ahead === undefined ? {} : { ahead: state.ahead }),
-          ...(state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true } : {}),
+          ...(state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true, ...(state.pausedBy === undefined ? {} : { pausedBy: state.pausedBy }) } : {}),
         },
       };
     },
@@ -1309,6 +1309,32 @@ describe("step 3: Build (ticket 2.10)", () => {
     await buildPollAfter(2000);
     await expect.poll(() => banner.isVisible()).toBe(false);
     expect(await page.locator("#build-now").textContent()).toBe("Your build is next in the queue.");
+  }, 30_000);
+
+  it("ticket 3.10 criterion 6: WHEN a facilitator paused the participant THEN step 3 says so over the queued build (also while the Stop is on); WHEN resumed THEN the line goes, at 375 px", async () => {
+    const api = fakeBuildApi("queued", []);
+    api.state.ahead = 0;
+    api.state.paused = true;
+    api.state.pausedBy = "facilitator";
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.paused);
+    expect(await page.locator("#build-now").textContent()).toBe("Your build is next in the queue.");
+    await expectNoSideScroll();
+    await buildPollAfter(2000);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.paused);
+    // Resumed while the global Stop is still on: the Stop's own line.
+    api.state.pausedBy = undefined;
+    await buildPollAfter(2000);
+    await expect.poll(() => banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    // Both off: the line goes.
+    api.state.paused = false;
+    await buildPollAfter(2000);
+    await expect.poll(() => banner.isVisible()).toBe(false);
   }, 30_000);
 
   it("WHEN a build is running THEN the page shows its stages, files and commits, and polls every 2 seconds (criteria 1, 4 and 5)", async () => {

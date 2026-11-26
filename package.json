@@ -22,7 +22,8 @@
     "eval": "npm run -s eval -w platform --",
     "conversation": "npm run -s conversation -w platform --",
     "builds": "npm run -s builds -w platform --",
-    "participant": "npm run -s participant -w platform --"
+    "participant": "npm run -s participant -w platform --",
+    "backfill-list-type": "npm run -s backfill-list-type -w platform --"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

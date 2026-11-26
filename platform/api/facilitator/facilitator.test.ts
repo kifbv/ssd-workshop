@@ -2,7 +2,7 @@
 // flags command's (platform/src/flags/command.test.ts), pressed on the dashboard instead.
 import { describe, expect, it } from "vitest";
 import { CLARIFY_SYSTEM_PROMPT } from "../conversation/answer.js";
-import { handleConversationRequest, HISTORY_ROUTE, POLL_ROUTE, SEND_ROUTE, type ConversationDeps } from "../conversation/conversation.js";
+import { BUILD_ROUTE, handleConversationRequest, HISTORY_ROUTE, POLL_ROUTE, SEND_ROUTE, STATUS_ROUTE, type ConversationDeps } from "../conversation/conversation.js";
 import { FakeBuildQueue, FakeModel, FakeQueue, verdictReply } from "../conversation/fakes.js";
 import { STOP_HOLD_SECONDS, textHash, type AiJob } from "../conversation/state.js";
 import { processJob, type WorkerDeps } from "../conversation/worker.js";
@@ -81,6 +81,8 @@ function setup() {
     handleConversationRequest({ routeKey: SEND_ROUTE, cookies: [`${SESSION_COOKIE}=${t}`], headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) }, api);
   const poll = async (id: string, t = ADA) => json(await handleConversationRequest({ routeKey: POLL_ROUTE, cookies: [`${SESSION_COOKIE}=${t}`], pathParameters: { id } }, api));
   const history = async (t = ADA) => json(await handleConversationRequest({ routeKey: HISTORY_ROUTE, cookies: [`${SESSION_COOKIE}=${t}`] }, api));
+  /** A participant's own GET (`/api/build`, `/api/status`), as their page reads it. */
+  const read = async (routeKey: string, t = ADA) => json(await handleConversationRequest({ routeKey, cookies: [`${SESSION_COOKIE}=${t}`] }, api));
   const call = (request: HttpRequest) => handleFacilitatorRequest(request, deps);
   const advance = (ms: number) => {
     clock = new Date(clock.getTime() + ms);
@@ -93,7 +95,7 @@ function setup() {
     expect(table.conversations.get("p-ada")?.state).toBe("waiting");
     return id;
   };
-  return { table, queue, model, logs, call, drain, deliverHeld, say, poll, history, advance, flag };
+  return { table, queue, model, logs, call, drain, deliverHeld, say, poll, history, read, advance, flag };
 }
 
 /** `null`: no session cookie. */
@@ -235,6 +237,57 @@ describe("who may call the facilitator routes (ticket 3.10)", () => {
     }
   });
 
+  it("WHEN a nickname is given in another letter case THEN it resolves to the same participant", async () => {
+    const s = setup();
+    expect((await s.call(action(PAUSE_ROUTE, "ADA"))).statusCode).toBe(200);
+    expect(s.table.profiles.get("p-ada")?.paused).toBe(true);
+    expect((await s.call(action(RESUME_ROUTE, "aDa"))).statusCode).toBe(200);
+    expect(s.table.profiles.get("p-ada")?.paused).toBe(false);
+    expect(json(await s.call(action(CONVERSATION_ROUTE, "BoB")))).toMatchObject({ nickname: "BoB" });
+  });
+
+  it("WHEN a facilitator is removed from the allow-list THEN every route answers 401", async () => {
+    const s = setup();
+    expect((await s.call(list())).statusCode).toBe(200);
+    s.table.allow.delete(FakeTable.emailOf("f-1"));
+    for (const request of every(FACILITATOR)) expect((await s.call(request)).statusCode, request.routeKey).toBe(401);
+    expect(s.table.profiles.get("p-ada")?.paused).toBeUndefined();
+  });
+
+  it("WHEN a facilitator or the admin acts on a facilitator, the admin, themselves or a removed person THEN the answer is the plain 404 and nothing is written", async () => {
+    const s = setup();
+    // The facilitator and the admin have nicknames too (they chose one like anyone else).
+    for (const [id, nickname] of [
+      ["f-1", "Fran"],
+      ["a-1", "Root"],
+    ] as const) {
+      s.table.profiles.set(id, { ...must(s.table.profiles.get(id)), nickname, step: "clarify" });
+      s.table.nicknames.set(nickname.toLowerCase(), { nickname, participantId: id });
+    }
+    // Bob's allow-list entry was removed: `npm run allowlist -- remove` marks his profile.
+    s.table.profiles.set("p-bob", { ...must(s.table.profiles.get("p-bob")), role: "removed" as never });
+    const before = JSON.stringify([...s.table.profiles]);
+    const actions = FACILITATOR_ROUTES.filter((routeKey) => routeKey !== LIST_ROUTE);
+    for (const [who, nickname] of [
+      [FACILITATOR, "Fran"],
+      [FACILITATOR, "root"],
+      [ADMIN, "Root"],
+      [ADMIN, "FRAN"],
+      [FACILITATOR, "bob"],
+    ] as const) {
+      for (const routeKey of actions) {
+        const res = await s.call(action(routeKey, nickname, who, "{}"));
+        expect(res.statusCode, `${routeKey} ${nickname}`).toBe(404);
+        expect(json(res)).toEqual(json(await s.call(action(routeKey, "Nobody", who, "{}"))));
+      }
+    }
+    expect(JSON.stringify([...s.table.profiles])).toBe(before);
+    expect(s.table.retryRequests.size).toBe(0);
+    expect(s.queue.sent).toEqual([]);
+    // Ada, a participant, is still reachable.
+    expect((await s.call(action(PAUSE_ROUTE, "Ada"))).statusCode).toBe(200);
+  });
+
   it("answers 404 for an unknown or malformed nickname, 415 for a write without JSON, and 500 on a table failure (error name only)", async () => {
     const s = setup();
     expect((await s.call(action(PAUSE_ROUTE, "Nobody"))).statusCode).toBe(404);
@@ -326,6 +379,43 @@ describe("facilitator actions (ticket 3.10)", () => {
     s.model.push(verdictReply("on-path"), { text: "Who runs with you?", inputTokens: 1, outputTokens: 1 });
     expect(await s.deliverHeld()).toEqual(["done"]);
     expect(await s.poll(id)).toEqual({ id, status: "done", reply: "Who runs with you?" });
+  });
+
+  it("criterion 6 (the build): WHEN a participant with a queued build is paused THEN GET /api/build and GET /api/status say the facilitator paused them; WHEN resumed THEN pausedBy is gone; a facilitator's Pause wins over the global Stop's text", async () => {
+    const s = setup();
+    s.table.profiles.set("p-ada", { ...must(s.table.profiles.get("p-ada")), step: "building" });
+    s.table.conversations.set("p-ada", { state: "open", buildId: "b-ada" });
+    s.table.builds.set("b-ada", { buildId: "b-ada", nickname: "Ada", participantId: "p-ada", status: "queued", createdAt: "x", updatedAt: "x" });
+    expect(await s.read(BUILD_ROUTE)).toMatchObject({ buildId: "b-ada", status: "queued" });
+    expect(await s.read(BUILD_ROUTE)).not.toHaveProperty("paused");
+    expect(await s.read(STATUS_ROUTE)).toEqual({});
+
+    expect((await s.call(action(PAUSE_ROUTE, "Ada"))).statusCode).toBe(200);
+    expect(await s.read(BUILD_ROUTE)).toMatchObject({ buildId: "b-ada", status: "queued", paused: true, pausedBy: "facilitator" });
+    expect(await s.read(STATUS_ROUTE)).toEqual({ paused: true, pausedBy: "facilitator" });
+    // Only Ada: Bob's status is untouched.
+    expect(await s.read(STATUS_ROUTE, BOB)).toEqual({});
+
+    // The global Stop on as well: the facilitator's Pause still names itself (it lasts until that facilitator's Resume),
+    // and everyone else sees the Stop's own line.
+    s.table.settingsItem = { stopped: { BOOL: true } };
+    expect(await s.read(BUILD_ROUTE)).toMatchObject({ paused: true, pausedBy: "facilitator" });
+    expect(await s.read(STATUS_ROUTE)).toEqual({ paused: true, pausedBy: "facilitator" });
+    expect(await s.read(STATUS_ROUTE, BOB)).toEqual({ paused: true });
+
+    // Resume while the Stop is still on: the Stop's line (no pausedBy).
+    expect((await s.call(action(RESUME_ROUTE, "Ada"))).statusCode).toBe(200);
+    expect(await s.read(BUILD_ROUTE)).toMatchObject({ status: "queued", paused: true });
+    expect(await s.read(BUILD_ROUTE)).not.toHaveProperty("pausedBy");
+    expect(await s.read(STATUS_ROUTE)).toEqual({ paused: true });
+
+    // The Stop off too: nothing.
+    s.table.settingsItem = undefined;
+    const build = await s.read(BUILD_ROUTE);
+    expect(build).toMatchObject({ status: "queued" });
+    expect(build).not.toHaveProperty("paused");
+    expect(build).not.toHaveProperty("pausedBy");
+    expect(await s.read(STATUS_ROUTE)).toEqual({});
   });
 
   it("WHEN Add budget is pressed THEN $2 is added each time, whatever the body says", async () => {
