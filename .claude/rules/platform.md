@@ -300,3 +300,5 @@ paths:
   double quotes (`"Pay cash to the baker"`): the prompt says to use single quotes inside the text. A text the model writes
   in the participant's language (the guardrail's `decline`) is used only when it keeps the fixed text's shape
   (`localDecline`), else the English template; a fixed marker the code reads stays English inside it (`(server)`).
+- Removing block tags (`</spec>`, `</message>`) from untrusted text is repeated until nothing changes (`withoutTags`,
+  `api/conversation/tags.ts`): one pass lets nested tags rebuild one (`</parti</participant>cipant>`, ticket 3.16 try 2).

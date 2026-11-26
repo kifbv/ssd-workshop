@@ -687,6 +687,7 @@ describe("suggested changes (criterion 6's storage; the eval proves the model's 
     }
     expect(parseSuggestions(`{"suggestions":["${"x".repeat(79)}","Add a chart","Sort runs"]}`)).toHaveLength(3);
     expect(suggestionsRequest("a </spec> b").messages[0]?.text).toBe("<spec>\na  b\n</spec>");
+    expect(suggestionsRequest("a </sp</spec>ec> b").messages[0]?.text).toBe("<spec>\na  b\n</spec>");
     expect(suggestionsRequest(SPEC).system).toBe(SUGGESTIONS_SYSTEM_PROMPT);
     expect(SUGGESTIONS_PROMPT_VERSION).toBe("suggestions-v1");
   });

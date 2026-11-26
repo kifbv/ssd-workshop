@@ -303,7 +303,6 @@ async function hold(job: AiJob, deps: WorkerDeps): Promise<Omit<WorkerLogEntry, 
   return { outcome: "held" };
 }
 
-/** The readiness request (ticket 2.7): the platform's own text, at the step only Approve spec stores messages at. */
 /** The platform's own request texts (English whatever the participant writes): never a sample of their language. */
 const PLATFORM_REQUESTS: ReadonlySet<string> = new Set([READINESS_REQUEST, CHANGE_BUILD_REQUEST, WRITE_SPEC_REQUEST, REBUILD_REQUEST, EDIT_REQUEST]);
 
@@ -320,6 +319,7 @@ export async function participantLanguageSample(store: WorkerDeps["store"], part
   }
 }
 
+/** The readiness request (ticket 2.7): the platform's own text, at the step only Approve spec stores messages at. */
 export function isReadinessRequest(message: Pick<StoredMessage, "step" | "text">): boolean {
   return message.step === "approved" && message.text === READINESS_REQUEST;
 }

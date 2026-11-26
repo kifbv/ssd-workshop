@@ -6,10 +6,12 @@
 // the expected JSON is "unreadable": no build starts, and the participant is asked to approve again.
 // Ticket 3.16 (readiness-v3): the reasons are written in the participant's language (the language of their latest own
 // message when the caller passes it, else the spec's), each ending with the problem's English word in brackets, the
-// agreed form "(login)", "(payment)", "(outside service)", "(server)" or "(open question)" (readinessProblem). The fixed
+// agreed form "(login)", "(payment)", "(outside service)", "(server)" or "(open question)" (readinessProblem, which serves the
+// tests and evals). The fixed
 // sentences around them (notReadyReply) stay English.
 import type { TokenUsage } from "../types.js";
 import { usageOf, type ModelClient } from "./model.js";
+import { withoutTags } from "./tags.js";
 
 export const READINESS_PROMPT_VERSION = "readiness-v3";
 export const READINESS_MAX_TOKENS = 600;
@@ -26,7 +28,7 @@ export const READINESS_PROBLEMS = ["login", "payment", "outside service", "serve
 export type ReadinessProblem = (typeof READINESS_PROBLEMS)[number];
 
 /**
- * The problem a reason names: the agreed form "(server)" at its end (any letter case, a final full stop allowed), else
+ * The problem a reason names (for the tests and evals; the worker shows reasons as they are): the agreed form "(server)" at its end (any letter case, a final full stop allowed), else
  * (a reason written before readiness-v3, or in English without the brackets) the first of the five English words it
  * contains. Undefined when it names none.
  */
@@ -145,11 +147,12 @@ export function readinessRequest(
   specText: string,
   participantText?: string,
 ): { system: string; messages: { role: "user"; text: string }[]; maxTokens: number; temperature: number } {
-  // Any spec or participant tag, in any letter case and with attributes or spaces (`</SPEC >`), is removed so the text
-  // cannot close its block early. Linear: `[^<>]*` stops at the next `<`.
-  const strip = (text: string) => text.replace(/<\/?(spec|participant)\b[^<>]*>/gi, "");
-  const spec = strip(specText.slice(0, MAX_SPEC_TEXT));
-  const sample = participantText === undefined ? "" : strip(Array.from(participantText.trim()).slice(0, LANGUAGE_SAMPLE_CHARS).join(""));
+  // Any spec or participant tag, in any letter case and with attributes or spaces (`</SPEC >`), is removed from the spec
+  // until none is left (nested tags cannot rebuild one), so the text cannot close its block early. The participant's
+  // sample only sets the language: every `<` and `>` in it goes.
+  const spec = withoutTags(specText.slice(0, MAX_SPEC_TEXT), ["spec", "participant"]);
+  const sample =
+    participantText === undefined ? "" : Array.from(participantText.trim()).slice(0, LANGUAGE_SAMPLE_CHARS).join("").replace(/[<>]/g, "").trim();
   const language = sample === "" ? "" : `<participant>\n${sample}\n</participant>\n`;
   return {
     system: READINESS_SYSTEM_PROMPT,

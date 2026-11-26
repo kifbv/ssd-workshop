@@ -4,6 +4,7 @@
 // the worker, `npm run eval -- suggestions` and the tests share it.
 import type { TokenUsage } from "../types.js";
 import { usageOf, type ModelClient, type ModelRequest } from "./model.js";
+import { withoutTags } from "./tags.js";
 
 export const SUGGESTIONS_PROMPT_VERSION = "suggestions-v1";
 export const SUGGESTIONS_MAX_TOKENS = 400;
@@ -32,8 +33,9 @@ Reply with strict JSON only, no other text:
 
 /** The request the worker (and `npm run eval -- suggestions`) sends: the live spec alone, no history. */
 export function suggestionsRequest(specText: string): ModelRequest {
-  // Any spec tag, in any letter case and with attributes or spaces, is removed so the text cannot close the block early.
-  const spec = specText.slice(0, MAX_SPEC_TEXT).replace(/<\/?spec\b[^<>]*>/gi, "");
+  // Any spec tag, in any letter case and with attributes or spaces, is removed until none is left (ticket 3.16 try 2:
+  // nested tags cannot rebuild one), so the text cannot close the block early.
+  const spec = withoutTags(specText.slice(0, MAX_SPEC_TEXT), ["spec"]);
   return { system: SUGGESTIONS_SYSTEM_PROMPT, messages: [{ role: "user", text: `<spec>\n${spec}\n</spec>` }], maxTokens: SUGGESTIONS_MAX_TOKENS, temperature: 0.7 };
 }
 

@@ -8,6 +8,7 @@
 // polite sentence ending with a question (the English template otherwise).
 import type { GuardrailVerdict, TokenUsage } from "../types.js";
 import { usageOf, type ModelClient } from "./model.js";
+import { withoutTags } from "./tags.js";
 
 export const GUARDRAIL_PROMPT_VERSION = "guardrail-v4";
 /** Room for the decline sentence in the participant's language (was 300 before guardrail-v4). */
@@ -98,7 +99,7 @@ export const LOCAL_DECLINE_MAX = 250;
 /**
  * The model's decline sentence when it has the decline's shape, else undefined: one line of plain text (control and
  * format characters removed, spaces collapsed), 20 to 250 characters, no markup, link or address characters, no
- * sentence break inside (no . ! ? ; : … before the end) and a question at the end (the suggestion is asked as a
+ * phone-like number or dot look-alike, no sentence break inside (no . ! ? ; : … before the end) and a question at the end (the suggestion is asked as a
  * question: "?" also after a space, as French writes it, or the full-width "？").
  */
 export function localDecline(text: unknown): string | undefined {
@@ -110,6 +111,9 @@ export function localDecline(text: unknown): string | undefined {
   const length = Array.from(line).length;
   if (length < LOCAL_DECLINE_MIN || length > LOCAL_DECLINE_MAX) return undefined;
   if (/[<>{}[\]`*_#|\\@/=]|https?|www\./i.test(line)) return undefined;
+  // Ticket 3.16 try 2: no phone-like number (6 or more digits, spaces, dots or dashes between them counted) and no dot
+  // look-alike that could join a domain ("exemple．org"): full-width, halfwidth, one dot leader, small full stop.
+  if (/\p{Nd}(?:[\s.\-‐‑‒–—]*\p{Nd}){5}/u.test(line) || /[．｡․﹒‧∙⋅]/u.test(line)) return undefined;
   const body = /^(.*?)\s?[?？]$/su.exec(line)?.[1];
   if (body === undefined || !/\p{L}/u.test(body)) return undefined;
   if (/[.!?;:…。！？؟]/u.test(body)) return undefined;
@@ -138,7 +142,7 @@ export async function checkGuardrail(model: ModelClient, text: string, signal?: 
   const reply = await model.converse(
     {
       system: GUARDRAIL_SYSTEM_PROMPT,
-      messages: [{ role: "user", text: `<message>\n${text.replaceAll("</message>", "")}\n</message>` }],
+      messages: [{ role: "user", text: `<message>\n${withoutTags(text, ["message"])}\n</message>` }],
       maxTokens: GUARDRAIL_MAX_TOKENS,
       temperature: 0,
     },
