@@ -46,10 +46,20 @@ export interface StoredMessage {
    * (`repositoryRead`, and `repositorySpec` for a found file: attributes only the launcher may write).
    */
   repository?: RepositoryRead;
+  /**
+   * Ticket 3.15: on a Rebuild with my edits request (`edit-spec`), the edited spec as the route cleaned it (`editedSpec`:
+   * an attribute only the conversation function writes, with the request).
+   */
+  editedSpec?: string;
 }
 
-/** Ticket 3.9: the marks only the platform's own routes put on a message (a participant's message never has one). */
-export type PlatformRequest = "change-build" | "rebuild-from-repo";
+/**
+ * Ticket 3.9: the marks only the platform's own routes put on a message (a participant's message never has one).
+ * Ticket 3.15: `edit-spec`, Rebuild with my edits.
+ */
+export type PlatformRequest = "change-build" | "rebuild-from-repo" | "edit-spec";
+const PLATFORM_REQUESTS: readonly string[] = ["change-build", "rebuild-from-repo", "edit-spec"] satisfies PlatformRequest[];
+export const isPlatformRequest = (value: string | undefined): value is PlatformRequest => value !== undefined && PLATFORM_REQUESTS.includes(value);
 
 /**
  * Ticket 3.9: what the launcher found in the participant's repository for a Rebuild from my repository request: the
@@ -154,6 +164,8 @@ export interface NewMessage {
   nowSeconds: number;
   /** Ticket 3.6: only Build this change's own request carries it (ticket 3.9: or Rebuild from my repository's). */
   request?: PlatformRequest;
+  /** Ticket 3.15: only Rebuild with my edits' request carries it: the edited spec, cleaned by the route. */
+  editedSpec?: string;
 }
 
 /** `approved`: the participant approved their spec, so no message is taken any more (ticket 1.9). */

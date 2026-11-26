@@ -251,6 +251,28 @@
           <textarea id="live-chat-input" name="text" rows="3" maxlength="2000" required></textarea>
           <button id="live-chat-send" type="submit" data-busy-label="Sending…">Send</button>
         </form>
+        <!-- Ticket 3.15: Edit my spec: the live spec in a text box; Rebuild with my edits sends it through the same checks as a change. -->
+        <div id="edit-spec" class="edit-spec" hidden>
+          <button id="edit-spec-button" type="button" class="secondary" data-busy-label="Opening…">Edit my spec</button>
+          <section id="spec-editor" class="spec-editor" aria-labelledby="spec-editor-heading" hidden>
+            <h3 id="spec-editor-heading" tabindex="-1">Edit my spec</h3>
+            <ol class="mini-flow" aria-label="What happens when you press Rebuild with my edits">
+              <li>Your edits</li>
+              <li>Checks: shape, safety, ready to build</li>
+              <li>New spec version</li>
+              <li>Build queue (counts as 1 change)</li>
+              <li>GitHub: one commit with your new SPEC.md</li>
+            </ol>
+            <p class="help">Keep the title line, the diagram and the headings ## What it does, ## Screens and ## Data it keeps; at most 8,000 characters. Your live app stays as it is until the new version is live.</p>
+            <label for="spec-editor-input">Your spec (SPEC.md)</label>
+            <textarea id="spec-editor-input" name="spec" rows="14" spellcheck="false"></textarea>
+            <div class="proposal-buttons">
+              <button id="spec-editor-rebuild" type="button" class="primary" data-busy-label="Sending…">Rebuild with my edits</button>
+              <button id="spec-editor-cancel" type="button" class="secondary">Cancel</button>
+            </div>
+            <p id="spec-editor-answer" class="message" role="status" aria-live="polite"></p>
+          </section>
+        </div>
         <details id="rebuild-fold" class="advanced">
           <summary>Advanced: edited SPEC.md on GitHub?</summary>
           <p class="help">If you changed <code>SPEC.md</code> in your repository yourself, the platform can read it from <code>main</code>, check it like any change and rebuild your app from it. It counts as one of your changes.</p>

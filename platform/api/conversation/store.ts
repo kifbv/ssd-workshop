@@ -64,6 +64,7 @@ import {
   type RepositoryRead,
   REBUILD_REPLY_KINDS,
   REPOSITORY_READ_KINDS,
+  isPlatformRequest,
   rebuildSpent,
   rebuildStatus,
 } from "./state.js";
@@ -281,6 +282,8 @@ export class DynamoConversationStore implements ConversationStore {
                 pendingSince: num(message.nowSeconds),
                 // Ticket 3.9: Rebuild from my repository's request carries its mark.
                 ...(message.request === undefined ? {} : { request: str(message.request) }),
+                // Ticket 3.15: Rebuild with my edits' request carries the edited spec.
+                ...(message.editedSpec === undefined ? {} : { editedSpec: str(message.editedSpec) }),
               },
               { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
             ),
@@ -313,6 +316,8 @@ export class DynamoConversationStore implements ConversationStore {
     const approvedTextHash = item["approvedTextHash"]?.S;
     const request = item["request"]?.S;
     const repository = request === "rebuild-from-repo" ? repositoryReadOf(item) : undefined;
+    // Ticket 3.15: Rebuild with my edits' request carries the edited spec (written by its route only).
+    const editedSpec = request === "edit-spec" ? item["editedSpec"]?.S : undefined;
     return {
       id: messageId,
       step,
@@ -322,8 +327,9 @@ export class DynamoConversationStore implements ConversationStore {
       ...(approvedTextHash === undefined ? {} : { approvedTextHash }),
       ...(suggestion === undefined ? {} : { suggestion }),
       ...(verdictReason === undefined ? {} : { verdictReason }),
-      ...(request === "change-build" || request === "rebuild-from-repo" ? { request } : {}),
+      ...(isPlatformRequest(request) ? { request } : {}),
       ...(repository === undefined ? {} : { repository }),
+      ...(editedSpec === undefined ? {} : { editedSpec }),
     };
   }
 

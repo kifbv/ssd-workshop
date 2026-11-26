@@ -16,13 +16,28 @@
 //    version (approved by the press: `rebuildApprovedAt`, with a fixed "What changes" line), counts the change and
 //    queues the change build, exactly as Build this change does.
 //
+// Ticket 3.15, Rebuild with my edits: the route stores EDIT_REQUEST marked `edit-spec` with the participant's edited text
+// (cleaned as cleanRepositorySpec does, at most 8,000 characters) in `editedSpec`, an attribute only that route writes.
+// The same run takes it from the same place in the pipeline as a found repository read (no launcher round trip): the
+// same-spec check, the shape check, the guardrail, the readiness check and the same transaction, with the texts of the
+// page (SOURCE_TEXTS.page). The launcher builds such a version only while its text equals that `editedSpec`.
+//
 // SQS delivers at least once: every final write is conditional on the message still pending and in flight, and the
 // build id comes from the message id, so a redelivery after the transaction only re-sends the build id.
 import { cleanRepositorySpec, repositoryNameFor } from "../github/repository.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { TokenUsage } from "../types.js";
 import { BUDGET_REPLY, budgetOf, mustHold, overBudget } from "../workshop/budget.js";
-import { changesUsedText, PHASE_3_TEXTS, REBUILD_REQUEST, REBUILD_WHAT_CHANGES, rebuildNotReadyText } from "../workshop/texts.js";
+import {
+  changesUsedText,
+  EDIT_REQUEST,
+  EDIT_WHAT_CHANGES,
+  editNotReadyText,
+  PHASE_3_TEXTS,
+  REBUILD_REQUEST,
+  REBUILD_WHAT_CHANGES,
+  rebuildNotReadyText,
+} from "../workshop/texts.js";
 import { checkSpec, MAX_SPEC_CHARS } from "./spec.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, type ModelClient } from "./model.js";
@@ -42,7 +57,34 @@ import {
   rebuildSpent,
 } from "./state.js";
 
-export { REBUILD_REQUEST } from "../workshop/texts.js";
+export { EDIT_REQUEST, REBUILD_REQUEST } from "../workshop/texts.js";
+
+/** Where the new spec comes from: the participant's repository (3.9) or the editor on the page (3.15). */
+export type SpecSource = "repository" | "page";
+
+/** The participant-facing texts of each source (the same pipeline, its own words). */
+export const SOURCE_TEXTS = {
+  repository: {
+    unchanged: PHASE_3_TEXTS.specUnchanged,
+    tooLong: PHASE_3_TEXTS.specTooLongForPlatform,
+    wrongShape: PHASE_3_TEXTS.specWrongShape,
+    flagged: PHASE_3_TEXTS.rebuildFlagged,
+    ready: PHASE_3_TEXTS.rebuildReady,
+    failed: PHASE_3_TEXTS.rebuildFailed,
+    notReady: rebuildNotReadyText,
+    whatChanges: REBUILD_WHAT_CHANGES,
+  },
+  page: {
+    unchanged: PHASE_3_TEXTS.editUnchanged,
+    tooLong: PHASE_3_TEXTS.editTooLong,
+    wrongShape: PHASE_3_TEXTS.editWrongShape,
+    flagged: PHASE_3_TEXTS.editFlagged,
+    ready: PHASE_3_TEXTS.editReady,
+    failed: PHASE_3_TEXTS.editFailed,
+    notReady: editNotReadyText,
+    whatChanges: EDIT_WHAT_CHANGES,
+  },
+} as const;
 
 /** What a rebuild run ends with (the worker logs it). */
 export type RebuildOutcome =
@@ -81,6 +123,11 @@ export function isRebuildRequest(message: Pick<StoredMessage, "step" | "text" | 
   return message.step === "building" && message.request === "rebuild-from-repo" && message.text === REBUILD_REQUEST;
 }
 
+/** Ticket 3.15: Rebuild with my edits' request: the platform's text at step 4 with the mark only that route writes. */
+export function isEditRequest(message: Pick<StoredMessage, "step" | "text" | "request">): boolean {
+  return message.step === "building" && message.request === "edit-spec" && message.text === EDIT_REQUEST;
+}
+
 /** The participant-facing text for a repository read that found no spec to use. */
 export function refusalText(read: Exclude<RepositoryRead, { kind: "found" }>): string {
   switch (read.kind) {
@@ -110,10 +157,10 @@ export function sameSpec(repositoryText: string, liveText: string): boolean {
  * or undefined when it has the shape every stored version has. A spec over MAX_SPEC_CHARS has its own text; any other
  * problem (no title, not one flowchart, other sections) gets the shape text.
  */
-export function shapeRefusal(text: string): string | undefined {
+export function shapeRefusal(text: string, source: SpecSource = "repository"): string | undefined {
   const problems = checkSpec(text);
   if (problems.length === 0) return undefined;
-  return text.length > MAX_SPEC_CHARS ? PHASE_3_TEXTS.specTooLongForPlatform : PHASE_3_TEXTS.specWrongShape;
+  return text.length > MAX_SPEC_CHARS ? SOURCE_TEXTS[source].tooLong : SOURCE_TEXTS[source].wrongShape;
 }
 
 const FINISH_ATTEMPTS = 3;
@@ -144,6 +191,8 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
   const profile = await deps.store.getParticipantInfo(participantId);
   if (profile?.step !== "building" || profile.nickname === undefined) return { outcome: "skipped" };
   const nickname = profile.nickname;
+  const source: SpecSource = isEditRequest(message) ? "page" : "repository";
+  const texts = SOURCE_TEXTS[source];
 
   const finish = async (outcome: RebuildFinish): Promise<boolean> => {
     for (let attempt = 1; ; attempt++) {
@@ -192,7 +241,10 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
       finishing = true;
       return await ended({ kind: "over-limit", reply: changesUsedText(cap), previousBuildId }, "over-limit");
     }
-    const read = message.repository;
+    // Ticket 3.15: an edit carries its text (cleaned by the route) from the participant's own request: no read to ask for.
+    if (source === "page" && message.editedSpec === undefined) throw Object.assign(new Error("the edited spec is missing"), { name: "MissingEdit" });
+    const read: RepositoryRead | undefined =
+      source === "page" && message.editedSpec !== undefined ? { kind: "found", text: message.editedSpec, repository: repositoryNameFor(nickname) } : message.repository;
     if (read === undefined) {
       // First pass: the launcher reads SPEC.md and hands the job back. A failed send is thrown (SQS delivers again).
       finishing = true;
@@ -210,9 +262,9 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
     // Order: the 20 KB cap and the cleaning (launcher), the same-spec check, the shape check, then the AI calls.
     if (sameSpec(read.text, live.text)) {
       finishing = true;
-      return await ended({ kind: "unchanged", reply: PHASE_3_TEXTS.specUnchanged, previousBuildId }, "unchanged");
+      return await ended({ kind: "unchanged", reply: texts.unchanged, previousBuildId }, "unchanged");
     }
-    const refusal = shapeRefusal(read.text);
+    const refusal = shapeRefusal(read.text, source);
     if (refusal !== undefined) {
       finishing = true;
       return await ended({ kind: "refused", reply: refusal, previousBuildId }, "refused");
@@ -223,7 +275,7 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
       // Decline or flag: nothing is built. A flagged repository spec does not wait for a facilitator (the message's text
       // is the platform's request, not the spec): the participant is told to talk to them or change SPEC.md.
       finishing = true;
-      const reply = check.verdict === "decline" ? declineReply(check.suggestion) : PHASE_3_TEXTS.rebuildFlagged;
+      const reply = check.verdict === "decline" ? declineReply(check.suggestion) : texts.flagged;
       return await ended({ kind: "declined", reply, previousBuildId, guardrail }, "declined", check.verdict);
     }
     if (overBudget(budget, guardrail.usage.costUsd)) {
@@ -236,7 +288,7 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
     const answer = { prompt: message.text, modelId: deps.modelId, promptVersion: READINESS_PROMPT_VERSION, historyCount: 0, usage: readiness.usage };
     finishing = true;
     if (readiness.verdict === "not-ready") {
-      return await ended({ kind: "not-ready", reply: rebuildNotReadyText(readiness.reasons), previousBuildId, guardrail, answer }, "not-ready", "on-path");
+      return await ended({ kind: "not-ready", reply: texts.notReady(readiness.reasons), previousBuildId, guardrail, answer }, "not-ready", "on-path");
     }
     if (overBudget(budget, guardrail.usage.costUsd + readiness.usage.costUsd)) {
       return await ended({ kind: "over-budget", reply: BUDGET_REPLY, previousBuildId, guardrail, usage: readiness.usage }, "over-budget", "on-path");
@@ -245,9 +297,9 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
     const version = Math.max(latest?.version ?? 0, live.version) + 1;
     const ready: RebuildFinish = {
       kind: "ready",
-      reply: PHASE_3_TEXTS.rebuildReady,
+      reply: texts.ready,
       previousBuildId,
-      spec: { version, text: read.text, whatChanges: [REBUILD_WHAT_CHANGES] },
+      spec: { version, text: read.text, whatChanges: [texts.whatChanges] },
       guardrail,
       answer,
       build: { buildId, nickname, changeNumber: used + 1 },
@@ -266,7 +318,7 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
     if (finishing) throw error;
     const applied = await finish({
       kind: "failed",
-      reply: PHASE_3_TEXTS.rebuildFailed,
+      reply: texts.failed,
       previousBuildId,
       ...(guardrail === undefined ? {} : { guardrail }),
       ...(usage === undefined ? {} : { usage }),

@@ -35,7 +35,7 @@ import {
   SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
 import { BUILD_QUEUE_PK, BUILD_RETRIES_PK, BUILD_SLOTS_PK, LAUNCHES_PK, SETTINGS_PK } from "../keys.js";
-import { REBUILD_REQUEST } from "../workshop/texts.js";
+import { EDIT_REQUEST, REBUILD_REQUEST } from "../workshop/texts.js";
 import {
   BUILD_CHECK_QUEUE_NAME,
   BUILD_DLQ_URL,
@@ -138,8 +138,25 @@ describe("DynamoLaunchRecords: Rebuild from my repository (ticket 3.9)", () => {
       UpdateExpression: "SET #repositoryRead = :read, #repositorySpec = :spec, #repositoryName = :repository",
       ExpressionAttributeValues: { ":read": { S: "found" }, ":spec": { S: "# Spec\n" }, ":repository": { S: "ssd-ada" } },
     });
-    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ text: "# Spec\n", repository: "ssd-ada" });
+    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ source: "repository", text: "# Spec\n", repository: "ssd-ada" });
     for (let i = 0; i < 3; i++) expect(await records.readRebuildSpec("p-1", "m-1")).toBeUndefined();
+  });
+
+  it("ticket 3.15: reads the edited text back only from Rebuild with my edits' own request (author, step, exact text, mark)", async () => {
+    const base = { author: { S: "participant" }, step: { S: "building" }, text: { S: EDIT_REQUEST }, request: { S: "edit-spec" } };
+    const { client, sent } = stub([
+      { Item: { ...base, editedSpec: { S: "# Edited\n" } } },
+      { Item: { ...base } },
+      { Item: { ...base, text: { S: REBUILD_REQUEST }, editedSpec: { S: "# Edited\n" } } },
+      { Item: { ...base, request: { S: "rebuild-from-repo" }, editedSpec: { S: "# Edited\n" } } },
+      { Item: { ...base, author: { S: "assistant" }, editedSpec: { S: "# Edited\n" } } },
+      { Item: { ...base, step: { S: "spec" }, editedSpec: { S: "# Edited\n" } } },
+    ]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ source: "page", text: "# Edited\n" });
+    for (let i = 0; i < 5; i++) expect(await records.readRebuildSpec("p-1", "m-1"), String(i)).toBeUndefined();
+    // A projected read naming editedSpec (in the launcher's read list, synth test).
+    expect((sent[0]?.input as GetItemCommandInput).ProjectionExpression).toContain("#editedSpec");
   });
 
   it("ticket 3.9 try 2: a version approved only by Rebuild from my repository (rebuildApprovedAt) names its request; one with neither approval is not approved", async () => {
@@ -180,7 +197,7 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.readRebuildRequest("p-1", "m-1")).toEqual({ pending: true, read: false, inFlight: true, pendingSince: 1700000000 });
     expect(await records.storeRepositoryRead("p-1", "m-1", { kind: "found", text: "# Spec\n", repository: "ssd-ada" })).toBe(true);
     expect(await records.storeRepositoryRead("p-1", "m-1", { kind: "too-large" })).toBe(true);
-    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ text: "# Spec\n", repository: "ssd-ada" });
+    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ source: "repository", text: "# Spec\n", repository: "ssd-ada" });
     // Ticket 3.4: the cap, the waiting line and the slots.
     expect((await records.readSettings()).buildsAtOnce).toBe(15);
     expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);

@@ -3,7 +3,7 @@
 // sends the pages' real Content-Security-Policy, so any inline script or style the policy would
 // block in production fails these tests too. Every test runs at phone width (375 px); step 2's diagram
 // is also checked at laptop width (1280 px).
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,11 +16,13 @@ import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
 import { BUILD_TEXTS } from "./src/build-view.js";
-import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText, REBUILD_REQUEST } from "../api/workshop/texts.js";
+import { changeBuildFailedText, changeBuildingText, EDIT_REQUEST, PHASE_3_TEXTS, proposalVersionText, REBUILD_REQUEST } from "../api/workshop/texts.js";
 
 const jsQR = jsQRModule.default;
 
 const PHONE = { width: 375, height: 667 };
+/** Ticket 3.15's screenshot of the spec editor at 375 px, when asked (`EDIT_SCREENSHOTS=<folder>`); CI takes none. */
+const EDIT_SHOTS = process.env["EDIT_SCREENSHOTS"];
 const EMAIL = "ada@example.com";
 const OTHER_EMAIL = "not-on-the-list@example.com";
 const NEUTRAL_BODY = { message: MESSAGES.neutral };
@@ -1609,6 +1611,10 @@ function fakeStepFour(used = 1) {
     kind: undefined as "change" | undefined,
     changeNumber: undefined as number | undefined,
     buildAnswer: undefined as Reply | undefined,
+    /** Ticket 3.15: the live version (the one last sent to build) and its text, and a fixed answer to Rebuild with my edits. */
+    live: 1,
+    liveText: SPEC_1,
+    editAnswer: undefined as Reply | undefined,
   };
   const lastMessage = () => must(convo.state.messages.at(-1));
   const handlers: Record<string, Handler> = {
@@ -1629,11 +1635,13 @@ function fakeStepFour(used = 1) {
           changeRequestsPerPerson: step4.cap,
           ...(step4.suggestions === undefined ? {} : { suggestions: step4.suggestions }),
           ...(step4.proposed === undefined ? {} : { proposedSpecVersion: step4.proposed }),
+          approvedSpecVersion: step4.live,
         },
       };
     },
     "GET /api/conversation/spec": (call) => {
       const version = Number(new URLSearchParams(call.search).get("version"));
+      if (version === step4.live) return { status: 200, body: { version, text: step4.liveText, createdAt: "x", approved: true } };
       if (step4.proposed === undefined || version !== step4.proposed) return { status: 404, body: { message: "Not found." } };
       return { status: 200, body: { version, text: SPEC_2, createdAt: "x", approved: false, whatChanges: step4.whatChanges } };
     },
@@ -1662,6 +1670,19 @@ function fakeStepFour(used = 1) {
       convo.state.pendingId = id;
       return { status: 202, body: { id } };
     },
+    // Ticket 3.15: Rebuild with my edits, as the API answers it (the length and the version first).
+    "POST /api/conversation/change/edit": (call) => {
+      if (step4.editAnswer !== undefined) return step4.editAnswer;
+      const body = call.body as { version: number; text: string };
+      if (Array.from(body.text).length > 8000) return { status: 400, body: { reason: "too-long", message: PHASE_3_TEXTS.editTooLong } };
+      if (body.version !== step4.live) return { status: 404, body: { message: "Not found." } };
+      if (step4.used >= step4.cap) return { status: 409, body: { reason: "no-changes-left", message: "You've used your 5 changes." } };
+      if (convo.state.pendingId) return { status: 409, body: { reason: "busy", message: "Please wait for the answer to your last message." } };
+      const id = `m${convo.state.nextId++}`;
+      convo.state.messages.push({ id, author: "participant", text: EDIT_REQUEST, status: "pending", step: "building" });
+      convo.state.pendingId = id;
+      return { status: 202, body: { id } };
+    },
     "POST /api/conversation/change/discard": (call) => {
       const version = (call.body as { version: number }).version;
       if (version !== step4.proposed) return { status: 404, body: { message: "Not found." } };
@@ -1674,8 +1695,8 @@ function fakeStepFour(used = 1) {
     lastMessage().step = "building";
     step4.proposed = step4.nextVersion++;
   };
-  const ready = () => {
-    convo.answer(READY_REPLY);
+  const ready = (reply = READY_REPLY) => {
+    convo.answer(reply);
     lastMessage().step = "building";
     step4.proposed = undefined;
     step4.used++;
@@ -2053,6 +2074,168 @@ describe("step 4: change requests (ticket 3.8)", () => {
     await openStepFour();
     expect(await page.locator("#changes-used").isVisible()).toBe(true);
     expect(await page.locator("#rebuild-fold").isVisible()).toBe(false);
+  }, 30_000);
+});
+
+// Ticket 3.15: Edit my spec on step 4 against the mocked API.
+const editCalls = (calls: Call[]) => calls.filter((c) => c.method === "POST" && c.path === "/api/conversation/change/edit");
+const editor = () => page.locator("#spec-editor");
+const editorInput = () => page.getByRole("textbox", { name: "Your spec (SPEC.md)" });
+
+/** Opens step 4 and the editor on the live spec. */
+async function openEditor(): Promise<void> {
+  await openStepFour();
+  await page.getByRole("button", { name: "Edit my spec" }).click();
+  await expect.poll(() => editor().isVisible()).toBe(true);
+  await settle();
+}
+
+/** Every part of the editor lies inside the 375 px viewport (nothing cut off on the right). */
+async function expectEditorFits(): Promise<void> {
+  for (const selector of ["#spec-editor", "#spec-editor-input", "#spec-editor-rebuild", "#spec-editor-cancel", "#spec-editor .mini-flow"]) {
+    const box = must((await page.locator(selector).boundingBox()) ?? undefined);
+    expect(box.x, selector).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width, selector).toBeLessThanOrEqual(PHONE.width);
+  }
+  await expectNoSideScroll();
+}
+
+describe("step 4: Edit my spec (ticket 3.15)", () => {
+  it("criteria 1 and 2: WHEN Edit my spec opens the live spec and Rebuild with my edits sends it unchanged THEN the page says \"Your spec has not changed.\" and stays on step 4; edited, the reply queues a change build and the page follows it", async () => {
+    const api = fakeStepFour(1);
+    const calls = await mockApi(api.handlers);
+    await openStepFour();
+    expect(await editor().isVisible()).toBe(false);
+    await page.getByRole("button", { name: "Edit my spec" }).click();
+    await expect.poll(() => editor().isVisible()).toBe(true);
+    // The live version (the one last sent to build), read through the spec route: no GitHub read.
+    expect(calls.filter((c) => c.path === "/api/conversation/spec").map((c) => c.search)).toEqual(["?version=1"]);
+    expect(await editorInput().inputValue()).toBe(SPEC_1);
+    expect(await page.locator("#spec-editor .mini-flow li").allTextContents()).toEqual([
+      "Your edits",
+      "Checks: shape, safety, ready to build",
+      "New spec version",
+      "Build queue (counts as 1 change)",
+      "GitHub: one commit with your new SPEC.md",
+    ]);
+    expect(await page.getByRole("button", { name: "Edit my spec" }).isVisible()).toBe(false);
+
+    // Unchanged.
+    await page.getByRole("button", { name: "Rebuild with my edits" }).click();
+    await expect.poll(() => editCalls(calls).map((c) => c.body)).toEqual([{ version: 1, text: SPEC_1 }]);
+    await expect.poll(liveBubbles).toEqual([EDIT_REQUEST]);
+    await expect.poll(() => page.locator("#live-typing-text").textContent()).toBe(PHASE_3_TEXTS.checkingEdit);
+    expect(await page.locator("#spec-editor-rebuild").isDisabled()).toBe(true);
+    api.convo.answer(PHASE_3_TEXTS.editUnchanged);
+    must(api.convo.state.messages.at(-1)).step = "building";
+    await pollAfter(2000);
+    await expect.poll(() => page.locator("#spec-editor-answer").textContent()).toBe("Your spec has not changed.");
+    expect(await liveBubbles()).toEqual([EDIT_REQUEST, "Your spec has not changed."]);
+    expect(await screen("live").isVisible()).toBe(true);
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+    expect(await editor().isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#spec-editor-rebuild").isDisabled()).toBe(false);
+
+    // Edited: the reply queues a change build (counted) and the page follows it to step 3.
+    const edited = SPEC_1.replace("- Add a run: date, distance and time.", "- Add a run: date, distance and time.\n- Chart: the distance run each week.");
+    await editorInput().fill(edited);
+    await page.getByRole("button", { name: "Rebuild with my edits" }).click();
+    await expect.poll(() => editCalls(calls).length).toBe(2);
+    expect(editCalls(calls)[1]?.body).toEqual({ version: 1, text: edited });
+    await expect.poll(() => page.locator("#spec-editor-answer").textContent()).toBe("");
+    await settle();
+    api.ready(PHASE_3_TEXTS.editReady);
+    await pollAfter(2000);
+    await expect.poll(() => screen("build").isVisible()).toBe(true);
+    expect(await page.locator("#build-change").textContent()).toBe(changeBuildingText(2));
+    expect(sends(calls)).toEqual([]);
+  }, 30_000);
+
+  it("criteria 3 and 4: WHEN the edited text fails a check THEN its answer shows under the editor with the text kept; WHEN it is over 8,000 characters THEN the API's refusal shows and nothing is pending", async () => {
+    const api = fakeStepFour(1);
+    const calls = await mockApi(api.handlers);
+    await openEditor();
+    const broken = SPEC_1.replace("## Screens", "## Pages");
+    await editorInput().fill(broken);
+    await page.getByRole("button", { name: "Rebuild with my edits" }).click();
+    await expect.poll(() => editCalls(calls).length).toBe(1);
+    await settle();
+    api.convo.answer(PHASE_3_TEXTS.editWrongShape);
+    must(api.convo.state.messages.at(-1)).step = "building";
+    await pollAfter(2000);
+    await expect.poll(() => page.locator("#spec-editor-answer").textContent()).toBe(PHASE_3_TEXTS.editWrongShape);
+    expect(await editorInput().inputValue()).toBe(broken);
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+    expect(await screen("live").isVisible()).toBe(true);
+
+    // Over 8,000 characters: refused by the API (400) before anything is stored; the editor says so, nothing waits.
+    await editorInput().fill(`${SPEC_1}\n${"x".repeat(8000)}`);
+    await page.getByRole("button", { name: "Rebuild with my edits" }).click();
+    await expect.poll(() => page.locator("#spec-editor-answer").textContent()).toBe(PHASE_3_TEXTS.editTooLong);
+    expect(await page.locator("#spec-editor-answer").getAttribute("data-tone")).toBe("error");
+    expect(await page.locator("#live-typing").isVisible()).toBe(false);
+    expect(api.convo.state.pendingId).toBeUndefined();
+    expect(await liveBubbles()).toEqual([EDIT_REQUEST, PHASE_3_TEXTS.editWrongShape]);
+  }, 30_000);
+
+  it("Cancel closes the editor and drops the edits; a stale live version (404) closes it with a note; with every change used it is not offered", async () => {
+    const api = fakeStepFour(1);
+    const calls = await mockApi(api.handlers);
+    await openEditor();
+    await editorInput().fill("# Something else");
+    await page.getByRole("button", { name: "Cancel" }).click();
+    expect(await editor().isVisible()).toBe(false);
+    expect(await page.getByRole("button", { name: "Edit my spec" }).isVisible()).toBe(true);
+    expect(editCalls(calls)).toEqual([]);
+    await page.getByRole("button", { name: "Edit my spec" }).click();
+    await expect.poll(() => editor().isVisible()).toBe(true);
+    expect(await editorInput().inputValue()).toBe(SPEC_1);
+
+    // The live version moved on meanwhile (another tab rebuilt): 404, the editor closes and says so.
+    api.step4.live = 2;
+    api.step4.liveText = SPEC_2;
+    await page.getByRole("button", { name: "Rebuild with my edits" }).click();
+    await expect.poll(() => page.locator("#message-live").textContent()).toBe(PHASE_3_TEXTS.editStale);
+    expect(await editor().isVisible()).toBe(false);
+    await page.getByRole("button", { name: "Edit my spec" }).click();
+    await expect.poll(() => editorInput().inputValue()).toBe(SPEC_2);
+
+    const used = fakeStepFour(5);
+    await page.unrouteAll();
+    await mockApi(used.handlers);
+    await page.reload();
+    await expect.poll(() => page.locator("#changes-used").isVisible()).toBe(true);
+    expect(await page.locator("#edit-spec").isVisible()).toBe(false);
+  }, 30_000);
+
+  it("criterion 6: WHEN the page is 375 px wide THEN the editor and its buttons fit with nothing scrolling sideways (a long unbroken line, the workshop paused, an answer shown)", async () => {
+    const api = fakeStepFour(1);
+    api.convo.state.paused = true;
+    api.step4.liveText = SPEC_1.replace("- Runs: date, distance in km and time.", `- Runs: ${"x".repeat(300)} and a ${"long ".repeat(40)}line.`);
+    await mockApi(api.handlers);
+    await openEditor();
+    expect(await page.locator("#workshop-paused").isVisible()).toBe(true);
+    await expectEditorFits();
+    api.step4.editAnswer = { status: 400, body: { reason: "too-long", message: PHASE_3_TEXTS.editTooLong } };
+    await page.getByRole("button", { name: "Rebuild with my edits" }).click();
+    await expect.poll(() => page.locator("#spec-editor-answer").textContent()).toBe(PHASE_3_TEXTS.editTooLong);
+    await expectEditorFits();
+  }, 30_000);
+
+  it.skipIf(EDIT_SHOTS === undefined || EDIT_SHOTS === "")("takes the 375 px screenshot of the spec editor", async () => {
+    const target = EDIT_SHOTS as string;
+    mkdirSync(target, { recursive: true });
+    await context.close();
+    context = await browser.newContext({ viewport: PHONE, deviceScaleFactor: 2 });
+    page = await context.newPage();
+    page.setDefaultTimeout(5_000);
+    const api = fakeStepFour(1);
+    await mockApi(api.handlers);
+    await openEditor();
+    await editorInput().fill(SPEC_1.replace("- Add a run: date, distance and time.", "- Add a run: date, distance and time.\n- Chart: the distance run each week."));
+    await page.locator("#spec-editor").scrollIntoViewIfNeeded();
+    await page.locator("#spec-editor").screenshot({ path: join(target, "edit-375.png") });
+    await expectEditorFits();
   }, 30_000);
 });
 

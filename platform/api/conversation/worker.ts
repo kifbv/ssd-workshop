@@ -38,13 +38,14 @@
 //
 // Ticket 3.9: Rebuild from my repository stores REBUILD_REQUEST marked `rebuild-from-repo`; ./rebuild.ts runs it (the
 // launcher reads SPEC.md in between, then the guardrail, the readiness check and the same change-build transaction).
+// Ticket 3.15: Rebuild with my edits stores EDIT_REQUEST marked `edit-spec` with the edited text; ./rebuild.ts runs it too.
 import { errorName } from "../sign-in/code-request.js";
 import { BUDGET_REPLY, budgetOf, mustHold, overBudget } from "../workshop/budget.js";
 import { changesUsedText } from "../workshop/texts.js";
 import { answerMessage } from "./answer.js";
 import { answerChange, CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY, CHANGE_READY_REPLY, changeNotReadyReply } from "./change.js";
 import { suggestChanges } from "./suggestions.js";
-import { isRebuildRequest, runRebuild, type RebuildOutcome } from "./rebuild.js";
+import { isEditRequest, isRebuildRequest, runRebuild, type RebuildOutcome } from "./rebuild.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, usageOf, type ModelClient } from "./model.js";
 import { checkReadiness, notReadyReply, READINESS_FAILURE_REPLY, READINESS_PROMPT_VERSION, READINESS_REQUEST, READY_REPLY } from "./readiness.js";
@@ -151,7 +152,8 @@ async function run(
   const nowSeconds = () => Math.floor(deps.now().getTime() / 1000);
   if (message !== undefined && isReadinessRequest(message)) return runReadiness(job, message, deps, signal);
   if (message !== undefined && isChangeBuildRequest(message)) return runChangeBuild(job, message, deps, signal);
-  if (message !== undefined && isRebuildRequest(message)) return runRebuild(job, message, { ...deps, sleep: deps.sleep ?? realSleep }, signal);
+  // Ticket 3.15: Rebuild with my edits runs the same pipeline, from the text its route stored on the request.
+  if (message !== undefined && (isRebuildRequest(message) || isEditRequest(message))) return runRebuild(job, message, { ...deps, sleep: deps.sleep ?? realSleep }, signal);
   // Ticket 3.9: a platform mark on anything but its own request (or a mark this worker does not know) is never answered.
   if (message?.request !== undefined) return { outcome: "skipped" };
   if (message === undefined || message.status !== "pending" || isStale(message, nowSeconds())) return { outcome: "skipped" };

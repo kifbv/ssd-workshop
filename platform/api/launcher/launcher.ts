@@ -198,9 +198,10 @@ export interface LaunchRecords {
   /**
    * Ticket 3.9 try 2: the text and repository name the launcher stored on a Rebuild from my repository request
    * (`repositorySpec`, `repositoryName`: attributes only the launcher writes), only for the route's marked request with a
-   * `found` read; undefined otherwise.
+   * `found` read; undefined otherwise. Ticket 3.15: for Rebuild with my edits' marked request, the edited text its route
+   * stored (`editedSpec`, an attribute only the conversation function writes), as `{ source: "page" }`.
    */
-  readRebuildSpec(participantId: string, messageId: string): Promise<{ text: string; repository: string } | undefined>;
+  readRebuildSpec(participantId: string, messageId: string): Promise<RebuildSpecRead | undefined>;
   /**
    * Ticket 3.7: stores a change build's input (`changeSpec`, `changeList`) on the build, only while it is `building`
    * under this launch without a task. False when refused.
@@ -307,6 +308,12 @@ export interface RetryBuildState {
   /** The builder stored its pushed commit (handed over to the deployer). */
   handedOver: boolean;
 }
+
+/**
+ * Ticket 3.9 try 2 and 3.15: the text a version approved by a rebuild (`rebuildApprovedAt`) must equal: what the launcher
+ * read from the repository for that request, or what the participant's edit request holds.
+ */
+export type RebuildSpecRead = { source: "repository"; text: string; repository: string } | { source: "page"; text: string };
 
 /** Ticket 3.9: what the launcher reads of a Rebuild from my repository request. */
 export interface RebuildRequestState {
@@ -540,6 +547,9 @@ export const SPEC_MISSING_REASON = "The approved spec could not be found, so the
 /** Ticket 3.9 try 2: a version approved by Rebuild from my repository whose text is not what the launcher read. */
 export const REBUILD_SPEC_UNCONFIRMED_REASON =
   "The spec could not be confirmed as the one read from your repository, so the build did not start. Press Rebuild from my repository again.";
+/** Ticket 3.15: a version approved by Rebuild with my edits whose text is not the edit its request holds. */
+export const EDIT_SPEC_UNCONFIRMED_REASON =
+  "The spec could not be confirmed as the one you edited, so the build did not start. Press Rebuild with my edits again.";
 export const START_FAILED_REASON = "The build could not be started: the build service had no room for it. Your facilitator can restart it.";
 export const LAUNCH_SERVICE_REASON = "The build could not be started because of a problem on the workshop's side.";
 export const STOPPED_REASON = "The build stopped before it was finished.";
@@ -685,8 +695,12 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
     if (spec.rebuildRequestId !== undefined) {
       // Ticket 3.9 try 2: approved by Rebuild from my repository (the AI worker's rebuildApprovedAt), so built only as
       // the exact text the launcher itself read from this participant's own repository for that request.
+      // Ticket 3.15: or, for Rebuild with my edits, the exact text the participant's own request holds (written by the
+      // conversation function's route, never by the AI worker).
       const read = await deps.records.readRebuildSpec(participantId, spec.rebuildRequestId);
-      if (read === undefined || read.text !== spec.text || read.repository !== repositoryNameFor(nickname)) {
+      if (read?.source === "page") {
+        if (read.text !== spec.text) throw new LaunchFailure(EDIT_SPEC_UNCONFIRMED_REASON);
+      } else if (read === undefined || read.text !== spec.text || read.repository !== repositoryNameFor(nickname)) {
         throw new LaunchFailure(REBUILD_SPEC_UNCONFIRMED_REASON);
       }
     }
