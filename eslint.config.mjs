@@ -17,6 +17,8 @@ export default defineConfig(
         window: "readonly",
         document: "readonly",
         location: "readonly",
+        history: "readonly",
+        Element: "readonly",
         fetch: "readonly",
         workshopData: "readonly",
       },

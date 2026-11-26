@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { ALLOWED_EXTENSIONS, KEY_VALUE_MIN_CHARS, MAX_APP_BYTES, MAX_PROBLEMS, checkApp, keysIn, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
+import { ALLOWED_EXTENSIONS, DATA_CLIENT_FIRST_REASON, KEY_VALUE_MIN_CHARS, MAX_APP_BYTES, MAX_PROBLEMS, checkApp, keysIn, outsideAddresses, readAppFolder, type AppFile } from "./check.js";
 
 /** Fake key values, built at run time so secret scanners do not take the test file for a leak (ticket 2.14). */
 const FAKE_KEY = ["FAKE", "test", "KEY", "0123456789", "not", "REAL"].join("");
@@ -82,6 +82,88 @@ describe("file types (criterion 2)", () => {
     const result = checkApp([text("pages/index.html", "<p>hi</p>")]);
     expect(result.ok).toBe(false);
     expect(result.problems).toEqual([{ file: "index.html", reason: expect.stringMatching(/no index\.html/) }]);
+  });
+});
+
+describe("ticket 3.25 try 2: index.html runs workshop-data.js before any other script", () => {
+  const page = (head: string, body = ""): AppFile => text("index.html", `<!doctype html>\n<html lang="en">\n<head>\n${head}\n</head>\n<body>${body}</body>\n</html>\n`);
+  const FIRST = '<script src="workshop-data.js"></script>';
+  const refused = (file: AppFile) => expect(checkApp([file]).problems, new TextDecoder().decode(file.bytes)).toEqual([{ file: "index.html", reason: DATA_CLIENT_FIRST_REASON }]);
+  const passed = (file: AppFile) => expect(checkApp([file]).problems, new TextDecoder().decode(file.bytes)).toEqual([]);
+
+  it("passes the template's form: workshop-data.js first in <head> (after <meta>, <link> and <title> only), then the app's deferred scripts", () => {
+    passed(page(`<meta charset="utf-8">\n${FIRST}\n<title>App</title>\n<script src="app.js" defer></script>`));
+    passed(page(`<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">\n<title>My app</title><link rel="icon" href="data:,"><link rel="stylesheet" href="style.css">\n${FIRST}<script src="app.js" defer></script>`));
+    passed(page('<script src="./workshop-data.js"></script><script src="app.js"></script>'));
+    passed(page("<script src='workshop-data.js'></script>"));
+    passed(page("<SCRIPT SRC=workshop-data.js></SCRIPT>"));
+    passed(text("index.html", `\uFEFF<!DOCTYPE html><HTML><HEAD>${FIRST}</HEAD><body><script src="app.js"></script></body></HTML>`));
+  });
+
+  it("passes a page with no script at all (nothing can run before or after)", () => {
+    passed(page('<meta charset="utf-8"><title>Static</title>', "<p>Hello</p>"));
+  });
+
+  it("refuses a page whose first script is another one, wherever workshop-data.js comes later", () => {
+    refused(page(`<script src="app.js" defer></script>\n${FIRST}`));
+    refused(page(`<script src="steal.js"></script>${FIRST}`));
+    refused(page('<meta charset="utf-8">', `${FIRST}<script src="app.js"></script>`.replace(FIRST, "") + FIRST));
+    refused(page('<meta charset="utf-8">', '<script src="app.js" defer></script>'));
+  });
+
+  it("refuses workshop-data.js loaded with defer, async, as a module, with other attributes, or from another file", () => {
+    for (const tag of [
+      '<script src="workshop-data.js" defer></script>',
+      '<script defer src="workshop-data.js"></script>',
+      '<script src="workshop-data.js" async></script>',
+      '<script type="module" src="workshop-data.js"></script>',
+      '<script src="workshop-data.js" type="text/plain"></script>',
+      '<script src="lib/workshop-data.js"></script>',
+      '<script src="WORKSHOP-DATA.JS"></script>',
+      '<script src="workshop-data.js?v=2"></script>',
+      '<script src="/apps/other/workshop-data.js"></script>',
+      '<script src="workshop-data.js">alert(1)</script>',
+      "<script>workshopData = {}</script>",
+    ]) {
+      refused(page(`${tag}<script src="app.js" defer></script>`));
+    }
+  });
+
+  it("refuses anything but <meta>, <link> and a plain <title> before it: a script in SVG, a comment, a base address, a frame, a style", () => {
+    for (const before of [
+      '<svg><script href="steal.js"></script></svg>',
+      "<!-- note -->",
+      '<base href="/apps/other/">',
+      '<iframe src="frame.html"></iframe>',
+      "<style>p{}</style>",
+      "<noscript>no</noscript>",
+      "<title><b>x</b></title>",
+      "<p>hi</p>",
+    ]) {
+      refused(page(`${before}${FIRST}`));
+    }
+  });
+
+  it("is not fooled by a decoy: a tag inside an attribute, a textarea or a comment that hides the real first script", () => {
+    // The browser reads the quoted '>' as part of the attribute: workshop-data.js is never loaded there.
+    refused(page(`<meta content="x>${FIRST}<link y=">\n<script src="steal.js"></script>`));
+    refused(page(`<meta content='>${FIRST}<x '>\n<script src="steal.js"></script>`));
+    refused(text("index.html", `<textarea>${FIRST}</textarea><script src="steal.js"></script>`));
+    refused(text("index.html", `<!-- ${FIRST} --><script src="steal.js"></script>`));
+    refused(text("index.html", `<title>${FIRST}</title><script src="steal.js"></script>`));
+  });
+
+  it("checks only the top-level index.html, and answers quickly on a long page", () => {
+    expect(checkApp([page(FIRST), text("other.html", '<script src="app.js"></script>')]).problems).toEqual([]);
+    const long = page(`${'<meta name="a" content="b">'.repeat(20_000)}${" ".repeat(200_000)}<meta ${" a".repeat(100_000)}${" ".repeat(200_000)}x<script src="app.js"></script>`);
+    const started = Date.now();
+    expect(checkApp([long]).problems.map((p) => p.reason)).toEqual([DATA_CLIENT_FIRST_REASON]);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it("says what to write, in plain words", () => {
+    expect(DATA_CLIENT_FIRST_REASON).toContain('<script src="workshop-data.js"></script>');
+    expect(DATA_CLIENT_FIRST_REASON).toMatch(/defer/);
   });
 });
 

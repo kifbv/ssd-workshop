@@ -673,6 +673,55 @@ export function missingScreens(title: string | undefined, screens: readonly stri
   return missing;
 }
 
+/**
+ * Ticket 3.25: what a visitor (no token) sees of the workshop's sign-in in the published app. `shown`: elements with
+ * `data-workshop-sign-in` that read "Sign in" (text or aria-label) and that the visitor sees once the app shows the part
+ * they are in (try 3: however an ancestor hides it, by the `hidden` attribute or by CSS, the way apps switch screens and
+ * show result panels; never hidden by its own `hidden`, or its own `display: none`, `visibility: hidden` or opacity 0); `visible`: those really visible
+ * when the app opens (`checkVisibility`, a box larger than 0), the first one pressed; `opens`: whether pressing the first visible one opened the hand-off page
+ * (`/app-sign-in/?app=<nickname>`) in a new tab (undefined when none is on the first screen).
+ */
+export interface SignInCheck {
+  shown: number;
+  visible: number;
+  opens: boolean | undefined;
+}
+
+/**
+ * Ticket 3.25: the sign-in elements a visitor sees once the page settled, as SignInCheck counts them (run in the page by
+ * src/eval/build.ts; the first `visible` one is marked `data-eval-sign-in` so the harness can press it).
+ */
+export const SIGN_IN_SCRIPT = `(() => {
+  // Shown (try 3): the element is in the page, reads "Sign in", and hides itself in no way: not its own hidden attribute,
+  // not display:none, visibility:hidden (its own, not inherited) or opacity 0 from its own styles. However an ancestor
+  // hides it (a screen or a result panel the app shows later, by the hidden attribute or by CSS such as
+  // .screen.hidden { display: none }), the visitor sees it once the app shows that part. Visible: really visible now
+  // (checkVisibility) and taking room: the one pressed.
+  const reads = (el) => /sign in/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || ""));
+  const shownOnceRevealed = (el) => {
+    if (el.hidden) return false;
+    const own = getComputedStyle(el);
+    if (own.display === "none" || Number(own.opacity) === 0) return false;
+    const parent = el.parentElement;
+    const inherited = parent === null ? "visible" : getComputedStyle(parent).visibility;
+    return own.visibility === "visible" || own.visibility === inherited;
+  };
+  const shown = Array.from(document.querySelectorAll("[data-workshop-sign-in]")).filter((el) => reads(el) && shownOnceRevealed(el));
+  const visible = shown.filter((el) => {
+    const box = el.getBoundingClientRect();
+    return el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && box.width > 0 && box.height > 0;
+  });
+  if (visible[0]) visible[0].setAttribute("data-eval-sign-in", "");
+  return { shown: shown.length, visible: visible.length };
+})()`;
+
+/** The sign-in problem of a published app, if any: a visitor must find the sign-in button, and it must open the hand-off. */
+export function signInProblem(check: SignInCheck): string | undefined {
+  if (check.shown === 0) return 'no "Sign in to save" button (data-workshop-sign-in) for a visitor';
+  if (check.opens === false) return "the sign-in button does not open the workshop's sign-in page in a new tab";
+  return undefined;
+}
+
 export interface BuildEvalOutcome {
   /** The runner's outcome. */
   outcome: string;
@@ -689,6 +738,8 @@ export interface BuildEvalOutcome {
   missing: string[];
   /** Hosts other than the app's own that the page asked for (ticket 2.14: free outside services), sorted. */
   outsideHosts: string[];
+  /** Ticket 3.25: the sign-in button a visitor sees (none checked before the app was published). */
+  signIn: SignInCheck;
   /** Pages the coding agent read with WebFetch while building (ticket 2.15), from the build feed. */
   fetches: number;
   /** The hosts it read them from, each once, sorted. */
@@ -715,7 +766,7 @@ export function expectsWebFetch(spec: string): boolean {
 
 /**
  * Scores one build: handed over, steps in order, at least one commit, check passed, no console error, no overflow, every
- * screen found, and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
+ * screen found, the sign-in button shown to a visitor (ticket 3.25), and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
  */
 export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): ClarifyScore {
   const problems: string[] = [];
@@ -729,11 +780,15 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
     if (outcome.consoleErrors.length > 0) problems.push(`${outcome.consoleErrors.length} console error(s): ${outcome.consoleErrors.join(" | ").slice(0, 300)}`);
     if (outcome.overflow > 0) problems.push(`scrolls sideways by ${outcome.overflow} px`);
     if (outcome.missing.length > 0) problems.push(`missing ${outcome.missing.join(", ")}`);
+    const signIn = signInProblem(outcome.signIn);
+    if (signIn !== undefined) problems.push(signIn);
   }
   return problems.length === 0
     ? {
         pass: true,
-        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown${
+        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown, sign-in button shown to a visitor${
+          outcome.signIn.opens === true ? " and opens the sign-in" : ""
+        }${
           outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
         }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}`,
       }

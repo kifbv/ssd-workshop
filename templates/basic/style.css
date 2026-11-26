@@ -78,6 +78,13 @@ button {
   cursor: pointer;
 }
 
+/* The workshop's "Sign in to save" button (workshop-data.js shows it to visitors who are not signed in). */
+.sign-in {
+  background: transparent;
+  color: var(--accent);
+  border: 2px solid var(--accent);
+}
+
 button:disabled {
   opacity: 0.6;
   cursor: wait;

@@ -9,7 +9,8 @@ paths:
 - Participant app commits are automatic and never reviewed, so a starter must be safe to deploy
   as it is.
 - Apps are served under the sandbox CSP (`APPS_CONTENT_SECURITY_POLICY` in `infra/lib/config.ts`): the page
-  has an opaque origin (`origin` is `"null"`). Use classic `<script defer>` tags, never `type="module"`: a
+  has an opaque origin (`origin` is `"null"`). Use classic `<script defer>` tags (but `workshop-data.js` first and not
+  deferred, below), never `type="module"`: a
   module script is fetched with CORS and the same server's answer has no `Access-Control-Allow-Origin`, so it
   is blocked. `localStorage`, `sessionStorage` and cookies throw; data goes through `workshop-data.js`, whose
   requests carry `Origin: null` (ticket 2.3, `platform/api/build/template.test.ts`).
@@ -36,3 +37,43 @@ paths:
   fails on any console error: the data API answers a missing key with `200` and `null`, never 404.
 - ESLint lints `templates/**/*.js` as browser scripts with the globals declared in `eslint.config.mjs`;
   a new browser global used there must be added to that list.
+- Since ticket 3.25 the deployer publishes the platform's `templates/basic/workshop-data.js` (bundled with it) in every
+  app, whatever the repository holds: a change to it reaches new deploys at once, and live apps through
+  `npm run apps -- refresh` (Franck). Keep it passing the deploy check (`deploy.test.ts` checks it): send the token as
+  `options.headers.authorization = "Bearer " + pass` (a property set with `=`; `authorization:` or `"authorization",`
+  fails the check), and never write the header with a colon in a comment either. Keep it backward compatible: older
+  apps' `app.js` call only `get`, `set`, `remove`.
+- Sign-in in apps (3.25): the token arrives in the fragment (`#wt=<token>`, nothing else: a name in the address is not
+  checked by anyone, try 2) and is removed
+  with `history.replaceState` at once (it works in the sandbox's opaque origin in Chromium); in Playwright, a `goto` that
+  changes only the fragment does not reload the page: go to `about:blank` first. A visitor's save gets a 401, which
+  Chromium logs as a console error: a test of that path allows exactly that line. Style an element made by
+  `workshop-data.js` through the CSSOM (`element.style.x = ...`), never a `style` attribute (the CSP refuses it).
+- The build eval is noisy: a change to AGENTS.md or the builder's prompt can tip one example (ticket 3.25: placing new
+  prompt lines before the WebFetch lines made the Wikipedia example skip WebFetch 3 times in a row). Run the changed
+  example several times (`npm run eval -- build --example <n>`), compare with a baseline on `main` before blaming the
+  change, then run the whole suite once. Keep the published files with `EVAL_DUMP_DIR=<absolute folder>` and look at a
+  failed app before guessing (3.25 try 3). A field beside a button in a flex row needs `min-width: 0` (AGENTS.md rule 9).
+- `whoAmI()` (3.25 try 2) is a promise of the nickname the data API confirms for the token (`GET .../data/whoami?whoami=1`
+  with the token, once per page load), never a name from the address. A name an app stores inside a value is the app's
+  word, not the server's: show who posted from `getInfo(key).updatedBy`.
+- App code runs in the same page as `workshop-data.js` (3.25 try 2): `workshop-data.js` is the first script of
+  `index.html`, not deferred (the deploy check, `runsDataClientFirst` in `platform/api/build/check.ts`, refuses anything
+  else), captures `fetch`, `history.replaceState`, `location.replace` and `window.open` with `.bind` at its top, and
+  passes `fetch` options in `Object.create(null)` objects (fetch reads `signal`, `referrer`, ... and `Symbol.iterator`
+  through the prototype chain, where a getter on `Object.prototype` would see the headers). This does not make the token
+  secret from the app: Chromium's `performance.getEntriesByType("navigation")[0].name` keeps the address the page opened
+  with, fragment and token included, after `replaceState` (tested; decision "(3.25) Residual"). Only a separate origin
+  or frame for the data client would.
+- `workshop-data.js` builds every address absolute from the page's server read at its start (3.25 access review): a
+  relative address given to a captured `fetch` or `window.open` still resolves against the page's CURRENT base URL,
+  which app code can change with a `<base>` element. Test any new request the client makes with that `<base>` test.
+- In Playwright, a document served through `page.route` cannot load files from a real loopback server (Chromium's
+  private network check, "Permission was denied for this request to access the `loopback` address space"): route every
+  file of such a page, or serve the page from the server and route only one script.
+- Apps hide screens both ways (3.25 try 3): with the `hidden` attribute and with CSS classes (`.screen.hidden { display: none }`,
+  a class named `hidden`, not the attribute). A check of "what a visitor sees once the screen is open" looks at the element's
+  own hiding only (its `hidden`, its own `display`/`opacity`, its `visibility` unless inherited), never at its ancestors.
+  `workshop-data.js` shows only the sign-in elements present at `DOMContentLoaded`: AGENTS.md puts them in `index.html`.
+- The deploy check does not parse JavaScript; the builder's PostToolUse hook does (`scriptSyntaxProblem`, 3.25 try 3), so
+  the agent hears of a syntax error (a `'` inside a `'...'` string: "missing ) after argument list") while it can fix it.

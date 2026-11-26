@@ -16,6 +16,13 @@
  *    new version no longer has, invalidates `/apps/<nickname>/*` on CloudFront, writes the app's live
  *    marker (keeping the first `liveAt`) and marks the build `live` with the commit.
  *
+ * Ticket 3.25: the app's `workshop-data.js` (the data client and the workshop's sign-in to save) is always the
+ * platform's current one, bundled with the deployer, whatever the repository holds (none, an older copy, a changed one,
+ * a folder or a link of that name): it replaces the repository's before the check (`withPlatformDataClient`). A second
+ * message kind, `{ "refresh": "<nickname>" }` (sent by Franck's `npm run apps -- refresh`, question 10), puts only that
+ * file into an app already published (its `index.html` is there) and invalidates it: apps built before 3.25 then save
+ * with the workshop's sign-in without a new build.
+ *
  * SQS delivers at least once and every step can run again: the same commit gives the same files. A
  * passing problem (GitHub or AWS) throws, so SQS delivers the message again; on the last delivery the
  * build is marked failed instead. Every phase runs within the Lambda's remaining time less DEPLOY_RESERVE_MS, so
@@ -23,6 +30,7 @@
  * (its AbortSignal), and the build's last writes are conditional on it still being `deploying`, so a late write can
  * never change a finished build. Logs hold counts only: never a nickname, commit, file name, reason or error message.
  */
+import { createHash } from "node:crypto";
 import { checkApp, type AppFile, type Problem } from "../build/check.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
 import { NICKNAME_PATTERN } from "../participant/participant.js";
@@ -43,6 +51,34 @@ export interface DeployJob {
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
+/** The platform's data client: every published app holds the platform's current copy at its top (ticket 3.25). */
+export const DATA_CLIENT_PATH = "workshop-data.js";
+
+/**
+ * The app's files with the repository's `workshop-data.js` (of any kind, a folder with what it holds included) replaced by
+ * the platform's `dataClient`.
+ */
+export function withPlatformDataClient(files: readonly AppFile[], dataClient: Uint8Array): AppFile[] {
+  const theirs = (path: string): boolean => path === DATA_CLIENT_PATH || path.startsWith(`${DATA_CLIENT_PATH}/`);
+  return [...files.filter((file) => !theirs(file.path)), { path: DATA_CLIENT_PATH, kind: "file", bytes: dataClient }];
+}
+
+/** Ticket 3.25: `{ "refresh": "<nickname>" }`, exactly, or undefined. */
+export function parseRefreshJob(body: string | undefined): { nickname: string } | undefined {
+  if (typeof body !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const fields = parsed as Record<string, unknown>;
+  if (Object.keys(fields).join(",") !== "refresh") return undefined;
+  const nickname = fields["refresh"];
+  return typeof nickname === "string" && NICKNAME_PATTERN.test(nickname) ? { nickname } : undefined;
+}
+
 /** The message body, read strictly: exactly these three fields, each in its form, or undefined. */
 export function parseDeployJob(body: string | undefined): DeployJob | undefined {
   if (typeof body !== "string") return undefined;
@@ -62,14 +98,20 @@ export function parseDeployJob(body: string | undefined): DeployJob | undefined 
   return { buildId, nickname, commit };
 }
 
+/** An object in the apps bucket: its key and, when known, the MD5 of its bytes (hex). */
+export interface ListedObject {
+  key: string;
+  md5?: string;
+}
+
 /**
  * The apps bucket, as the deployer uses it. `signal` is aborted when the phase's time is up: the call must stop
  * (the AWS SDK's `abortSignal`), so nothing it does lands after the deploy gave up.
  */
 export interface AppObjects {
   put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string, signal?: AbortSignal): Promise<void>;
-  /** Every key under the prefix. */
-  list(prefix: string, signal?: AbortSignal): Promise<string[]>;
+  /** Every object under the prefix, with its MD5 (hex) when S3's ETag is one (ticket 3.25 try 2, for the refresh). */
+  list(prefix: string, signal?: AbortSignal): Promise<ListedObject[]>;
   remove(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
@@ -99,8 +141,11 @@ export interface DeployRecords {
 /**
  * `no-build`: no deployable build for the message (missing, another app's, or already live or failed).
  * `dead-letter`: the last delivery could not even mark the build failed; the message goes to the dead-letter queue.
+ * Ticket 3.25, a refresh: `refreshed` (the platform's workshop-data.js put and invalidated), `not-published` (the app has
+ * no index.html under its prefix: nothing to refresh), `up-to-date` (it already holds the platform's bytes: nothing done),
+ * or `retry`/`dead-letter` on a failure.
  */
-export type DeployOutcome = "live" | "failed" | "invalid" | "no-build" | "retry" | "gave-up" | "dead-letter";
+export type DeployOutcome = "live" | "failed" | "invalid" | "no-build" | "retry" | "gave-up" | "dead-letter" | "refreshed" | "not-published" | "up-to-date";
 
 /** The only things ever logged: counts, an outcome and an error name. */
 export interface DeployLogEntry {
@@ -125,6 +170,8 @@ export interface DeployDeps {
   records: DeployRecords;
   now: () => Date;
   log: (entry: DeployLogEntry) => void;
+  /** Ticket 3.25: the platform's current templates/basic/workshop-data.js (bundled next to the deployer's code). */
+  dataClient: Uint8Array;
 }
 
 /**
@@ -319,6 +366,8 @@ export async function processDeploy(
 
   const job = parseDeployJob(body);
   if (job === undefined) {
+    const refresh = parseRefreshJob(body);
+    if (refresh !== undefined) return refreshDataClient(refresh.nickname, receiveCount, deps, bounded, log);
     log({ outcome: "invalid" });
     return;
   }
@@ -343,7 +392,8 @@ export async function processDeploy(
       if (unpacked.commit === undefined) throw new DownloadProblem(NO_COMMIT_REASON, false);
       // Another commit: main moved on, or codeload served its copy from before the push. Retried, never published.
       if (unpacked.commit !== job.commit) throw new DownloadProblem(MAIN_MOVED_REASON, true);
-      files = unpacked.files;
+      // Ticket 3.25: the platform's data client, whatever the repository holds; the check then sees what is published.
+      files = withPlatformDataClient(unpacked.files, deps.dataClient);
     } catch (error) {
       const reason = error instanceof ArchiveProblem || (error instanceof DownloadProblem && !error.passing) ? error.reason : undefined;
       if (reason === undefined) throw error;
@@ -362,7 +412,7 @@ export async function processDeploy(
 
     await putAll(published, prefix, deps.objects, bounded);
     const keep = new Set(published.map((file) => `${prefix}${file.path}`));
-    const stale = (await bounded((_, signal) => deps.objects.list(prefix, signal))).filter((key) => key.startsWith(prefix) && !keep.has(key));
+    const stale = (await bounded((_, signal) => deps.objects.list(prefix, signal))).map((object) => object.key).filter((key) => key.startsWith(prefix) && !keep.has(key));
     if (stale.length > 0) await bounded((_, signal) => deps.objects.remove(stale, signal));
     await bounded((_, signal) => deps.cdn.invalidate([`/${prefix}*`], `${job.buildId}-${deps.now().getTime()}`, signal));
     // The marker before the build: when the build's write then fails, the build stays `deploying`, so a redelivery
@@ -397,5 +447,43 @@ export async function processDeploy(
     log({ outcome: recorded === undefined ? "dead-letter" : recorded ? "gave-up" : "no-build", error: name });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
     if (recorded === undefined) throw new Error(DEPLOY_FAILED);
+  }
+}
+
+/**
+ * Ticket 3.25 (question 10): puts the platform's workshop-data.js into an app already published and invalidates it on
+ * CloudFront; nothing else of the app changes, and no record is written. An app is published when its `index.html` is
+ * under its prefix (the deployer puts it last). A failure throws, so SQS delivers the message again; after the last
+ * delivery it goes to the dead-letter queue (`npm run apps -- refresh` can simply run again).
+ */
+async function refreshDataClient(
+  nickname: string,
+  receiveCount: number,
+  deps: DeployDeps,
+  bounded: Bounded,
+  log: (entry: Omit<DeployLogEntry, "event" | "durationMs">) => void,
+): Promise<void> {
+  const prefix = `${APPS_KEY_PREFIX}${nickname.toLowerCase()}/`;
+  try {
+    const listed = await bounded((_, signal) => deps.objects.list(prefix, signal));
+    if (!listed.some((object) => object.key === `${prefix}index.html`)) {
+      log({ outcome: "not-published" });
+      return;
+    }
+    // Try 2: the app already has the platform's bytes (a refresh again, or a deploy since): no put, no invalidation, so
+    // any number of refresh messages costs at most one invalidation per app and change of workshop-data.js.
+    const current = listed.find((object) => object.key === `${prefix}${DATA_CLIENT_PATH}`);
+    if (current?.md5 !== undefined && current.md5 === createHash("md5").update(deps.dataClient).digest("hex")) {
+      log({ outcome: "up-to-date" });
+      return;
+    }
+    await bounded((_, signal) => deps.objects.put(`${prefix}${DATA_CLIENT_PATH}`, deps.dataClient, contentTypeOf(DATA_CLIENT_PATH), CACHE_CONTROL, signal));
+    await bounded((_, signal) => deps.cdn.invalidate([`/${prefix}${DATA_CLIENT_PATH}`], `refresh-${nickname.toLowerCase()}-${deps.now().getTime()}`, signal));
+    log({ outcome: "refreshed", files: 1, bytes: deps.dataClient.byteLength });
+  } catch (error) {
+    log({ outcome: receiveCount < DEPLOY_MAX_RECEIVES ? "retry" : "dead-letter", error: errorName(error) });
+    // Deliberately no cause, as for a deploy: the runtime would log its message.
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error(DEPLOY_FAILED);
   }
 }

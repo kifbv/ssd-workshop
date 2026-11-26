@@ -1,16 +1,20 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { clientSettings } from "../aws.js";
 import { CloudFrontCdn, DynamoDeployRecords, S3AppObjects } from "../deploy/aws.js";
-import { processDeploy, type DeployDeps, type DeployLogEntry } from "../deploy/deploy.js";
+import { DATA_CLIENT_PATH, processDeploy, type DeployDeps, type DeployLogEntry } from "../deploy/deploy.js";
 import { downloadForDeployer } from "../deploy/github.js";
 import { APPS_BUCKET_NAME, DISTRIBUTION_ID, REGION, TABLE_NAME } from "../settings.js";
 
 /**
  * The deployer (ticket 2.5): one SQS record per invocation (batch size 1, FIFO queue, one message group per
- * app), holding `{ buildId, nickname, commit }`. Rules in ../deploy/deploy.ts.
+ * app), holding `{ buildId, nickname, commit }` (or, ticket 3.25, `{ refresh: nickname }`). Rules in ../deploy/deploy.ts.
+ * The platform's workshop-data.js travels with the code (copied from templates/basic at synth time, like the
+ * launcher's template) and goes into every app it publishes.
  */
 
 /** The parts of an SQS event the deployer reads. */
@@ -62,6 +66,7 @@ export async function handler(event: DeployEvent, context?: DeployContext): Prom
     records: new DynamoDeployRecords(new DynamoDBClient(clientSettings()), TABLE_NAME),
     now: () => new Date(),
     log: logEntry,
+    dataClient: new Uint8Array(readFileSync(join(process.env.LAMBDA_TASK_ROOT ?? ".", DATA_CLIENT_PATH))),
   });
   return live(event, context);
 }

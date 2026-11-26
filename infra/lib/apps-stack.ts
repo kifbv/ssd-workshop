@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import { Table } from "aws-cdk-lib/aws-dynamodb";
 import { AnyPrincipal, Effect, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
@@ -20,6 +21,9 @@ import {
   DISTRIBUTION_ARN,
   TABLE_NAME,
 } from "./config.js";
+
+/** Ticket 3.25: the platform's data client, copied next to the deployer's bundled code as `workshop-data.js`. */
+export const DATA_CLIENT_FILE = fileURLToPath(new URL("../../templates/basic/workshop-data.js", import.meta.url));
 
 /** The deployer downloads, checks and uploads an app of at most 5 MB; 2 minutes leave a wide margin. */
 export const DEPLOYER_TIMEOUT_SECONDS = 120;
@@ -117,7 +121,13 @@ export class AppsStack extends Stack {
       deadLetterQueue: { queue: deadLetters, maxReceiveCount: DEPLOY_QUEUE_MAX_RECEIVES },
     });
 
-    const deployer = workshopFunction(this, "Deployer", DEPLOYER_FUNCTION_NAME, "deployer.ts", DEPLOYER_MEMORY_MB, DEPLOYER_TIMEOUT_SECONDS);
+    const deployer = workshopFunction(this, "Deployer", DEPLOYER_FUNCTION_NAME, "deployer.ts", DEPLOYER_MEMORY_MB, DEPLOYER_TIMEOUT_SECONDS, {
+      beforeBundling: () => [],
+      beforeInstall: () => [],
+      // Ticket 3.25: every app the deployer publishes gets the platform's current workshop-data.js, which travels with
+      // its code (whatever the app's repository holds).
+      afterBundling: (_inputDir: string, outputDir: string) => [`cp "${DATA_CLIENT_FILE}" "${outputDir}/workshop-data.js"`],
+    });
     deployer.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,

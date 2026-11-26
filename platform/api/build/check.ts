@@ -486,6 +486,43 @@ function formatSize(bytes: number): string {
 
 const isGitFolder = (path: string): boolean => path === ".git" || path.startsWith(".git/");
 
+/**
+ * Ticket 3.25 try 2: the reason when index.html's first script is not the platform's workshop-data.js, loaded at once.
+ * The workshop's sign-in hands the visitor's write token to the page in its address; workshop-data.js takes it and keeps
+ * the browser functions it sends it with before any of the app's own code can run (and wrap them).
+ */
+export const DATA_CLIENT_FIRST_REASON =
+  'index.html must load workshop-data.js before any other script: put <script src="workshop-data.js"></script> in <head>, with no defer or async, before every other <script> (only <meta>, <link> and <title> may come before it). It keeps the workshop\'s sign-in out of reach of the app\'s own code.';
+
+/** An HTML attribute written plainly: a quoted value holds no `<` or `>`, so the browser and this check end the tag at the same `>`. */
+const ATTRIBUTES = String.raw`(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*(?:\s*=\s*(?:"[^"<>]*"|'[^'<>]*'|[^\s"'<>=\x60]+))?)*\s*\/?>`;
+/** What may come before workshop-data.js: white space, the doctype, `<html>`, `<head>`, `<meta>`, `<link>`, a plain `<title>`. */
+const BEFORE_DATA_CLIENT = new RegExp(String.raw`\s+|<!doctype[^<>]*>|<(?:html|head|meta|link)${ATTRIBUTES}|<title>[^<>]*<\/title\s*>`, "iy");
+/** workshop-data.js as a plain script: its own `src` and nothing else (no defer, async or type), and no text inside. */
+const DATA_CLIENT_TAG = /<script\s+src\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)'|([^\s"'<>=`]+))\s*>\s*<\/script\s*>/iy;
+const DATA_CLIENT_SOURCES = ["workshop-data.js", "./workshop-data.js"];
+
+/**
+ * Whether index.html runs the platform's workshop-data.js before any other script (ticket 3.25 try 2): a page with a
+ * `<script` anywhere must start (after only the doctype, `<html>`, `<head>`, `<meta>`, `<link>` and a plain `<title>`)
+ * with `<script src="workshop-data.js"></script>`, without defer or async, so it runs while the page is read, before
+ * every other script (deferred or not, in SVG or anywhere else). Strict on purpose: comments, quoted `<`/`>`, raw-text
+ * elements and anything else that the browser could read differently from this check are refused before it. Linear.
+ */
+export function runsDataClientFirst(html: string): boolean {
+  if (!/<script/i.test(html)) return true;
+  let at = html.startsWith("\uFEFF") ? 1 : 0;
+  for (;;) {
+    BEFORE_DATA_CLIENT.lastIndex = at;
+    if (BEFORE_DATA_CLIENT.exec(html) === null) break;
+    at = BEFORE_DATA_CLIENT.lastIndex;
+  }
+  DATA_CLIENT_TAG.lastIndex = at;
+  const tag = DATA_CLIENT_TAG.exec(html);
+  if (tag === null) return false;
+  return DATA_CLIENT_SOURCES.includes(tag[1] ?? tag[2] ?? tag[3] ?? "");
+}
+
 /** At most this many problems are listed; the rest are counted in one closing line. */
 export const MAX_PROBLEMS = 50;
 
@@ -530,8 +567,13 @@ export function checkApp(files: readonly AppFile[]): CheckResult {
     });
   }
 
-  if (!files.some((file) => file.path === "index.html" && file.kind === "file")) {
+  const index = files.find((file) => file.path === "index.html" && file.kind === "file");
+  if (index === undefined) {
     problems.push({ file: "index.html", reason: "The app has no index.html at its top level, so it has no page to open." });
+  } else if (!tooBig) {
+    // Ticket 3.25 try 2 (a page that is not UTF-8 text is reported above).
+    const lines = textLines(index.bytes);
+    if (lines !== undefined && !runsDataClientFirst(lines.join("\n"))) problems.push({ file: "index.html", reason: DATA_CLIENT_FIRST_REASON });
   }
   if (tooBig) {
     problems.push({ reason: `The app is ${formatSize(totalBytes)}; the limit is ${MAX_APP_BYTES / MB} MB.` });

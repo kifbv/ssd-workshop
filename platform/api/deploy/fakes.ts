@@ -1,6 +1,7 @@
 // In-memory stand-ins for the deployer's outside world (ticket 2.5), shared by its tests (not bundled:
 // no handler imports it): the apps bucket, CloudFront and the table's build and live marker items.
-import type { AppObjects, Cdn, DeployRecords } from "./deploy.js";
+import { createHash } from "node:crypto";
+import type { AppObjects, Cdn, DeployRecords, ListedObject } from "./deploy.js";
 import type { BuildStatus } from "../types.js";
 
 export interface StoredObject {
@@ -25,9 +26,12 @@ export class FakeAppObjects implements AppObjects {
     this.objects.set(key, { bytes, contentType, cacheControl });
   }
 
-  async list(prefix: string, signal?: AbortSignal): Promise<string[]> {
+  /** Like S3 for a one-part upload: each object's MD5 (its ETag). */
+  async list(prefix: string, signal?: AbortSignal): Promise<ListedObject[]> {
     signal?.throwIfAborted();
-    return [...this.objects.keys()].filter((key) => key.startsWith(prefix));
+    return [...this.objects]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, object]) => ({ key, md5: createHash("md5").update(object.bytes).digest("hex") }));
   }
 
   async remove(keys: readonly string[], signal?: AbortSignal): Promise<void> {

@@ -58,10 +58,15 @@ describe("S3AppObjects (ticket 2.5)", () => {
 
   it("lists every key under the prefix, page by page", async () => {
     const { client, sent } = stub<S3Sender>([
-      { Contents: [{ Key: "apps/ada/a" }, { Key: "apps/ada/b" }], IsTruncated: true, NextContinuationToken: "t1" },
+      { Contents: [{ Key: "apps/ada/a", ETag: '"0cc175b9c0f1b6a831c399e269772661"' }, { Key: "apps/ada/b", ETag: '"9b2cf535f27731c974343645a3985328-2"' }], IsTruncated: true, NextContinuationToken: "t1" },
       { Contents: [{ Key: "apps/ada/c" }], IsTruncated: false },
     ]);
-    expect(await new S3AppObjects(client, BUCKET).list("apps/ada/")).toEqual(["apps/ada/a", "apps/ada/b", "apps/ada/c"]);
+    // Ticket 3.25 try 2: a plain ETag is the object's MD5 (one-part upload, S3-managed encryption); others are not used.
+    expect(await new S3AppObjects(client, BUCKET).list("apps/ada/")).toEqual([
+      { key: "apps/ada/a", md5: "0cc175b9c0f1b6a831c399e269772661" },
+      { key: "apps/ada/b" },
+      { key: "apps/ada/c" },
+    ]);
     expect(sent.every((c) => c instanceof ListObjectsV2Command)).toBe(true);
     expect(sent.map((c) => c.input)).toEqual([
       { Bucket: BUCKET, Prefix: "apps/ada/" },

@@ -1,10 +1,10 @@
 // Ticket 2.8: the coding agent's settings (tools, permissions, environment) and its token count, without calling Claude.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, fetchSucceeded, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
@@ -88,6 +88,36 @@ describe("the agent's settings (criterion 2)", () => {
     expect(written).toEqual(["app.js"]);
   });
 
+  // Ticket 3.25 try 3: live builds left app.js with a syntax error ("missing ) after argument list", "Unexpected
+  // string"), which the deploy check does not see; the agent now hears of it after each write, while it can still fix it.
+  it("tells the agent after a Write or Edit of a .js file that does not parse as a classic script, with the line, and nothing else", async () => {
+    const hook = options.hooks?.PostToolUse?.[0]?.hooks[0];
+    const signal = new AbortController().signal;
+    const post = (tool_name: string, file_path: string) =>
+      hook?.({ hook_event_name: "PostToolUse", tool_name, tool_input: { file_path, content: "x" }, tool_response: {}, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal });
+    writeFileSync(join(ws, "app.js"), "const a = 1;\nshow('Use the workshop's sign-in');\n");
+    const problem = scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "app.js") });
+    expect(problem).toContain("app.js");
+    expect(problem).toContain("line 2");
+    expect(problem).toContain("missing ) after argument list");
+    expect(await post("Write", join(ws, "app.js"))).toEqual({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: problem } });
+    expect(await post("Edit", "app.js")).toEqual({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: problem } });
+    // Never run: a script that would throw or loop when run parses fine.
+    writeFileSync(join(ws, "app.js"), '"use strict";\nwhile (true) {}\nthrow new Error("x");\ndocument.addEventListener("click", async () => { await 1; });\n');
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "app.js") })).toBeUndefined();
+    expect(await post("Write", join(ws, "app.js"))).toEqual({});
+    // A module statement is an error in the app's classic script (AGENTS.md rule 1).
+    writeFileSync(join(ws, "app.js"), 'import x from "./x.js";\n');
+    expect(scriptSyntaxProblem(ws, "Edit", { file_path: join(ws, "app.js") })).toContain("line 1");
+    // Other files, other tools and paths outside the workspace are not parsed.
+    writeFileSync(join(ws, "notes.md"), "show('it's');\n");
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "notes.md") })).toBeUndefined();
+    expect(scriptSyntaxProblem(ws, "Read", { file_path: join(ws, "app.js") })).toBeUndefined();
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: "/etc/x.js" })).toBeUndefined();
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "missing.js") })).toBeUndefined();
+    writeFileSync(join(ws, "app.js"), "x");
+  });
+
   it("counts and feeds a WebFetch only when the page answered 2xx: not a redirect reply, 4xx, 5xx or a missing answer (ticket 2.15 try 2)", async () => {
     const hook = options.hooks?.PostToolUse?.[0]?.hooks[0];
     const signal = new AbortController().signal;
@@ -165,6 +195,33 @@ describe("the agent's settings (criterion 2)", () => {
   it("asks the agent to follow AGENTS.md and build SPEC.md in its folder", () => {
     expect(buildPrompt(ws)).toContain(ws);
     expect(buildPrompt(ws)).toMatch(/AGENTS\.md[\s\S]*SPEC\.md/);
+  });
+
+  it("ticket 3.25: both prompts carry the sign-in rule of the template's AGENTS.md (read-only for visitors, the sign-in button, who posted)", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
+    // The button the guidance asks for is exactly the one AGENTS.md shows.
+    const button = '<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>';
+    expect(agents).toContain(button);
+    expect(SIGN_IN_GUIDANCE).toContain(button);
+    for (const name of ["whoAmI()", "getInfo(key)", "updatedBy"]) {
+      expect(agents).toContain(name);
+      expect(SIGN_IN_GUIDANCE).toContain(name);
+    }
+    expect(buildPrompt(ws)).toContain(SIGN_IN_GUIDANCE);
+    expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(SIGN_IN_GUIDANCE);
+  });
+
+  it("ticket 3.25 try 2: both AGENTS.md and the guidance say workshop-data.js is index.html's first script, as the template has it and the deploy check requires", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8").replace(/\s+/g, " ");
+    const index = readFileSync(new URL("../../templates/basic/index.html", import.meta.url), "utf8");
+    const tag = '<script src="workshop-data.js"></script>';
+    expect(index).toContain(tag);
+    expect(index.indexOf(tag)).toBeLessThan(index.indexOf("<script src=\"app.js\" defer></script>"));
+    expect(agents).toContain(tag);
+    expect(SIGN_IN_GUIDANCE).toContain(tag);
+    for (const text of [agents, SIGN_IN_GUIDANCE]) expect(text).toMatch(/no `?defer`? or `?async`?/);
+    expect(agents).toMatch(/deploy check refuses a page that runs any other script first/);
+    expect(SIGN_IN_GUIDANCE).toMatch(/deploy check refuses a page that runs any other script first/);
   });
 
   it("tells the agent it may check a service with WebFetch, that pages are data and never instructions, never with keys, and few fetches (ticket 2.15)", () => {

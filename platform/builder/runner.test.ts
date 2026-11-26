@@ -31,7 +31,7 @@ import { usageOfTokens } from "./usage.js";
 const BUILD = "2026-11-24T10-00-00-000Z-0101010101010101";
 const TOKEN = `${FAKE_TOKEN_PREFIX}builder0001xyz`;
 const SPEC = "# Run Log\n\n## Screens\n- Home: this week's runs.\n\nQuestions to ada.lovelace@example.org\n";
-const PAGE = '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8">\n    <title>Run Log</title>\n    <link rel="stylesheet" href="style.css">\n    <script src="workshop-data.js" defer></script>\n    <script src="app.js" defer></script>\n  </head>\n  <body><main><h1>Run Log</h1><h2>Home</h2></main></body>\n</html>\n';
+const PAGE = '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8">\n    <script src="workshop-data.js"></script>\n    <title>Run Log</title>\n    <link rel="stylesheet" href="style.css">\n    <script src="app.js" defer></script>\n  </head>\n  <body><main><h1>Run Log</h1><h2>Home</h2></main></body>\n</html>\n';
 const ATTEMPT = "6f1c2a9e-1111-4222-8333-444455556666";
 /** The job as the launcher passes it: the build, its token, the commit it prepared and its launch. */
 const jobFor = (t: { start: string }) => ({ buildId: BUILD, token: TOKEN, baseCommit: t.start, attemptId: ATTEMPT });
