@@ -10,7 +10,7 @@ import type {
   ApprovedSpec,
   BuildTasks,
   ChangeInput,
-  ClusterTask,
+  ClusterTaskList,
   ClaimResult,
   DeadLetter,
   DeadLetters,
@@ -481,9 +481,19 @@ export class FakeTasks implements BuildTasks {
     this.subnets.set(taskArn, [...subnetIds]);
   }
 
-  async listClusterTasks(): Promise<ClusterTask[]> {
+  /** Ticket 3.14 try 2: when true, the list says the page bound left some tasks out. */
+  listTruncated = false;
+
+  async listClusterTasks(): Promise<ClusterTaskList> {
     if (this.listError) throw this.listError;
-    return [...this.states].filter(([, state]) => !state.stopped).map(([taskArn]) => ({ taskArn, subnetIds: [...(this.subnets.get(taskArn) ?? [])] }));
+    const tasks = [...this.states]
+      .filter(([, state]) => !state.stopped)
+      .map(([taskArn, state]) => ({
+        taskArn,
+        subnetIds: [...(this.subnets.get(taskArn) ?? [])],
+        ...(state.createdAt === undefined ? {} : { createdAt: state.createdAt }),
+      }));
+    return { tasks, truncated: this.listTruncated };
   }
 
   async describe(taskArns: readonly string[]): Promise<Map<string, TaskState>> {

@@ -65,8 +65,9 @@
  *
  * Ticket 3.14 (auto-stop outside the build subnets, Franck's choice "Add it to the minute check", 2026-11-26): IAM cannot
  * pin RunTask to subnets (accepted risk 1), so after the watched builds the check lists every task of the builds cluster
- * (RUNNING and PENDING) and stops each one whose network interface is not entirely in BUILDS_SUBNET_IDS, or has no subnet
- * yet, with the reason OUTSIDE_STOP_REASON, logging one `outside-task` line with only the task's id. A stray watched build
+ * (RUNNING and PENDING) and stops each one whose network interface is not entirely in BUILDS_SUBNET_IDS, or that still
+ * has no subnet OUTSIDE_NO_SUBNET_GRACE_MS after its creation (try 2: a young one may be PROVISIONING), with the reason
+ * OUTSIDE_STOP_REASON, logging one `outside-task` line with only the task's id. A stray watched build
  * is not failed here: its task is stopped, and the next minute's check fails it like any stopped task. A refused list
  * (AccessDenied until Franck applies the boundary with `ecs:ListTasks`) is logged once and the check goes on.
  *
@@ -95,8 +96,10 @@ import {
   BUILD_TASK_MAX_MS,
   BUILDS_CLUSTER_NAME,
   BUILDS_SUBNET_IDS,
+  CLUSTER_LIST_MAX_PAGES,
   HANDED_OVER_GRACE_MS,
   LAUNCH_UNSTARTED_MS,
+  OUTSIDE_NO_SUBNET_GRACE_MS,
   QUEUE_SEEN_MS,
   QUEUE_WAIT_MAX_MS,
   REGION,
@@ -339,10 +342,20 @@ export interface TaskStart {
   attemptId: string;
 }
 
-/** Ticket 3.14: a task of the builds cluster that has not stopped, with the subnets of its network interface (none yet: empty). */
+/**
+ * Ticket 3.14: a task of the builds cluster that has not stopped, with the subnets of its network interface (none yet:
+ * empty) and when ECS created it (try 2: a young task without a subnet is left alone).
+ */
 export interface ClusterTask {
   taskArn: string;
   subnetIds: string[];
+  createdAt?: Date;
+}
+
+/** Ticket 3.14: the cluster's tasks; `truncated` when the page bound (CLUSTER_LIST_MAX_PAGES) left some out. */
+export interface ClusterTaskList {
+  tasks: ClusterTask[];
+  truncated: boolean;
 }
 
 export interface BuildTasks {
@@ -353,7 +366,7 @@ export interface BuildTasks {
   /** Stops a task of the builds cluster, with `reason` (default: the launcher's own). */
   stop(taskArn: string, reason?: string): Promise<void>;
   /** Ticket 3.14: every task of the builds cluster whose desired status is RUNNING or PENDING, except those already stopped. */
-  listClusterTasks(): Promise<ClusterTask[]>;
+  listClusterTasks(): Promise<ClusterTaskList>;
 }
 
 export interface DeadLetter {
@@ -395,9 +408,10 @@ export type SpecReadOutcome = "read" | "resent" | "skipped" | "invalid";
 
 /**
  * Ticket 3.14, one `outside-task` line: `stopped` (a task outside the build subnets was stopped), `stop-failed` (StopTask
- * refused it: the next minute tries again), `list-failed` (the cluster's tasks could not be listed, once per check).
+ * refused it: the next minute tries again), `list-failed` (the cluster's tasks could not be listed, once per check),
+ * `list-truncated` (try 2: more tasks than CLUSTER_LIST_MAX_PAGES pages; the listed ones are still checked).
  */
-export type OutsideTaskOutcome = "stopped" | "stop-failed" | "list-failed";
+export type OutsideTaskOutcome = "stopped" | "stop-failed" | "list-failed" | "list-truncated";
 
 export interface LauncherLogEntry {
   event: "launcher" | "build-check" | "spec-read" | "outside-task";
@@ -424,6 +438,8 @@ export interface LauncherLogEntry {
   retried?: number;
   /** Check (ticket 3.14): tasks stopped because they ran outside the build subnets. */
   outside?: number;
+  /** Ticket 3.14 try 2: the page bound a `list-truncated` line hit (pages per status). */
+  pages?: number;
   durationMs: number;
 }
 
@@ -742,24 +758,37 @@ const BUILD_TASK_ARN = new RegExp(`^arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUIL
 const taskIdOf = (taskArn: string): string => taskArn.slice(taskArn.lastIndexOf("/") + 1);
 
 /**
- * Ticket 3.14: stops every task of the builds cluster not entirely in the build subnets (or with no subnet), and answers
- * how many it stopped. Never throws: a refused list is logged once (`list-failed`), a refused stop with the task's id.
+ * Ticket 3.14: whether a builds-cluster task is outside the build subnets. A task with a subnet is outside when any of
+ * its subnets is not a build subnet. A task with no subnet yet is outside only once it is OUTSIDE_NO_SUBNET_GRACE_MS old
+ * (try 2, checker A: a fresh Fargate task may not show its subnet while PROVISIONING); one whose age is unknown is left.
+ */
+export function isOutsideTask(task: ClusterTask, now: Date): boolean {
+  const buildSubnets: readonly string[] = BUILDS_SUBNET_IDS;
+  if (task.subnetIds.length > 0) return !task.subnetIds.every((subnet) => buildSubnets.includes(subnet));
+  return task.createdAt !== undefined && now.getTime() - task.createdAt.getTime() >= OUTSIDE_NO_SUBNET_GRACE_MS;
+}
+
+/**
+ * Ticket 3.14: stops every task of the builds cluster outside the build subnets (isOutsideTask), and answers how many it
+ * stopped. Never throws: a refused list is logged once (`list-failed`), a refused stop with the task's id, a list cut at
+ * CLUSTER_LIST_MAX_PAGES pages once (`list-truncated`).
  */
 async function stopOutsideTasks(deps: CheckDeps, started: number): Promise<number> {
   const durationMs = (): number => Math.max(0, deps.now().getTime() - started);
-  const buildSubnets: readonly string[] = BUILDS_SUBNET_IDS;
-  let tasks: ClusterTask[];
+  let listed: ClusterTaskList;
   try {
-    tasks = await deps.tasks.listClusterTasks();
+    listed = await deps.tasks.listClusterTasks();
   } catch (error) {
     deps.log({ event: "outside-task", outcome: "list-failed", error: errorName(error), durationMs: durationMs() });
     return 0;
   }
+  if (listed.truncated) deps.log({ event: "outside-task", outcome: "list-truncated", pages: CLUSTER_LIST_MAX_PAGES, durationMs: durationMs() });
+  const now = deps.now();
   let outside = 0;
-  for (const task of tasks) {
+  for (const task of listed.tasks) {
     // ECS answers only this cluster's tasks; anything else is never acted on.
     if (!BUILD_TASK_ARN.test(task.taskArn)) continue;
-    if (task.subnetIds.length > 0 && task.subnetIds.every((subnet) => buildSubnets.includes(subnet))) continue;
+    if (!isOutsideTask(task, now)) continue;
     try {
       await deps.tasks.stop(task.taskArn, OUTSIDE_STOP_REASON);
       outside += 1;

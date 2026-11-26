@@ -154,6 +154,14 @@ export const LAUNCH_UNSTARTED_MS = 20 * 60 * 1000;
 /** A build task running longer than this is stopped by the check (the agent alone stops at 12 minutes). */
 export const BUILD_TASK_MAX_MS = 30 * 60 * 1000;
 /**
+ * Ticket 3.14 try 2 (checker A): a builds-cluster task whose network interface names no subnet yet is left alone by the
+ * minute check while it is younger than this (from its `createdAt`): a fresh Fargate task may still be PROVISIONING, and
+ * a task with no subnet has no network to misuse. After it, a task still without a subnet is stopped.
+ */
+export const OUTSIDE_NO_SUBNET_GRACE_MS = 5 * 60 * 1000;
+/** Ticket 3.14 try 2 (checker B): the minute check reads at most this many ListTasks pages (100 tasks each) per status. */
+export const CLUSTER_LIST_MAX_PAGES = 10;
+/**
  * A build still `building` with a pushed commit (the builder handed it over) whose task has stopped is waiting for the
  * deployer to take its message (the deployer moves it to `deploying`). After this long since the task stopped, no
  * deploy will come (the message was lost, or never sent and the builder died), and the check marks it failed (ticket

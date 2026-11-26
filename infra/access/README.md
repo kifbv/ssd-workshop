@@ -290,8 +290,11 @@ follow-up.
    can pin them to subnets (a negated condition on the missing key would deny every `RunTask`; a
    `ForAnyValue` one would deny none).
    Since ticket 3.14 the launcher's every-minute check lists the builds cluster's tasks (`ecs:ListTasks`,
-   boundary `AccountWideServiceCalls`) and stops any task with a subnet outside `BUILDS_SUBNET_IDS`, logging
-   its id (`outside-task`); a stray task can run for about a minute. Other clusters are not watched.
+   boundary `AccountWideServiceCalls`) and stops any task with a subnet outside `BUILDS_SUBNET_IDS`, or with no subnet
+   after the grace (`OUTSIDE_NO_SUBNET_GRACE_MS`, 5 minutes), logging its id (`outside-task`); a stray task can run for
+   about a minute. Other clusters are not watched. The security-group half stays open: a task in a build subnet with
+   another security group (or a public IP) is not caught, since DescribeTasks shows no security group; checking it would
+   need `ec2:DescribeNetworkInterfaces` for the launcher (Franck's call).
 
    ```mermaid
    flowchart LR
@@ -384,7 +387,11 @@ follow-up.
    fails, and changing one needs Franck or a replacement under a new name.
 8. **Channels without a resource scope in the boundary:** `ssmmessages:*`, `ec2messages:*`
    (Session Manager and Run Command of the calling k3s node), `xray:PutTraceSegments`,
-   `ecr:GetAuthorizationToken`.
+   `ecr:GetAuthorizationToken`, and `ecs:ListTasks` (ticket 3.14): any workload role whose own policy
+   allows it could list the task ARNs (cluster names and task ids, never overrides) of every cluster
+   in the account and region, other projects' included. Today only the launcher has it, held to the
+   builds cluster by `ecs:cluster` in its own grant (synth test); sessions already have `ecs:List*`
+   through `-deploy-read`.
 9. **Code that runs with a workshop role can send the data it may read anywhere on the internet.**
    IAM does not control network egress.
 10. **Participant code runs under workshop roles.** Advanced-track apps run as ECS tasks or on k3s
@@ -392,6 +399,8 @@ follow-up.
     endpoint, instance metadata) and use everything that role may do within the boundary.
     Follow-up (Kubernetes phase): IMDSv2 with hop limit 1 on k3s nodes so pods cannot reach the
     node role, and one minimal role per workload instead of the boundary's full set.
+    Follow-up (ticket 3.14): no broad `ecs:List*` on roles that run participant code (the boundary
+    lets `ecs:ListTasks` through on every cluster, risk 8).
 11. **CloudFront origins and aliases.** A workshop distribution with an origin access control can
     name another project's bucket or Lambda function URL as its origin; it gets their content if
     their bucket or function policy trusts `cloudfront.amazonaws.com` with only `AWS:SourceAccount`

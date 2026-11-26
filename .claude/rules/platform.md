@@ -288,3 +288,5 @@ paths:
 - A new step in the launcher's minute check that depends on a right not yet applied (3.14's ListTasks, until Franck applies
   the boundary) never throws: it logs one line with the error's name per run and the check goes on (test it with the
   fake throwing `AccessDeniedException`). Log a task by its id (last ARN part) only: overrides can hold a build's token.
+  A check that stops tasks on what DescribeTasks shows (3.14's subnets) never acts on a missing detail of a young task
+  (a PROVISIONING task may not show it yet): wait a grace from `createdAt`, and bound every ListTasks loop (pages per status).

@@ -59,7 +59,7 @@ import {
 } from "../keys.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
-import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
+import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS, CLUSTER_LIST_MAX_PAGES } from "../settings.js";
 import type { BuildStatus } from "../types.js";
 import type { RepositoryRead } from "../conversation/state.js";
 import { REBUILD_REQUEST } from "../workshop/texts.js";
@@ -73,6 +73,7 @@ import type {
   ChangeInput,
   BuildTasks,
   ClusterTask,
+  ClusterTaskList,
   ClaimResult,
   DeadLetter,
   DeadLetters,
@@ -741,24 +742,30 @@ export class EcsBuildTasks implements BuildTasks {
   }
 
   /**
-   * Ticket 3.14: the builds cluster's tasks (ListTasks of desired status RUNNING, then PENDING, every page; each task
-   * once), described 100 at a time, with the `subnetId` of each network interface attachment. A task already STOPPED, or
-   * one ECS no longer knows, is left out. ListTasks needs `ecs:ListTasks` (Resource `*`, condition `ecs:cluster`).
+   * Ticket 3.14: the builds cluster's tasks (ListTasks of desired status RUNNING, then PENDING; each task once), described
+   * 100 at a time, with the `subnetId` of each network interface attachment and when ECS created the task. A task already
+   * STOPPED, or one ECS no longer knows, is left out. At most CLUSTER_LIST_MAX_PAGES pages per status (try 2, checker B:
+   * the check never runs unbounded); `truncated` says the bound was hit. ListTasks needs `ecs:ListTasks` (Resource `*`,
+   * condition `ecs:cluster`).
    */
-  async listClusterTasks(): Promise<ClusterTask[]> {
+  async listClusterTasks(): Promise<ClusterTaskList> {
     const seen = new Set<string>();
+    let truncated = false;
     for (const desiredStatus of ["RUNNING", "PENDING"] satisfies DesiredStatus[]) {
       let nextToken: string | undefined;
+      let pages = 0;
       do {
         const answer = await this.client.send(
           new ListTasksCommand({ cluster: BUILDS_CLUSTER_NAME, desiredStatus, maxResults: 100, ...(nextToken === undefined ? {} : { nextToken }) }),
         );
+        pages += 1;
         for (const arn of answer.taskArns ?? []) seen.add(arn);
         nextToken = answer.nextToken;
-      } while (nextToken !== undefined);
+      } while (nextToken !== undefined && pages < CLUSTER_LIST_MAX_PAGES);
+      if (nextToken !== undefined) truncated = true;
     }
     const arns = [...seen];
-    const listed: ClusterTask[] = [];
+    const tasks: ClusterTask[] = [];
     for (let i = 0; i < arns.length; i += 100) {
       const answer = await this.client.send(new DescribeTasksCommand({ cluster: BUILDS_CLUSTER_NAME, tasks: arns.slice(i, i + 100) }));
       for (const task of answer.tasks ?? []) {
@@ -766,10 +773,10 @@ export class EcsBuildTasks implements BuildTasks {
         const subnetIds = (task.attachments ?? []).flatMap((attachment) =>
           (attachment.details ?? []).flatMap((detail) => (detail.name === "subnetId" && detail.value !== undefined ? [detail.value] : [])),
         );
-        listed.push({ taskArn: task.taskArn, subnetIds });
+        tasks.push({ taskArn: task.taskArn, subnetIds, ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }) });
       }
     }
-    return listed;
+    return { tasks, truncated };
   }
 }
 

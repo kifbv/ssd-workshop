@@ -907,7 +907,10 @@ flowchart LR
   check -->|DescribeTasks: subnet of each task| cluster
   check --> q{Every subnet one of<br/>BUILDS_SUBNET_IDS?}
   q -->|yes| keep[Nothing happens]
-  q -->|no, or no subnet| stop[StopTask<br/>'ssd-workshop: outside the build subnets'<br/>log line with the task id]
+  q -->|no| stop[StopTask<br/>'ssd-workshop: outside the build subnets'<br/>log line with the task id]
+  q -->|no subnet yet| age{Older than<br/>5 minutes?}
+  age -->|no| keep
+  age -->|yes| stop
 ```
 
 IAM cannot pin `RunTask` to subnets (accepted risk 1), so the launcher's minute check stops any task of the builds
@@ -941,7 +944,19 @@ aws logs tail ssd-workshop-builds-launcher --since 10m | grep outside-task
 # and the check's own line shows "outside":1 that minute
 ```
 
-A `list-failed` line instead means the access stack with `ecs:ListTasks` is not applied yet. Criteria 1 and 2 are
+Then check that a real build is left alone while it starts (the grace for a task without a subnet,
+`OUTSIDE_NO_SUBNET_GRACE_MS`): start a build from the workshop page right after the deploy (or press Retry on a failed
+one), and while its task is PROVISIONING or PENDING, and for a few minutes after, watch the launcher's log:
+
+```sh
+aws ecs list-tasks --cluster ssd-workshop-builds --desired-status RUNNING   # note the new task's id
+aws logs tail ssd-workshop-builds-launcher --since 10m --follow | grep -E 'outside-task|build-check'
+# expect: no outside-task line for that task id, and "outside":0 on each build-check line; the build finishes
+```
+
+A `list-failed` line instead means the access stack with `ecs:ListTasks` is not applied yet. A `list-truncated`
+line means the cluster had more than 1,000 tasks of one desired status (`CLUSTER_LIST_MAX_PAGES`); the listed ones
+are still checked. Criteria 1 and 2 are
 tests with the fakes (`platform/api/launcher/launcher.test.ts`, "auto-stop outside the build subnets"), criterion 3 a
 synth test (`infra/lib/app.test.ts`, "ticket 3.14 criterion 3").
 
