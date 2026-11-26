@@ -521,3 +521,105 @@ main:has(#screen-spec:not([hidden])) {
   color: var(--muted);
   font-size: 0.85rem;
 }
+
+/* Step 4's change requests (ticket 3.8): the count, the ideas as buttons, the spec update and its two buttons. */
+#screen-live h3 {
+  margin: 1.5rem 0 0.5rem;
+}
+#screen-live .behind h3 {
+  margin-top: 0;
+}
+.changes-left {
+  font-weight: 600;
+}
+.live-failed {
+  border-left-color: var(--error);
+}
+.live-failed p {
+  margin: 0 0 0.5rem;
+  color: var(--error);
+  font-weight: 600;
+}
+.live-failed .reasons {
+  margin: 0;
+}
+.suggestions {
+  margin-top: 1rem;
+}
+.suggestions-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+button.suggestion {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--accent);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  text-align: start;
+}
+.proposal {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 2px solid var(--accent);
+  border-radius: 0.5rem;
+  background: var(--bg);
+}
+.proposal:focus {
+  outline: none;
+}
+#screen-live .proposal h3 {
+  margin: 0 0 0.25rem;
+}
+.proposal h4 {
+  margin: 0.5rem 0 0.25rem;
+  font-size: 1rem;
+}
+.proposal ul {
+  margin: 0 0 0.75rem;
+  padding-left: 1.25rem;
+}
+.proposal details {
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+}
+.proposal summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.proposal-spec h5 {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.95rem;
+}
+.proposal-spec pre {
+  white-space: pre-wrap;
+}
+.proposal-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+.proposal-buttons button {
+  padding: 0.7rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+}
+.proposal-buttons .primary {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.proposal-buttons .secondary {
+  border: 2px solid var(--accent);
+  background: none;
+  color: var(--accent);
+}
+.proposal .help {
+  margin: 0;
+  font-size: 0.9rem;
+}

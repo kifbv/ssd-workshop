@@ -242,3 +242,9 @@ paths:
   `removeEmailAddresses` itself drops `\p{Cc}` other than `\t\n\r` first, so multi-line text is covered too),
   and cut with `Array.from` (code points) so an emoji at the cut never leaves a lone surrogate. A read-only GitHub step
   gets a `contents: read` token (`repositoryToken(..., "read")`), never the builder's write one.
+- One page, several screens on one conversation (step 4, ticket 3.8): a reply on a screen that can start a build is followed
+  by a read of `GET /api/build` before the conversation (`refreshLive`), so the page follows a queued build to step 3;
+  `loadConversation` fills step 4 only while step 4 shows (`current === "live"`), else a running build opens step 3. A
+  test's mocked API keys handlers by path only: read the query from `call.search` (`?version=3`). A text the page must
+  recognise (Build this change's request) lives in `platform/api/workshop/texts.ts`, never in a module that pulls model
+  code into the browser bundle (`api/conversation/change.ts` re-exports it).

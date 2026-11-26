@@ -8,7 +8,7 @@ import {
   PARTICIPANT_LIMIT_ATTRIBUTES,
   settingsFromItem,
 } from "./settings.js";
-import { changesLeftText, changesUsedText, PHASE_3_TEXTS, queuePositionText } from "./texts.js";
+import { CHANGE_BUILD_REQUEST, changeBuildFailedText, changeBuildingText, changesLeftText, changesUsedText, PHASE_3_TEXTS, proposalVersionText, queuePositionText } from "./texts.js";
 
 const VALID = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15 };
 
@@ -101,8 +101,28 @@ describe("phase 3 texts (ticket 3.2)", () => {
     expect(queuePositionText(0)).toBe("Your build is next in the queue.");
   });
 
+  it("ticket 3.8: names the change being built or failed, and keeps Build this change's request text", () => {
+    expect(CHANGE_BUILD_REQUEST).toBe("Please build this change.");
+    expect(changeBuildingText(2)).toMatch(/^Change 2: the AI is changing your app/);
+    expect(changeBuildingText(undefined)).toMatch(/^Your change: /);
+    expect(changeBuildFailedText(3)).toMatch(/^Change 3 could not be built, so your app still shows the version before it\./);
+    expect(changeBuildFailedText(undefined)).toMatch(/^Your last change could not be built/);
+    expect(proposalVersionText(3)).toBe("Version 3, not built yet");
+  });
+
   it("names no amount, address or other participant (plain text for textContent)", () => {
-    const all = [...Object.values(PHASE_3_TEXTS), changesUsedText(5), changesLeftText(1, 5), queuePositionText(2)];
+    const all = [
+      ...Object.values(PHASE_3_TEXTS),
+      changesUsedText(5),
+      changesLeftText(1, 5),
+      queuePositionText(2),
+      CHANGE_BUILD_REQUEST,
+      changeBuildingText(2),
+      changeBuildingText(undefined),
+      changeBuildFailedText(2),
+      changeBuildFailedText(undefined),
+      proposalVersionText(3),
+    ];
     for (const text of all) {
       expect(text, text).not.toMatch(/[$@<>]/);
       expect(text, text).not.toMatch(/\{|\}/);

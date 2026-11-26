@@ -1,7 +1,8 @@
 // Sign-in screens (ticket 1.6): email, code, nickname, then the step screen; step 1, Clarify (ticket
-// 1.8), step 2, Spec and approval (ticket 1.9), step 3, Build (ticket 2.10), and step 4, Live (tickets 2.10 and 2.11). The rules for each API answer are in ./flow.ts,
-// ./chat.ts and ./spec-view.ts; this file only wires them to the page. Both steps share one
-// conversation, polling and Send form logic, each on its own elements (`VIEWS`).
+// 1.8), step 2, Spec and approval (ticket 1.9), step 3, Build (ticket 2.10), and step 4, Live (tickets 2.10 and 2.11) with
+// its change requests (ticket 3.8). The rules for each API answer are in ./flow.ts, ./chat.ts, ./spec-view.ts,
+// ./build-view.ts and ./live-view.ts; this file only wires them to the page. Steps 1, 2 and 4 share one conversation,
+// polling and Send form logic, each on its own elements (`VIEWS`).
 //
 // Personal data: the email address lives only in `pendingEmail` (memory) between asking for a
 // code and checking it. It never goes into the URL, storage, a cookie or the console.
@@ -40,8 +41,18 @@ import type { DiagramApi } from "./diagram.js";
 import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
 import { qrModules, qrSvgPath } from "./qr.js";
-import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, stageStates, type Build } from "./build-view.js";
-import { PHASE_3_TEXTS } from "../../api/workshop/texts.js";
+import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, showsStepFour, stageStates, type Build } from "./build-view.js";
+import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText } from "../../api/workshop/texts.js";
+import {
+  CHANGE_LOOP_ALT,
+  CHANGE_LOOP_DIAGRAM,
+  changeActionResult,
+  proposalResult,
+  stepFourMessages,
+  stepFourView,
+  type Proposal,
+} from "./live-view.js";
+import type { Conversation } from "./chat.js";
 
 type ScreenName = Screen | "loading";
 
@@ -91,6 +102,7 @@ let current: ScreenName = "loading";
 /** Shows one screen and moves the focus to its first field, or to its heading. Leaving step 3 stops its polling. */
 function show(name: ScreenName, focusId?: string): void {
   if (name !== "build") stopBuildPolling();
+  if (name !== "live") stopSuggestionsReread();
   current = name;
   for (const section of document.querySelectorAll<HTMLElement>("[data-screen]")) {
     section.hidden = section.id !== `screen-${name}`;
@@ -194,11 +206,11 @@ function showMe(me: Me): void {
   void loadConversation();
 }
 
-// ---- Steps 1 and 2: the conversation (tickets 1.8 and 1.9) ----
+// ---- Steps 1, 2 and 4: the conversation (tickets 1.8, 1.9 and 3.8) ----
 
 /** The elements of one step's conversation. */
 interface View {
-  screen: "step" | "spec";
+  screen: "step" | "spec" | "live";
   chat: string;
   typing: string;
   waitingNotice: string;
@@ -210,7 +222,7 @@ interface View {
   budget: string;
 }
 
-const VIEWS: Record<"step" | "spec", View> = {
+const VIEWS: Record<"step" | "spec" | "live", View> = {
   step: { screen: "step", chat: "chat", typing: "typing", waitingNotice: "waiting-notice", send: "chat-send", flow: "behind-flow", form: "chat-form", input: "chat-input", budget: "chat-budget" },
   spec: {
     screen: "spec",
@@ -222,6 +234,18 @@ const VIEWS: Record<"step" | "spec", View> = {
     form: "spec-chat-form",
     input: "spec-chat-input",
     budget: "spec-chat-budget",
+  },
+  // Ticket 3.8: step 4's change conversation; its stage marks the change loop's figure.
+  live: {
+    screen: "live",
+    chat: "live-chat",
+    typing: "live-typing",
+    waitingNotice: "live-waiting-notice",
+    send: "live-chat-send",
+    flow: "live-diagram",
+    form: "live-chat-form",
+    input: "live-chat-input",
+    budget: "live-chat-budget",
   },
 };
 
@@ -293,7 +317,8 @@ function render(): void {
   budget.hidden = budgetLeft === undefined;
   budget.textContent = budgetLeft === undefined ? "" : budgetLeftText(budgetLeft);
   if (view.screen === "step") renderStepOne();
-  else renderStepTwo();
+  else if (view.screen === "spec") renderStepTwo();
+  else renderStepFour();
 }
 
 /** Step 1: Write my spec (ticket 1.8). */
@@ -353,8 +378,10 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
     stopPolling();
     // A new spec version saved by this reply is brought into view once it is read (live check, ticket 1.9).
     revealNextSpec = true;
-    // The reload brings offersSpec, a new spec version and anything else the poll does not carry.
-    await loadConversation();
+    // The reload brings offersSpec, a new spec version and anything else the poll does not carry. At step 4 the
+    // answer may have queued a change build (Build this change): the build is read first (ticket 3.8).
+    if (view.screen === "live") await refreshLive();
+    else await loadConversation();
     return;
   } else if (result.kind === "signed-out") {
     stopPolling();
@@ -362,7 +389,8 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
     return;
   } else if (result.kind === "lost") {
     stopPolling();
-    await loadConversation();
+    if (view.screen === "live") await refreshLive();
+    else await loadConversation();
     return;
   }
   render();
@@ -398,8 +426,13 @@ async function loadConversation(): Promise<void> {
     await goToOwnStep(view.screen);
     return;
   }
-  // Ticket 2.10: once the readiness check passed, the build is on, and step 3 follows it.
+  // Ticket 2.10: once the readiness check passed, the build is on, and step 3 follows it. Ticket 3.8: on step 4 (shown
+  // only once the build was read live, or a change build failed) the conversation is the change conversation.
   if (conversation.step === "building") {
+    if (view.screen === "live" && current === "live") {
+      await fillStepFour(conversation);
+      return;
+    }
     stopPolling();
     openBuild();
     return;
@@ -471,30 +504,33 @@ function showSpecDocument(spec: SpecVersion): void {
   byId("spec-version").textContent = versionLabel(spec);
   byId("spec-title").textContent = doc.title;
   byId("spec-diagram-text").textContent = doc.diagram;
-  byId("spec-sections").replaceChildren(
-    ...doc.sections.flatMap((section) => {
-      const heading = document.createElement("h4");
-      heading.textContent = section.heading;
-      const blocks = section.blocks.map((block) => {
-        if (block.kind === "paragraph") {
-          const p = document.createElement("p");
-          p.textContent = block.text;
-          return p;
-        }
-        const list = document.createElement("ul");
-        list.append(
-          ...block.items.map((text) => {
-            const li = document.createElement("li");
-            li.textContent = text;
-            return li;
-          }),
-        );
-        return list;
-      });
-      return [heading, ...blocks];
-    }),
-  );
+  byId("spec-sections").replaceChildren(...sectionNodes(doc.sections, "h4"));
   void drawDiagram(doc.diagram, doc.title, ++drawing);
+}
+
+/** A spec's sections as headings, paragraphs and lists, every text set with `textContent`. */
+function sectionNodes(sections: ReturnType<typeof specView>["sections"], headingTag: "h4" | "h5"): HTMLElement[] {
+  return sections.flatMap((section) => {
+    const heading = document.createElement(headingTag);
+    heading.textContent = section.heading;
+    const blocks = section.blocks.map((block) => {
+      if (block.kind === "paragraph") {
+        const p = document.createElement("p");
+        p.textContent = block.text;
+        return p;
+      }
+      const list = document.createElement("ul");
+      list.append(
+        ...block.items.map((text) => {
+          const li = document.createElement("li");
+          li.textContent = text;
+          return li;
+        }),
+      );
+      return list;
+    });
+    return [heading, ...blocks];
+  });
 }
 
 let diagramScript: Promise<DiagramApi> | undefined;
@@ -579,7 +615,8 @@ async function pollBuild(round: number): Promise<void> {
   if (result.kind === "build") {
     setPausedFrom(result.build);
     renderBuild(result.build);
-    if (result.build.status === "live") {
+    // Live, or a change build that failed (the app before it is still live): back to step 4 (ticket 3.8).
+    if (showsStepFour(result.build)) {
       showLive(result.build);
       return;
     }
@@ -591,6 +628,15 @@ async function pollBuild(round: number): Promise<void> {
 
 /** The stages (the current one highlighted), the line on what happens now, the feed and the behind-the-scenes part. */
 function renderBuild(build: Build): void {
+  // Ticket 3.8: a change build says which change it is, and Behind the scenes says it starts from the repository.
+  const change = build.kind === "change";
+  byId("build-intro").hidden = change;
+  const changeLine = byId("build-change");
+  changeLine.hidden = !change;
+  changeLine.textContent = change ? changeBuildingText(build.changeNumber) : "";
+  const behindText = byId("build-behind-text");
+  firstBuildBehindText ??= behindText.textContent ?? "";
+  behindText.textContent = change ? PHASE_3_TEXTS.changeBuildBehind : firstBuildBehindText;
   const states = stageStates(build);
   const failed = build.status === "failed";
   for (const item of byId("build-stages").querySelectorAll<HTMLElement>("li[data-stage]")) {
@@ -645,18 +691,22 @@ function renderBuild(build: Build): void {
   );
 }
 
+/** Step 3's first-build "Behind the scenes" text, as index.html has it (a change build shows another). */
+let firstBuildBehindText: string | undefined;
+
 /**
  * Step 4 (tickets 2.10 and 2.11): the app's address as a link and as a QR code, and the repository link. Only the
  * addresses `parseBuild` validated reach the page, set with `href` and `textContent`; each part stays hidden
- * without its address.
+ * without its address. Ticket 3.8: after a failed change build, the failure and its reasons above them; then the change
+ * conversation, read from `GET /api/conversation`.
  */
 function showLive(build: Build): void {
   const link = byId<HTMLAnchorElement>("live-link");
   const code = byId("live-qr-code");
   if (build.appUrl !== undefined) {
     link.href = build.appUrl;
+    if (link.textContent !== build.appUrl) code.replaceChildren(qrSvg(build.appUrl));
     link.textContent = build.appUrl;
-    code.replaceChildren(qrSvg(build.appUrl));
   } else code.replaceChildren();
   byId("live-address").hidden = build.appUrl === undefined;
   byId("live-qr").hidden = build.appUrl === undefined;
@@ -666,8 +716,257 @@ function showLive(build: Build): void {
     repository.textContent = build.repositoryUrl;
   }
   byId("live-repository").hidden = build.repositoryUrl === undefined;
-  clearMessage("live");
-  show("live", "live-heading");
+  const failed = build.status === "failed";
+  byId("live-failed").hidden = !failed;
+  byId("live-failed-text").textContent = failed ? changeBuildFailedText(build.changeNumber) : "";
+  byId("live-failed-reasons").replaceChildren(
+    ...(failed ? (build.failureReasons ?? []) : []).map((reason) => {
+      const li = document.createElement("li");
+      li.textContent = reason;
+      return li;
+    }),
+  );
+  view = VIEWS.live;
+  if (current !== "live") {
+    // Entering step 4 (a page load, or back from a change build): start from what the API says.
+    stopPolling();
+    messages = [];
+    proposal = null;
+    stepFour = {};
+    suggestionsShown = "";
+    suggestionsRereads = 0;
+    byId<HTMLTextAreaElement>("live-chat-input").value = "";
+    renderSuggestions([]);
+    clearMessage("live");
+    show("live", "live-heading");
+    void drawChangeLoop();
+  }
+  void loadConversation();
+}
+
+// ---- Step 4: change requests (ticket 3.8) ----
+
+/** The step 4 facts of the last conversation read: changes used and the cap, suggestions, the proposed version. */
+let stepFour: Pick<Conversation, "changeRequestsUsed" | "changeRequestsPerPerson" | "suggestions" | "proposedSpecVersion"> = {};
+/** The proposed change on the page (its "What changes" list), or none. */
+let proposal: Proposal | null = null;
+
+/** Shows the change conversation from a conversation read, resumes waiting for a reply, then reads the proposal. */
+async function fillStepFour(conversation: Conversation): Promise<void> {
+  messages = stepFourMessages(conversation.messages);
+  budgetLeft = conversation.budgetLeft;
+  stepFour = {
+    ...(conversation.changeRequestsUsed === undefined ? {} : { changeRequestsUsed: conversation.changeRequestsUsed }),
+    ...(conversation.changeRequestsPerPerson === undefined ? {} : { changeRequestsPerPerson: conversation.changeRequestsPerPerson }),
+    ...(conversation.suggestions === undefined ? {} : { suggestions: conversation.suggestions }),
+    ...(conversation.proposedSpecVersion === undefined ? {} : { proposedSpecVersion: conversation.proposedSpecVersion }),
+  };
+  renderSuggestions(conversation.suggestions ?? []);
+  stopPolling();
+  const pending = conversation.pendingId;
+  if (pending !== undefined) startPolling(pending, conversation.state === "waiting" ? "flagged" : "pending");
+  else render();
+  await loadProposal();
+  rereadForSuggestions();
+}
+
+/** Reads the proposed version when it is not the one on the page, and shows its "What changes" list. */
+async function loadProposal(): Promise<void> {
+  const version = stepFour.proposedSpecVersion;
+  const reveal = revealNextSpec;
+  revealNextSpec = false;
+  if (version === undefined) {
+    proposal = null;
+    render();
+    return;
+  }
+  if (proposal?.version === version) return;
+  const result = proposalResult(await call("GET", `/api/conversation/spec?version=${version}`));
+  if (current !== "live") return;
+  if (result.kind === "signed-out") {
+    stopPolling();
+    showEmail(MESSAGES.signedOut);
+    return;
+  }
+  if (result.kind === "show") {
+    say("live", result.message, result.tone);
+    return;
+  }
+  if (result.kind === "none" || stepFour.proposedSpecVersion !== version) return;
+  proposal = result.proposal;
+  showProposal(result.proposal);
+  render();
+  if (reveal) {
+    const box = byId("proposal");
+    box.scrollIntoView({ block: "start" });
+    box.focus({ preventScroll: true });
+  }
+}
+
+/** Fills the spec update: its version, the "What changes" list, and the whole spec under a fold. */
+function showProposal(update: Proposal): void {
+  byId("proposal-version").textContent = proposalVersionText(update.version);
+  byId("proposal-changes").replaceChildren(
+    ...update.whatChanges.map((line) => {
+      const li = document.createElement("li");
+      li.textContent = line;
+      return li;
+    }),
+  );
+  let nodes: HTMLElement[];
+  try {
+    const doc = specView(update.text);
+    const title = document.createElement("p");
+    const strong = document.createElement("strong");
+    strong.textContent = doc.title;
+    title.append(strong);
+    nodes = [title, ...sectionNodes(doc.sections, "h5")];
+  } catch {
+    const pre = document.createElement("pre");
+    pre.textContent = update.text;
+    nodes = [pre];
+  }
+  byId("proposal-spec-body").replaceChildren(...nodes);
+  byId("proposal-hint").textContent = PHASE_3_TEXTS.proposalHint;
+}
+
+/** The suggestions as shown (joined), so the buttons are made again only when they change (a press keeps its focus). */
+let suggestionsShown = "";
+
+function renderSuggestions(suggestions: readonly string[]): void {
+  const key = suggestions.join("\n");
+  if (key === suggestionsShown && byId("suggestions-list").childElementCount === suggestions.length) return;
+  suggestionsShown = key;
+  byId("suggestions-intro").textContent = PHASE_3_TEXTS.suggestionsIntro;
+  byId("suggestions-list").replaceChildren(
+    ...suggestions.map((text) => {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggestion";
+      button.textContent = text;
+      // Fills the box only: nothing is sent until Send.
+      button.addEventListener("click", () => {
+        const input = byId<HTMLTextAreaElement>("live-chat-input");
+        input.value = text;
+        clearMessage("live");
+        input.focus();
+      });
+      li.append(button);
+      return li;
+    }),
+  );
+}
+
+/** Step 4's own parts: changes left, the used-up line, the suggestions, the spec update and its buttons, the form. */
+function renderStepFour(): void {
+  const pending = waiting === null ? undefined : messages.find((m) => m.id === waiting?.id);
+  const state = stepFourView(stepFour, proposal, pending);
+  const count = byId("changes-left");
+  count.hidden = state.countText === undefined;
+  count.textContent = state.countText ?? "";
+  const usedUp = byId("changes-used");
+  usedUp.hidden = state.usedUpText === undefined;
+  usedUp.textContent = state.usedUpText ?? "";
+  byId("changes-intro").hidden = !state.showForm;
+  byId("live-chat-form").hidden = !state.showForm;
+  byId("suggestions").hidden = !state.showSuggestions;
+  byId("proposal").hidden = !state.showProposal;
+  byId<HTMLButtonElement>("build-change-button").disabled = waiting !== null;
+  byId<HTMLButtonElement>("discard-change-button").disabled = waiting !== null;
+  byId("live-typing-text").textContent = state.typingText;
+}
+
+/**
+ * Re-reads the build, then shows what it says: step 3 while a build runs (Build this change queued one, ticket 3.8),
+ * else step 4 with the conversation read again. A missing build or a passing problem keeps step 4.
+ */
+async function refreshLive(): Promise<void> {
+  const result = buildResult(await call("GET", "/api/build"));
+  if (result.kind === "signed-out") {
+    stopPolling();
+    showEmail(MESSAGES.signedOut);
+    return;
+  }
+  if (result.kind === "build") {
+    setPausedFrom(result.build);
+    if (showsStepFour(result.build)) showLive(result.build);
+    else openBuild();
+    return;
+  }
+  if (result.kind === "show") say("live", result.message, result.tone);
+  await loadConversation();
+}
+
+/** What Build this change and Not this one do with their answer. */
+async function afterChangeAction(result: ReturnType<typeof changeActionResult>): Promise<void> {
+  if (result.kind === "done") {
+    await loadConversation();
+  } else if (result.kind === "gone") {
+    say("live", PHASE_3_TEXTS.proposalGone, "info");
+    proposal = null;
+    await loadConversation();
+  } else if (result.kind === "refused") {
+    say("live", result.message, "error");
+    if (result.reason === "build-running" || result.reason === "not-live") await refreshLive();
+    else await loadConversation();
+  } else if (result.kind === "signed-out") {
+    stopPolling();
+    showEmail(MESSAGES.signedOut);
+  } else say("live", result.message, result.tone);
+}
+
+/**
+ * The suggestions are written by the AI once the app is first live, a few seconds after the page may have read the
+ * conversation: while none are there (and changes are left), the page reads the conversation again every 5 s, at most
+ * 12 times (a minute), only while step 4 shows and nothing is in flight.
+ */
+const SUGGESTIONS_REREAD_MS = 5000;
+const SUGGESTIONS_REREADS = 12;
+let suggestionsTimer: number | undefined;
+let suggestionsRereads = 0;
+
+function stopSuggestionsReread(): void {
+  if (suggestionsTimer !== undefined) window.clearTimeout(suggestionsTimer);
+  suggestionsTimer = undefined;
+}
+
+function rereadForSuggestions(): void {
+  const missing = (stepFour.suggestions?.length ?? 0) === 0;
+  const left = stepFour.changeRequestsUsed === undefined || stepFour.changeRequestsPerPerson === undefined || stepFour.changeRequestsUsed < stepFour.changeRequestsPerPerson;
+  if (!missing || !left || current !== "live" || suggestionsTimer !== undefined || suggestionsRereads >= SUGGESTIONS_REREADS) return;
+  suggestionsTimer = window.setTimeout(() => {
+    suggestionsTimer = undefined;
+    suggestionsRereads++;
+    if (current === "live" && waiting === null) void loadConversation();
+    else rereadForSuggestions();
+  }, SUGGESTIONS_REREAD_MS);
+}
+
+/** Draws the change loop in step 4's Behind the scenes box, once per page (Mermaid's diagram.js, loaded the first time). */
+let changeLoopDrawn = false;
+
+async function drawChangeLoop(): Promise<void> {
+  if (changeLoopDrawn) return;
+  changeLoopDrawn = true;
+  const status = byId("live-diagram-status");
+  const img = byId<HTMLImageElement>("live-diagram-img");
+  byId("live-diagram-text").textContent = CHANGE_LOOP_DIAGRAM;
+  status.textContent = SPEC_TEXTS.drawing;
+  try {
+    const picture = await (await diagramApi()).render(CHANGE_LOOP_DIAGRAM);
+    img.width = picture.width;
+    img.height = picture.height;
+    img.alt = CHANGE_LOOP_ALT;
+    img.src = pictureUrl(picture);
+    await img.decode();
+    img.hidden = false;
+    status.textContent = "";
+  } catch {
+    changeLoopDrawn = false;
+    img.hidden = true;
+    status.textContent = PHASE_3_TEXTS.changeLoopNoDiagram;
+  }
 }
 
 /** The QR code for `text` as an SVG element: a white square and one black path (no markup, no style attribute). */
@@ -708,10 +1007,15 @@ function sendMessage(): void {
     if (result.kind === "sent") {
       input.value = "";
       localVersion++;
-      messages.push({ id: result.id, author: "participant", text, status: "pending", step: screen === "spec" ? "spec" : "clarify" });
+      messages.push({ id: result.id, author: "participant", text, status: "pending", step: screen === "spec" ? "spec" : screen === "live" ? "building" : "clarify" });
       startPolling(result.id, "pending");
     } else if (result.kind === "busy" || result.kind === "waiting" || result.kind === "approved") {
       await loadConversation();
+    } else if (result.kind === "change-refused") {
+      // Ticket 3.8: all changes used (the page shows it), or a build running or no live app (the build is read again).
+      say(screen, result.message, "error");
+      if (result.reason === "no-changes-left") await loadConversation();
+      else await refreshLive();
     } else if (result.kind === "no-nickname") {
       await goToOwnStep(screen);
     } else if (result.kind === "signed-out") {
@@ -862,6 +1166,23 @@ function wire(): void {
       if (!byId("screen-spec").hidden) render();
     });
   });
+
+  // Ticket 3.8: Build this change and Not this one, on the version on the page.
+  for (const [id, path] of [["build-change-button", "/api/conversation/change/build"], ["discard-change-button", "/api/conversation/change/discard"]] as const) {
+    const button = byId<HTMLButtonElement>(id);
+    button.addEventListener("click", () => {
+      const update = proposal;
+      if (update === null || waiting !== null) return;
+      clearMessage("live");
+      void whileBusy(button, async () => {
+        const result = changeActionResult(await call("POST", path, { version: update.version }));
+        if (result.kind === "done" && id === "discard-change-button") proposal = null;
+        await afterChangeAction(result);
+      }).finally(() => {
+        if (current === "live") render();
+      });
+    });
+  }
 
   // Sign out (ticket 3.1): the API deletes the session and clears the cookie; the page stops polling.
   const signOutButton = byId<HTMLButtonElement>("sign-out-button");

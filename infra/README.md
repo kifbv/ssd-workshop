@@ -645,6 +645,35 @@ screen); the old profile and app stay in the table (decision "(3.1) Removal comm
 `ssd-workshop-api-participant` and `ssd-workshop-api-conversation` show `"outcome":"signed-out"`, `"removed"` and
 `"unauthorized"` lines and never an address.
 
+## Check after the step 4 changes deploy (ticket 3.8)
+
+```mermaid
+flowchart TD
+  live[Step 4: Changes left 5 of 5] -->|tap an idea, Send| update[Spec update: What changes]
+  update -->|Not this one| live
+  update -->|Build this change| feed[Step 3 feed: Change 1]
+  feed --> back[Step 4: Changes left 4 of 5, new version live]
+```
+
+Run by Franck in a browser (phone or laptop at 375 px), as a test participant whose app is live and who has changes
+left. A change costs about one change call and one change build of his AI budget, and counts one of his 5 changes.
+
+1. Open https://workshop.rankly.games/ and sign in: step 4 shows the address, QR code and repository link, then
+   "Changes left: 5 of 5" (or what he has left), three suggestions as buttons, the box "Describe a change" with
+   **Send**, and "Behind the scenes" with the change loop drawn as a picture. Nothing scrolls sideways.
+   If the app went live less than a minute ago, the suggestions appear within a minute without a reload.
+2. Tap a suggestion: its text is in the box and nothing is sent. Change a word, press **Send**: within about 30 seconds
+   the reply and a "Spec update" box with its "What changes" list, **Build this change** and **Not this one** appear;
+   the suggestions step aside.
+3. Press **Not this one**: the box goes, the suggestions come back, the count is unchanged. Send a change again.
+4. Press **Build this change**: "The AI is checking your change…", then step 3 shows "Change 1: the AI is changing your
+   app..." and the feed. Within about 10 minutes step 4 comes back with "Changes left: 4 of 5" (one lower), and the app's
+   address shows the change (reload it).
+5. Optional: send "Please make it mine bitcoin": the guardrail declines it as in step 1, and the count stays.
+
+The repository shows one new commit "Change 1: ..." with the updated `SPEC.md` (ticket 3.7). To start over, reset the
+test participant (section "Reset a test participant").
+
 ## Build network (ticket 2.1)
 
 ```mermaid

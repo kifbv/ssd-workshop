@@ -38,6 +38,13 @@ export interface Conversation {
   paused?: true;
   /** Ticket 3.5: the server could not read whether it is paused (keep the line as it shows). */
   pausedUnknown?: true;
+  /** Ticket 3.8 (from 3.6): at step 4, the changes built so far and the cap ("Changes left: 3 of 5"). */
+  changeRequestsUsed?: number;
+  changeRequestsPerPerson?: number;
+  /** Ticket 3.8 (from 3.6): the three suggested changes, once the AI wrote them. */
+  suggestions?: string[];
+  /** Ticket 3.8 (from 3.6): the proposed change's spec version, waiting for Build this change or Not this one. */
+  proposedSpecVersion?: number;
 }
 
 /** Ticket 3.5: what an answer says of the global Stop: paused, unknown (the server's read failed), or neither (running). */
@@ -97,7 +104,7 @@ function parseMessage(value: unknown): ChatMessage | undefined {
 export function parseConversation(body: unknown): Conversation | undefined {
   const b = record(body);
   if (b === undefined) return undefined;
-  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft } = b;
+  const { step, state, messages, pendingId, latestSpecVersion, approvedSpecVersion, budgetLeft, changeRequestsUsed, changeRequestsPerPerson, suggestions, proposedSpecVersion } = b;
   if (typeof step !== "string" || (state !== "open" && state !== "waiting") || !Array.isArray(messages)) return undefined;
   const parsed = messages.map(parseMessage);
   if (parsed.some((m) => m === undefined)) return undefined;
@@ -110,8 +117,16 @@ export function parseConversation(body: unknown): Conversation | undefined {
     ...(isVersion(approvedSpecVersion) ? { approvedSpecVersion } : {}),
     ...(typeof budgetLeft === "number" && Number.isFinite(budgetLeft) && budgetLeft >= 0 ? { budgetLeft } : {}),
     ...pausedFlags(b),
+    // Ticket 3.8: step 4's facts; the count and the cap only together, each a whole number (the cap from 1).
+    ...(isCount(changeRequestsUsed) && isCount(changeRequestsPerPerson) && changeRequestsPerPerson >= 1 ? { changeRequestsUsed, changeRequestsPerPerson } : {}),
+    ...(Array.isArray(suggestions) ? { suggestions: suggestions.filter((t): t is string => typeof t === "string" && t.trim() !== "").slice(0, MAX_SUGGESTIONS) } : {}),
+    ...(isVersion(proposedSpecVersion) ? { proposedSpecVersion } : {}),
   };
 }
+
+/** Ticket 3.8: step 4 shows at most this many suggested changes (the API stores exactly 3). */
+export const MAX_SUGGESTIONS = 3;
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 
 /** Ticket 3.3: the line under the conversation, "AI budget left: $3.20". */
 export function budgetLeftText(dollars: number): string {
@@ -132,7 +147,15 @@ const reasonOf = (body: unknown): unknown => record(body)?.["reason"];
 /** `POST /api/conversation/messages`. */
 export function sendResult(
   answer: ApiAnswer,
-): { kind: "sent"; id: string } | { kind: "busy" } | { kind: "waiting" } | { kind: "no-nickname" } | { kind: "approved" } | { kind: "signed-out" } | Show {
+):
+  | { kind: "sent"; id: string }
+  | { kind: "busy" }
+  | { kind: "waiting" }
+  | { kind: "no-nickname" }
+  | { kind: "approved" }
+  | { kind: "change-refused"; reason: ChangeRefusal; message: string }
+  | { kind: "signed-out" }
+  | Show {
   if (answer.status === 202) {
     const id = record(answer.body)?.["id"];
     return typeof id === "string" ? { kind: "sent", id } : show(MESSAGES.failed);
@@ -145,11 +168,17 @@ export function sendResult(
     if (reason === "no-nickname") return { kind: "no-nickname" };
     // Ticket 1.9: the spec was approved (in another tab): the page shows the approved state.
     if (reason === "approved") return { kind: "approved" };
+    // Ticket 3.8: step 4's refusals (all changes used, a build running, no live app): the API's words, then a re-read.
+    if (isChangeRefusal(reason)) return { kind: "change-refused", reason, message: messageOf(answer.body) ?? MESSAGES.failed };
   }
   if (answer.status === 400) return show(messageOf(answer.body) ?? MESSAGES.failed);
   if (answer.status === 401) return { kind: "signed-out" };
   return common(answer);
 }
+
+/** Ticket 3.8 (from 3.6): why a change request or Build this change was refused (409). */
+export type ChangeRefusal = "no-changes-left" | "build-running" | "not-live";
+export const isChangeRefusal = (reason: unknown): reason is ChangeRefusal => reason === "no-changes-left" || reason === "build-running" || reason === "not-live";
 
 /** `GET /api/conversation/messages/{id}`. A passing failure (network, 429, 5xx) keeps polling. */
 export function pollResult(

@@ -22,7 +22,8 @@ export const CHANGE_LINE_CHARS = 160;
  * `request: "change-build"`, an attribute only that route writes (a participant's own message never has it): the worker
  * runs the readiness check on the proposed version for exactly this text with that mark, never for a participant's text.
  */
-export const CHANGE_BUILD_REQUEST = "Please build this change.";
+// Ticket 3.8: the text lives with the phase 3 texts, so the step 4 page can recognise the request in flight.
+export { CHANGE_BUILD_REQUEST } from "../workshop/texts.js";
 
 /** The reply when the check passes: the change build is queued in the same transaction. */
 export const CHANGE_READY_REPLY = "Your change is ready to build. The build is starting now: the AI changes your app to match the new spec.";
