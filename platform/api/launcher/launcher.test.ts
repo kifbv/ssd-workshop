@@ -357,6 +357,18 @@ describe("launching a change build (ticket 3.7)", () => {
     expect(build.changeList).toEqual(["Adds a weekly chart sent to [email removed]", "Shows the coach ([email removed]) on the home screen"]);
   });
 
+  it("access review of 3.7 (try 3): WHEN a control character sits inside an address in the text or the list THEN the build's stored input holds none", async () => {
+    const s = changeSetup();
+    const spec = must(s.table.specs.get(`${PARTICIPANT}#3`));
+    spec.text = "# Run log\n\nQuestions go to ada@example\u0001.org or bob\u0000@example.org.\n\tThanks";
+    spec.whatChanges = ["Adds a chart sent to ada@example\u0001.org", "Shows bob\u0000@example.org\non the home screen"];
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("started");
+    const build = must(s.table.builds.get(CHANGE));
+    expect(JSON.stringify([build.changeSpec, build.changeList])).not.toMatch(/ada|bob|example\.org/);
+    expect(build.changeSpec).toBe("# Run log\n\nQuestions go to [email removed] or [email removed].\n\tThanks");
+    expect(build.changeList).toEqual(["Adds a chart sent to [email removed]", "Shows [email removed] on the home screen"]);
+  });
+
   it("ignores a change build whose participant is not the conversation's owner: no spec read across participants, no task", async () => {
     const s = changeSetup();
     // Another participant with their own approved version 3 and the same nickname on their profile.

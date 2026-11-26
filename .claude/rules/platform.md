@@ -238,6 +238,7 @@ paths:
   build from `SPEC#<specVersion>`, in attributes only it may write), never a read right in another partition: IAM's
   `dynamodb:Attributes` cannot tell a spec's `text` from a message's `text` in `PARTICIPANT#*`.
 - Cleaning untrusted text into one line (3.7's `plainLineWithoutEmails`): remove control and format characters (`\p{Cc}`,
-  `\p{Cf}`: bidi overrides, zero-width) BEFORE removing email addresses (else `ada@example<U+0001>.org` slips through),
+  `\p{Cf}`: bidi overrides, zero-width) BEFORE removing email addresses (else `ada@example<U+0001>.org` slips through;
+  `removeEmailAddresses` itself drops `\p{Cc}` other than `\t\n\r` first, so multi-line text is covered too),
   and cut with `Array.from` (code points) so an emoji at the cut never leaves a lone surrogate. A read-only GitHub step
   gets a `contents: read` token (`repositoryToken(..., "read")`), never the builder's write one.

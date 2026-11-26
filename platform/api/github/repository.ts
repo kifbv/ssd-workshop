@@ -81,9 +81,16 @@ const AT_ENTITY = /&(?:#0*64|#x0*40|commat);?/giu;
 const DOT_ENTITY = /&(?:#0*46|#x0*2e|period);?/giu;
 export const EMAIL_REMOVED = "[email removed]";
 
-/** The spec as published: every email-shaped text replaced (decision "(2.6) Email addresses removed from SPEC.md"). */
+/** Control characters other than tab, line feed and carriage return (C0, DEL, C1): removed first, so none can split an address. */
+const CONTROL_EXCEPT_LAYOUT = /[^\P{Cc}\t\n\r]/gu;
+
+/**
+ * The spec as published: control characters other than `\t`, `\n` and `\r` removed (access review of 3.7), then every
+ * email-shaped text replaced (decision "(2.6) Email addresses removed from SPEC.md").
+ */
 export function removeEmailAddresses(text: string): string {
   return text
+    .replace(CONTROL_EXCEPT_LAYOUT, "")
     .normalize("NFC")
     .replace(AT_ENTITY, "@")
     .replace(DOT_ENTITY, ".")

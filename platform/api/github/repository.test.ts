@@ -19,6 +19,8 @@ import {
   repositoryNameFor,
   withSpec,
   removeEmailAddresses,
+  EMAIL_REMOVED,
+  plainLineWithoutEmails,
   type RepositoryFile,
 } from "./repository.js";
 import { loadTemplateFiles, templateDir } from "./template.js";
@@ -128,6 +130,15 @@ describe("removeEmailAddresses", () => {
       expect(performance.now() - start, text.slice(0, 12)).toBeLessThan(1000);
     }
   });
+
+  it("removes control characters other than line breaks and tabs first, so none can split an address", () => {
+    expect(removeEmailAddresses("ada@example\u0001.org")).toBe(EMAIL_REMOVED);
+    expect(removeEmailAddresses("ada\u0000@example.org")).toBe(EMAIL_REMOVED);
+    expect(removeEmailAddresses("a\u007F\u0085b ada@exa\u009Bmple.org")).toBe(`ab ${EMAIL_REMOVED}`);
+    expect(removeEmailAddresses("# Title\r\n\n\t- item\u0007\n")).toBe("# Title\r\n\n\t- item\n");
+  });
+
+  it("plainLineWithoutEmails drops a lone surrogate", () => expect(plainLineWithoutEmails("x\uD800y")).toBe("xy"));
 
   it("withSpec writes the spec with its addresses removed", () => {
     const files = withSpec(template, "Owner: ada@example.org\n");

@@ -63,7 +63,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/app.js";
-import { builderToken, GIT_ID_PATTERN, prepareRepository, readRepositoryMain, removeEmailAddresses, type RepositoryFile } from "../github/repository.js";
+import { builderToken, GIT_ID_PATTERN, plainLineWithoutEmails, prepareRepository, readRepositoryMain, removeEmailAddresses, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN, newQueueKey } from "../keys.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
@@ -479,8 +479,8 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
       baseCommit = await readRepositoryMain(credentials, nickname, deps.github);
       if (!GIT_ID_PATTERN.test(baseCommit)) throw new LaunchFailure(LAUNCH_SERVICE_REASON);
       // Access review of 3.7: the input stored on the build (which the task beside the AI agent reads) holds no email
-      // address, neither in the spec's text nor in the list.
-      const input = { spec: removeEmailAddresses(spec.text), whatChanges: whatChanges.map(removeEmailAddresses) };
+      // address, neither in the spec's text nor in the list (each line made one plain line first).
+      const input = { spec: removeEmailAddresses(spec.text), whatChanges: whatChanges.map(plainLineWithoutEmails) };
       if (!(await deps.records.setChangeInput(buildId, attemptId, input, deps.now().toISOString()))) {
         throw new LaunchFailure(LAUNCH_SERVICE_REASON);
       }
