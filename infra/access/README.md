@@ -107,7 +107,7 @@ flowchart LR
 | `BuildsFromTheirSendersOnly` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24). Deny `sqs:SendMessage` on `ssd-workshop-builds*` (launch queue, its dead-letter queue, check queue) to every workload role but the AI worker (`ssd-workshop-api-ai-worker`, the launch queue's sender) and the check's scheduler role (`ssd-workshop-builds-check-scheduler`, the check queue's sender): a launch message makes the launcher mint a token and start a task. |
 | `PullImages` | Pull images only from `ssd-workshop-*` repositories. |
 | `InvalidateWorkshopSite` | Invalidate only distributions tagged `project=ssd-workshop`. |
-| `AccountWideServiceCalls` | ECR login token and X-Ray traces; neither has a resource scope. |
+| `AccountWideServiceCalls` | ECR login token and X-Ray traces; neither has a resource scope. `ecs:ListTasks` (ticket 3.14, Franck's yes 2026-11-26): the launcher's minute check lists the builds cluster's tasks to stop any outside the build subnets; it returns task ARNs only, and the launcher's own CDK grant limits it to the builds cluster (`ecs:cluster`). A tighter boundary statement did not fit in the 6,144 characters. |
 | `WorkshopMetrics` | Metrics only in the CloudWatch namespace `ssd-workshop`. |
 | `PassWorkshopRoles` | A role may hand only `/ssd-workshop/` roles, and only to ECS tasks. |
 | `ServicesInWorkshopSubnetsOnly` | Deny, as in the deploy policies: ECS services (Express Gateway services included) only in the two workshop subnets. The boundary grants no service rights today; the deny keeps it so if it ever does. |
