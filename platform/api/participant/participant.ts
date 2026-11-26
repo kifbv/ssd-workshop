@@ -100,6 +100,8 @@ export type ParticipantRoute = "me" | "nickname" | "participant" | "sign-out" | 
 export type ParticipantOutcome =
   | "ok"
   | "signed-out"
+  /** Ticket 3.24 try 3: signed out, but the revocation after the session's delete failed every try. */
+  | "signed-out-revoke-failed"
   | "unauthorized"
   /** Refused because the person's allow-list entry is gone: their session was deleted (ticket 3.1). */
   | "removed"
@@ -231,13 +233,16 @@ async function route(
   }
   const { participant } = session;
   switch (which) {
-    case "sign-out":
+    case "sign-out": {
       if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
       // Ticket 3.24: the caller's app write tokens first (all of them, from every session), so a failure leaves them
       // signed in to try again rather than signed out with tokens still working; a second pass after the session's
       // delete ends any token made in between (signOutWithAppTokens).
-      await signOutWithAppTokens(deps.store, participant.id, session.tokenHash);
-      return { outcome: "signed-out", response: withClearedCookie(jsonResponse(200, { message: SIGNED_OUT_MESSAGE })) };
+      // Try 3: a failure of that last pass (after its retries) still answers the sign-out as done (the session is gone,
+      // nothing for the person to retry) and is logged by its outcome name only.
+      const signedOut = await signOutWithAppTokens(deps.store, participant.id, session.tokenHash);
+      return { outcome: signedOut === "done" ? "signed-out" : "signed-out-revoke-failed", response: withClearedCookie(jsonResponse(200, { message: SIGNED_OUT_MESSAGE })) };
+    }
     case "me":
       return { outcome: "ok", response: jsonResponse(200, recordBody(participant)) };
     case "participant":

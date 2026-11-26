@@ -26,6 +26,7 @@ import {
   APP_TOKEN_LIST_READ_ATTRIBUTES,
   APP_TOKEN_LIST_UPDATE_ATTRIBUTES,
   APP_TOKEN_PUT_ATTRIBUTES,
+  APP_TOKEN_PROFILE_CHECK_ATTRIBUTES,
   APP_TOKEN_READ_ATTRIBUTES,
   APP_TOKEN_SESSION_CHECK_ATTRIBUTES,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
@@ -461,6 +462,18 @@ export class ApiStack extends Stack {
         conditions: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_SESSION_CHECK_ATTRIBUTES] },
+        },
+      }),
+    );
+    // Ticket 3.24 try 3 (access review L1): ... and that the caller's profile is not marked removed from the allow-list.
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:ConditionCheckItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_PROFILE_CHECK_ATTRIBUTES] },
         },
       }),
     );

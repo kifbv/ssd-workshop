@@ -457,6 +457,23 @@ describe("app write tokens: POST /api/app-tokens (ticket 3.24)", () => {
     expect(s.logs.at(-1)).toEqual({ event: "participant", route: "app-token", outcome: "unauthorized" });
   });
 
+  it("WHEN the revocation after the session's delete keeps failing THEN the sign-out still answers 200, logged by outcome name only (ticket 3.24 try 3)", async () => {
+    const s = live();
+    const revoke = s.table.revokeAppTokens.bind(s.table);
+    let calls = 0;
+    s.table.revokeAppTokens = async (participantId: string) => {
+      calls += 1;
+      if (calls > 1) throw Object.assign(new Error("throttled"), { name: "ThrottlingException" });
+      return revoke(participantId);
+    };
+    const out = await handleParticipantRequest({ routeKey: SIGN_OUT_ROUTE, cookies: cookie(THEIRS), headers: { "content-type": "application/json" }, body: "{}" }, s.deps);
+    expect(out.statusCode).toBe(200);
+    expect(out.cookies?.join(";")).toContain("Max-Age=0");
+    expect(s.table.sessions.has(hashToken(THEIRS))).toBe(false);
+    expect(calls).toBe(4);
+    expect(s.logs.at(-1)).toEqual({ event: "participant", route: "sign-out", outcome: "signed-out-revoke-failed" });
+  });
+
   it("keeps the session when revoking the tokens fails on sign-out (500), so the person can try again", async () => {
     const s = live();
     s.table.failOn = "revokeAppTokens";

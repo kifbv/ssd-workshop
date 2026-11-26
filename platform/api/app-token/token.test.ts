@@ -2,7 +2,17 @@
 import { describe, expect, it } from "vitest";
 import type { HttpRequest } from "../http.js";
 import { FakeAppTokenStore } from "./fakes.js";
-import { APP_TOKEN_TTL_SECONDS, appTokenExpiry, checkAppWrite, hashAppToken, newAppToken, readBearerToken, APP_TOKEN_PATTERN } from "./token.js";
+import {
+  APP_TOKEN_TTL_SECONDS,
+  appTokenExpiry,
+  checkAppWrite,
+  hashAppToken,
+  newAppToken,
+  readBearerToken,
+  APP_TOKEN_PATTERN,
+  LAST_REVOKE_ATTEMPTS,
+  signOutWithAppTokens,
+} from "./token.js";
 
 const NOW = new Date("2026-11-26T10:00:00.000Z");
 const NOW_S = NOW.getTime() / 1000;
@@ -57,5 +67,49 @@ describe("app write tokens (ticket 3.24)", () => {
     await expect(checkAppWrite(withAuth(`Bearer ${TOKEN}`), "ada", atExpiry, NOW)).resolves.toEqual({ ok: false, reason: "expired" });
     const second = store({ expiresAt: NOW_S + 1 });
     await expect(checkAppWrite(withAuth(`Bearer ${TOKEN}`), "ada", second, NOW)).resolves.toMatchObject({ ok: true });
+  });
+});
+
+describe("sign-out's last revocation (ticket 3.24 try 3)", () => {
+  /** A sign-out store whose revocations fail as scripted (true = throws), recording the calls in order. */
+  function scripted(failures: boolean[]) {
+    const calls: string[] = [];
+    const store = {
+      createAppToken: () => Promise.reject(new Error("unused")),
+      revokeAppTokens: async () => {
+        calls.push("revoke");
+        if (failures.shift() === true) throw Object.assign(new Error("throttled"), { name: "ThrottlingException" });
+        return 0;
+      },
+      deleteSession: async () => {
+        calls.push("delete-session");
+      },
+    };
+    return { store, calls };
+  }
+
+  it("revokes, deletes the session, revokes again: done", async () => {
+    const { store, calls } = scripted([]);
+    await expect(signOutWithAppTokens(store, "p-1", "h")).resolves.toBe("done");
+    expect(calls).toEqual(["revoke", "delete-session", "revoke"]);
+  });
+
+  it("WHEN the first revocation fails THEN it throws before the session is deleted (the person stays signed in to try again)", async () => {
+    const { store, calls } = scripted([true]);
+    await expect(signOutWithAppTokens(store, "p-1", "h")).rejects.toThrow("throttled");
+    expect(calls).toEqual(["revoke"]);
+  });
+
+  it("WHEN the last revocation fails THEN it is tried again, up to LAST_REVOKE_ATTEMPTS times in all", async () => {
+    expect(LAST_REVOKE_ATTEMPTS).toBe(3);
+    const { store, calls } = scripted([false, true, true]);
+    await expect(signOutWithAppTokens(store, "p-1", "h")).resolves.toBe("done");
+    expect(calls).toEqual(["revoke", "delete-session", "revoke", "revoke", "revoke"]);
+  });
+
+  it("WHEN every try of the last revocation fails THEN the sign-out still completes, as `last-revoke-failed` (never thrown)", async () => {
+    const { store, calls } = scripted([false, true, true, true]);
+    await expect(signOutWithAppTokens(store, "p-1", "h")).resolves.toBe("last-revoke-failed");
+    expect(calls).toEqual(["revoke", "delete-session", "revoke", "revoke", "revoke"]);
   });
 });

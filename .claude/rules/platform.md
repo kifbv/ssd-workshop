@@ -318,5 +318,6 @@ paths:
   write is conditional on, never a size (an add and a remove leave the size unchanged), and the item is emptied, not
   deleted, so the version never goes back. Something that must stop once a session ends (a token create) checks the
   session item inside its own transaction (`ConditionCheck`), and the ending runs its cleanup again after deleting the
-  session. Prove such races over every interleaving against a small condition-evaluating stand-in for DynamoDB
+  session (retried; a failure there is logged by outcome and the ending still answers done). A cleanup that leaves the
+  session in place (allow-list removal) needs its own mark checked in the same transaction (the profile's `role`). Prove such races over every interleaving against a small condition-evaluating stand-in for DynamoDB
   (`MiniDynamo` in `app-token/store.test.ts`), with a control showing the old order fails.

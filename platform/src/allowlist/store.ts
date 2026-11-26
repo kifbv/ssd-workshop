@@ -14,7 +14,7 @@ import {
   type TransactWriteItemsCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { DynamoAppTokenStore } from "../../api/app-token/store.js";
+import { DynamoAppTokenStore, REMOVED_ROLE as REMOVED_PROFILE_ROLE } from "../../api/app-token/store.js";
 import type { AppTokenWriter } from "../../api/app-token/token.js";
 import { allowListKey, participantKey } from "../../api/keys.js";
 import type { Role } from "../../api/types.js";
@@ -31,7 +31,7 @@ export interface AllowListInput {
  * The role a profile gets when its allow-list entry is removed (ticket 3.10): not a Role, so the dashboard (rows with role
  * `participant` only) drops the person and no facilitator action reaches them; their session already stopped working.
  */
-export const REMOVED_ROLE = "removed";
+export const REMOVED_ROLE = REMOVED_PROFILE_ROLE;
 
 export interface AllowListStore {
   /**

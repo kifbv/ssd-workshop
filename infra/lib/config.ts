@@ -345,9 +345,11 @@ export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", 
 
 /**
  * App write tokens (ticket 3.24, platform/api/app-token/). The data function reads in `APPTOKEN#*` only these names
- * (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES) and nothing else of the partition.
+ * (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES) and nothing else of the partition. Every list
+ * below names `pk` and `sk` too (try 3): IAM may count the key among a request's `dynamodb:Attributes`
+ * (.claude/rules/infra.md), as every other list of this file does.
  */
-export const APP_TOKEN_READ_ATTRIBUTES = ["app", "nickname", "expiresAt"] as const;
+export const APP_TOKEN_READ_ATTRIBUTES = ["pk", "sk", "app", "nickname", "expiresAt"] as const;
 /** The names the participant function may put in `APPTOKEN#*` (a new token item, conditions included). */
 export const APP_TOKEN_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", "createdAt", "expiresAt"] as const;
 /**
@@ -356,11 +358,16 @@ export const APP_TOKEN_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", 
  */
 export const APP_TOKEN_LIST_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "tokens", "expiresAt", "version"] as const;
 /** What the participant function reads of a token list (GetItem with a projection). */
-export const APP_TOKEN_LIST_READ_ATTRIBUTES = ["tokens", "version"] as const;
+export const APP_TOKEN_LIST_READ_ATTRIBUTES = ["pk", "sk", "tokens", "version"] as const;
 /** What the token create transaction's ConditionCheck names in `SESSION#*`: that the caller's session still exists. */
-export const APP_TOKEN_SESSION_CHECK_ATTRIBUTES = ["pk"] as const;
+export const APP_TOKEN_SESSION_CHECK_ATTRIBUTES = ["pk", "sk"] as const;
+/**
+ * What the token create transaction's second ConditionCheck names in `PARTICIPANT#*` (try 3, access review L1): that the
+ * caller's profile exists and is not marked removed from the allow-list (`role`, written by `npm run allowlist -- remove`).
+ */
+export const APP_TOKEN_PROFILE_CHECK_ATTRIBUTES = ["pk", "sk", "role"] as const;
 /** What the participant function reads of an app's live marker in `APP#*` (the token route answers only for a live app). */
-export const APP_LIVE_READ_ATTRIBUTES = ["liveAt"] as const;
+export const APP_LIVE_READ_ATTRIBUTES = ["pk", "sk", "liveAt"] as const;
 
 /**
  * Apps hosting and the deployer (ticket 2.5, stack `ssd-workshop-apps`). The bucket name holds the account,

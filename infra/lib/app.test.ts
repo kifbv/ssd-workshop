@@ -1576,7 +1576,8 @@ describe("api stack: participant function (ticket 1.5)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["liveAt"] },
+          // Try 3: `pk` and `sk` too, like every other read list of the repository.
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "liveAt"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },
@@ -1586,7 +1587,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["tokens", "version"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "tokens", "version"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },
@@ -1619,14 +1620,25 @@ describe("api stack: participant function (ticket 1.5)", () => {
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
         },
       },
-      // Ticket 3.24 try 2: no token once the session is gone. Only that the session item exists (`pk`), nothing else of it.
+      // Ticket 3.24 try 2: no token once the session is gone. Only that the session item exists, nothing else of it
+      // (try 3: `pk` and `sk`, as a transaction item's `dynamodb:Attributes` always lists the key, .claude/rules/infra.md).
       {
         Effect: "Allow",
         Action: "dynamodb:ConditionCheckItem",
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk"] },
+        },
+      },
+      // Ticket 3.24 try 3 (access review L1): no token once the person is removed from the allow-list (profile role).
+      {
+        Effect: "Allow",
+        Action: "dynamodb:ConditionCheckItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "role"] },
         },
       },
     ]);
@@ -2156,7 +2168,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["app", "nickname", "expiresAt"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "app", "nickname", "expiresAt"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },

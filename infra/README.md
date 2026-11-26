@@ -558,10 +558,14 @@ On a phone signed in to the workshop (with a nickname):
    `ssd-workshop-api-app-data` `"outcome":"unauthorized","status":401` lines and, on step 4's accepted `PUT`,
    `"writer":"<your nickname>"`; no line holds the token, its hash, an email or the app's nickname. An
    `AccessDeniedException` in either means an IAM right is missing (`APPTOKEN#*`, `TOKENS#*` with `version`, `APP#*`
-   `liveAt`, `ConditionCheckItem` on `SESSION#*`).
+   `liveAt`, `ConditionCheckItem` on `SESSION#*` (`pk`, `sk`) and on `PARTICIPANT#*` (`pk`, `sk`, `role`); every list
+   names `pk` and `sk`). A `"route":"sign-out","outcome":"signed-out-revoke-failed"` line means the revocation after the
+   session's delete failed three times: run `npm run participant -- reset <nick> --yes` for that person (the line names
+   no one: match it by time with the person who reported signing out).
 7. `npm run participant -- reset <test nick> --yes` prints "Ended N sign-ins to save in apps (app write tokens)."; a
    token that participant held answers 401 afterwards. `npm run -s allowlist -- remove <test address> --yes` (a test
-   person, re-imported afterwards) prints "... and ended N sign-ins to save in apps. ..."; their token answers 401.
+   person, re-imported afterwards) prints "... and ended N sign-ins to save in apps. ..."; their token answers 401, and
+   a new token request from their still-open session answers 401 too (the create's profile check, try 3).
 8. The tab an app opens escapes the sandbox (CloudFront's new `ssd-workshop-apps-v3` policy; v2 is retained, Franck may
    delete it after the deploy). First:
 

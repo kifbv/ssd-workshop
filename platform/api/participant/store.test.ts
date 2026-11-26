@@ -179,7 +179,7 @@ describe("DynamoParticipantStore", () => {
 });
 
 describe("DynamoParticipantStore: app tokens (ticket 3.24)", () => {
-  it("reads an app's live marker consistently, `liveAt` only (the names of APP_LIVE_READ_ATTRIBUTES)", async () => {
+  it("reads an app's live marker consistently, `liveAt` only (in APP_LIVE_READ_ATTRIBUTES)", async () => {
     const { client, sent } = stubClient([{ Item: { liveAt: { S: "2026-11-26T10:00:00.000Z" } } }, {}, { Item: { pk: { S: "APP#ada" } } }]);
     const store = new DynamoParticipantStore(client, TABLE);
     await expect(store.isAppLive("Ada")).resolves.toBe(true);
@@ -193,7 +193,9 @@ describe("DynamoParticipantStore: app tokens (ticket 3.24)", () => {
       ProjectionExpression: "#liveAt",
       ExpressionAttributeNames: { "#liveAt": "liveAt" },
     });
-    expect(Object.values(input.ExpressionAttributeNames ?? {})).toEqual([...APP_LIVE_READ_ATTRIBUTES]);
+    for (const name of Object.values(input.ExpressionAttributeNames ?? {})) expect(APP_LIVE_READ_ATTRIBUTES).toContain(name);
+    // Try 3: the IAM list names the key too, as every read list does.
+    expect(APP_LIVE_READ_ATTRIBUTES).toEqual(["pk", "sk", "liveAt"]);
   });
 
   it("makes and revokes tokens through the token store (APPTOKEN# and TOKENS# items)", async () => {

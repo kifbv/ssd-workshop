@@ -33,7 +33,8 @@ const APP_PAGE = `<!doctype html><title>Ada's app</title>
 <a id="link" href="/app-sign-in/?app=ada" target="_blank">Sign in to save</a>
 <button id="open" type="button">Sign in to save (window.open)</button>
 <script src="open.js" defer></script>`;
-const APP_SCRIPT = `document.getElementById("open").addEventListener("click", () => { window.open("/app-sign-in/?app=ada", "_blank"); });`;
+// The app keeps the handle `window.open` gives, so the test can try to reach into the tab from the app.
+const APP_SCRIPT = `document.getElementById("open").addEventListener("click", () => { window.handOff = window.open("/app-sign-in/?app=ada", "_blank"); });`;
 
 let dir: string;
 let server: Server;
@@ -117,8 +118,28 @@ describe("the hand-off page opened from a sandboxed app (ticket 3.24 try 2, apps
       // Same-origin fetch: the cookie came, and no opaque `Origin: null`.
       for (const call of meCalls) expect(call).toMatchObject({ cookie: true });
       expect(meCalls.map((c) => c.origin)).not.toContain("null");
-      // The app still cannot reach into the tab it opened (it stays sandboxed in its opaque origin).
+      // The app still cannot reach into the tab it opened (it stays sandboxed in its opaque origin): tried for real.
       expect(await page.evaluate(() => window.origin)).toBe("null");
+      if (how === "window.open") {
+        // From the app, with the handle `window.open` returned: reading the tab's document or address is refused.
+        const tries = await page.evaluate(() => {
+          const tab = (window as unknown as { handOff?: Window | null }).handOff;
+          if (tab === undefined || tab === null) return ["no handle"];
+          return [() => tab.document.title, () => tab.location.href, () => tab.localStorage.length].map((read) => {
+            try {
+              read();
+              return "read";
+            } catch (error) {
+              return (error as Error).name;
+            }
+          });
+        });
+        expect(tries).toEqual(["SecurityError", "SecurityError", "SecurityError"]);
+      } else {
+        // A `target="_blank"` link opens without an opener (Chromium's implied `noopener`): the app holds no handle at
+        // all, and the tab has no way back to the app.
+        expect(await popup.evaluate(() => window.opener)).toBeNull();
+      }
     });
   }
 

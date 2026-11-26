@@ -3,7 +3,8 @@
 // Rights (infra/lib/api-stack.ts): the data function may only read `APPTOKEN#*` items' `app`, `nickname` and
 // `expiresAt` (projection required). The participant function may put in `APPTOKEN#*` and update in `TOKENS#*` only
 // the names below, read `TOKENS#*` items' `tokens` and `version`, delete in `APPTOKEN#*` (sign-out), and check that a
-// `SESSION#*` item exists (ConditionCheckItem, inside the create transaction). The reset command
+// `SESSION#*` item exists and that a `PARTICIPANT#*` profile is not marked removed (ConditionCheckItem, inside the create
+// transaction; `pk`, `sk` and `role` only). The reset command
 // (`npm run participant -- reset`) runs with the owner's own credentials. No call returns old or new items.
 import {
   DeleteItemCommand,
@@ -16,7 +17,7 @@ import {
   type TransactWriteItemsCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { appTokenKey, appTokenListKey, sessionKey, type ItemKey } from "../keys.js";
+import { appTokenKey, appTokenListKey, participantKey, sessionKey, type ItemKey } from "../keys.js";
 import { APP_TOKEN_TTL_SECONDS, MAX_APP_TOKENS, type AppTokenReader, type AppTokenWriter, type CreateTokenResult, type StoredAppToken } from "./token.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -26,6 +27,12 @@ export interface AppTokenSender {
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
   send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
 }
+
+/**
+ * The role a profile gets when its allow-list entry is removed (ticket 3.10, `npm run allowlist -- remove`, which
+ * re-exports it): a token is never made for such a profile (ticket 3.24 try 3).
+ */
+export const REMOVED_ROLE = "removed";
 
 /** Revocation reads the list again when a token was added meanwhile, this many times in all. */
 export const REVOKE_ATTEMPTS = 3;
@@ -93,9 +100,10 @@ export class DynamoAppTokenStore implements AppTokenReader, AppTokenWriter {
 
   /**
    * One transaction: the token item (only if new), its entry in the participant's list (which drops expired entries and
-   * bumps the list's `version`), and a check that the session still exists. The list's update holds only while its
-   * version is still the one read (else a token was added or the list emptied meanwhile: `conflict`, the caller tries
-   * again), and is refused before writing when MAX_APP_TOKENS are live; a missing session is `no-session`.
+   * bumps the list's `version`), a check that the session still exists, and (try 3) a check that the participant's
+   * profile exists and is not marked removed from the allow-list. The list's update holds only while its version is still
+   * the one read (else a token was added or the list emptied meanwhile: `conflict`, the caller tries again), and is
+   * refused before writing when MAX_APP_TOKENS are live; a missing session or a removed profile is `no-session` (401).
    */
   async createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
     const list = await this.readList(participantId);
@@ -161,12 +169,23 @@ export class DynamoAppTokenStore implements AppTokenReader, AppTokenWriter {
                 ExpressionAttributeNames: { "#pk": "pk" },
               },
             },
+            {
+              // No token once the person is removed from the allow-list (try 3, access review L1): `remove` marks the
+              // profile before it revokes, so a create that commits after the revocation's read meets this check.
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: keyOf(participantKey(participantId)),
+                ConditionExpression: "attribute_exists(#pk) AND #role <> :removed",
+                ExpressionAttributeNames: { "#pk": "pk", "#role": "role" },
+                ExpressionAttributeValues: { ":removed": str(REMOVED_ROLE) },
+              },
+            },
           ],
         }),
       );
       return "saved";
     } catch (error) {
-      if (failedAt(error, 2)) return "no-session";
+      if (failedAt(error, 2) || failedAt(error, 3)) return "no-session";
       if (isConditionFailure(error)) return "conflict";
       throw error;
     }

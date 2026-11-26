@@ -60,17 +60,34 @@ export interface SignOutStore extends AppTokenWriter {
   deleteSession(tokenHash: string): Promise<void>;
 }
 
+/** The revocation after the session's delete is tried this many times in all before the sign-out gives up on it. */
+export const LAST_REVOKE_ATTEMPTS = 3;
+
+/** `last-revoke-failed`: signed out, but every try of the last revocation failed (a racing token may live on). */
+export type SignOutResult = "done" | "last-revoke-failed";
+
 /**
  * Sign-out (ticket 3.24 try 2): the participant's tokens, then the session, then the tokens once more.
- * The first pass comes before the session's delete, so a failure there leaves the person signed in to try again. A
- * token whose request passed the session check can still be committed between that pass and the session's delete;
+ * The first pass comes before the session's delete, so a failure there (thrown) leaves the person signed in to try again.
+ * A token whose request passed the session check can still be committed between that pass and the session's delete;
  * once the session is gone none can be (the create transaction checks the session item), and every committed token is
- * in the list (its `version` condition), so the last pass deletes whatever the first one missed.
+ * in the list (its `version` condition), so the last pass deletes whatever the first one missed. Try 3: the session is
+ * already gone when the last pass runs, so a failure there cannot be retried by the person: it is tried
+ * LAST_REVOKE_ATTEMPTS times, and if all fail the sign-out still completes (`last-revoke-failed`, for the log; the
+ * residual risk is in docs/decisions.md "(3.24) No token survives a sign-out").
  */
-export async function signOutWithAppTokens(store: SignOutStore, participantId: string, sessionTokenHash: string): Promise<void> {
+export async function signOutWithAppTokens(store: SignOutStore, participantId: string, sessionTokenHash: string): Promise<SignOutResult> {
   await store.revokeAppTokens(participantId);
   await store.deleteSession(sessionTokenHash);
-  await store.revokeAppTokens(participantId);
+  for (let attempt = 0; attempt < LAST_REVOKE_ATTEMPTS; attempt += 1) {
+    try {
+      await store.revokeAppTokens(participantId);
+      return "done";
+    } catch {
+      // Tried again; the error itself is never logged (only the outcome, by the caller).
+    }
+  }
+  return "last-revoke-failed";
 }
 
 /** A new token from a cryptographic source such as `crypto.randomBytes` (same form as a session token). */

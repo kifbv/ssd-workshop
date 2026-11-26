@@ -5,11 +5,13 @@ import { describe, expect, it } from "vitest";
 import {
   APP_TOKEN_LIST_READ_ATTRIBUTES,
   APP_TOKEN_LIST_UPDATE_ATTRIBUTES,
+  APP_TOKEN_PROFILE_CHECK_ATTRIBUTES,
   APP_TOKEN_PUT_ATTRIBUTES,
   APP_TOKEN_READ_ATTRIBUTES,
   APP_TOKEN_SESSION_CHECK_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
-import { DynamoAppTokenStore, REVOKE_ATTEMPTS, type AppTokenSender } from "./store.js";
+import { DynamoAllowListStore, REMOVED_ROLE as ALLOW_LIST_REMOVED_ROLE, type DynamoSender } from "../../src/allowlist/store.js";
+import { DynamoAppTokenStore, REMOVED_ROLE, REVOKE_ATTEMPTS, type AppTokenSender } from "./store.js";
 import { MAX_APP_TOKENS, signOutWithAppTokens } from "./token.js";
 
 type Sent = GetItemCommand | DeleteItemCommand | TransactWriteItemsCommand | UpdateItemCommand;
@@ -37,7 +39,7 @@ const conditionFailed = (): Error => Object.assign(new Error("no"), { name: "Con
 const cancelled = (): Error => Object.assign(new Error("cancelled"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "None" }, { Code: "ConditionalCheckFailed" }] });
 /** A transaction cancelled on the condition of its item number `index` only. */
 const cancelledAt = (index: number): Error =>
-  Object.assign(new Error("cancelled"), { name: "TransactionCanceledException", CancellationReasons: [0, 1, 2].map((i) => ({ Code: i === index ? "ConditionalCheckFailed" : "None" })) });
+  Object.assign(new Error("cancelled"), { name: "TransactionCanceledException", CancellationReasons: [0, 1, 2, 3].map((i) => ({ Code: i === index ? "ConditionalCheckFailed" : "None" })) });
 const TOKEN = { app: "ada", nickname: "Bob", expiresAt: NOW_S + 3600 };
 
 /** Every `#name` and `:value` an expression uses is defined, and every one defined is used (DynamoDB refuses either). */
@@ -70,7 +72,9 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
       ProjectionExpression: "#app, #nickname, #expiresAt",
       ExpressionAttributeNames: { "#app": "app", "#nickname": "nickname", "#expiresAt": "expiresAt" },
     });
-    expect(Object.values(input.ExpressionAttributeNames ?? {}).sort()).toEqual([...APP_TOKEN_READ_ATTRIBUTES].sort());
+    for (const name of Object.values(input.ExpressionAttributeNames ?? {})) expect(APP_TOKEN_READ_ATTRIBUTES).toContain(name);
+    // Try 3: the IAM list names the key too, as every read list does.
+    expect(APP_TOKEN_READ_ATTRIBUTES).toEqual(expect.arrayContaining(["pk", "sk"]));
     await expect(store.getAppToken("not-a-hash")).rejects.toThrow();
   });
 
@@ -79,8 +83,11 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
     await expect(new DynamoAppTokenStore(client, TABLE).createAppToken("p-1", SESSION_HASH, HASH, TOKEN, NOW_S)).resolves.toBe("saved");
     const read = (sent[0] as GetItemCommand).input;
     expect(read).toMatchObject({ Key: { pk: { S: "TOKENS#p-1" }, sk: { S: "TOKENS" } }, ConsistentRead: true, ProjectionExpression: "#tokens, #version" });
-    expect(Object.values(read.ExpressionAttributeNames ?? {})).toEqual([...APP_TOKEN_LIST_READ_ATTRIBUTES]);
-    const [put, update, check] = (sent[1] as TransactWriteItemsCommand).input.TransactItems ?? [];
+    for (const name of Object.values(read.ExpressionAttributeNames ?? {})) expect(APP_TOKEN_LIST_READ_ATTRIBUTES).toContain(name);
+    expect(APP_TOKEN_LIST_READ_ATTRIBUTES).toEqual(expect.arrayContaining(["pk", "sk"]));
+    const items = (sent[1] as TransactWriteItemsCommand).input.TransactItems ?? [];
+    expect(items).toHaveLength(4);
+    const [put, update, check, profile] = items;
     expect(put?.Put?.Item).toEqual({
       pk: { S: `APPTOKEN#${HASH}` },
       sk: { S: "TOKEN" },
@@ -103,7 +110,7 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
     expectPlaceholders(update?.Update as never);
     for (const name of topLevelNames(update?.Update as never)) expect(APP_TOKEN_LIST_UPDATE_ATTRIBUTES).toContain(name);
     expectPlaceholders(put?.Put as never);
-    // The session check: that the item exists, nothing else of it (IAM: ConditionCheckItem on SESSION#*, `pk` only).
+    // The session check: that the item exists, nothing else of it (IAM: ConditionCheckItem on SESSION#*, `pk` and `sk`).
     expect(check?.ConditionCheck).toEqual({
       TableName: TABLE,
       Key: { pk: { S: `SESSION#${SESSION_HASH}` }, sk: { S: "SESSION" } },
@@ -112,6 +119,22 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
     });
     for (const name of topLevelNames(check?.ConditionCheck as never)) expect(APP_TOKEN_SESSION_CHECK_ATTRIBUTES).toContain(name);
     expectPlaceholders(check?.ConditionCheck as never);
+    // Try 3 (access review L1): the profile exists and is not marked removed (IAM: ConditionCheckItem on PARTICIPANT#*,
+    // `pk`, `sk` and `role`), with the very role `npm run allowlist -- remove` writes.
+    expect(profile?.ConditionCheck).toEqual({
+      TableName: TABLE,
+      Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" } },
+      ConditionExpression: "attribute_exists(#pk) AND #role <> :removed",
+      ExpressionAttributeNames: { "#pk": "pk", "#role": "role" },
+      ExpressionAttributeValues: { ":removed": { S: "removed" } },
+    });
+    expect(REMOVED_ROLE).toBe(ALLOW_LIST_REMOVED_ROLE);
+    for (const name of topLevelNames(profile?.ConditionCheck as never)) expect(APP_TOKEN_PROFILE_CHECK_ATTRIBUTES).toContain(name);
+    expectPlaceholders(profile?.ConditionCheck as never);
+    // Every transaction item's IAM list names the key (`pk`, `sk`): .claude/rules/infra.md.
+    for (const list of [APP_TOKEN_PUT_ATTRIBUTES, APP_TOKEN_LIST_UPDATE_ATTRIBUTES, APP_TOKEN_SESSION_CHECK_ATTRIBUTES, APP_TOKEN_PROFILE_CHECK_ATTRIBUTES]) {
+      expect(list).toEqual(expect.arrayContaining(["pk", "sk"]));
+    }
   });
 
   it("adds a later token to the list, drops expired entries, and holds only while the list's version is the one read (then one more)", async () => {
@@ -135,7 +158,7 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
     expect(next?.ExpressionAttributeValues).toMatchObject({ ":version": { N: "9" }, ":nextVersion": { N: "10" } });
   });
 
-  it(`refuses a new token, writing nothing, while ${MAX_APP_TOKENS} are live; a lost race is a conflict; a missing session is no-session`, async () => {
+  it(`refuses a new token, writing nothing, while ${MAX_APP_TOKENS} are live; a lost race is a conflict; a missing session or a removed profile is no-session`, async () => {
     const full = Object.fromEntries(Array.from({ length: MAX_APP_TOKENS }, (_, i) => [hash(i + 1), { N: String(NOW_S + 60) }]));
     const { client, sent } = stubClient([{ Item: { tokens: { M: full }, version: { N: "3" } } }]);
     await expect(new DynamoAppTokenStore(client, TABLE).createAppToken("p-1", SESSION_HASH, HASH, TOKEN, NOW_S)).resolves.toBe("too-many");
@@ -145,6 +168,9 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
     await expect(new DynamoAppTokenStore(race.client, TABLE).createAppToken("p-1", SESSION_HASH, HASH, TOKEN, NOW_S)).resolves.toBe("conflict");
     const signedOut = stubClient([{}, cancelledAt(2)]);
     await expect(new DynamoAppTokenStore(signedOut.client, TABLE).createAppToken("p-1", SESSION_HASH, HASH, TOKEN, NOW_S)).resolves.toBe("no-session");
+    // Try 3: a profile marked removed (or missing) is refused the same way (the route answers 401).
+    const removed = stubClient([{}, cancelledAt(3)]);
+    await expect(new DynamoAppTokenStore(removed.client, TABLE).createAppToken("p-1", SESSION_HASH, HASH, TOKEN, NOW_S)).resolves.toBe("no-session");
     const failing = stubClient([{}, Object.assign(new Error("x"), { name: "InternalServerError" })]);
     await expect(new DynamoAppTokenStore(failing.client, TABLE).createAppToken("p-1", SESSION_HASH, HASH, TOKEN, NOW_S)).rejects.toThrow("x");
   });
@@ -193,88 +219,96 @@ describe("DynamoAppTokenStore (ticket 3.24)", () => {
   });
 });
 
-// Ticket 3.24 try 2 (access review M2): a sign-out and a token request that already passed its session check, run
-// against a small in-memory DynamoDB that evaluates the store's real conditions and updates, interleaved in EVERY order
-// their calls can take (each `send` is one step; the request retries a conflict as the route does). Whatever the order,
-// no token item is left and the list is empty once the sign-out has finished.
+// Ticket 3.24 try 2 (access review M2) and try 3 (L1): a token request that already passed its session check, raced by
+// a sign-out or by `npm run allowlist -- remove`, run against a small in-memory DynamoDB that evaluates the stores' real
+// conditions and updates, interleaved in EVERY order their calls can take (each `send` is one step; the request retries
+// a conflict as the route does). Whatever the order, no token item is left and the list is empty once the other has
+// finished.
+const SESSION_KEY = { pk: `SESSION#${SESSION_HASH}`, sk: "SESSION" };
+const ADDRESS = ["bob", "example.org"].join("@");
+/** The racing actor: it gets a client whose every `send` is one step of the schedule. */
+type Racer = (client: AppTokenSender & DynamoSender) => Promise<void>;
+
+/** Runs the token request and the racer under one schedule of choices; returns the db afterwards. */
+async function runSchedule(choices: number[], racer: Racer, db: MiniDynamo) {
+  db.put({ pk: { S: `SESSION#${SESSION_HASH}` }, sk: { S: "SESSION" } });
+  db.put({ pk: { S: "PARTICIPANT#p-1" }, sk: { S: "PROFILE" }, role: { S: "participant" }, nickname: { S: "Bob" } });
+  db.put({ pk: { S: `EMAIL#${ADDRESS}` }, sk: { S: "ALLOW" }, email: { S: ADDRESS }, role: { S: "participant" }, participantId: { S: "p-1" } });
+  // Bob already holds one token from earlier.
+  db.put({ pk: { S: `APPTOKEN#${hash(1)}` }, sk: { S: "TOKEN" }, app: { S: "ada" }, nickname: { S: "Bob" }, expiresAt: { N: String(NOW_S + 60) } });
+  db.put({ pk: { S: "TOKENS#p-1" }, sk: { S: "TOKENS" }, tokens: { M: { [hash(1)]: { N: String(NOW_S + 60) } } }, version: { N: "1" } });
+  // Each actor's sends waiting for their turn (a revocation's parallel deletes go one by one, in order).
+  const waiting = new Map<string, (() => void)[]>([["create", []], ["other", []]]);
+  const client = (actor: string): AppTokenSender & DynamoSender =>
+    ({
+      send: async (command: Sent) => {
+        await new Promise<void>((resolve) => waiting.get(actor)?.push(resolve));
+        return db.send(command);
+      },
+    }) as unknown as AppTokenSender & DynamoSender;
+  const create = (async () => {
+    const store = new DynamoAppTokenStore(client("create"), TABLE);
+    const results: string[] = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await store.createAppToken("p-1", SESSION_HASH, hash(100 + attempt), TOKEN, NOW_S);
+      results.push(result);
+      if (result !== "conflict") break;
+    }
+    return results;
+  })();
+  const other = racer(client("other"));
+  let step = 0;
+  for (;;) {
+    // Let both actors run until each is waiting on a send or finished.
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    const ready = ["create", "other"].filter((a) => (waiting.get(a)?.length ?? 0) > 0);
+    if (ready.length === 0) break;
+    let pick = 0;
+    if (ready.length === 2) {
+      pick = choices[step] ?? 0;
+      step += 1;
+    }
+    const actor = ready[pick] as string;
+    waiting.get(actor)?.shift()?.();
+  }
+  const results = await create;
+  await other;
+  return { db, results, choicesUsed: step };
+}
+
+/** Every schedule: depth-first over the points where both actors could go next. */
+async function everySchedule(racer: Racer, newDb: () => MiniDynamo = () => new MiniDynamo()) {
+  const runs: { db: MiniDynamo; results: string[]; choices: number[] }[] = [];
+  const stack: number[][] = [[]];
+  while (stack.length > 0) {
+    const prefix = stack.pop() as number[];
+    const run = await runSchedule(prefix, racer, newDb());
+    const full = [...prefix];
+    while (full.length < run.choicesUsed) full.push(0);
+    runs.push({ db: run.db, results: run.results, choices: full });
+    for (let i = prefix.length; i < run.choicesUsed; i += 1) stack.push([...full.slice(0, i), 1]);
+  }
+  return runs;
+}
+
 describe("sign-out racing a token request (ticket 3.24 try 2)", () => {
-  const SESSION_KEY = { pk: `SESSION#${SESSION_HASH}`, sk: "SESSION" };
   /** A sign-out over the store and a session delete that is one more step (a DeleteItem through the same client). */
-  type SignOut = (store: DynamoAppTokenStore, deleteSession: () => Promise<void>) => Promise<void>;
-
-  /** Runs both actors under one schedule of choices; returns the db afterwards and the choices that were open. */
-  async function runSchedule(choices: number[], signOut: SignOut) {
-    const db = new MiniDynamo();
-    db.put({ pk: { S: `SESSION#${SESSION_HASH}` }, sk: { S: "SESSION" } });
-    // Bob already holds one token from earlier.
-    db.put({ pk: { S: `APPTOKEN#${hash(1)}` }, sk: { S: "TOKEN" }, app: { S: "ada" }, nickname: { S: "Bob" }, expiresAt: { N: String(NOW_S + 60) } });
-    db.put({ pk: { S: "TOKENS#p-1" }, sk: { S: "TOKENS" }, tokens: { M: { [hash(1)]: { N: String(NOW_S + 60) } } }, version: { N: "1" } });
-    // Each actor's sends waiting for their turn (a revocation's parallel deletes go one by one, in order).
-    const waiting = new Map<string, (() => void)[]>([["create", []], ["sign-out", []]]);
-    const client = (actor: string): AppTokenSender =>
-      ({
-        send: async (command: Sent | UpdateItemCommand) => {
-          await new Promise<void>((resolve) => waiting.get(actor)?.push(resolve));
-          return db.send(command);
-        },
-      }) as unknown as AppTokenSender;
-    const create = (async () => {
-      const store = new DynamoAppTokenStore(client("create"), TABLE);
-      const results: string[] = [];
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const result = await store.createAppToken("p-1", SESSION_HASH, hash(100 + attempt), TOKEN, NOW_S);
-        results.push(result);
-        if (result !== "conflict") break;
-      }
-      return results;
-    })();
-    const signOutClient = client("sign-out");
-    const deleteSession = async () => {
-      await signOutClient.send(new DeleteItemCommand({ TableName: TABLE, Key: { pk: { S: SESSION_KEY.pk }, sk: { S: SESSION_KEY.sk } } }));
+  const signOut =
+    (run: (store: DynamoAppTokenStore, deleteSession: () => Promise<void>) => Promise<void>): Racer =>
+    async (client) => {
+      const deleteSession = async () => {
+        await client.send(new DeleteItemCommand({ TableName: TABLE, Key: { pk: { S: SESSION_KEY.pk }, sk: { S: SESSION_KEY.sk } } }));
+      };
+      await run(new DynamoAppTokenStore(client, TABLE), deleteSession);
     };
-    const out = signOut(new DynamoAppTokenStore(signOutClient, TABLE), deleteSession);
-    const open: number[] = [];
-    let step = 0;
-    for (;;) {
-      // Let both actors run until each is waiting on a send or finished.
-      for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
-      const ready = ["create", "sign-out"].filter((a) => (waiting.get(a)?.length ?? 0) > 0);
-      if (ready.length === 0) break;
-      let pick = 0;
-      if (ready.length === 2) {
-        pick = choices[step] ?? 0;
-        open.push(step);
-        step += 1;
-      }
-      const actor = ready[pick] as string;
-      waiting.get(actor)?.shift()?.();
-    }
-    const results = await create;
-    await out;
-    return { db, results, open, choicesUsed: step };
-  }
+  const signOutLikeTheRoute = signOut(async (store, deleteSession) => {
+    const result = await signOutWithAppTokens({ revokeAppTokens: (id) => store.revokeAppTokens(id), createAppToken: () => Promise.reject(new Error("unused")), deleteSession }, "p-1", SESSION_HASH);
+    expect(result).toBe("done");
+  });
 
-  /** Every schedule: depth-first over the points where both actors could go next. */
-  async function everySchedule(signOut: SignOut) {
-    const runs: { db: MiniDynamo; results: string[]; choices: number[] }[] = [];
-    const stack: number[][] = [[]];
-    while (stack.length > 0) {
-      const prefix = stack.pop() as number[];
-      const run = await runSchedule(prefix, signOut);
-      const full = [...prefix];
-      while (full.length < run.choicesUsed) full.push(0);
-      runs.push({ db: run.db, results: run.results, choices: full });
-      for (let i = prefix.length; i < run.choicesUsed; i += 1) stack.push([...full.slice(0, i), 1]);
-    }
-    return runs;
-  }
-
-  const signOutLikeTheRoute: SignOut = async (store, deleteSession) =>
-    signOutWithAppTokens({ revokeAppTokens: (id) => store.revokeAppTokens(id), createAppToken: () => Promise.reject(new Error("unused")), deleteSession }, "p-1", SESSION_HASH);
-
-  it("WHEN a token request and a sign-out interleave in any order THEN no token survives the sign-out", async () => {
+  it("WHEN a token request and a sign-out interleave in any order (all 36) THEN no token survives the sign-out", async () => {
     const runs = await everySchedule(signOutLikeTheRoute);
-    expect(runs.length).toBeGreaterThan(20);
+    expect(runs).toHaveLength(36);
     for (const run of runs) {
       expect(run.db.tokenItems(), `schedule ${run.choices.join("")} (${run.results.join(", ")})`).toEqual([]);
       expect(run.db.listSize(), `schedule ${run.choices.join("")}`).toBe(0);
@@ -286,20 +320,51 @@ describe("sign-out racing a token request (ticket 3.24 try 2)", () => {
   });
 
   it("control: WHEN the sign-out revoked only once, before deleting the session (try 1) THEN some order leaves a live token", async () => {
-    const runs = await everySchedule(async (store, deleteSession) => {
-      await store.revokeAppTokens("p-1");
-      await deleteSession();
-    });
+    const runs = await everySchedule(
+      signOut(async (store, deleteSession) => {
+        await store.revokeAppTokens("p-1");
+        await deleteSession();
+      }),
+    );
+    expect(runs.some((r) => r.db.tokenItems().length > 0)).toBe(true);
+  });
+});
+
+describe("allow-list removal racing a token request (ticket 3.24 try 3, access review L1)", () => {
+  /** The real `npm run allowlist -- remove` store call: mark the profile removed, revoke the tokens, delete the entry. */
+  const removeLikeTheCommand: Racer = async (client) => {
+    const result = await new DynamoAllowListStore(client, TABLE).remove(ADDRESS);
+    expect(result.removed).toBe(true);
+  };
+
+  it("WHEN a token request and a removal interleave in any order THEN no token survives the removal (the session is left)", async () => {
+    const runs = await everySchedule(removeLikeTheCommand);
+    expect(runs.length).toBeGreaterThan(20);
+    for (const run of runs) {
+      expect(run.db.tokenItems(), `schedule ${run.choices.join("")} (${run.results.join(", ")})`).toEqual([]);
+      expect(run.db.listSize(), `schedule ${run.choices.join("")}`).toBe(0);
+      // The removed person's session is still there until their next call: only the profile check stops the create.
+      expect(run.db.has(SESSION_KEY)).toBe(true);
+      expect(run.db.has({ pk: `EMAIL#${ADDRESS}`, sk: "ALLOW" })).toBe(false);
+    }
+    expect(runs.some((r) => r.results.includes("saved"))).toBe(true);
+    expect(runs.some((r) => r.results.at(-1) === "no-session")).toBe(true);
+  });
+
+  it("control: WHEN the create transaction did not check the profile (try 2) THEN some order leaves a live token", async () => {
+    const runs = await everySchedule(removeLikeTheCommand, () => new MiniDynamo({ ignoreChecksIn: "PARTICIPANT#" }));
     expect(runs.some((r) => r.db.tokenItems().length > 0)).toBe(true);
   });
 });
 
 /**
  * Just enough of DynamoDB for the token store: GetItem, DeleteItem, UpdateItem and TransactWriteItems (Put, Update,
- * ConditionCheck; all conditions checked before anything is written) with the condition and update forms the store
- * uses (`attribute_exists`, `attribute_not_exists`, `#a = :v`, `OR`; `SET` of top-level or map-entry paths, `REMOVE`).
+ * ConditionCheck; all conditions checked before anything is written) with the condition and update forms the stores
+ * use (`attribute_exists`, `attribute_not_exists`, `#a = :v`, `#a <> :v`, `AND` within `OR`; `SET` of top-level or map-entry paths, `REMOVE`).
  */
 class MiniDynamo {
+  /** `ignoreChecksIn`: a transaction's ConditionCheck on a key with this prefix always holds (a control: try 2's create). */
+  constructor(private readonly options: { ignoreChecksIn?: string } = {}) {}
   private readonly items = new Map<string, Record<string, AttributeValue>>();
   private static id(key: Record<string, AttributeValue> | { pk: string; sk: string }): string {
     const value = (v: unknown) => (typeof v === "string" ? v : (v as { S: string }).S);
@@ -323,15 +388,21 @@ class MiniDynamo {
 
   private holds(item: Record<string, AttributeValue> | undefined, expression: string | undefined, names: Record<string, string>, values: Record<string, AttributeValue>): boolean {
     if (expression === undefined) return true;
-    return expression.split(" OR ").some((part) => {
+    return expression.split(" OR ").some((alternative) => alternative.split(" AND ").every((part) => {
       let m = /^attribute_exists\((#\w+)\)$/.exec(part);
       if (m) return item?.[names[m[1] as string] as string] !== undefined;
       m = /^attribute_not_exists\((#\w+)\)$/.exec(part);
       if (m) return item?.[names[m[1] as string] as string] === undefined;
       m = /^(#\w+) = (:\w+)$/.exec(part);
       if (m) return JSON.stringify(item?.[names[m[1] as string] as string]) === JSON.stringify(values[m[2] as string]);
+      // DynamoDB: a comparison with a missing attribute is false, `<>` included (the store pairs it with attribute_exists).
+      m = /^(#\w+) <> (:\w+)$/.exec(part);
+      if (m) {
+        const value = item?.[names[m[1] as string] as string];
+        return value !== undefined && JSON.stringify(value) !== JSON.stringify(values[m[2] as string]);
+      }
       throw new Error(`MiniDynamo cannot read the condition ${part}`);
-    });
+    }));
   }
 
   private applyUpdate(key: Record<string, AttributeValue>, expression: string, names: Record<string, string>, values: Record<string, AttributeValue>): void {
@@ -374,6 +445,8 @@ class MiniDynamo {
     const codes = items.map((t) => {
       const part = t.Put ?? t.Update ?? t.ConditionCheck;
       const key = t.Put ? t.Put.Item : (part as { Key: Record<string, AttributeValue> }).Key;
+      const ignored = this.options.ignoreChecksIn;
+      if (t.ConditionCheck && ignored !== undefined && (key?.["pk"]?.S ?? "").startsWith(ignored)) return "None";
       return this.holds(this.items.get(MiniDynamo.id(key ?? {})), part?.ConditionExpression, part?.ExpressionAttributeNames ?? {}, (part as { ExpressionAttributeValues?: Record<string, AttributeValue> })?.ExpressionAttributeValues ?? {})
         ? "None"
         : "ConditionalCheckFailed";
