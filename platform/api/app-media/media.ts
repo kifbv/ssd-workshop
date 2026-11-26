@@ -23,7 +23,7 @@ import { checkNickname } from "../participant/participant.js";
 import { SITE_DOMAIN } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
-import { detectMedia, MEDIA_CONTENT_TYPES, stripJpegMetadata, type MediaKind } from "./formats.js";
+import { detectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripJpegMetadata, stripRecordingMetadata, type MediaKind } from "./formats.js";
 
 export const APP_MEDIA_PATH = "/api/apps/{nickname}/media/{id}";
 export const APP_MEDIA_METHODS = ["PUT", "DELETE", "OPTIONS"] as const;
@@ -57,17 +57,31 @@ export const UPLOAD_STALE_SECONDS = 120;
 export const MEDIA_ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 /** Where a file lives in the media bucket; CloudFront serves the same path at the workshop's address. */
 export const MEDIA_KEY_PREFIX = "app-media/";
+/** A recording is at most 5 minutes (Franck's answer to the brief), measured by the server from the file's own timing. */
+export const MAX_RECORDING_SECONDS = 5 * 60;
+/**
+ * What the server lets pass beyond 5 minutes (please veto): 5 s, so a recording 3.19's `recordVoice()` stops at 5:00
+ * is never refused for its container's rounding or the last packet's length; at most 5:05 is stored.
+ */
+export const RECORDING_MARGIN_SECONDS = 5;
 /** Base64 grows a body by 4/3: a raw body longer than this cannot decode to 4 MB or less. */
 const MAX_RAW_BASE64_BYTES = Math.ceil(MAX_MEDIA_FILE_BYTES / 3) * 4;
 /** Like the data API: every upload of one app updates the same totals item, so a lost race is tried again. */
 export const UPLOAD_ATTEMPTS = 4;
 
 /**
- * Stored with every file and served as is (S3 metadata; CloudFront's caching policy follows it). Browsers keep a file a
- * year (an id is never reused, so a file never changes); CloudFront at most a day (`s-maxage`), so a deleted file
- * leaves the edge caches within a day without an invalidation per delete (please veto).
+ * Stored with every file and served as is (S3 metadata; CloudFront's caching policy follows it), please veto: CloudFront
+ * keeps a file at most an hour (`s-maxage`), so a photo deleted by mistake (a person's face, a private paper) leaves the
+ * edge caches within an hour without an invalidation per delete (which anyone with a token could drive, at $0.005 a
+ * path); browsers that loaded it keep it a day (`max-age`), without `immutable`.
  */
-export const MEDIA_CACHE_CONTROL = "public, max-age=31536000, s-maxage=86400, immutable";
+export const MEDIA_CACHE_CONTROL = "public, max-age=86400, s-maxage=3600";
+/**
+ * The media function's timeout (infra/lib/api-stack.ts APP_MEDIA_TIMEOUT_SECONDS; a synth test keeps them equal): two S3 attempts of at
+ * most 1 s + 8 s (handlers/app-media.ts S3_TIMEOUTS) plus the table calls, under API Gateway's 30 s. The reset waits
+ * longer than this before its last pass over an app's media, so an upload cut off mid-flight is still removed.
+ */
+export const APP_MEDIA_TIMEOUT_SECONDS = 25;
 
 /** The media bucket's key of a file: `app-media/<lower-cased nickname>/<id>`. */
 export const mediaKey = (nickname: string, id: string): string => `${MEDIA_KEY_PREFIX}${nickname.toLowerCase()}/${id}`;
@@ -92,6 +106,8 @@ export const APP_MEDIA_MESSAGES = {
   noBody: "Send the photo or recording as the request's body.",
   fileTooBig: "This file is too big: a photo or recording can be at most 4 MB.",
   unsupported: "Send a photo as a JPEG, or a voice recording as WebM, Ogg or MP4 audio.",
+  recordingTooLong: "This recording is too long: a recording can be at most 5 minutes.",
+  unknownLength: "The length of this recording could not be read. Record it again, or send it as WebM, Ogg or MP4 audio.",
   appFull: "This app has no room left for photos and recordings: an app can keep at most 500 MB.",
   tooManyFiles: "This app already keeps 2,000 photos and recordings, the most it can keep. Delete one to add another.",
   uploadBudget: "This app has uploaded a lot today. Uploading starts again tomorrow.",
@@ -112,10 +128,13 @@ export interface MediaUsage {
   created: boolean;
 }
 
-/** One file's record (`MEDIA#<id>`). */
+/**
+ * One file's record (`MEDIA#<id>`). A deleted file leaves its record as a tombstone (`deleted`, no longer in the totals),
+ * so its id is never used again (a later PUT answers 409) until a reset clears the app.
+ */
 export interface MediaRecord {
   bytes: number;
-  status: "uploading" | "stored";
+  status: "uploading" | "stored" | "deleted";
   /** When the upload began (ISO). */
   createdAt: string;
 }
@@ -153,7 +172,7 @@ export interface AppMediaStore {
   finish(nickname: string, id: string): Promise<boolean>;
   /** Gives a failed upload's room back: deletes its record (only while `uploading`) and takes it off the totals (not the day's uploads). */
   release(nickname: string, id: string, bytes: number, nowIso: string): Promise<void>;
-  /** Deletes the record and takes it off the totals, only while it is as read; `conflict` when it changed. */
+  /** Turns the record into a tombstone (`deleted`) and takes it off the totals, only while it is as read; `conflict` when it changed. */
   remove(nickname: string, id: string, record: MediaRecord, nowIso: string): Promise<"deleted" | "conflict">;
 }
 
@@ -173,6 +192,8 @@ export type AppMediaOutcome =
   | "no-body"
   | "file-too-big"
   | "unsupported-media-type"
+  | "recording-too-long"
+  | "unknown-length"
   | "app-full"
   | "too-many-files"
   | "upload-budget"
@@ -262,8 +283,14 @@ async function putMedia(request: HttpRequest, nickname: string, id: string, writ
   if (!body.ok) return body.answer;
   const kind = detectMedia(body.bytes);
   if (kind === undefined) return refuse(415, "unsupported-media-type", APP_MEDIA_MESSAGES.unsupported);
-  // detectMedia accepted the JPEG, so stripping it succeeds.
-  const file = kind === "jpeg" ? (stripJpegMetadata(body.bytes) as Buffer) : body.bytes;
+  if (kind !== "jpeg") {
+    // At most 5 minutes (plus the margin), from the container's own timing; a length that cannot be read is refused.
+    const seconds = recordingSeconds(body.bytes, kind);
+    if (seconds === undefined) return { ...refuse(415, "unknown-length", APP_MEDIA_MESSAGES.unknownLength), kind };
+    if (seconds > MAX_RECORDING_SECONDS + RECORDING_MARGIN_SECONDS) return { ...refuse(413, "recording-too-long", APP_MEDIA_MESSAGES.recordingTooLong), kind };
+  }
+  // detectMedia accepted the JPEG, so stripping it succeeds; a recording's metadata is blanked in place (same size).
+  const file = kind === "jpeg" ? (stripJpegMetadata(body.bytes) as Buffer) : stripRecordingMetadata(body.bytes, kind);
   const contentType = MEDIA_CONTENT_TYPES[kind];
   const sized = { bytes: file.length, kind };
   for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt += 1) {
@@ -282,6 +309,9 @@ async function putMedia(request: HttpRequest, nickname: string, id: string, writ
     try {
       await deps.bucket.put(key, file, contentType);
     } catch (error) {
+      // A put that failed late (a timeout after S3 took the bytes) may still have stored the file: remove it (best
+      // effort) before giving the room back, so no file stays without a record.
+      await quietly(() => deps.bucket.delete(key));
       await quietly(() => deps.store.release(nickname, id, file.length, deps.now().toISOString()));
       throw error;
     }
@@ -300,8 +330,8 @@ async function deleteMedia(nickname: string, id: string, deps: AppMediaDeps): Pr
   for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt += 1) {
     if (attempt > 0) await deps.pause();
     const record = await deps.store.getRecord(nickname, id);
-    // Nothing to remove (never stored, or already deleted): done, nothing touched.
-    if (record === undefined) return { outcome: "deleted", response: { statusCode: 204, headers: { "cache-control": "no-store", ...CORS_HEADERS } } };
+    // Nothing to remove (never stored, or already deleted: a tombstone): done, nothing touched.
+    if (record === undefined || record.status === "deleted") return { outcome: "deleted", response: { statusCode: 204, headers: { "cache-control": "no-store", ...CORS_HEADERS } } };
     const now = deps.now();
     if (record.status === "uploading" && now.getTime() - Date.parse(record.createdAt) < UPLOAD_STALE_SECONDS * 1000) {
       return refuse(409, "uploading", APP_MEDIA_MESSAGES.uploading);

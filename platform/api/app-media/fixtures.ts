@@ -90,8 +90,12 @@ const ebmlSize = (n: number): Buffer => {
 const UNKNOWN_SIZE = Buffer.from([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
 const element = (id: number[], data: Buffer): Buffer => Buffer.concat([Buffer.from(id), ebmlSize(data.length), data]);
 
-/** A WebM as MediaRecorder writes it (Segment and Cluster of unknown size), with one track per codec, padded to `totalBytes`. */
-export function webmOfSize(totalBytes: number, codecs: string[] = ["A_OPUS"], docType = "webm"): Buffer {
+/**
+ * A WebM as MediaRecorder writes it (Segment and Cluster of unknown size, no Duration), with one track per codec, padded
+ * to `totalBytes`: one Cluster whose Timecode is `seconds` (TimecodeScale 1 ms) holding one SimpleBlock at relative time
+ * 0, so the recording measures `seconds` long. `declaredSeconds` adds Info's Duration (an 8-byte float, in ms).
+ */
+export function webmOfSize(totalBytes: number, codecs: string[] = ["A_OPUS"], docType = "webm", seconds = 10, declaredSeconds?: number): Buffer {
   const header = element([0x1a, 0x45, 0xdf, 0xa3], Buffer.concat([element([0x42, 0x86], Buffer.from([1])), element([0x42, 0x82], Buffer.from(docType))]));
   const tracks = element(
     [0x16, 0x54, 0xae, 0x6b],
@@ -101,17 +105,24 @@ export function webmOfSize(totalBytes: number, codecs: string[] = ["A_OPUS"], do
       ),
     ),
   );
-  const info = element([0x15, 0x49, 0xa9, 0x66], element([0x2a, 0xd7, 0xb1], Buffer.from([0x0f, 0x42, 0x40])));
-  const start = Buffer.concat([header, Buffer.from([0x18, 0x53, 0x80, 0x67]), UNKNOWN_SIZE, info, tracks, Buffer.from([0x1f, 0x43, 0xb6, 0x75]), UNKNOWN_SIZE]);
-  const blockHead = Buffer.concat([Buffer.from([0xa3]), ebmlSize(0)]);
-  const room = Math.max(0, totalBytes - start.length - blockHead.length);
-  return Buffer.concat([start, Buffer.from([0xa3]), ebmlSize(room), filler(room)]);
+  const duration = Buffer.alloc(8);
+  duration.writeDoubleBE((declaredSeconds ?? 0) * 1000);
+  const info = element(
+    [0x15, 0x49, 0xa9, 0x66],
+    Buffer.concat([element([0x2a, 0xd7, 0xb1], Buffer.from([0x0f, 0x42, 0x40])), ...(declaredSeconds === undefined ? [] : [element([0x44, 0x89], duration)])]),
+  );
+  const timecode = element([0xe7], u32(Math.round(seconds * 1000)));
+  const start = Buffer.concat([header, Buffer.from([0x18, 0x53, 0x80, 0x67]), UNKNOWN_SIZE, info, tracks, Buffer.from([0x1f, 0x43, 0xb6, 0x75]), UNKNOWN_SIZE, timecode]);
+  // SimpleBlock: track 1 (0x81), relative time 0, flags (keyframe), then the frame.
+  const blockHead = Buffer.from([0x81, 0x00, 0x00, 0x80]);
+  const room = Math.max(0, totalBytes - start.length - 1 - 8 - blockHead.length);
+  return Buffer.concat([start, Buffer.from([0xa3]), ebmlSize(room + blockHead.length), blockHead, filler(room)]);
 }
 
 // ---- Ogg ----
 
 /** One Ogg page holding one packet (at most 255 x 255 bytes). */
-function oggPage(packet: Buffer, flags: number, sequence: number, serial = 1): Buffer {
+function oggPage(packet: Buffer, flags: number, sequence: number, serial = 1, granule = 0n): Buffer {
   const lacing: number[] = [];
   let left = packet.length;
   while (left >= 255) {
@@ -119,20 +130,31 @@ function oggPage(packet: Buffer, flags: number, sequence: number, serial = 1): B
     left -= 255;
   }
   lacing.push(left);
-  return Buffer.concat([Buffer.from("OggS"), Buffer.from([0, flags]), Buffer.alloc(8), u32(serial), u32(sequence), Buffer.alloc(4), Buffer.from([lacing.length]), Buffer.from(lacing), packet]);
+  const position = Buffer.alloc(8);
+  position.writeBigInt64LE(granule);
+  return Buffer.concat([Buffer.from("OggS"), Buffer.from([0, flags]), position, u32(serial), u32(sequence), Buffer.alloc(4), Buffer.from([lacing.length]), Buffer.from(lacing), packet]);
 }
 
-/** An Ogg file whose first (BOS) page starts the given stream ("OpusHead" or a Theora header). */
-export function oggOfSize(totalBytes: number, head: Buffer = Buffer.concat([Buffer.from("OpusHead"), Buffer.from([1, 1, 0x38, 1, 0x80, 0xbb, 0, 0, 0, 0, 0])])): Buffer {
+/** Opus's pre-skip in the fixtures' OpusHead (0x0138 = 312 samples at 48 kHz). */
+export const OGG_PRE_SKIP = 312;
+const OPUS_HEAD = Buffer.concat([Buffer.from("OpusHead"), Buffer.from([1, 1, 0x38, 1, 0x80, 0xbb, 0, 0, 0, 0, 0])]);
+
+/**
+ * An Ogg file whose first (BOS) page starts the given stream ("OpusHead" or a Theora header), padded with data pages;
+ * the last page's granule position makes it `seconds` long (48 kHz, plus the pre-skip). `seconds` null leaves
+ * every data page at -1 (no packet ends there), so the length cannot be read.
+ */
+export function oggOfSize(totalBytes: number, head: Buffer = OPUS_HEAD, seconds: number | null = 10): Buffer {
   const pages = [oggPage(head, 0x02, 0), oggPage(Buffer.concat([Buffer.from("OpusTags"), Buffer.alloc(8)]), 0, 1)];
   let size = pages.reduce((n, p) => n + p.length, 0);
   let sequence = 2;
-  while (size < totalBytes) {
-    const page = oggPage(filler(Math.min(60_000, Math.max(1, totalBytes - size - 300))), 0, sequence);
+  while (size < totalBytes || pages.length < 3) {
+    const page = oggPage(filler(Math.min(60_000, Math.max(1, totalBytes - size - 300))), 0, sequence, 1, -1n);
     pages.push(page);
     size += page.length;
     sequence += 1;
   }
+  if (seconds !== null) (pages[pages.length - 1] as Buffer).writeBigInt64LE(BigInt(Math.round(seconds * 48_000) + OGG_PRE_SKIP), 6);
   return Buffer.concat(pages);
 }
 
@@ -143,19 +165,78 @@ const box = (type: string, ...children: Buffer[]): Buffer => {
   return Buffer.concat([u32(body.length + 8), Buffer.from(type, "latin1"), body]);
 };
 
-/** An MP4 with one track per [handler, sample entry] (`soun`/`mp4a` is AAC audio, `vide`/`avc1` is video), padded with `mdat`. */
-export function mp4OfSize(totalBytes: number, tracks: [string, string][] = [["soun", "mp4a"]]): Buffer {
-  const trak = ([handler, entry]: [string, string]) =>
+/** mvhd or mdhd, version 0: version and flags, creation and modification times, timescale, duration (then zeros). */
+const timedBox = (type: "mvhd" | "mdhd", scale: number, duration: number, size: number): Buffer => box(type, Buffer.alloc(12), u32(scale), u32(duration), Buffer.alloc(size - 28));
+/** tkhd, version 0: version and flags, creation and modification times, track_ID (then zeros). */
+const tkhd = (track: number): Buffer => box("tkhd", Buffer.alloc(12), u32(track), Buffer.alloc(64));
+
+function mp4Track([handler, entry]: [string, string], track: number, mediaScale: number, mediaDuration: number, stts: Buffer = Buffer.concat([Buffer.alloc(4), u32(0)])): Buffer {
+  return box(
+    "trak",
+    tkhd(track),
     box(
-      "trak",
-      box(
-        "mdia",
-        box("hdlr", Buffer.alloc(8), Buffer.from(handler, "latin1"), Buffer.alloc(13)),
-        box("minf", box("stbl", box("stsd", Buffer.alloc(4), u32(1), box(entry, Buffer.alloc(28))))),
-      ),
-    );
-  const head = Buffer.concat([box("ftyp", Buffer.from("M4A ", "latin1"), u32(0), Buffer.from("isomM4A ", "latin1")), box("moov", box("mvhd", Buffer.alloc(100)), ...tracks.map(trak))]);
+      "mdia",
+      timedBox("mdhd", mediaScale, mediaDuration, 32),
+      box("hdlr", Buffer.alloc(8), Buffer.from(handler, "latin1"), Buffer.alloc(13)),
+      box("minf", box("stbl", box("stsd", Buffer.alloc(4), u32(1), box(entry, Buffer.alloc(28))), box("stts", stts))),
+    ),
+  );
+}
+
+/**
+ * A plain MP4 with one track per [handler, sample entry] (`soun`/`mp4a` is AAC audio, `vide`/`avc1` is video), padded
+ * with `mdat`; mvhd declares `seconds` (timescale 1000). `extra` boxes go into `moov` (a `udta`, say).
+ */
+export function mp4OfSize(totalBytes: number, tracks: [string, string][] = [["soun", "mp4a"]], seconds = 10, extra: Buffer[] = []): Buffer {
+  const head = Buffer.concat([
+    box("ftyp", Buffer.from("M4A ", "latin1"), u32(0), Buffer.from("isomM4A ", "latin1")),
+    box("moov", timedBox("mvhd", 1000, Math.round(seconds * 1000), 108), ...tracks.map((t, i) => mp4Track(t, i + 1, 48_000, 0)), ...extra),
+  ]);
   return Buffer.concat([head, box("mdat", filler(Math.max(0, totalBytes - head.length - 8)))]);
 }
+
+/** A plain MP4 whose only length is its sample table: `count` samples of `delta` at 48 kHz (mvhd and mdhd say 0). */
+export function mp4WithSampleTable(count: number, delta: number): Buffer {
+  const stts = Buffer.concat([Buffer.alloc(4), u32(1), u32(count), u32(delta)]);
+  const head = Buffer.concat([box("ftyp", Buffer.from("M4A ", "latin1"), u32(0)), box("moov", timedBox("mvhd", 1000, 0, 108), mp4Track(["soun", "mp4a"], 1, 48_000, 0, stts))]);
+  return Buffer.concat([head, box("mdat", filler(1000))]);
+}
+
+/**
+ * A fragmented MP4 as MediaRecorder writes it (Chromium: Opus with per-sample durations in `trun`; Safari: AAC): an
+ * empty `moov` (mvhd and mdhd say 0) with `mvex`/`trex`, then `fragments` pairs of `moof` + `mdat` of AAC frames (1,024
+ * samples at 48 kHz) adding up to `seconds`. `durations` says where each sample's duration is written: in `trun` per
+ * sample, as `tfhd`'s default, or only as `trex`'s default; `tfdt: false` leaves each fragment to start where the
+ * previous one ended.
+ */
+export function fragmentedMp4(seconds: number, options: { fragments?: number; durations?: "trun" | "tfhd" | "trex"; tfdt?: boolean; entry?: string } = {}): Buffer {
+  const { fragments = 4, durations = "trun", tfdt = true, entry = "mp4a" } = options;
+  const frame = 1024;
+  const perFragment = Math.ceil((seconds * 48_000) / frame / fragments);
+  const moov = box(
+    "moov",
+    timedBox("mvhd", 1000, 0, 108),
+    mp4Track(["soun", entry], 1, 48_000, 0),
+    box("mvex", box("trex", Buffer.alloc(4), u32(1), u32(1), u32(durations === "trex" ? frame : 0), u32(0), u32(0))),
+  );
+  const parts: Buffer[] = [box("ftyp", Buffer.from("iso6", "latin1"), u32(0), Buffer.from("iso6mp41", "latin1")), moov];
+  for (let f = 0; f < fragments; f += 1) {
+    const tfhdFlags = 0x020000 | (durations === "tfhd" ? 0x08 : 0);
+    const tfhdBox = box("tfhd", u32(tfhdFlags), u32(1), ...(durations === "tfhd" ? [u32(frame)] : []));
+    const tfdtBox = box("tfdt", Buffer.from([1, 0, 0, 0]), Buffer.alloc(4), u32(f * perFragment * frame));
+    const trunFlags = 0x000001 | 0x000200 | (durations === "trun" ? 0x000100 : 0);
+    const samples = Array.from({ length: perFragment }, () => (durations === "trun" ? Buffer.concat([u32(frame), u32(10)]) : u32(10)));
+    const trun = box("trun", u32(trunFlags), u32(perFragment), u32(0), ...samples);
+    parts.push(box("moof", box("mfhd", Buffer.alloc(4), u32(f + 1)), box("traf", tfhdBox, ...(tfdt ? [tfdtBox] : []), trun)), box("mdat", filler(perFragment * 10)));
+  }
+  return Buffer.concat(parts);
+}
+
+/** An MP4 metadata box (`udta` with a title, as a phone's recorder names a recording after the place). */
+export const mp4TitleBox = (title: string): Buffer => box("udta", box("\xa9nam", Buffer.from(title)));
+
+/** A WebM Tags element (top level, after the Clusters here) with a title. */
+export const webmTags = (title: string): Buffer =>
+  element([0x12, 0x54, 0xc3, 0x67], element([0x73, 0x73], element([0x67, 0xc8], Buffer.concat([element([0x45, 0xa3], Buffer.from("TITLE")), element([0x44, 0x87], Buffer.from(title))]))));
 
 export const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);

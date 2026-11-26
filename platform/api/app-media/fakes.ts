@@ -2,7 +2,7 @@
 // (not bundled: no handler imports them). The store follows DynamoAppMediaStore's conditions: a record is created only
 // if absent, together with the totals, only while they stay within 500 MB, 2,000 files and the day's budget (a new day
 // only over an older one); `finish` only while the record is `uploading` and the app live; `remove` only while the
-// record is as read. Each call is atomic here, so DynamoDB's TransactionConflict does not happen (the store's own tests
+// record is as read, leaving a tombstone (`deleted`). Each call is atomic here, so DynamoDB's TransactionConflict does not happen (the store's own tests
 // check the expressions).
 import { FakeAppTokenStore } from "../app-token/fakes.js";
 import {
@@ -111,7 +111,8 @@ export class FakeAppMediaStore implements AppMediaStore {
     const record = this.records.get(FakeAppMediaStore.id(nickname, id));
     const usage = this.usage.get(nickname.toLowerCase());
     if (record === undefined || usage === undefined || record.status !== read.status || record.bytes !== read.bytes) return "conflict";
-    this.records.delete(FakeAppMediaStore.id(nickname, id));
+    // A tombstone: the id stays taken.
+    record.status = "deleted";
     usage.bytes -= record.bytes;
     usage.files -= 1;
     return "deleted";
@@ -127,6 +128,9 @@ export class FakeMediaBucket implements MediaBucket {
   /** Runs right after a put stored the object (something happening while the upload was in flight). */
   afterPut: (() => void) | undefined;
 
+  /** When set, the next put stores the object and THEN fails with it (a timeout after S3 took the bytes). */
+  putFailureAfterStoring: Error | undefined;
+
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
     this.calls.push(`put ${key}`);
     if (this.putFailure !== undefined) {
@@ -135,6 +139,11 @@ export class FakeMediaBucket implements MediaBucket {
       throw failure;
     }
     this.objects.set(key, { body: Buffer.from(body), contentType });
+    if (this.putFailureAfterStoring !== undefined) {
+      const failure = this.putFailureAfterStoring;
+      this.putFailureAfterStoring = undefined;
+      throw failure;
+    }
     this.afterPut?.();
   }
 

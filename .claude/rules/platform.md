@@ -330,8 +330,25 @@ paths:
   content types: check the base64 length against the limit before decoding, and remember Lambda's 6 MB request limit
   (4 MB of bytes is ~5.6 MB of base64). Judge a file's format from its bytes (magic numbers and the container's own
   track/codec fields), never the declared type, and serve it with a fixed type per format plus `nosniff`. Remove photo
-  metadata by walking the JPEG segments (drop APP1/APP13/COM and every APPn but JFIF, ICC and Adobe, and anything after
-  EOI); prove "still decodes" on a JPEG Chromium encodes (`app-media/browser.test.ts`).
+  metadata by walking the JPEG segments with an ALLOW-list (the picture's own segments SOFn, DHT, DAC, DQT, DNL, DRI,
+  SOS, RSTn, plus JFIF, ICC and Adobe; everything else, reserved and JPGn markers included, goes, and anything after
+  EOI); prove "still decodes" on a JPEG Chromium encodes (`app-media/browser.test.ts`). Dropping APP1 drops the Exif
+  orientation: the template's canvas resize (3.19) applies it first.
+- A limit on a recording's length (3.18 try 2: 5 minutes) is measured from the container's own timing on the server,
+  never trusted from the client: WebM from Info's Duration AND the last block (MediaRecorder writes no Duration and
+  unknown-size Clusters: walk flat, stepping INTO Clusters and BlockGroups), Ogg/Opus from the last granule position
+  less OpusHead's pre-skip (skip granule -1 and the header pages' 0), MP4 from mvhd/mdhd/mehd, `stts` and fragments
+  (`tfdt` + `trun` durations or `tfhd`/`trex` defaults: Chromium's and Safari's MediaRecorder write fragmented MP4).
+  Refuse what cannot be measured. Check every count against the box before looping (multiply when there is no
+  per-sample data), and test with real MediaRecorder output plus 4 MB of tiny elements against a time limit.
+  Metadata in a recording is blanked IN PLACE (MP4 `udta`/`meta` -> `free`, WebM Tags/Title -> Void): a plain MP4's
+  sample offsets point into the file, so removing bytes would break it.
+- An id that must never serve other bytes (media ids, browsers cache by address) keeps a tombstone on delete (status
+  `deleted`, out of the totals) so a create-only PUT still finds it taken; only a full reset deletes tombstones.
+- An operator cleanup racing a Lambda that may still be running (3.18's reset vs an upload in flight) waits longer than
+  that function's timeout before its last pass, and a failed put that may have stored the object deletes the key (best
+  effort) before giving the reservation back.
+- A TypeScript default parameter also applies to an explicit `undefined`: a fixture argument meaning "none" is `null`.
 - Browser code in a `platform/api` test (no DOM types in that tsconfig) goes to `page.evaluate` as plain JavaScript text
   (`inPage` in `app-media/browser.test.ts`), not as a typed function; `platform/web` tests have DOM types.
 - Media in sandboxed apps: `<img>` and `<audio>` from the workshop's own `/app-media/...` load under the apps' CSP

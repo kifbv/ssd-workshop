@@ -808,12 +808,28 @@ export const WAF_RATE_WINDOW_SECONDS = 300;
 /**
  * Ticket 3.18 (decision "Abuse cost", question 3): a second rule, per address, at most WAF_MEDIA_RATE_LIMIT requests to
  * `/app-media/*` in WAF_RATE_WINDOW_SECONDS, counted apart from `/api/*` so a room loading photos never blocks the API.
- * Sized for a room behind one venue address: browsers keep a file a year, so each person fetches each photo or recording
- * once; ~45 people each opening ~100 files within 5 minutes is ~4,500. Above it, 429 like the API rule.
+ * Try 2 (cost, accepted by Franck 2026-11-26): 3,000. A room behind one venue address: browsers keep a file a day, so
+ * each person fetches each photo or recording about once; ~45 people each opening ~60 files within 5 minutes is
+ * ~2,700. One abusing address then pulls at most 3,000 x 4 MB = 12 GB per 5 minutes. Above it, 429 like the API rule.
  */
 export const WAF_MEDIA_RATE_RULE_NAME = `${PREFIX}-media-rate`;
 export const WAF_MEDIA_PATH_PREFIX = "/app-media/";
-export const WAF_MEDIA_RATE_LIMIT = 6_000;
+export const WAF_MEDIA_RATE_LIMIT = 3_000;
+/**
+ * Ticket 3.18 try 2: a junk filter in the same web ACL (its own rule, priority 2): a `PUT` or `DELETE` to
+ * `/api/apps/<nickname>/media/<id>` whose `authorization` header does not start with `Bearer ` is answered by WAF
+ * (WAF_MEDIA_AUTH_STATUS, the API's own 401 body and CORS header), never reaching API Gateway or Lambda. It does not stop
+ * a made-up token (the function checks tokens); it only keeps token-less floods off the paid path.
+ */
+export const WAF_MEDIA_AUTH_RULE_NAME = `${PREFIX}-media-auth`;
+export const WAF_MEDIA_API_PREFIX = "/api/apps/";
+export const WAF_MEDIA_API_SEGMENT = "/media/";
+export const WAF_MEDIA_AUTH_METHODS = ["PUT", "DELETE"] as const;
+export const WAF_BEARER_PREFIX = "Bearer ";
+export const WAF_MEDIA_AUTH_STATUS = 401;
+export const WAF_MEDIA_AUTH_BODY_KEY = "sign-in-to-save";
+/** The media API's own 401 answer (platform APP_SIGN_IN_TEXTS.signInToSave; a synth test keeps them equal). */
+export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "Sign in to the workshop to save in this app." });
 /**
  * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
  * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would

@@ -1,8 +1,8 @@
 // Ticket 3.18: the media checks on the bytes themselves (criteria 3 and 4). Real encoder output (Chromium's JPEG and
 // MediaRecorder's WebM) and the decoding of a stripped photo are proved in browser.test.ts.
 import { describe, expect, it } from "vitest";
-import { exifWithGps, jpegOfSize, mp4OfSize, oggOfSize, PNG_SIGNATURE, segment, webmOfSize, xmpWithGps } from "./fixtures.js";
-import { detectMedia, MEDIA_CONTENT_TYPES, stripJpegMetadata } from "./formats.js";
+import { exifWithGps, fragmentedMp4, jpegOfSize, mp4OfSize, mp4TitleBox, mp4WithSampleTable, oggOfSize, PNG_SIGNATURE, segment, webmOfSize, webmTags, xmpWithGps } from "./fixtures.js";
+import { detectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripJpegMetadata, stripRecordingMetadata } from "./formats.js";
 
 const KB = 1024;
 
@@ -117,5 +117,134 @@ describe("criterion 4: a photo loses its location data", () => {
     expect(stripped?.includes(dht)).toBe(true);
     expect(stripped?.includes(sos2)).toBe(true);
     expect(stripped?.subarray(-2)).toEqual(Buffer.from([0xff, 0xd9]));
+  });
+});
+
+describe("try 2: the JPEG allow-list keeps only the picture's own segments and JFIF, ICC and Adobe", () => {
+  it("keeps DRI and DAC, drops JPG (C8), JPGn (F0 to FD), DHP, EXP, reserved markers and TEM", () => {
+    const dri = segment(0xdd, Buffer.from([0, 4]));
+    const dac = segment(0xcc, Buffer.from([0x10, 0x11]));
+    const dropped = [
+      segment(0xc8, Buffer.from("jpg extension place")),
+      segment(0xf0, Buffer.from("jpg0 place")),
+      segment(0xf7, Buffer.from("jpg7 place")),
+      segment(0xfd, Buffer.from("jpg13 place")),
+      segment(0xde, Buffer.from("dhp place")),
+      segment(0xdf, Buffer.from("exp place")),
+      segment(0x02, Buffer.from("reserved place")),
+      segment(0xbf, Buffer.from("reserved bf place")),
+    ];
+    const photo = jpegOfSize(10 * KB, [dri, dac, ...dropped, Buffer.from([0xff, 0x01])]);
+    const kept = stripJpegMetadata(photo) as Buffer;
+    expect(kept).toBeDefined();
+    expect(kept.includes(Buffer.from("place"))).toBe(false);
+    expect(markers(kept)).toEqual([0xe0, 0xdd, 0xcc, 0xdb, 0xc0, 0xc4, 0xda]);
+    expect(kept.length).toBe(photo.length - dropped.reduce((n, s) => n + s.length, 0) - 2);
+    expect(detectMedia(kept)).toBe("jpeg");
+  });
+});
+
+describe("try 2: a recording's length, from its own container", () => {
+  it("reads WebM from the last block (MediaRecorder writes no Duration) or the declared Duration, whichever is longer", () => {
+    expect(recordingSeconds(webmOfSize(10 * KB, ["A_OPUS"], "webm", 42), "webm")).toBeCloseTo(42, 3);
+    expect(recordingSeconds(webmOfSize(10 * KB, ["A_OPUS"], "webm", 1, 400), "webm")).toBeCloseTo(400, 3);
+    expect(recordingSeconds(webmOfSize(10 * KB, ["A_OPUS"], "webm", 400, 1), "webm")).toBeCloseTo(400, 3);
+  });
+
+  it("reads Ogg/Opus from the last granule position, less the pre-skip", () => {
+    expect(recordingSeconds(oggOfSize(10 * KB, undefined, 42), "ogg")).toBeCloseTo(42, 3);
+    expect(recordingSeconds(oggOfSize(200 * KB, undefined, 306), "ogg")).toBeCloseTo(306, 3);
+  });
+
+  it("reads MP4 from mvhd, the sample table, and every kind of fragment (durations in trun, tfhd's default or trex's; with or without tfdt)", () => {
+    expect(recordingSeconds(mp4OfSize(10 * KB, [["soun", "mp4a"]], 42), "mp4")).toBeCloseTo(42, 3);
+    // 2 x 48,000 samples of 1,000 ticks... here 15,000 samples of 1,024 at 48 kHz = 320 s, while mvhd says 0.
+    expect(recordingSeconds(mp4WithSampleTable(15_000, 1024), "mp4")).toBeCloseTo(320, 3);
+    for (const durations of ["trun", "tfhd", "trex"] as const) {
+      for (const tfdt of [true, false]) {
+        const seconds = recordingSeconds(fragmentedMp4(310, { durations, tfdt }), "mp4") as number;
+        expect(seconds, `${durations} ${tfdt}`).toBeGreaterThanOrEqual(310);
+        expect(seconds, `${durations} ${tfdt}`).toBeLessThan(310.2);
+      }
+    }
+    expect(recordingSeconds(fragmentedMp4(30, { entry: "Opus" }), "mp4")).toBeCloseTo(30, 0);
+  });
+
+  it("cannot read a length (undefined, so the API refuses) when there is none: no block, no audio page, nothing but zeros", () => {
+    const noBlock = webmOfSize(10 * KB);
+    const cluster = noBlock.indexOf(Buffer.from([0x1f, 0x43, 0xb6, 0x75]));
+    expect(recordingSeconds(noBlock.subarray(0, cluster), "webm")).toBeUndefined();
+    expect(recordingSeconds(oggOfSize(10 * KB, undefined, null), "ogg")).toBeUndefined();
+    expect(recordingSeconds(mp4OfSize(10 * KB, [["soun", "mp4a"]], 0), "mp4")).toBeUndefined();
+    // A cut file: a block or page running past the end.
+    expect(recordingSeconds(webmOfSize(10 * KB).subarray(0, 9 * KB), "webm")).toBeUndefined();
+    expect(recordingSeconds(oggOfSize(10 * KB).subarray(0, 9 * KB), "ogg")).toBeUndefined();
+    // A fragment whose samples have no duration anywhere.
+    const noDefault = fragmentedMp4(10, { durations: "trex" });
+    const trex = noDefault.indexOf(Buffer.from("trex"));
+    noDefault.writeUInt32BE(0, trex + 4 + 12);
+    expect(recordingSeconds(noDefault, "mp4")).toBeUndefined();
+  });
+
+  it("ends on hostile input in linear time: random bytes, 4 MB of tiny elements or pages, huge counts", () => {
+    let x = 3;
+    const random = (n: number) => Buffer.from(Array.from({ length: n }, () => ((x = (x * 1103515245 + 12345) >>> 0) >>> 16) & 0xff));
+    for (const [kind, start] of [
+      ["webm", webmOfSize(200).subarray(0, 120)],
+      ["ogg", oggOfSize(200).subarray(0, 60)],
+      ["mp4", mp4OfSize(600).subarray(0, 400)],
+    ] as const) {
+      for (let i = 0; i < 300; i += 1) expect(() => recordingSeconds(Buffer.concat([start, random(i * 7)]), kind)).not.toThrow();
+    }
+    const MB4 = 4 * 1024 * 1024;
+    const started = Date.now();
+    // WebM: 2 million two-byte Void elements between the Tracks and the Cluster, which still measures 7 s at the end.
+    const small = webmOfSize(200, ["A_OPUS"], "webm", 7);
+    const cluster = small.indexOf(Buffer.from([0x1f, 0x43, 0xb6, 0x75]));
+    const voids = Buffer.alloc(MB4, 0);
+    for (let i = 0; i < MB4; i += 2) voids[i] = 0xec;
+    for (let i = 1; i < MB4; i += 2) voids[i] = 0x80;
+    expect(recordingSeconds(Buffer.concat([small.subarray(0, cluster), voids, small.subarray(cluster)]), "webm")).toBeCloseTo(7, 3);
+    // Ogg: 4 MB of empty pages after the head (155,000 pages).
+    const ogg = oggOfSize(200);
+    const emptyPage = Buffer.concat([Buffer.from("OggS"), Buffer.from([0, 0]), Buffer.alloc(8, 0xff), ogg.subarray(14, 18), Buffer.alloc(8), Buffer.from([0])]);
+    const pages = Buffer.concat(Array.from({ length: Math.floor(MB4 / emptyPage.length) }, () => emptyPage));
+    expect(recordingSeconds(Buffer.concat([ogg, pages]), "ogg")).toBeCloseTo(10, 3);
+    // MP4: a trun claiming 4 billion samples with per-sample durations (cut: undefined at once) and without (multiplied, never looped).
+    const fragmented = fragmentedMp4(1, { fragments: 1 });
+    const trun = fragmented.indexOf(Buffer.from("trun"));
+    const huge = Buffer.from(fragmented);
+    huge.writeUInt32BE(0xffffffff, trun + 8);
+    expect(recordingSeconds(huge, "mp4")).toBeUndefined();
+    const hugeDefault = Buffer.from(fragmentedMp4(1, { fragments: 1, durations: "tfhd" }));
+    hugeDefault.writeUInt32BE(0xffffffff, hugeDefault.indexOf(Buffer.from("trun")) + 8);
+    expect(recordingSeconds(hugeDefault, "mp4")).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("try 2: a recording's metadata is blanked in place", () => {
+  it("turns MP4 udta into a free box of zeros and WebM Tags into a Void element: same size, still the same format and length", () => {
+    const mp4 = mp4OfSize(10 * KB, [["soun", "mp4a"]], 42, [mp4TitleBox("12 rue de la Paix")]);
+    const cleanMp4 = stripRecordingMetadata(mp4, "mp4");
+    expect(cleanMp4.length).toBe(mp4.length);
+    expect(cleanMp4.includes(Buffer.from("rue de la Paix"))).toBe(false);
+    expect(cleanMp4.includes(Buffer.from("udta"))).toBe(false);
+    expect(cleanMp4.includes(Buffer.from("free"))).toBe(true);
+    expect(detectMedia(cleanMp4)).toBe("mp4");
+    expect(recordingSeconds(cleanMp4, "mp4")).toBeCloseTo(42, 3);
+    // The input is not changed (the API may still need it).
+    expect(mp4.includes(Buffer.from("rue de la Paix"))).toBe(true);
+
+    const webm = Buffer.concat([webmOfSize(10 * KB, ["A_OPUS"], "webm", 42), webmTags("12 rue de la Paix")]);
+    expect(recordingSeconds(webm, "webm")).toBeCloseTo(42, 3);
+    const cleanWebm = stripRecordingMetadata(webm, "webm");
+    expect(cleanWebm.length).toBe(webm.length);
+    expect(cleanWebm.includes(Buffer.from("rue de la Paix"))).toBe(false);
+    expect(detectMedia(cleanWebm)).toBe("webm");
+    expect(recordingSeconds(cleanWebm, "webm")).toBeCloseTo(42, 3);
+    // Ogg is stored as received.
+    const ogg = oggOfSize(10 * KB);
+    expect(stripRecordingMetadata(ogg, "ogg").equals(ogg)).toBe(true);
   });
 });

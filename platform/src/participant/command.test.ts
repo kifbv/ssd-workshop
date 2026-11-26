@@ -5,7 +5,7 @@ import { FakeAppDataStore } from "../../api/app-data/fakes.js";
 import { handleAppDataRequest } from "../../api/app-data/data.js";
 import { FakeAppMediaStore, FakeMediaBucket } from "../../api/app-media/fakes.js";
 import { jpegOfSize } from "../../api/app-media/fixtures.js";
-import { handleAppMediaRequest, mediaKey } from "../../api/app-media/media.js";
+import { APP_MEDIA_TIMEOUT_SECONDS, handleAppMediaRequest, mediaKey } from "../../api/app-media/media.js";
 import { FakeAppTokenStore } from "../../api/app-token/fakes.js";
 import { hashAppToken } from "../../api/app-token/token.js";
 import { FakeConversationTable } from "../../api/conversation/fakes.js";
@@ -16,7 +16,7 @@ import { STALE_PENDING_SECONDS } from "../../api/conversation/state.js";
 import type { BuildStatus, Step } from "../../api/types.js";
 import { FakeResetStore } from "../conversation/fakes.js";
 import { runConversation, type ConversationDeps } from "../conversation/command.js";
-import { runParticipant, SETTLE_MS, USAGE, type AppMediaFiles, type ParticipantDeps } from "./command.js";
+import { MEDIA_SETTLE_MS, runParticipant, SETTLE_MS, USAGE, type AppMediaFiles, type ParticipantDeps } from "./command.js";
 import type { ParticipantResetStore } from "./store.js";
 
 const NOW = new Date("2026-11-25T10:00:00.000Z");
@@ -380,6 +380,7 @@ describe("AC2: reset --yes at any step", () => {
       expect(s.out).toEqual([
         "Reset Ada: deleted 2 messages and replies and 2 spec versions; back at step 1 (Clarify).",
         "Ended 2 sign-ins to save in apps (app write tokens).",
+        "Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.",
         "Deleted 2 stored values and the app's data totals; deleted the live marker.",
         "Deleted 2 photos and recordings; CloudFront stops serving the app's media within minutes.",
         "Repository ssd-workshop-apps/ssd-ada deleted.",
@@ -409,7 +410,8 @@ describe("AC2: reset --yes at any step", () => {
     expect(s.apps.usage.has("ada")).toBe(false);
     expect(s.github.repositories.has("ssd-ada")).toBe(false);
     expect(s.out[0]).toBe("Ended 2 sign-ins to save in apps (app write tokens).");
-    expect(s.out[1]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
+    expect(s.out[1]).toBe("Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.");
+    expect(s.out[2]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
     expectBobUntouched(s);
   });
 });
@@ -501,12 +503,38 @@ describe("ticket 3.18 criterion 8: reset and the app's photos and recordings", (
       }
     };
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
-    expect(passes).toBe(2);
-    expect(s.waits).toEqual([SETTLE_MS]);
+    expect(passes).toBe(3);
+    expect(s.waits).toEqual([SETTLE_MS, MEDIA_SETTLE_MS]);
     expect(s.bucket.objects.has(mediaKey("ada", "LateLateLateLateLate01"))).toBe(false);
     expect(s.media.records.has("ada/LateLateLateLateLate01")).toBe(false);
     expect(s.media.usage.has("ada")).toBe(false);
     expect(s.out).toContain("Deleted 3 photos and recordings; CloudFront stops serving the app's media within minutes.");
+  });
+
+  it("try 2: WHEN an upload cut off mid-flight stores its file after the second pass THEN the last pass, after a wait longer than the media function's timeout, deletes it", async () => {
+    const s = setup();
+    // The late file lands while the reset waits: after both data passes, before the last media listing.
+    s.deps.sleep = async (ms) => {
+      s.waits.push(ms);
+      if (ms === MEDIA_SETTLE_MS) s.bucket.objects.set(mediaKey("ada", "CutCutCutCutCutCutCut1"), { body: Buffer.from("cut"), contentType: "audio/webm" });
+    };
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    expect(s.waits).toEqual([SETTLE_MS, MEDIA_SETTLE_MS]);
+    expect(MEDIA_SETTLE_MS).toBeGreaterThan(APP_MEDIA_TIMEOUT_SECONDS * 1000);
+    expect(s.bucket.objects.has(mediaKey("ada", "CutCutCutCutCutCutCut1"))).toBe(false);
+    // CloudFront is told after the last pass.
+    expect(s.forgotten).toEqual(["/app-media/ada/*"]);
+    expect(s.out).toContain("Deleted 3 photos and recordings; CloudFront stops serving the app's media within minutes.");
+    expect(s.out).toContain("Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.");
+  });
+
+  it("try 2: WHEN the app has a deleted file's tombstone THEN the dry run does not count it and the reset deletes it", async () => {
+    const s = setup();
+    s.media.records.set("ada/GoneGoneGoneGoneGone01", { bytes: 1000, status: "deleted", createdAt: "2026-11-25T09:00:00.000Z", contentType: "image/jpeg", uploadedBy: "Bob" });
+    await expect(s.run("reset", "Ada")).resolves.toBe(0);
+    expect(s.out[1]).toContain("2 photos and recordings");
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    expect(s.media.records.has("ada/GoneGoneGoneGoneGone01")).toBe(false);
   });
 
   it("WHEN the media bucket cannot be listed THEN the dry run and the reset fail with the error's name only, before any change", async () => {
@@ -620,9 +648,10 @@ describe("AC4: retries", () => {
     s.out.length = 0;
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
     expect(snapshot(s)).toBe(after);
-    expect(s.out.slice(0, 5)).toEqual([
+    expect(s.out.slice(0, 6)).toEqual([
       "Reset Ada: deleted 0 messages and replies and 0 spec versions; back at step 1 (Clarify).",
       "Ended 0 sign-ins to save in apps (app write tokens).",
+      "Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.",
       "Deleted no app data; the live marker was already gone.",
       "Deleted no photos or recordings; CloudFront stops serving the app's media within minutes.",
       "Repository ssd-workshop-apps/ssd-ada was already gone.",
@@ -703,12 +732,12 @@ describe("AC2: data written while the reset runs", () => {
     };
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
     expect(passes).toBe(2);
-    expect(s.waits).toEqual([SETTLE_MS]);
+    expect(s.waits).toEqual([SETTLE_MS, MEDIA_SETTLE_MS]);
     expect(SETTLE_MS).toBe(2000);
     expect(s.apps.values.has("ada/late")).toBe(false);
     expectAdaReset(s, kept);
     expectBobUntouched(s);
-    expect(s.out[2]).toBe("Deleted 3 stored values and the app's data totals; deleted the live marker.");
+    expect(s.out[3]).toBe("Deleted 3 stored values and the app's data totals; deleted the live marker.");
   });
 
   it("AC2 WHEN nothing is written meanwhile THEN the second pass finds nothing and deletes nothing more", async () => {
@@ -721,7 +750,7 @@ describe("AC2: data written while the reset runs", () => {
     };
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
     expect(deleted.map((keys) => keys.length)).toEqual([3, 0]);
-    expect(s.waits).toEqual([SETTLE_MS]);
+    expect(s.waits).toEqual([SETTLE_MS, MEDIA_SETTLE_MS]);
   });
 });
 

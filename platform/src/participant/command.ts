@@ -7,6 +7,7 @@
 // Nothing it prints holds a message text, a participant id, an email address or a token; an error shows only its
 // name, or a GitHubProblem's plain reason (written never to hold a token, a key or GitHub's answer). It prints the
 // nickname and the repository's name: the operator asked for that participant (decision "(2.13) Names printed").
+import { APP_MEDIA_TIMEOUT_SECONDS } from "../../api/app-media/media.js";
 import { GitHubProblem } from "../../api/github/app.js";
 import type { RepositoryAdmin } from "../../api/github/repository.js";
 import { APPS_GITHUB_OWNER, appRepositoryName } from "../../api/settings.js";
@@ -66,6 +67,14 @@ export interface ParticipantDeps {
  * still commit afterwards; such a write normally lands within this pause and the second pass deletes it.
  */
 export const SETTLE_MS = 2000;
+
+/**
+ * Ticket 3.18 try 2: how long the reset waits after the second pass before its last pass over the app's media. An upload
+ * that read the live marker just before it went may run until the media function's timeout (APP_MEDIA_TIMEOUT_SECONDS)
+ * and store its file late, even when cut off mid-flight before it could delete it itself; waiting longer than that
+ * timeout (plus 5 s for a put S3 was still taking) means the last listing sees every such file.
+ */
+export const MEDIA_SETTLE_MS = (APP_MEDIA_TIMEOUT_SECONDS + 5) * 1000;
 
 const KEPT = "Kept: allow-list entry, nickname, sessions, AI usage totals and build records.";
 
@@ -150,22 +159,29 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   // than SETTLE_MS could still land afterwards (decision "(2.13) Reset order").
   // Ticket 3.18: the media the same way, files before their records. An upload that read the marker before it went and
   // stores its file after the first pass finds the marker gone when it finishes and deletes its own file; the second
-  // pass catches what it had not yet cleaned. Then CloudFront forgets the app's media (always: a run that stopped after
-  // the deletes still makes the cached copies go).
+  // pass catches what it had not yet cleaned. An upload cut off by the function's timeout before it could clean up
+  // (ticket 3.18 try 2) is caught by a last media pass after MEDIA_SETTLE_MS, longer than that timeout. Then CloudFront
+  // forgets the app's media (always: a run that stopped after the deletes still makes the cached copies go).
   const markerDeleted = await store.deleteLiveMarker(nickname);
   const passes = { data: [] as string[], files: [] as string[] };
-  const deletePass = async (): Promise<void> => {
-    const data = await store.listAppData(nickname);
-    await store.deleteAppData(nickname, data);
+  const mediaPass = async (): Promise<void> => {
     const files = await media.list(nickname);
     await media.remove(files);
     await store.deleteAppMedia(nickname, await store.listAppMedia(nickname));
-    passes.data.push(...data);
     passes.files.push(...files);
+  };
+  const deletePass = async (): Promise<void> => {
+    const data = await store.listAppData(nickname);
+    await store.deleteAppData(nickname, data);
+    passes.data.push(...data);
+    await mediaPass();
   };
   await deletePass();
   await deps.sleep(SETTLE_MS);
   await deletePass();
+  deps.out(`Waiting ${MEDIA_SETTLE_MS / 1000} s for uploads already under way, then deleting the app's photos and recordings once more.`);
+  await deps.sleep(MEDIA_SETTLE_MS);
+  await mediaPass();
   await media.forget(nickname);
   deps.out(`Deleted ${describeAppData([...new Set(passes.data)])}; ${markerDeleted ? "deleted the live marker" : "the live marker was already gone"}.`);
   deps.out(`Deleted ${describeMedia(new Set(passes.files).size)}; CloudFront stops serving the app's media within minutes.`);

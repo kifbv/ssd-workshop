@@ -2,7 +2,7 @@
 // - A photo Chromium encodes (canvas JPEG) with an Exif GPS segment added still decodes after stripJpegMetadata, with
 //   the same size and pixels, and the stripped bytes hold no Exif (criterion 4, "still decodes").
 // - MediaRecorder's own recordings (WebM/Opus, and MP4 when this Chromium records it) pass detectMedia (criterion 2's
-//   formats, from the real recorder rather than a hand-made file).
+//   formats, from the real recorder rather than a hand-made file), and the server measures their length (try 2).
 // - An app page under the REAL apps CSP (sandboxed, opaque origin) shows a photo and plays a recording served from
 //   `/app-media/...` of its own server with the media headers (nosniff, the media CSP): `img-src 'self'` and
 //   `media-src`, which falls back to `default-src 'self'`, both match the served address, not the opaque origin.
@@ -14,7 +14,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { APP_MEDIA_CONTENT_SECURITY_POLICY, APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
 import { exifWithGps } from "./fixtures.js";
-import { detectMedia, stripJpegMetadata } from "./formats.js";
+import { detectMedia, recordingSeconds, stripJpegMetadata, stripRecordingMetadata } from "./formats.js";
 import { MEDIA_CACHE_CONTROL } from "./media.js";
 
 const PHOTO_ID = "PhotoPhotoPhotoPhoto01";
@@ -169,9 +169,21 @@ describe("real encoder output", () => {
       expect(webm).toBeDefined();
       expect((webm as Buffer).length).toBeGreaterThan(500);
       expect(detectMedia(webm as Buffer)).toBe("webm");
-      // Newer Chromium records MP4 too (AAC or Opus inside); older ones answer isTypeSupported false.
+      // Try 2: the server measures the real recording (~1.2 s; MediaRecorder's WebM has no Duration, so from its blocks),
+      // and blanking metadata keeps it the same format and length.
+      const webmSeconds = recordingSeconds(webm as Buffer, "webm") as number;
+      expect(webmSeconds).toBeGreaterThan(0.8);
+      expect(webmSeconds).toBeLessThan(3);
+      expect(recordingSeconds(stripRecordingMetadata(webm as Buffer, "webm"), "webm")).toBe(webmSeconds);
+      // Newer Chromium records MP4 too (AAC or Opus inside, fragmented); older ones answer isTypeSupported false.
       const mp4 = await record(page, "audio/mp4");
-      if (mp4 !== undefined) expect(detectMedia(mp4)).toBe("mp4");
+      if (mp4 !== undefined) {
+        expect(detectMedia(mp4)).toBe("mp4");
+        const mp4Seconds = recordingSeconds(mp4, "mp4") as number;
+        expect(mp4Seconds).toBeGreaterThan(0.8);
+        expect(mp4Seconds).toBeLessThan(3);
+        expect(detectMedia(stripRecordingMetadata(mp4, "mp4"))).toBe("mp4");
+      }
       // A video recording is refused: a canvas stream recorded as WebM (VP8).
       const video = await recordVideo(page);
       expect(video.length).toBeGreaterThan(100);

@@ -112,10 +112,12 @@ export const APP_DATA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as 
 
 /**
  * Route throttles for the media API (ticket 3.18), for all apps together. An upload carries up to 4 MB, so PUT gets
- * 5 requests/s (burst 20): a room of 45 taking photos at once still passes in a few seconds, and each app's daily
- * budget caps what the requests cost. DELETE 10/s (burst 20); the preflight as for the data API.
+ * 2 requests/s (burst 10; try 2, cost accepted by Franck 2026-11-26): a room of 45 taking a photo each at once passes
+ * in ~20 s (3.19 retries a 429), and it bounds what anonymous junk can cost (each request is billed by API Gateway in
+ * 512 KB units, and invokes the function unless WAF's media-auth rule stopped it). DELETE 10/s (burst 20); the preflight
+ * as for the data API.
  */
-export const APP_MEDIA_UPLOAD_THROTTLE = { rateLimit: 5, burstLimit: 20 } as const;
+export const APP_MEDIA_UPLOAD_THROTTLE = { rateLimit: 2, burstLimit: 10 } as const;
 export const APP_MEDIA_DELETE_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
 export const APP_MEDIA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
 /** The media function: 512 MB for a 4 MB body (base64 text, decoded copy, stripped copy) and faster CPU. */

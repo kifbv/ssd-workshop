@@ -156,16 +156,18 @@ describe("DynamoAppMediaStore writes", () => {
     expect(stuck.sent).toHaveLength(FINISH_ATTEMPTS);
   });
 
-  it("release and remove delete the record only as read and give its room back (not the day's uploads)", async () => {
+  it("release deletes the record and remove leaves a tombstone, each only as read, and both give its room back (not the day's uploads)", async () => {
     const { client, sent } = stubClient([{}, {}, cancelled(["ConditionalCheckFailed", "None"]), cancelled(["ConditionalCheckFailed", "None"])]);
     const store = new DynamoAppMediaStore(client, TABLE);
     await store.release("Ada-42", ID, 300_000, NOW_ISO);
     expect(await store.remove("Ada-42", ID, { bytes: 300_000, status: "stored", createdAt: NOW_ISO }, NOW_ISO)).toBe("deleted");
     await expect(store.release("Ada-42", ID, 300_000, NOW_ISO)).resolves.toBeUndefined();
     expect(await store.remove("Ada-42", ID, { bytes: 300_000, status: "stored", createdAt: NOW_ISO }, NOW_ISO)).toBe("conflict");
-    for (const command of sent) {
+    for (const [i, command] of sent.entries()) {
       const [record, usage] = itemsOf(command);
-      expect(record?.kind).toBe("Delete");
+      // release deletes an upload's record; remove (try 2) leaves a tombstone: status `deleted`, so the id stays taken.
+      expect(record?.kind).toBe(i % 2 === 0 ? "Delete" : "Update");
+      if (i % 2 === 1) expect(record?.part["UpdateExpression"]).toBe("SET #status = :deleted");
       expect(record?.part["ConditionExpression"]).toMatch(/^#status = :(uploading|status) AND #bytes = :size$/);
       expect(usage?.part["UpdateExpression"]).toBe("SET #bytes = #bytes - :size, #files = #files - :one, #updatedAt = :now");
       expect(usage?.part["UpdateExpression"]).not.toContain("uploaded");
@@ -182,7 +184,7 @@ describe("DynamoAppMediaStore writes", () => {
 });
 
 describe("S3MediaBucket", () => {
-  it("criterion 7: stores a file with its fixed content type and a long cache header, and deletes by key", async () => {
+  it("criterion 7: stores a file with its fixed content type and its cache header (try 2: a day in browsers, an hour in CloudFront), and deletes by key", async () => {
     const sent: (PutObjectCommand | DeleteObjectCommand)[] = [];
     const client = { send: async (command: PutObjectCommand | DeleteObjectCommand) => void sent.push(command) } as unknown as MediaBucketSender;
     const bucket = new S3MediaBucket(client, "ssd-workshop-app-media-x");
@@ -190,7 +192,7 @@ describe("S3MediaBucket", () => {
     await bucket.delete(`app-media/ada-42/${ID}`);
     expect(sent[0]).toBeInstanceOf(PutObjectCommand);
     expect(sent[0]?.input).toMatchObject({ Bucket: "ssd-workshop-app-media-x", Key: `app-media/ada-42/${ID}`, ContentType: "audio/webm", CacheControl: MEDIA_CACHE_CONTROL, ContentLength: 3 });
-    expect(MEDIA_CACHE_CONTROL).toBe("public, max-age=31536000, s-maxage=86400, immutable");
+    expect(MEDIA_CACHE_CONTROL).toBe("public, max-age=86400, s-maxage=3600");
     expect(sent[1]).toBeInstanceOf(DeleteObjectCommand);
     expect(sent[1]?.input).toEqual({ Bucket: "ssd-workshop-app-media-x", Key: `app-media/ada-42/${ID}` });
   });

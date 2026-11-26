@@ -59,6 +59,14 @@ import {
   WAF_BLOCK_BODY,
   WAF_BLOCK_BODY_KEY,
   WAF_BLOCK_STATUS,
+  WAF_BEARER_PREFIX,
+  WAF_MEDIA_API_PREFIX,
+  WAF_MEDIA_API_SEGMENT,
+  WAF_MEDIA_AUTH_BODY,
+  WAF_MEDIA_AUTH_BODY_KEY,
+  WAF_MEDIA_AUTH_METHODS,
+  WAF_MEDIA_AUTH_RULE_NAME,
+  WAF_MEDIA_AUTH_STATUS,
   WAF_MEDIA_PATH_PREFIX,
   WAF_MEDIA_RATE_LIMIT,
   WAF_MEDIA_RATE_RULE_NAME,
@@ -211,7 +219,8 @@ export class EdgeStack extends Stack {
     // Ticket 3.18: photos and recordings that apps upload, at /app-media/<nickname>/<id>, from the media bucket (apps
     // stack, imported by name; its policy lets this distribution only read it) through its own origin access control
     // (retained, like the others). Each file keeps the type the media API stored (from its allow-list) and S3's
-    // Cache-Control (a year in browsers, a day in CloudFront: a deleted file stops being served within a day).
+    // Cache-Control (since 3.18 try 2: a day in browsers, an hour in CloudFront, so a deleted file stops being served
+    // from CloudFront within an hour).
     const mediaBucket = Bucket.fromBucketAttributes(this, "AppMediaBucket", {
       bucketName: APP_MEDIA_BUCKET_NAME,
       bucketRegionalDomainName: APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
@@ -287,9 +296,12 @@ export class EdgeStack extends Stack {
     const webAcl = new CfnWebACL(this, "WebAcl", {
       name: WEB_ACL_NAME,
       scope: "CLOUDFRONT",
-      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX} and ${WAF_MEDIA_PATH_PREFIX}`,
+      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX} and ${WAF_MEDIA_PATH_PREFIX}, media writes need a Bearer token`,
       defaultAction: { allow: {} },
-      customResponseBodies: { [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY } },
+      customResponseBodies: {
+        [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY },
+        [WAF_MEDIA_AUTH_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_AUTH_BODY },
+      },
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WEB_ACL_NAME, sampledRequestsEnabled: true },
       rules: [
         {
@@ -334,6 +346,64 @@ export class EdgeStack extends Stack {
             },
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.18 try 2: a media upload or delete without `Authorization: Bearer ...` never reaches API Gateway or
+        // Lambda (a junk filter; the function still checks every token). Answered like the API's own 401, with the CORS
+        // header, so an app can read the reason.
+        {
+          name: WAF_MEDIA_AUTH_RULE_NAME,
+          priority: 2,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_MEDIA_AUTH_STATUS,
+                customResponseBodyKey: WAF_MEDIA_AUTH_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            andStatement: {
+              statements: [
+                {
+                  orStatement: {
+                    statements: WAF_MEDIA_AUTH_METHODS.map((method) => ({
+                      byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: method, textTransformations: [{ priority: 0, type: "NONE" }] },
+                    })),
+                  },
+                },
+                {
+                  byteMatchStatement: {
+                    fieldToMatch: { uriPath: {} },
+                    positionalConstraint: "STARTS_WITH",
+                    searchString: WAF_MEDIA_API_PREFIX,
+                    textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                  },
+                },
+                {
+                  byteMatchStatement: {
+                    fieldToMatch: { uriPath: {} },
+                    positionalConstraint: "CONTAINS",
+                    searchString: WAF_MEDIA_API_SEGMENT,
+                    textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                  },
+                },
+                {
+                  notStatement: {
+                    statement: {
+                      byteMatchStatement: {
+                        fieldToMatch: { singleHeader: { Name: "authorization" } },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_BEARER_PREFIX,
+                        textTransformations: [{ priority: 0, type: "NONE" }],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_AUTH_RULE_NAME, sampledRequestsEnabled: true },
         },
       ],
     });

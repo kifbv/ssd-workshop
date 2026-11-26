@@ -148,6 +148,11 @@ import {
   WAF_BLOCK_BODY,
   WAF_BLOCK_BODY_KEY,
   WAF_BLOCK_STATUS,
+  WAF_BEARER_PREFIX,
+  WAF_MEDIA_AUTH_BODY,
+  WAF_MEDIA_AUTH_BODY_KEY,
+  WAF_MEDIA_AUTH_RULE_NAME,
+  WAF_MEDIA_AUTH_STATUS,
   WAF_MEDIA_PATH_PREFIX,
   WAF_MEDIA_RATE_LIMIT,
   WAF_MEDIA_RATE_RULE_NAME,
@@ -161,7 +166,9 @@ import { FACILITATOR_ROUTES as FACILITATOR_ROUTE_KEYS } from "../../platform/api
 import { BY_TYPE_INDEX_KEY as PLATFORM_BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME } from "../../platform/api/settings.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import {
+  APP_MEDIA_MESSAGES,
   APP_MEDIA_ROUTES as APP_MEDIA_ROUTE_KEYS,
+  APP_MEDIA_TIMEOUT_SECONDS as PLATFORM_APP_MEDIA_TIMEOUT_SECONDS,
   MEDIA_CACHE_CONTROL,
   MEDIA_KEY_PREFIX,
   MEDIA_PREFLIGHT_HEADERS,
@@ -304,6 +311,8 @@ const NOT_NAME_PATHS: Record<string, RegExp[]> = {
   "AWS::ECS::Cluster": [/^\.ClusterSettings\[\d+\]\.Name$/],
   // Ticket 2.9: a container's name lives inside its (named) task definition, like an inline policy's.
   "AWS::ECS::TaskDefinition": [/^\.ContainerDefinitions\[\d+\]\.Name$/],
+  // Ticket 3.18 try 2: a WAF custom response's header name and the request header a rule inspects are HTTP header names.
+  "AWS::WAFv2::WebACL": [/\.CustomResponse\.ResponseHeaders\[\d+\]\.Name$/, /\.FieldToMatch\.SingleHeader\.Name$/],
 };
 
 /** Every [path, value] under `value` whose key is a physical name ("Name" or "*Name"). */
@@ -2239,7 +2248,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
     // Every route setting of the stage, exactly: the sign-in routes', the data API's and (ticket 3.18) the media API's.
     expect(stage?.Properties?.RouteSettings).toEqual({
-      [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 20 },
+      [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 2, ThrottlingBurstLimit: 10 },
       [`DELETE ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
       [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
@@ -3671,10 +3680,11 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(resource.Properties).toMatchObject({ Name: WEB_ACL_NAME, Scope: "CLOUDFRONT", DefaultAction: { Allow: {} } });
     expect(WEB_ACL_NAME).toBe("ssd-workshop-edge");
     expect(tagsOf(resource)[TAG_KEY]).toBe(TAG_VALUE);
-    expect(resource.Properties?.VisibilityConfig).toEqual({ CloudWatchMetricsEnabled: true, MetricName: WEB_ACL_NAME, SampledRequestsEnabled: true });
+    expect(resource.Properties?.VisibilityConfig).toEqual({ CloudWatchMetricsEnabled: true, MetricName: WEB_ACL_NAME, SampledRequestsEnabled: true });    // WAF's own pattern for a description (no ";": try 2's first wording failed cdk's validation).
+    expect(resource.Properties?.Description).toMatch(/^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+[a-zA-Z0-9+=:#@/\-,.]{1,256}$/);
   });
 
-  it("has exactly two rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429)", () => {
+  it("has exactly three rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401", () => {
     const rules = acl()[2].Properties?.Rules as Record<string, unknown>[];
     expect(rules).toEqual([
       {
@@ -3719,15 +3729,67 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
         },
         VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_RATE_RULE_NAME, SampledRequestsEnabled: true },
       },
+      {
+        Name: WAF_MEDIA_AUTH_RULE_NAME,
+        Priority: 2,
+        Action: {
+          Block: {
+            CustomResponse: { ResponseCode: 401, CustomResponseBodyKey: WAF_MEDIA_AUTH_BODY_KEY, ResponseHeaders: [{ Name: "access-control-allow-origin", Value: "*" }] },
+          },
+        },
+        Statement: {
+          AndStatement: {
+            Statements: [
+              {
+                OrStatement: {
+                  Statements: ["PUT", "DELETE"].map((method) => ({
+                    ByteMatchStatement: { FieldToMatch: { Method: {} }, PositionalConstraint: "EXACTLY", SearchString: method, TextTransformations: [{ Priority: 0, Type: "NONE" }] },
+                  })),
+                },
+              },
+              {
+                ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+              },
+              {
+                ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+              },
+              {
+                NotStatement: {
+                  Statement: {
+                    ByteMatchStatement: {
+                      FieldToMatch: { SingleHeader: { Name: "authorization" } },
+                      PositionalConstraint: "STARTS_WITH",
+                      SearchString: "Bearer ",
+                      TextTransformations: [{ Priority: 0, Type: "NONE" }],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+        VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_AUTH_RULE_NAME, SampledRequestsEnabled: true },
+      },
     ]);
+    expect(WAF_MEDIA_AUTH_RULE_NAME).toBe("ssd-workshop-media-auth");
+    // The same answer as the media API's own 401 (workshop-data.js shows `message`).
+    expect(JSON.parse(WAF_MEDIA_AUTH_BODY)).toEqual({ message: APP_MEDIA_MESSAGES.signInToSave });
+    expect(WAF_MEDIA_AUTH_STATUS).toBe(401);
+    // The token header the media API reads is exactly `Bearer <token>` (3.24's checkAppWrite).
+    expect(WAF_BEARER_PREFIX).toBe("Bearer ");
     expect(WAF_MEDIA_RATE_RULE_NAME).toBe("ssd-workshop-media-rate");
     expect(WAF_MEDIA_PATH_PREFIX).toBe("/app-media/");
-    // A room behind one venue address, each person opening ~100 files once in 5 minutes (browsers keep them a year).
-    expect(WAF_MEDIA_RATE_LIMIT).toBeGreaterThanOrEqual(45 * 100);
+    // Try 2 (cost, accepted by Franck 2026-11-26): 3,000. A room behind one venue address, each person opening ~60
+    // files once in 5 minutes (browsers keep them a day).
+    expect(WAF_MEDIA_RATE_LIMIT).toBe(3_000);
+    expect(WAF_MEDIA_RATE_LIMIT).toBeGreaterThanOrEqual(45 * 60);
     expect(WAF_API_PATH_PREFIX).toBe("/api/");
     expect(WAF_RATE_WINDOW_SECONDS).toBe(300);
     // API Gateway's throttle answer, so pages and apps read a block as "too many requests".
-    expect(acl()[2].Properties?.CustomResponseBodies).toEqual({ [WAF_BLOCK_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_BLOCK_BODY } });
+    expect(acl()[2].Properties?.CustomResponseBodies).toEqual({
+      [WAF_BLOCK_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_BLOCK_BODY },
+      [WAF_MEDIA_AUTH_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_MEDIA_AUTH_BODY },
+    });
     expect(JSON.parse(WAF_BLOCK_BODY)).toEqual({ message: "Too Many Requests" });
     // A room behind one venue address must never reach it: ~45 people polling every 2 s (150 requests per 5 minutes
     // each), their apps' data calls and three dashboards are at most ~9,400 (docs/decisions.md "(3.13) Rate limit").
@@ -3941,6 +4003,8 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     expect(APP_MEDIA_MEMORY_MB).toBe(512);
     expect(2 * (S3_TIMEOUTS.connectionTimeout + S3_TIMEOUTS.requestTimeout) + 5000).toBeLessThanOrEqual(APP_MEDIA_TIMEOUT_SECONDS * 1000);
     expect(APP_MEDIA_TIMEOUT_SECONDS).toBeLessThan(30);
+    // The reset's last media pass waits longer than this timeout (platform's copy, ticket 3.18 try 2).
+    expect(APP_MEDIA_TIMEOUT_SECONDS).toBe(PLATFORM_APP_MEDIA_TIMEOUT_SECONDS);
     expect(tagsOf(f.fnEntry()?.[1] as Resource)[TAG_KEY]).toBe(TAG_VALUE);
     expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({ LogGroupName: APP_MEDIA_FUNCTION_NAME, RetentionInDays: 14 });
     expect(f.roleEntry()?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
@@ -3960,7 +4024,8 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
     expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
     expect(source).toContain('"/*/*/*"');
-    expect(APP_MEDIA_UPLOAD_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 20 });
+    // Try 2 (cost, accepted by Franck 2026-11-26): 2/s, burst 10.
+    expect(APP_MEDIA_UPLOAD_THROTTLE).toEqual({ rateLimit: 2, burstLimit: 10 });
     expect(APP_MEDIA_DELETE_THROTTLE).toEqual({ rateLimit: 10, burstLimit: 20 });
     expect(APP_MEDIA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
@@ -4039,8 +4104,8 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     const oac = ofType("AWS::CloudFront::OriginAccessControl").find(([, , r]) => (r.Properties?.OriginAccessControlConfig as { Name?: string }).Name === "ssd-workshop-app-media");
     expect(origin?.OriginAccessControlId).toEqual({ "Fn::GetAtt": [oac?.[1], "Id"] });
     expect(oac?.[2].Properties?.OriginAccessControlConfig).toMatchObject({ OriginAccessControlOriginType: "s3", SigningBehavior: "always", SigningProtocol: "sigv4" });
-    // A long cache time: a year in browsers (immutable: an id is never reused), a day in CloudFront.
-    expect(MEDIA_CACHE_CONTROL).toBe("public, max-age=31536000, s-maxage=86400, immutable");
+    // Try 2: a day in browsers (no `immutable`), an hour in CloudFront, so a deleted file leaves the CDN within an hour.
+    expect(MEDIA_CACHE_CONTROL).toBe("public, max-age=86400, s-maxage=3600");
   });
 
   it("criterion 7: answers every file with nosniff, HSTS, the referrer policy and an inert sandbox CSP, no CORS; the policy is ssd-workshop-app-media-v1, retained, versioned in its logical id", () => {

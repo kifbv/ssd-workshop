@@ -5,7 +5,7 @@ import type { HttpRequest, HttpResponse } from "../http.js";
 import { hashAppToken } from "../app-token/token.js";
 import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 import { FakeAppMediaStore, FakeMediaBucket } from "./fakes.js";
-import { exifWithGps, jpegOfSize, mp4OfSize, oggOfSize, PNG_SIGNATURE, webmOfSize } from "./fixtures.js";
+import { exifWithGps, fragmentedMp4, jpegOfSize, mp4OfSize, mp4TitleBox, oggOfSize, PNG_SIGNATURE, webmOfSize } from "./fixtures.js";
 import {
   APP_MEDIA_MESSAGES,
   APP_MEDIA_ROUTES,
@@ -14,9 +14,11 @@ import {
   MAX_APP_MEDIA_BYTES,
   MAX_APP_MEDIA_FILES,
   MAX_MEDIA_FILE_BYTES,
+  MAX_RECORDING_SECONDS,
   MEDIA_ID_PATTERN,
   MEDIA_PREFLIGHT_HEADERS,
   MIN_UPLOAD_CHARGE_BYTES,
+  RECORDING_MARGIN_SECONDS,
   UPLOAD_STALE_SECONDS,
   type AppMediaLogEntry,
 } from "./media.js";
@@ -165,6 +167,55 @@ describe("criterion 2: recordings", () => {
       expect(bucket.objects.get(keyOf(body.address))).toEqual({ body: bytes, contentType: type });
     });
   }
+});
+
+describe("try 2: a recording is at most 5 minutes, measured by the server", () => {
+  it("takes 5 minutes plus a 5 s margin", () => {
+    expect(MAX_RECORDING_SECONDS).toBe(300);
+    expect(RECORDING_MARGIN_SECONDS).toBe(5);
+  });
+
+  for (const [name, short, long] of [
+    ["WebM (last block)", webmOfSize(20_000, ["A_OPUS"], "webm", 304), webmOfSize(20_000, ["A_OPUS"], "webm", 306)],
+    ["WebM (declared Duration)", webmOfSize(20_000, ["A_OPUS"], "webm", 1, 304), webmOfSize(20_000, ["A_OPUS"], "webm", 1, 306)],
+    ["Ogg/Opus", oggOfSize(20_000, undefined, 304), oggOfSize(20_000, undefined, 306)],
+    ["MP4 (mvhd)", mp4OfSize(20_000, [["soun", "mp4a"]], 304), mp4OfSize(20_000, [["soun", "mp4a"]], 306)],
+    ["fragmented MP4 (Chromium, Safari)", fragmentedMp4(304), fragmentedMp4(306)],
+  ] as const) {
+    it(`WHEN a ${name} recording is 5:04 THEN it is stored; WHEN it is 5:06 THEN 413 with the length message and nothing is stored`, async () => {
+      const { call, bucket, store, logs } = setup();
+      expect((await call(put(short))).statusCode).toBe(201);
+      bucket.calls.length = 0;
+      const refused = await call(put(long, { id: id(9) }));
+      expect(refused.statusCode).toBe(413);
+      expect(message(refused)).toBe(APP_MEDIA_MESSAGES.recordingTooLong);
+      expect(refused.headers?.["access-control-allow-origin"]).toBe("*");
+      expect(bucket.calls).toEqual([]);
+      expect(store.records.has(`ada-42/${id(9)}`)).toBe(false);
+      expect(logs.at(-1)).toMatchObject({ outcome: "recording-too-long", status: 413 });
+    });
+  }
+
+  it("WHEN a recording's length cannot be read THEN 415 with its own message, and nothing is stored", async () => {
+    const { call, bucket } = setup();
+    for (const bytes of [oggOfSize(20_000, undefined, null), mp4OfSize(20_000, [["soun", "mp4a"]], 0)]) {
+      const answer = await call(put(bytes));
+      expect(answer.statusCode).toBe(415);
+      expect(message(answer)).toBe(APP_MEDIA_MESSAGES.unknownLength);
+    }
+    expect(bucket.calls).toEqual([]);
+  });
+
+  it("blanks a recording's title in place (MP4 udta, WebM Tags): the same size, the place name gone", async () => {
+    const { call, bucket } = setup();
+    const mp4 = mp4OfSize(20_000, [["soun", "mp4a"]], 10, [mp4TitleBox("12 rue de la Paix")]);
+    const answer = await call(put(mp4));
+    expect(answer.statusCode).toBe(201);
+    const stored = bucket.objects.get(`app-media/ada-42/${ID}`)?.body as Buffer;
+    expect(stored.length).toBe(mp4.length);
+    expect(stored.includes(Buffer.from("rue de la Paix"))).toBe(false);
+    expect(JSON.parse(answer.body ?? "{}")).toMatchObject({ bytes: mp4.length });
+  });
 });
 
 describe("criterion 3: anything else is refused with 415 and nothing is stored", () => {
@@ -368,7 +419,8 @@ describe("DELETE removes one file of this app only", () => {
     expect(answer.headers?.["access-control-allow-origin"]).toBe("*");
     expect(bucket.objects.has(`app-media/ada-42/${ID}`)).toBe(false);
     expect(bucket.objects.has(`app-media/bob-7/${ID}`)).toBe(true);
-    expect(store.records.has(`ada-42/${ID}`)).toBe(false);
+    // Try 2: the record stays as a tombstone, out of the totals.
+    expect(store.records.get(`ada-42/${ID}`)?.status).toBe("deleted");
     expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0, uploadedBytes: MIN_UPLOAD_CHARGE_BYTES });
     expect(logs.at(-1)).toEqual({ event: "app-media", method: "DELETE", outcome: "deleted", status: 204, writer: "Bob", bytes: 30_000 });
     bucket.calls.length = 0;
@@ -386,8 +438,27 @@ describe("DELETE removes one file of this app only", () => {
     expect(bucket.calls).toEqual([]);
     clock.now = new Date(NOW.getTime() + UPLOAD_STALE_SECONDS * 1000);
     expect((await call(del())).statusCode).toBe(204);
-    expect(store.records.size).toBe(0);
+    expect([...store.records.values()].map((r) => r.status)).toEqual(["deleted"]);
     expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
+  });
+
+  it("try 2: WHEN a deleted file's id is sent again THEN 409 (the tombstone keeps it taken), nothing is stored, and the totals do not count the tombstone", async () => {
+    const { call, store, bucket } = setup();
+    expect((await call(put(jpegOfSize(30_000)))).statusCode).toBe(201);
+    expect((await call(del())).statusCode).toBe(204);
+    bucket.calls.length = 0;
+    const again = await call(put(webmOfSize(20_000)));
+    expect(again.statusCode).toBe(409);
+    expect(message(again)).toBe(APP_MEDIA_MESSAGES.idTaken);
+    expect(bucket.calls).toEqual([]);
+    expect(bucket.objects.size).toBe(0);
+    expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
+    // A new id still uploads, and a DELETE of the tombstone answers 204 without touching anything.
+    expect((await call(put(jpegOfSize(30_000), { id: id(2) }))).statusCode).toBe(201);
+    expect(store.usage.get("ada-42")).toMatchObject({ files: 1 });
+    bucket.calls.length = 0;
+    expect((await call(del())).statusCode).toBe(204);
+    expect(bucket.calls).toEqual([]);
   });
 });
 
@@ -401,6 +472,18 @@ describe("failures and resets during an upload", () => {
     expect(store.records.size).toBe(0);
     expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
     expect(logs).toEqual([{ event: "app-media", method: "PUT", outcome: "failed", status: 500, writer: "Bob", error: "S3ServiceException" }]);
+  });
+
+  it("try 2: WHEN the put fails after S3 stored the file THEN the key is deleted (best effort) before the room is given back", async () => {
+    const { call, store, bucket } = setup();
+    bucket.putFailureAfterStoring = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    const answer = await call(put(jpegOfSize(5000)));
+    expect(answer.statusCode).toBe(500);
+    expect(bucket.objects.size).toBe(0);
+    expect(bucket.calls).toEqual([`put app-media/ada-42/${ID}`, `delete app-media/ada-42/${ID}`]);
+    expect(store.calls.slice(-1)).toEqual(["release"]);
+    expect(store.records.size).toBe(0);
+    expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
   });
 
   it("WHEN the app stops being live while the file uploads (a reset) THEN the file is deleted again and the API answers 404", async () => {

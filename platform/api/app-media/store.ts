@@ -6,7 +6,8 @@
 // `app-media/`. Every transaction is authorized item by item; no call returns an item's attributes.
 //
 // Items: `APPMEDIA#<nickname>` / `MEDIA_USAGE` (bytes, files, the day's uploads: `uploadDay`, `uploadedBytes`) and
-// `APPMEDIA#<nickname>` / `MEDIA#<id>` (bytes, contentType, status `uploading`/`stored`, uploadedBy, createdAt).
+// `APPMEDIA#<nickname>` / `MEDIA#<id>` (bytes, contentType, status `uploading`/`stored`/`deleted`, uploadedBy, createdAt;
+// a `deleted` record is a tombstone that keeps its id from being used again).
 // Reads are of these small items only (a file's bytes are in S3, never in the table).
 import {
   GetItemCommand,
@@ -122,7 +123,7 @@ export class DynamoAppMediaStore implements AppMediaStore {
     const bytes = numberOf(item?.["bytes"]);
     const status = item?.["status"]?.S;
     const createdAt = item?.["createdAt"]?.S;
-    if (bytes === undefined || (status !== "uploading" && status !== "stored") || createdAt === undefined) return undefined;
+    if (bytes === undefined || (status !== "uploading" && status !== "stored" && status !== "deleted") || createdAt === undefined) return undefined;
     return { bytes, status, createdAt };
   }
 
@@ -253,16 +254,21 @@ export class DynamoAppMediaStore implements AppMediaStore {
     }
   }
 
+  /**
+   * The record stays as a tombstone (`deleted`), so a later PUT of the same id finds it and answers 409: an address
+   * never serves other bytes than it first did. Only a reset deletes tombstones.
+   */
   async remove(nickname: string, id: string, record: MediaRecord, nowIso: string): Promise<"deleted" | "conflict"> {
     try {
       await this.transact([
         {
-          Delete: {
+          Update: {
             TableName: this.tableName,
             Key: keyOf(appMediaKey(nickname, id)),
+            UpdateExpression: "SET #status = :deleted",
             ConditionExpression: "#status = :status AND #bytes = :size",
             ExpressionAttributeNames: { "#status": "status", "#bytes": "bytes" },
-            ExpressionAttributeValues: { ":status": str(record.status), ":size": num(record.bytes) },
+            ExpressionAttributeValues: { ":deleted": str("deleted"), ":status": str(record.status), ":size": num(record.bytes) },
           },
         },
         this.giveBack(nickname, record.bytes, nowIso),
