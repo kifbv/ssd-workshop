@@ -318,3 +318,7 @@ paths:
   allowed to describe and stop build tasks (`WatchBuildsLauncherOnly`); an EventBridge rule on ECS events is refused.
 - A `beforeAll` that synthesizes the CDK app needs an explicit timeout (`120_000`): CI runners are slower than vitest's
   default 10 s (`HookTimeoutError` in the Deploy run on main, `infra/lib/app.test.ts`).
+- CloudFront strips `Authorization` from GET and HEAD unless a cache policy includes it, except (AWS knowledge center)
+  with caching off and the AllViewer / AllViewerExceptHostHeader origin request policy, which the `/api/*` behaviours
+  use. A route that needs the header on a GET (3.25 try 2's `?whoami=1`) is checked live after the deploy
+  (`infra/README.md`), and the client must degrade if it arrives without it.

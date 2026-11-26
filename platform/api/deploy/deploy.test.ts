@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ALLOWED_EXTENSIONS, checkApp } from "../build/check.js";
+import { ALLOWED_EXTENSIONS, DATA_CLIENT_FIRST_REASON, checkApp } from "../build/check.js";
 import { appMainArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
 import {
   CACHE_CONTROL,
@@ -34,7 +34,7 @@ const BUILD = "build-1";
 const job = (extra: Record<string, unknown> = {}) => JSON.stringify({ buildId: BUILD, nickname: "Ada", commit: COMMIT, ...extra });
 /** Ticket 3.25: the platform's data client as the deployer gets it (the real file, as bundled). */
 const DATA_CLIENT = new Uint8Array(readFileSync(fileURLToPath(new URL("../../../templates/basic/workshop-data.js", import.meta.url))));
-const PAGE = '<!doctype html><html><head><link rel="stylesheet" href="css/style.css"><script src="app.js" defer></script></head><body></body></html>';
+const PAGE = '<!doctype html><html><head><link rel="stylesheet" href="css/style.css"><script src="workshop-data.js"></script><script src="app.js" defer></script></head><body></body></html>';
 
 function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
   const objects = new FakeAppObjects();
@@ -153,7 +153,7 @@ describe("criterion 1: a commit that passes the check is published under apps/<n
 
 describe("criterion 2: a commit that fails the check uploads nothing, leaves the live version, and marks the build failed with the reasons", () => {
   const failing = () =>
-    gzip(githubTar({ "index.html": '<script src="http://evil.example/x.js"></script>', "shell.php": "<?php ?>", "app.js": "ok();\n" }));
+    gzip(githubTar({ "index.html": '<script src="workshop-data.js"></script><script src="http://evil.example/x.js"></script>', "shell.php": "<?php ?>", "app.js": "ok();\n" }));
 
   it("puts and removes nothing, invalidates nothing and leaves the live marker as it was", async () => {
     const t = setup(failing());
@@ -797,6 +797,19 @@ describe("ticket 3.25: every app gets the platform's current workshop-data.js, a
     expect(new TextDecoder().decode(published(t)?.bytes)).toBe(client());
   });
 
+  it("try 2: WHEN index.html runs another script before workshop-data.js (or loads it deferred) THEN nothing is published and the build fails with a reason the builder can act on", async () => {
+    for (const page of [
+      '<!doctype html><html><head><script src="app.js" defer></script><script src="workshop-data.js"></script></head></html>',
+      '<!doctype html><html><head><script src="workshop-data.js" defer></script><script src="app.js" defer></script></head></html>',
+      '<!doctype html><html><head><script src="steal.js"></script></head></html>',
+    ]) {
+      const t = setup(gzip(githubTar({ "index.html": page, "app.js": "ok();\n" })));
+      await processDeploy(job(), 1, t.deps);
+      expect(t.objects.puts, page).toEqual([]);
+      expect(t.records.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [`index.html: ${DATA_CLIENT_FIRST_REASON}`] });
+    }
+  });
+
   it("the platform's workshop-data.js itself passes the deploy check (it ships with every app)", () => {
     const files = withPlatformDataClient([{ path: "index.html", kind: "file", bytes: new TextEncoder().encode(PAGE) }], DATA_CLIENT);
     expect(checkApp(files).problems).toEqual([]);
@@ -830,6 +843,27 @@ describe("ticket 3.25: every app gets the platform's current workshop-data.js, a
     expect(t.records.live.size).toBe(0);
     expect(t.logs).toEqual([{ event: "deployer", outcome: "refreshed", files: 1, bytes: DATA_CLIENT.byteLength, durationMs: expect.any(Number) }]);
     expect(JSON.stringify(t.logs)).not.toMatch(/ada/i);
+  });
+
+  it("WHEN the published workshop-data.js already has the platform's bytes THEN a refresh puts nothing and invalidates nothing (try 2: no cost per message)", async () => {
+    const t = setup(passing());
+    seed(t.objects);
+    t.objects.objects.set("apps/ada/workshop-data.js", { bytes: new TextEncoder().encode("old client"), contentType: "text/javascript; charset=utf-8", cacheControl: CACHE_CONTROL });
+    await processDeploy(JSON.stringify({ refresh: "Ada" }), 1, t.deps);
+    expect(t.objects.puts).toEqual(["apps/ada/workshop-data.js"]);
+    expect(t.cdn.invalidations).toHaveLength(1);
+    // The same message again, and many more: the file is already the platform's, so nothing changes or costs.
+    for (let i = 0; i < 5; i += 1) await processDeploy(JSON.stringify({ refresh: "Ada" }), 1, t.deps);
+    expect(t.objects.puts).toEqual(["apps/ada/workshop-data.js"]);
+    expect(t.cdn.invalidations).toHaveLength(1);
+    expect(t.logs.map((entry) => entry.outcome)).toEqual(["refreshed", ...Array(5).fill("up-to-date")]);
+    // A deploy of the app publishes the platform's copy too, so a refresh right after it does nothing either.
+    const deployed = setup(passing());
+    await processDeploy(job(), 1, deployed.deps);
+    const invalidations = deployed.cdn.invalidations.length;
+    await processDeploy(JSON.stringify({ refresh: "Ada" }), 1, deployed.deps);
+    expect(deployed.cdn.invalidations).toHaveLength(invalidations);
+    expect(deployed.logs.at(-1)?.outcome).toBe("up-to-date");
   });
 
   it("WHEN a refresh names an app that is not published (no index.html under its prefix) THEN nothing is written", async () => {

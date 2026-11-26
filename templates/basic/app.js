@@ -9,10 +9,10 @@ const statusText = document.getElementById("status");
 
 let count = 0;
 let lastBy = null;
+let me = null;
 
 function show(message) {
   countText.textContent = String(count);
-  const me = workshopData.whoAmI();
   const parts = [];
   if (lastBy !== null) parts.push("Last press by " + lastBy + ".");
   if (me !== null) parts.push("You save as " + me + ".");
@@ -25,6 +25,7 @@ async function load() {
     const stored = await workshopData.getInfo("presses");
     count = typeof stored.value === "number" ? stored.value : 0;
     lastBy = stored.updatedBy;
+    me = await workshopData.whoAmI();
     show("");
   } catch (error) {
     show(error.message);
@@ -37,10 +38,12 @@ pressButton.addEventListener("click", async function () {
   show("Saving...");
   try {
     await workshopData.set("presses", count);
-    lastBy = workshopData.whoAmI();
+    me = await workshopData.whoAmI();
+    lastBy = me;
     show("Saved.");
   } catch (error) {
     count -= 1;
+    me = await workshopData.whoAmI();
     show(error.message);
   } finally {
     pressButton.disabled = false;

@@ -11,8 +11,12 @@ shell and no package manager. You cannot run or preview the app, so check your w
 
 ## The files
 
-- `index.html`: the single page. Keep the `<link>` to `style.css` and the two `<script ... defer>`
-  tags, `workshop-data.js` before `app.js`.
+- `index.html`: the single page. Keep the `<link>` to `style.css`, keep
+  `<script src="workshop-data.js"></script>` as the first script in `<head>` exactly as written (no
+  `defer` or `async`; only `<meta>`, `<link>` and `<title>` may come before it), and keep
+  `<script src="app.js" defer></script>` after it. The deploy check refuses a page that runs any other
+  script first: `workshop-data.js` must start before the app's own code, which keeps the workshop's
+  sign-in out of the app's reach.
 - `style.css`: all styles.
 - `app.js`: all behaviour. A classic script (no `import`/`export`), run after the page is parsed.
 - `workshop-data.js`: the data client and the workshop's sign-in to save. Do not change it: the
@@ -121,12 +125,17 @@ shell and no package manager. You cannot run or preview the app, so check your w
      visitor comes back to the app there, signed in). Style it in `style.css` (the `.sign-in` class).
    - A save by a visitor who is not signed in fails with the message "Sign in to the workshop to save
      in this app.": show it with the other errors (rule 5).
-   - `workshopData.whoAmI()` gives the visitor's workshop nickname once signed in, or `null`; the app
-     may show it ("You save as Ada."). `workshopData.signInLink()` gives the sign-in page's address.
+   - `await workshopData.whoAmI()` gives the visitor's workshop nickname, as the workshop confirmed it
+     for their sign-in, or `null` (a visitor, or not confirmed); the app may show it ("You save as
+     Ada."). `workshopData.signInLink()` gives the sign-in page's address.
    - The app may show who posted: `await workshopData.getInfo(key)` returns
      `{ value, updatedBy, updatedAt }`, the value with the nickname of whoever saved it last and when
-     (both `null` when unknown). Show only that nickname, never anything else about a person. To show
-     who posted each item of a list, store the nickname from `whoAmI()` in the item when it is saved.
+     (both `null` when unknown). `updatedBy` is recorded by the workshop itself: prefer it to show who
+     posted. Show only that nickname, never anything else about a person.
+   - A name stored inside a value (for example the author of each item of a list) is written by the
+     app, and anyone signed in to the workshop could save any text there. If the app stores one, use
+     only `await workshopData.whoAmI()` (skip the name when it is `null`), and prefer one key per item
+     with `getInfo(key).updatedBy` when who posted matters.
 7. No personal data: no email addresses, phone numbers, names of real people, passwords or keys in
    the code, and do not ask visitors for an email address or a password. The app has no accounts or
    sign-in of its own: the workshop's sign-in (rule 6) is the only one.
@@ -159,6 +168,8 @@ Before the app goes live, a check refuses it if any rule below is broken. The wh
   no API key or token. The app's own files use relative paths.
 - All files together at most 5 MB.
 - `index.html` stays at the top of the folder.
+- `index.html` runs `workshop-data.js` before any other script: `<script src="workshop-data.js"></script>`
+  first in `<head>`, with no `defer` or `async` (see "The files").
 
 ## When you are done
 

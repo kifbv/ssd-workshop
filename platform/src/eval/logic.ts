@@ -674,9 +674,10 @@ export function missingScreens(title: string | undefined, screens: readonly stri
 }
 
 /**
- * Ticket 3.25: what a visitor (no token) sees of the workshop's sign-in in the published app. `shown`: elements with
- * `data-workshop-sign-in` that workshop-data.js left shown and that read "Sign in" (text or aria-label); `visible`: those
- * on the first screen; `opens`: whether pressing the first visible one opened the hand-off page
+ * Ticket 3.25: what a visitor (no token) sees of the workshop's sign-in in the published app when it opens. `shown`:
+ * elements with `data-workshop-sign-in` that read "Sign in" (text or aria-label) and are really visible (try 2: no hidden or
+ * `display: none` ancestor, not `visibility: hidden` or transparent: `checkVisibility`); `visible`: those that also take
+ * room on the page (a box wider and taller than 0), the one pressed; `opens`: whether pressing the first visible one opened the hand-off page
  * (`/app-sign-in/?app=<nickname>`) in a new tab (undefined when none is on the first screen).
  */
 export interface SignInCheck {
@@ -684,6 +685,21 @@ export interface SignInCheck {
   visible: number;
   opens: boolean | undefined;
 }
+
+/**
+ * Ticket 3.25: the sign-in elements a visitor sees once the page settled, as SignInCheck counts them (run in the page by
+ * src/eval/build.ts; the first `visible` one is marked `data-eval-sign-in` so the harness can press it).
+ */
+export const SIGN_IN_SCRIPT = `(() => {
+  // Try 2 (checker): really visible, not merely without its own hidden attribute: no hidden or display:none ancestor,
+  // not visibility:hidden or fully transparent (itself or an ancestor), and taking room on the page.
+  const shown = Array.from(document.querySelectorAll("[data-workshop-sign-in]"))
+    .filter((el) => /sign in/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || "")))
+    .filter((el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true }));
+  const visible = shown.filter((el) => { const box = el.getBoundingClientRect(); return box.width > 0 && box.height > 0; });
+  if (visible[0]) visible[0].setAttribute("data-eval-sign-in", "");
+  return { shown: shown.length, visible: visible.length };
+})()`;
 
 /** The sign-in problem of a published app, if any: a visitor must find the sign-in button, and it must open the hand-off. */
 export function signInProblem(check: SignInCheck): string | undefined {

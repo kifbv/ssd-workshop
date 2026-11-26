@@ -867,6 +867,85 @@ describe("ticket 3.24: writes need an app write token, reads stay public", () =>
     expect(logs.map((l) => l.writer)).toEqual(["Bob", undefined, "Bob", "Bob"]);
   });
 
+  describe("ticket 3.25 try 2: GET ...?whoami=1 names the token's writer, so an app's whoAmI() comes from the server", () => {
+    const whoami = (token: string | null, options: { nickname?: string; key?: string } = {}): HttpRequest => ({
+      ...request("GET", options.key ?? "whoami", { token, ...(options.nickname === undefined ? {} : { nickname: options.nickname }) }),
+      queryStringParameters: { whoami: "1" },
+    });
+
+    it("WHEN the token is valid for this app THEN it answers {nickname} of the token's writer, reading no value and writing nothing", async () => {
+      const { call, store, logs } = setup();
+      await call(put("whoami", "a stored value"));
+      const before = snapshot(store);
+      store.reads.length = 0;
+      store.tokens.reads.length = 0;
+      const answer = await call(whoami(tokenFor(NICK)));
+      expect(answer.statusCode).toBe(200);
+      expect(JSON.parse(answer.body ?? "")).toEqual({ nickname: "Bob" });
+      expect(answer.headers).toMatchObject({ "content-type": "application/json", "cache-control": "no-store", ...CORS_HEADERS });
+      expect(answer.headers?.["access-control-allow-credentials"]).toBeUndefined();
+      // Only the live marker and the token: not the value (whatever the key), not the totals; nothing written or counted.
+      expect(store.reads).toEqual(["live"]);
+      expect(store.tokens.reads).toEqual([hashAppToken(tokenFor(NICK))]);
+      expect(snapshot(store)).toBe(before);
+      // Logged as a read of its own kind, without the writer, the token or its hash.
+      expect(logs.at(-1)).toEqual({ event: "app-data", method: "GET", outcome: "whoami", status: 200 });
+      // The app is matched regardless of the letter case of its address, and any valid key works.
+      expect(JSON.parse((await call(whoami(tokenFor(NICK), { nickname: "ADA-42", key: "x" }))).body ?? "")).toEqual({ nickname: "Bob" });
+    });
+
+    it("WHEN there is no token, a malformed one, or the session cookie alone THEN it answers 401 and names no one", async () => {
+      const { call, logs } = setup();
+      const answers = [
+        await call(whoami(null)),
+        await call(whoami(`${tokenFor(NICK)}x`)),
+        await call({ ...whoami(null), cookies: [`__Host-ssd_session=${tokenFor(NICK)}`] }),
+      ];
+      for (const answer of answers) {
+        expect(answer.statusCode).toBe(401);
+        expect(JSON.parse(answer.body ?? "")).toEqual({ message: SIGN_IN });
+        expect(answer.headers).toMatchObject(CORS_HEADERS);
+        expect(answer.body).not.toContain("Bob");
+      }
+      expect(logs.slice(-3).map((l) => [l.method, l.outcome, l.status, l.writer])).toEqual(Array(3).fill(["GET", "unauthorized", 401, undefined]));
+    });
+
+    it("WHEN the token was made for another app THEN it answers 401", async () => {
+      const { call } = setup([NICK, "grace"]);
+      const answer = await call(whoami(tokenFor(NICK), { nickname: "grace" }));
+      expect([answer.statusCode, JSON.parse(answer.body ?? "")]).toEqual([401, { message: SIGN_IN }]);
+      expect((await call(whoami(tokenFor("grace"), { nickname: "grace" }))).statusCode).toBe(200);
+    });
+
+    it("WHEN the token has expired or was revoked (sign-out, reset) THEN it answers 401", async () => {
+      const { call, store, clock } = setup();
+      store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 60 });
+      expect((await call(whoami(WRITE_TOKEN))).statusCode).toBe(200);
+      clock.now = new Date(NOW.getTime() + 60 * 1000);
+      expect((await call(whoami(WRITE_TOKEN))).statusCode).toBe(401);
+      clock.now = NOW;
+      store.tokens.tokens.delete(hashAppToken(WRITE_TOKEN));
+      expect((await call(whoami(WRITE_TOKEN))).statusCode).toBe(401);
+    });
+
+    it("keeps the other answers: 404 for an app that is not live and 400 for a bad key come first, token or not; any other whoami value is a plain read", async () => {
+      const { call, store } = setup();
+      expect((await call(whoami(tokenFor(NICK), { nickname: "grace" }))).statusCode).toBe(404);
+      expect((await call(whoami(tokenFor(NICK), { key: "bad key" }))).statusCode).toBe(400);
+      await call(put("score", 5));
+      store.reads.length = 0;
+      const plain = await call({ ...request("GET", "score", { token: tokenFor(NICK) }), queryStringParameters: { whoami: "yes" } });
+      expect([plain.statusCode, plain.body]).toEqual([200, "5"]);
+    });
+
+    it("never puts an email address, the token or its hash in the answer or the log", async () => {
+      const { call, logs } = setup();
+      const answers = [await call(whoami(tokenFor(NICK))), await call(whoami(WRITE_TOKEN)), await call(whoami(null))];
+      const text = JSON.stringify([answers, logs]);
+      for (const secret of [tokenFor(NICK), hashAppToken(tokenFor(NICK)), WRITE_TOKEN, hashAppToken(WRITE_TOKEN), "@"]) expect(text).not.toContain(secret);
+    });
+  });
+
   it("answers 500 (logged by name) when the token cannot be read", async () => {
     const { call, store, logs } = setup();
     store.tokens.failure = Object.assign(new Error(`down ${tokenFor(NICK)}`), { name: "InternalServerError" });

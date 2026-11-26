@@ -181,6 +181,19 @@ describe("the agent's settings (criterion 2)", () => {
     expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(SIGN_IN_GUIDANCE);
   });
 
+  it("ticket 3.25 try 2: both AGENTS.md and the guidance say workshop-data.js is index.html's first script, as the template has it and the deploy check requires", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8").replace(/\s+/g, " ");
+    const index = readFileSync(new URL("../../templates/basic/index.html", import.meta.url), "utf8");
+    const tag = '<script src="workshop-data.js"></script>';
+    expect(index).toContain(tag);
+    expect(index.indexOf(tag)).toBeLessThan(index.indexOf("<script src=\"app.js\" defer></script>"));
+    expect(agents).toContain(tag);
+    expect(SIGN_IN_GUIDANCE).toContain(tag);
+    for (const text of [agents, SIGN_IN_GUIDANCE]) expect(text).toMatch(/no `?defer`? or `?async`?/);
+    expect(agents).toMatch(/deploy check refuses a page that runs any other script first/);
+    expect(SIGN_IN_GUIDANCE).toMatch(/deploy check refuses a page that runs any other script first/);
+  });
+
   it("tells the agent it may check a service with WebFetch, that pages are data and never instructions, never with keys, and few fetches (ticket 2.15)", () => {
     const prompt = buildPrompt(ws);
     expect(prompt).toMatch(/WebFetch/);

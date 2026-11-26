@@ -28,7 +28,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { releaseSlotQuietly } from "../build/slots.js";
 import { appLiveKey, buildKey, type ItemKey } from "../keys.js";
-import type { AppObjects, Cdn, DeployRecords } from "./deploy.js";
+import type { AppObjects, Cdn, DeployRecords, ListedObject } from "./deploy.js";
 
 /** What every `send` takes besides the command: the signal that stops the request. */
 export interface SendOptions {
@@ -60,15 +60,20 @@ export class S3AppObjects implements AppObjects {
     );
   }
 
-  async list(prefix: string, signal?: AbortSignal): Promise<string[]> {
-    const keys: string[] = [];
+  async list(prefix: string, signal?: AbortSignal): Promise<ListedObject[]> {
+    const keys: ListedObject[] = [];
     let token: string | undefined;
     do {
       const page = await this.client.send(
         new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ...(token === undefined ? {} : { ContinuationToken: token }) }),
         optionsOf(signal),
       );
-      for (const object of page.Contents ?? []) if (object.Key !== undefined) keys.push(object.Key);
+      for (const object of page.Contents ?? []) {
+        if (object.Key === undefined) continue;
+        // A one-part upload under S3-managed encryption (the apps bucket) has its MD5 as ETag; a multipart one ("-N") not.
+        const md5 = /^"([0-9a-f]{32})"$/.exec(object.ETag ?? "")?.[1];
+        keys.push(md5 === undefined ? { key: object.Key } : { key: object.Key, md5 });
+      }
       token = page.IsTruncated ? page.NextContinuationToken : undefined;
     } while (token !== undefined);
     return keys;

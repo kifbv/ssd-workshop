@@ -13,12 +13,11 @@ describe("the hand-off page's rules (ticket 3.24)", () => {
     }
   });
 
-  it("sends a token only to /apps/<the same nickname, lower-cased>/ in the fragment, with the writer's nickname (3.25)", () => {
-    expect(appAddress("Ada-42", TOKEN, "Bob")).toBe(`/apps/ada-42/#wt=${TOKEN}&wn=Bob`);
-    expect(appAddress("ada", "short", "Bob")).toBeUndefined();
-    expect(appAddress("https://evil.example/x", TOKEN, "Bob")).toBeUndefined();
-    expect(appAddress("//evil", TOKEN, "Bob")).toBeUndefined();
-    for (const bad of ["", "Bo", "Bob&wt=x", "B%26b", "Bob#x", "x".repeat(21)]) expect(appAddress("ada", TOKEN, bad), bad).toBeUndefined();
+  it("sends a token only to /apps/<the same nickname, lower-cased>/ in the fragment", () => {
+    expect(appAddress("Ada-42", TOKEN)).toBe(`/apps/ada-42/#wt=${TOKEN}`);
+    expect(appAddress("ada", "short")).toBeUndefined();
+    expect(appAddress("https://evil.example/x", TOKEN)).toBeUndefined();
+    expect(appAddress("//evil", TOKEN)).toBeUndefined();
   });
 
   it("goes through the workshop's sign-in and back", () => {
@@ -38,10 +37,9 @@ describe("the hand-off page's rules (ticket 3.24)", () => {
   });
 
   it("opens the app only for a good answer about the same app; otherwise says why and goes nowhere", () => {
-    expect(tokenState({ status: 200, body: { token: TOKEN, app: "ada", nickname: "Bob" } }, "Ada")).toEqual({ kind: "open", address: `/apps/ada/#wt=${TOKEN}&wn=Bob` });
-    expect(tokenState({ status: 200, body: { token: TOKEN, app: "ada" } }, "Ada")).toEqual({ kind: "show", message: APP_SIGN_IN_TEXTS.failed });
-    expect(tokenState({ status: 200, body: { token: TOKEN, app: "bob", nickname: "Bob" } }, "Ada")).toEqual({ kind: "show", message: APP_SIGN_IN_TEXTS.failed });
-    expect(tokenState({ status: 200, body: { token: "x", app: "ada", nickname: "Bob" } }, "Ada")).toEqual({ kind: "show", message: APP_SIGN_IN_TEXTS.failed });
+    expect(tokenState({ status: 200, body: { token: TOKEN, app: "ada", nickname: "Bob" } }, "Ada")).toEqual({ kind: "open", address: `/apps/ada/#wt=${TOKEN}` });
+    expect(tokenState({ status: 200, body: { token: TOKEN, app: "bob" } }, "Ada")).toEqual({ kind: "show", message: APP_SIGN_IN_TEXTS.failed });
+    expect(tokenState({ status: 200, body: { token: "x", app: "ada" } }, "Ada")).toEqual({ kind: "show", message: APP_SIGN_IN_TEXTS.failed });
     expect(tokenState({ status: 404, body: { message: "This app is not live." } }, "Ada")).toEqual({ kind: "not-live" });
     expect(tokenState({ status: 401, body: {} }, "Ada")).toEqual({ kind: "signed-out" });
     expect(tokenState({ status: 409, body: { reason: "no-nickname" } }, "Ada")).toEqual({ kind: "no-nickname" });

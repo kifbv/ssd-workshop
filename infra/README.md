@@ -608,13 +608,19 @@ Then:
 1. The log group `ssd-workshop-apps-deployer` has one `{"event":"deployer","outcome":"refreshed","files":1,...}` line
    per app within a minute (`not-published` for a marker without an `index.html`; `retry`/`dead-letter` with an error
    name: run the command again).
-2. `curl -sS https://workshop.rankly.games/apps/<nick>/workshop-data.js | grep -c whoAmI` prints `1` for an app built
-   before 3.25.
+2. `curl -sS https://workshop.rankly.games/apps/<nick>/workshop-data.js | grep -c 'whoami=1'` prints `1` for an app built
+   before 3.25. Running the command a second time logs `up-to-date` per app instead of `refreshed` and makes no
+   CloudFront invalidation (3.25 try 2).
 3. On a phone, open that app without signing in: the data shows; a save says "Sign in to the workshop to save in this
    app." and a "Sign in to save" button appears at the bottom right (the app has no button of its own). Press it: a new
    tab asks "Save in <nick>'s app as <your nickname>?"; Continue opens the app there with no `#wt=` left in the address,
    and a save now works (`curl -sS "https://workshop.rankly.games/api/apps/<nick>/data/<key>?info=1"` names you in
    `updatedBy`). A new build's app shows its own "Sign in to save" button next to where it saves.
+4. Unverified until this check (3.25 try 2): CloudFront passes the token on a `GET`. Right after the Continue of step 3,
+   the log group `ssd-workshop-api-app-data` has a `{"event":"app-data","method":"GET","outcome":"whoami","status":200}`
+   line (the app asked who the token names). A `"outcome":"unauthorized","status":401` `GET` line there instead means
+   CloudFront dropped the `Authorization` header on GETs: saving still works, but `workshopData.whoAmI()` stays null;
+   tell Claude (the fix: a cache policy for `/api/apps/*` that includes the header).
 
 Rights: the command needs Franck's `dynamodb:Scan` on `ssd-workshop-data` and `sqs:SendMessage` on
 `ssd-workshop-deploys.fifo` (both already used by `npm run builds` and the manual deploy below). Claude sessions are

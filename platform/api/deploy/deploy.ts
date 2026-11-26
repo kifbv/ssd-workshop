@@ -30,6 +30,7 @@
  * (its AbortSignal), and the build's last writes are conditional on it still being `deploying`, so a late write can
  * never change a finished build. Logs hold counts only: never a nickname, commit, file name, reason or error message.
  */
+import { createHash } from "node:crypto";
 import { checkApp, type AppFile, type Problem } from "../build/check.js";
 import { BUILD_ID_PATTERN } from "../keys.js";
 import { NICKNAME_PATTERN } from "../participant/participant.js";
@@ -97,14 +98,20 @@ export function parseDeployJob(body: string | undefined): DeployJob | undefined 
   return { buildId, nickname, commit };
 }
 
+/** An object in the apps bucket: its key and, when known, the MD5 of its bytes (hex). */
+export interface ListedObject {
+  key: string;
+  md5?: string;
+}
+
 /**
  * The apps bucket, as the deployer uses it. `signal` is aborted when the phase's time is up: the call must stop
  * (the AWS SDK's `abortSignal`), so nothing it does lands after the deploy gave up.
  */
 export interface AppObjects {
   put(key: string, bytes: Uint8Array, contentType: string, cacheControl: string, signal?: AbortSignal): Promise<void>;
-  /** Every key under the prefix. */
-  list(prefix: string, signal?: AbortSignal): Promise<string[]>;
+  /** Every object under the prefix, with its MD5 (hex) when S3's ETag is one (ticket 3.25 try 2, for the refresh). */
+  list(prefix: string, signal?: AbortSignal): Promise<ListedObject[]>;
   remove(keys: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
@@ -135,9 +142,10 @@ export interface DeployRecords {
  * `no-build`: no deployable build for the message (missing, another app's, or already live or failed).
  * `dead-letter`: the last delivery could not even mark the build failed; the message goes to the dead-letter queue.
  * Ticket 3.25, a refresh: `refreshed` (the platform's workshop-data.js put and invalidated), `not-published` (the app has
- * no index.html under its prefix: nothing to refresh), or `retry`/`dead-letter` on a failure.
+ * no index.html under its prefix: nothing to refresh), `up-to-date` (it already holds the platform's bytes: nothing done),
+ * or `retry`/`dead-letter` on a failure.
  */
-export type DeployOutcome = "live" | "failed" | "invalid" | "no-build" | "retry" | "gave-up" | "dead-letter" | "refreshed" | "not-published";
+export type DeployOutcome = "live" | "failed" | "invalid" | "no-build" | "retry" | "gave-up" | "dead-letter" | "refreshed" | "not-published" | "up-to-date";
 
 /** The only things ever logged: counts, an outcome and an error name. */
 export interface DeployLogEntry {
@@ -404,7 +412,7 @@ export async function processDeploy(
 
     await putAll(published, prefix, deps.objects, bounded);
     const keep = new Set(published.map((file) => `${prefix}${file.path}`));
-    const stale = (await bounded((_, signal) => deps.objects.list(prefix, signal))).filter((key) => key.startsWith(prefix) && !keep.has(key));
+    const stale = (await bounded((_, signal) => deps.objects.list(prefix, signal))).map((object) => object.key).filter((key) => key.startsWith(prefix) && !keep.has(key));
     if (stale.length > 0) await bounded((_, signal) => deps.objects.remove(stale, signal));
     await bounded((_, signal) => deps.cdn.invalidate([`/${prefix}*`], `${job.buildId}-${deps.now().getTime()}`, signal));
     // The marker before the build: when the build's write then fails, the build stays `deploying`, so a redelivery
@@ -457,9 +465,16 @@ async function refreshDataClient(
 ): Promise<void> {
   const prefix = `${APPS_KEY_PREFIX}${nickname.toLowerCase()}/`;
   try {
-    const keys = await bounded((_, signal) => deps.objects.list(prefix, signal));
-    if (!keys.includes(`${prefix}index.html`)) {
+    const listed = await bounded((_, signal) => deps.objects.list(prefix, signal));
+    if (!listed.some((object) => object.key === `${prefix}index.html`)) {
       log({ outcome: "not-published" });
+      return;
+    }
+    // Try 2: the app already has the platform's bytes (a refresh again, or a deploy since): no put, no invalidation, so
+    // any number of refresh messages costs at most one invalidation per app and change of workshop-data.js.
+    const current = listed.find((object) => object.key === `${prefix}${DATA_CLIENT_PATH}`);
+    if (current?.md5 !== undefined && current.md5 === createHash("md5").update(deps.dataClient).digest("hex")) {
+      log({ outcome: "up-to-date" });
       return;
     }
     await bounded((_, signal) => deps.objects.put(`${prefix}${DATA_CLIENT_PATH}`, deps.dataClient, contentTypeOf(DATA_CLIENT_PATH), CACHE_CONTROL, signal));

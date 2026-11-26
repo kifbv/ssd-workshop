@@ -1,5 +1,5 @@
 // The hand-off page for saving in apps (ticket 3.24), at /app-sign-in/?app=<nickname>: "Save in <app>'s app as <your
-// nickname>?" and Continue, which asks POST /api/app-tokens for a token and opens /apps/<app>/#wt=<token>&wn=<nickname>. A signed-out
+// nickname>?" and Continue, which asks POST /api/app-tokens for a token and opens /apps/<app>/#wt=<token>. A signed-out
 // person is sent to the workshop's own sign-in (`/?app=<app>`), which brings them back here. The rules for each answer
 // are in ./app-sign-in-view.ts; every text is set with `textContent`.
 //

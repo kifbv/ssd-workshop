@@ -26,7 +26,7 @@ const TYPES: Record<string, string> = { ".html": "text/html", ".css": "text/css"
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
 /** Ticket 3.25: the app write token the fake API accepts (as the hand-off gives it), and the 401 text of the real API. */
 const TOKEN = Buffer.alloc(32, 9).toString("base64url");
-const HAND_OFF = `#wt=${TOKEN}&wn=Bob`;
+const HAND_OFF = `#wt=${TOKEN}`;
 const SIGN_IN_TO_SAVE = APP_DATA_MESSAGES.signInToSave;
 /** Chromium logs every 401 answer itself (a visitor's save): only that line is expected then. */
 const LOGGED_401 = "Failed to load resource: the server responded with a status of 401";
@@ -146,6 +146,11 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
           writers.delete(key);
         }
         return answer(204);
+      }
+      // Try 2: `?whoami=1` names the token's writer (Bob), 401 without the token.
+      if (url.searchParams.get("whoami") === "1") {
+        if (headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) });
+        return answer(200, { body: JSON.stringify({ nickname: "Bob" }) });
       }
       const value = store.get(key) ?? "null";
       if (url.searchParams.get("info") === "1") {
@@ -497,8 +502,10 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
       ["PUT", `Bearer ${TOKEN}`, 204],
       ["DELETE", `Bearer ${TOKEN}`, 204],
     ]);
-    // Reads never carry it.
-    expect(calls.filter((call) => call.method === "GET").every((call) => call.authorization === undefined)).toBe(true);
+    // Reads never carry it; only the one question who the token names does (try 2), asked once when the page opened.
+    const whoami = calls.filter((call) => call.method === "GET" && call.search === "?whoami=1");
+    expect(whoami.map((call) => [call.path, call.authorization])).toEqual([[`${DATA_PREFIX}whoami`, `Bearer ${TOKEN}`]]);
+    expect(calls.filter((call) => call.method === "GET" && call.search !== "?whoami=1").every((call) => call.authorization === undefined)).toBe(true);
     expect(store.get("presses")).toBe(String(STORED + 1));
     expect(errors).toEqual([]);
   });
@@ -519,14 +526,101 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(errors).toEqual([]);
   });
 
-  it("ticket 3.25: WHEN the fragment holds a malformed token or no nickname THEN it is removed and the visitor is not signed in", async () => {
-    for (const hash of ["#wt=short&wn=Bob", `#wt=${TOKEN}`, `#wt=${TOKEN}&wn=a%2`, "#wn=Bob"]) {
+  it("ticket 3.25: WHEN the fragment holds a malformed token THEN it is removed and the visitor is not signed in", async () => {
+    for (const hash of ["#wt=short", "#wt=", `#wt=${TOKEN}x`]) {
       await openApp("0", hash);
       expect(page.url(), hash).toBe(`${origin}${APP_PATH}`);
       expect(await page.evaluate<unknown>("workshopData.whoAmI()"), hash).toBeNull();
       expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible(), hash).toBe(true);
     }
+    expect(calls.some((call) => call.search === "?whoami=1")).toBe(false);
     expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.25 try 2 (finding A): WHEN the address names someone (an old #wn=) THEN whoAmI() still gives only the nickname the API confirms for the token", async () => {
+    allow401();
+    await openApp("0", `#wt=${TOKEN}&wn=Ada`);
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
+    expect(await page.locator("#who").textContent()).toBe("You save as Bob.");
+    // A token the API does not accept: no name at all, whatever the address says.
+    await page.unroute("**/api/apps/**");
+    await page.route("**/api/apps/**", (route) => {
+      const url = new URL(route.request().url());
+      if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
+      if (url.searchParams.get("whoami") === "1") return route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) });
+      return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: url.searchParams.get("info") === "1" ? '{"value":0,"updatedBy":null,"updatedAt":null}' : "0" });
+    });
+    await openApp("0", `#wt=${TOKEN}&wn=Ada`);
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
+    expect(await page.locator("#who").textContent()).toBe("");
+    expect(errors).toEqual([]);
+  });
+
+  /**
+   * Try 2 (finding B): app code that runs after workshop-data.js, trying every way short of reading browser internals to
+   * see the token: wrapping fetch, XMLHttpRequest, Headers, history and location, getters on Object.prototype (read by
+   * fetch for its options), and Symbol.iterator. It records any text that holds the token in `window.stolen`.
+   */
+  const HOSTILE_APP = `"use strict";
+    window.stolen = [];
+    const T = ${JSON.stringify(TOKEN)};
+    const grab = (where, value) => { try { if (String(JSON.stringify(value) ?? value).includes(T)) window.stolen.push(where); } catch (e) { if (String(value).includes(T)) window.stolen.push(where); } };
+    const realFetch = window.fetch;
+    window.fetch = function (input, init) { grab("fetch", [input, init, init && init.headers]); return realFetch.apply(this, arguments); };
+    const realOpen = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function (n, v) { grab("xhr", v); return realOpen.apply(this, arguments); };
+    for (const name of ["append", "set"]) { const real = Headers.prototype[name]; Headers.prototype[name] = function (n, v) { grab("headers." + name, v); return real.apply(this, arguments); }; }
+    const realReplace = History.prototype.replaceState;
+    History.prototype.replaceState = function () { grab("replaceState", [...arguments]); return realReplace.apply(this, arguments); };
+    for (const name of ["signal", "referrer", "mode", "cache", "redirect", "integrity", "keepalive", "window", "priority", "duplex", "referrerPolicy", "body", "headers"]) {
+      Object.defineProperty(Object.prototype, name, { configurable: true, get() { grab("Object.prototype." + name, this); return undefined; } });
+    }
+    Object.defineProperty(Object.prototype, Symbol.iterator, { configurable: true, get() { grab("Symbol.iterator", this); return undefined; } });
+    const realStringify = JSON.stringify;
+    JSON.stringify = function (v) { const out = realStringify.apply(this, arguments); if (typeof out === "string" && out.includes(T)) window.stolen.push("JSON.stringify"); return out; };
+    grab("location", [location.href, location.hash, document.URL, history.state]);
+    document.addEventListener("DOMContentLoaded", async () => {
+      await workshopData.whoAmI();
+      try { await workshopData.set("presses", 1); window.saved = "yes"; } catch (e) { window.saved = e.message; }
+    });`;
+
+  const serveApp = async (files: Record<string, string>): Promise<void> => {
+    for (const [name, body] of Object.entries(files)) {
+      await page.route(`${origin}${APP_PATH}${name === "index.html" ? "" : name}`, (route) =>
+        route.fulfill({ status: 200, headers: { "content-type": TYPES[extname(name)] ?? "text/plain", "content-security-policy": APPS_CONTENT_SECURITY_POLICY }, body }),
+      );
+    }
+  };
+
+  it("ticket 3.25 try 2 (finding B): WHEN the app's own code wraps fetch, XMLHttpRequest, history and Object.prototype THEN it never sees the token, and saves still carry it", async () => {
+    await serveApp({ "app.js": HOSTILE_APP });
+    await page.goto(`${origin}${APP_PATH}${HAND_OFF}`);
+    await expect.poll(() => page.evaluate<unknown>("window.saved")).toBe("yes");
+    expect(await page.evaluate<string[]>("window.stolen")).toEqual([]);
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
+    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[`Bearer ${TOKEN}`, 204]]);
+    expect(page.url()).toBe(`${origin}${APP_PATH}`);
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.25 try 2 (finding B, control): the same code run BEFORE workshop-data.js sees the token, which is why the deploy check requires it first", async () => {
+    const index = readFileSync(join(TEMPLATE_DIR, "index.html"), "utf8").replace('<script src="workshop-data.js"></script>', '<script src="early.js"></script><script src="workshop-data.js"></script>');
+    expect(checkApp([{ path: "index.html", kind: "file", bytes: new TextEncoder().encode(index) }]).ok).toBe(false);
+    // Every file through the same route (Chromium refuses a routed page's loads from the loopback server).
+    const own = (name: string) => readFileSync(join(TEMPLATE_DIR, name), "utf8");
+    await serveApp({ "index.html": index, "early.js": HOSTILE_APP, "workshop-data.js": own("workshop-data.js"), "app.js": own("app.js"), "style.css": own("style.css") });
+    await page.goto(`${origin}${APP_PATH}${HAND_OFF}`);
+    await expect.poll(() => page.evaluate<unknown>("window.saved")).toBe("yes");
+    // It read the address before workshop-data.js removed the token, and saw it again in every save it wrapped.
+    expect(await page.evaluate<string[]>("window.stolen")).toEqual(expect.arrayContaining(["location", "fetch"]));
+  });
+
+  it("ticket 3.25 try 2 (residual, docs/decisions.md): the browser's navigation timing entry still holds the address the page opened with, token included", async () => {
+    await openApp("0", HAND_OFF);
+    expect(page.url()).toBe(`${origin}${APP_PATH}`);
+    // Any script of the page can read it; no script can clear it. Only a hand-off that keeps the token out of the app's own
+    // address (another origin or frame for the data client) would close this.
+    expect(await page.evaluate<string>(`performance.getEntriesByType("navigation")[0].name`)).toBe(`${origin}${APP_PATH}${HAND_OFF}`);
   });
 });
 

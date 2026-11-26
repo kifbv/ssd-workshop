@@ -6,7 +6,8 @@
 // server is cross-origin and the browser reads an answer only if CORS allows it.
 //
 // Ticket 3.24: writes need `Authorization: Bearer <token>`. Since 3.25 the template's workshop-data.js sends it, taking
-// the token from the address (`#wt=<token>&wn=<nickname>`), which also proves the preflight lets a sandboxed page send it.
+// the token from the address (`#wt=<token>`), which also proves the preflight lets a sandboxed page send it. Try 2: the
+// template asks the real API who the token's writer is (`GET ...?whoami=1` with the token, preflighted too).
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -42,7 +43,7 @@ interface Seen {
 
 /** The write token the tests give the page (ticket 3.24), handed over in the address as /app-sign-in does (3.25). */
 const TOKEN = Buffer.alloc(32, 5).toString("base64url");
-const HAND_OFF = `#wt=${TOKEN}&wn=Bob`;
+const HAND_OFF = `#wt=${TOKEN}`;
 
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -182,6 +183,15 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     })()`);
     expect(roundTrip).toEqual({ read: { name: "Ada's list", items: [1, 2, 3], done: false, note: null }, list: [3, 1.5, -2], text: "héllo ☕", gone: null });
 
+    // Ticket 3.25 try 2: whoAmI() came from the real API, which named the token's writer; the GET was preflighted for
+    // `authorization` (a GET with that header is not a simple request), and allowed.
+    const whoami = seen.filter((s) => s.path === `${DATA_PREFIX}whoami`);
+    // Once per page load (the page was opened twice); each preceded by its preflight (Chromium keeps none for an opaque origin).
+    expect(whoami.filter((s) => s.method === "GET").map((s) => s.status)).toEqual([200, 200]);
+    expect(whoami[0]?.method).toBe("OPTIONS");
+    for (const preflight of whoami.filter((s) => s.method === "OPTIONS")) expect([preflight.status, preflight.requestHeaders]).toEqual([204, "authorization"]);
+    expect(logs.filter((entry) => entry.outcome === "whoami")).toHaveLength(2);
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
     // The PUTs were preflighted (JSON content type), and every answer, preflight included, allowed any origin.
     expect(seen.filter((s) => s.method === "OPTIONS").length).toBeGreaterThan(0);
     expect(seen.map((s) => s.method)).toEqual(expect.arrayContaining(["OPTIONS", "PUT", "GET", "DELETE"]));
@@ -212,6 +222,9 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     store.values.set(`${NICKNAME}/presses`, { json: "5", bytes: 1 });
     await openApp("5");
     expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
+    // No token, no whoami question: whoAmI() is null at once.
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
+    expect(seen.some((s) => s.path === `${DATA_PREFIX}whoami`)).toBe(false);
     const message = await page.evaluate<string>(`workshopData.set("presses", 6).then(() => "stored", (error) => error.message)`);
     expect(message).toBe(APP_DATA_MESSAGES.signInToSave);
     // Ticket 3.25: the template's own button, pressed by a visitor, shows the same reason and saves nothing.
@@ -234,6 +247,23 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     expect(message).toBe(APP_DATA_MESSAGES.valueTooBig);
     expect(store.values.has(`${NICKNAME}/big`)).toBe(false);
     expect(seen.find((s) => s.method === "PUT")).toMatchObject({ status: 413, allowOrigin: "*" });
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.25 try 2: WHEN the address holds a token the API does not accept THEN whoAmI() stays null and the page names no one", async () => {
+    page.removeAllListeners("console");
+    page.on("console", (message) => {
+      if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 401")) errors.push(message.text());
+    });
+    store.live.add(NICKNAME);
+    // Another app's token, then an unknown one: both well formed, neither for this app.
+    store.tokens.tokens.set(hashAppToken(Buffer.alloc(32, 6).toString("base64url")), { app: "other-app", nickname: "Eve", expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+    for (const token of [Buffer.alloc(32, 6).toString("base64url"), Buffer.alloc(32, 7).toString("base64url")]) {
+      await openApp("0", `#wt=${token}`);
+      expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
+      expect(await page.locator("#who").textContent()).toBe("");
+    }
+    expect(seen.filter((s) => s.method === "GET" && s.path === `${DATA_PREFIX}whoami`).map((s) => s.status)).toEqual([401, 401]);
     expect(errors).toEqual([]);
   });
 

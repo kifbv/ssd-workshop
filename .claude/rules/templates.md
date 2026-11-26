@@ -9,7 +9,8 @@ paths:
 - Participant app commits are automatic and never reviewed, so a starter must be safe to deploy
   as it is.
 - Apps are served under the sandbox CSP (`APPS_CONTENT_SECURITY_POLICY` in `infra/lib/config.ts`): the page
-  has an opaque origin (`origin` is `"null"`). Use classic `<script defer>` tags, never `type="module"`: a
+  has an opaque origin (`origin` is `"null"`). Use classic `<script defer>` tags (but `workshop-data.js` first and not
+  deferred, below), never `type="module"`: a
   module script is fetched with CORS and the same server's answer has no `Access-Control-Allow-Origin`, so it
   is blocked. `localStorage`, `sessionStorage` and cookies throw; data goes through `workshop-data.js`, whose
   requests carry `Origin: null` (ticket 2.3, `platform/api/build/template.test.ts`).
@@ -42,7 +43,8 @@ paths:
   `options.headers.authorization = "Bearer " + pass` (a property set with `=`; `authorization:` or `"authorization",`
   fails the check), and never write the header with a colon in a comment either. Keep it backward compatible: older
   apps' `app.js` call only `get`, `set`, `remove`.
-- Sign-in in apps (3.25): the token and nickname arrive in the fragment (`#wt=<token>&wn=<nickname>`) and are removed
+- Sign-in in apps (3.25): the token arrives in the fragment (`#wt=<token>`, nothing else: a name in the address is not
+  checked by anyone, try 2) and is removed
   with `history.replaceState` at once (it works in the sandbox's opaque origin in Chromium); in Playwright, a `goto` that
   changes only the fragment does not reload the page: go to `about:blank` first. A visitor's save gets a 401, which
   Chromium logs as a console error: a test of that path allows exactly that line. Style an element made by
@@ -51,3 +53,17 @@ paths:
   prompt lines before the WebFetch lines made the Wikipedia example skip WebFetch 3 times in a row). Run the changed
   example several times (`npm run eval -- build --example <n>`), compare with a baseline on `main` before blaming the
   change, then run the whole suite once. A field beside a button in a flex row needs `min-width: 0` (AGENTS.md rule 9).
+- `whoAmI()` (3.25 try 2) is a promise of the nickname the data API confirms for the token (`GET .../data/whoami?whoami=1`
+  with the token, once per page load), never a name from the address. A name an app stores inside a value is the app's
+  word, not the server's: show who posted from `getInfo(key).updatedBy`.
+- App code runs in the same page as `workshop-data.js` (3.25 try 2): `workshop-data.js` is the first script of
+  `index.html`, not deferred (the deploy check, `runsDataClientFirst` in `platform/api/build/check.ts`, refuses anything
+  else), captures `fetch`, `history.replaceState`, `location.replace` and `window.open` with `.bind` at its top, and
+  passes `fetch` options in `Object.create(null)` objects (fetch reads `signal`, `referrer`, ... and `Symbol.iterator`
+  through the prototype chain, where a getter on `Object.prototype` would see the headers). This does not make the token
+  secret from the app: Chromium's `performance.getEntriesByType("navigation")[0].name` keeps the address the page opened
+  with, fragment and token included, after `replaceState` (tested; decision "(3.25) Residual"). Only a separate origin
+  or frame for the data client would.
+- In Playwright, a document served through `page.route` cannot load files from a real loopback server (Chromium's
+  private network check, "Permission was denied for this request to access the `loopback` address space"): route every
+  file of such a page, or serve the page from the server and route only one script.

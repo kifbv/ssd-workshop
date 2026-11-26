@@ -2,7 +2,8 @@
 // /api/apps/{nickname}/data/{key}`, JSON values that anyone with the app's address may read. Since ticket 3.24 a
 // write (`PUT`, `DELETE`) needs an app write token for this app (`Authorization: Bearer <token>`, ../app-token/),
 // which only a participant signed in to the workshop can get, and each value records its writer's nickname
-// (`updatedBy`; `GET ...?info=1` answers `{value, updatedBy, updatedAt}`). Apps run sandboxed (opaque origin), so
+// (`updatedBy`; `GET ...?info=1` answers `{value, updatedBy, updatedAt}`). Since ticket 3.25 try 2, `GET ...?whoami=1` with
+// the token answers `{nickname}`, the token's writer (401 without a valid token for this app). Apps run sandboxed (opaque origin), so
 // every answer carries `Access-Control-Allow-Origin: *` (never with credentials), and `OPTIONS` answers the preflight
 // a JSON `PUT` or an `Authorization` header causes. The client is templates/basic/workshop-data.js; the contract is in
 // docs/decisions.md ("(2.3) Data API contract for 2.4", "(3.24) ...").
@@ -154,6 +155,8 @@ export type AppDataOutcome =
   | "saved"
   | "deleted"
   | "preflight"
+  /** Ticket 3.25 try 2: `GET ...?whoami=1` with a valid token named its writer. */
+  | "whoami"
   | "not-found"
   /** Ticket 3.24: a write without a valid token for this app. */
   | "unauthorized"
@@ -374,6 +377,13 @@ async function route(request: HttpRequest, method: AppDataMethod | "other", deps
   if (typeof nickname !== "string" || checkNickname(nickname) !== "ok") return notFound();
   if (!(await deps.store.isLive(nickname))) return notFound();
   if (typeof key !== "string" || !DATA_KEY_PATTERN.test(key)) return refuse(400, "bad-key", APP_DATA_MESSAGES.badKey);
+  if (method === "GET" && request.queryStringParameters?.["whoami"] === "1") {
+    // Ticket 3.25 try 2: who the app's visitor saves as (workshop-data.js's whoAmI()), from the token itself, never from
+    // the address. The same check as a write, but nothing is written, counted or read beyond the live marker and the token.
+    const who = await checkAppWrite(request, nickname, deps.tokens, deps.now());
+    if (!who.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.signInToSave);
+    return { outcome: "whoami", response: json(200, JSON.stringify({ nickname: who.writer })) };
+  }
   if (method === "GET") {
     const stored = await deps.store.getValue(nickname, key);
     // A missing key is `null`, never 404 (404 means the app is not live).

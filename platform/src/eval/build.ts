@@ -31,7 +31,7 @@ import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
-import { missingScreens, screenNames, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type SignInCheck } from "./logic.js";
+import { missingScreens, screenNames, SIGN_IN_SCRIPT, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type SignInCheck } from "./logic.js";
 
 const NICKNAME = "eval-app";
 const REPOSITORY = "ssd-eval-app";
@@ -42,18 +42,6 @@ const PHONE = { width: 375, height: 740 };
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
 /** Ticket 3.25: what the in-memory data API answers a write without a valid token, as the real one does (3.24). */
 const SIGN_IN_TO_SAVE = JSON.stringify({ message: APP_SIGN_IN_TEXTS.signInToSave });
-
-/**
- * Ticket 3.25: the sign-in elements a visitor sees once the page settled. `shown`: not hidden and reading "Sign in" (text
- * or aria-label); `visible`: those also laid out on the first screen (marked so the harness can press the first one).
- */
-const SIGN_IN_SCRIPT = `(() => {
-  const shown = Array.from(document.querySelectorAll("[data-workshop-sign-in]"))
-    .filter((el) => !el.hidden && /sign in/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || "")));
-  const visible = shown.filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
-  if (visible[0]) visible[0].setAttribute("data-eval-sign-in", "");
-  return { shown: shown.length, visible: visible.length };
-})()`;
 
 /** Labels the title check reads: headings, buttons, tabs, links, labels, legends and aria-labels, hidden ones included. */
 const LABELS_SCRIPT = `Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,button,[role=tab],[role=button],a,label,legend,summary,[aria-label]"))
