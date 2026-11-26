@@ -1,7 +1,7 @@
 // Step 4, change requests (ticket 3.6). Once the app is live, a participant asks for a change in plain English: after
 // the guardrail, the AI writes the next version of the spec and a short "What changes" list. The participant then
 // presses Build this change (the readiness check runs on that version and a change build is queued, counting one of
-// their changes) or Not this one. The model sees the live spec (the version last built) and, while one is open, the
+// their changes) or Not this one. The model sees the live spec (the version last sent to build) and, while one is open, the
 // proposed version, so a later message refines the proposal; the list always compares with the live spec.
 // Pure TypeScript: the worker, the eval and the tests share it.
 import type { Exchange } from "./answer.js";
@@ -10,7 +10,7 @@ import type { ModelClient, ModelReply, ModelRequest } from "./model.js";
 import { notReadyReasonsList } from "./readiness.js";
 import { checkSpec, extractSpec, SPEC_FORMAT_AND_RULES } from "./spec.js";
 
-export const CHANGE_PROMPT_VERSION = "change-v1";
+export const CHANGE_PROMPT_VERSION = "change-v2";
 /** A whole spec (about 300 words and the diagram), a few sentences and the list. */
 export const CHANGE_MAX_TOKENS = 3500;
 /** At most this many "What changes" lines are kept, each cut to CHANGE_LINE_CHARS characters on one line. */
@@ -39,7 +39,7 @@ export function changeNotReadyReply(reasons: readonly string[]): string {
   ].join("\n");
 }
 
-export const CHANGE_SYSTEM_PROMPT = `You are the friendly guide of a one-day workshop in which non-developers turn an idea into a small single-page web app. The participant's app is already live: it was built from the live spec below. This is step 4, Live: they ask for small changes in plain English. For each change you write the next version of the spec and a short list of what changes. They then press "Build this change" (or "Not this one"), and the app is changed to match the new spec, keeping everything else as it is. The workshop builds and hosts the app; never discuss servers, hosting, programming languages, frameworks or code.
+export const CHANGE_SYSTEM_PROMPT = `You are the friendly guide of a one-day workshop in which non-developers turn an idea into a small single-page web app. The participant's app is already live, and the live spec below is the version they last sent to build. This is step 4, Live: they ask for small changes in plain English. For each change you write the next version of the spec and a short list of what changes. They then press "Build this change" (or "Not this one"), and the app is changed to match the new spec, keeping everything else as it is. The workshop builds and hosts the app; never discuss servers, hosting, programming languages, frameworks or code.
 
 How to reply:
 - When the participant asks for a change (add, remove, rename, simplify, "make it...", "I'd like..."), make it: one or two short sentences saying what you changed, then the whole new spec, then the list of what changes. When there is a proposed spec, the participant is refining it: start from the proposed spec; otherwise start from the live spec. Keep everything they did not ask to change exactly as it was.
@@ -58,7 +58,7 @@ The list of what changes goes right after the spec, between a line that is exact
 
 /** The change prompt with the live spec and, while one is open, the proposed version. */
 export function changeSystemPrompt(liveSpec: string, proposedSpec: string | undefined): string {
-  const live = `The live spec (the app was built from it):\n<live_spec>\n${liveSpec}\n</live_spec>`;
+  const live = `The live spec (the spec last sent to build):\n<live_spec>\n${liveSpec}\n</live_spec>`;
   const proposed =
     proposedSpec === undefined
       ? "There is no proposed spec: start from the live spec."

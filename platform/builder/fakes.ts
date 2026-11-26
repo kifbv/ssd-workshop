@@ -20,6 +20,11 @@ export interface FakeBuildItem {
   failureReasons?: string[];
   finishedAt?: string;
   updatedAt?: string;
+  /** Ticket 3.7: a change build, its number, and the input the launcher copied onto it. */
+  kind?: "first" | "change";
+  changeNumber?: number;
+  changeSpec?: string;
+  changeList?: string[];
 }
 
 /** Follows DynamoBuildRecords' conditions. */
@@ -32,7 +37,12 @@ export class FakeBuildRecords implements BuildRecords {
 
   async read(buildId: string): Promise<BuildToRun | undefined> {
     const build = this.builds.get(buildId);
-    return build && { nickname: build.nickname, participantId: build.participantId, status: build.status };
+    if (!build) return undefined;
+    const base = { nickname: build.nickname, participantId: build.participantId, status: build.status };
+    if (build.kind !== "change") return { ...base, kind: "first" };
+    const { changeNumber: number, changeSpec: spec, changeList: whatChanges = [] } = build;
+    const complete = number !== undefined && Number.isInteger(number) && number >= 1 && spec !== undefined && spec.trim() !== "" && whatChanges.length > 0;
+    return { ...base, kind: "change", ...(complete ? { change: { number, spec, whatChanges: [...whatChanges] } } : {}) };
   }
 
   /** DynamoBuildRecords' THIS_ATTEMPT condition. */

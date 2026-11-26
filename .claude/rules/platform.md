@@ -233,3 +233,7 @@ paths:
 - A count that must only rise when work is really queued (3.6's `changeRequestsUsed`) is a SET to the value read plus
   one, conditional on that exact value and the cap, in the same transaction that creates the work; a missing value is
   `attribute_not_exists` OR the same check, never a bare `ADD` (a redelivery would count twice).
+- A worker that runs next to untrusted code (the builder task beside the AI agent) gets the platform's input on its own
+  record, copied there by the trusted worker that starts it (3.7: the launcher writes `changeSpec`/`changeList` on the
+  build from `SPEC#<specVersion>`, in attributes only it may write), never a read right in another partition: IAM's
+  `dynamodb:Attributes` cannot tell a spec's `text` from a message's `text` in `PARTICIPANT#*`.

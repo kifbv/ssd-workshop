@@ -426,13 +426,15 @@ export const AI_WORKER_BUILD_CHECK_ATTRIBUTES = ["pk", "sk", "status"] as const;
  * The attribute names the builder (ticket 2.8, its task role from ticket 2.9) may name in `BUILD#*`, split by call for
  * 2.9's `dynamodb:Attributes` conditions (tested against the requests in platform/builder/aws.test.ts):
  *
- * - BUILDER_BUILD_READ_ATTRIBUTES: GetItem, its keys and projection (`nickname`, `participantId`, `status`);
+ * - BUILDER_BUILD_READ_ATTRIBUTES: GetItem, its keys and projection (`nickname`, `participantId`, `status`; ticket 3.7:
+ *   `kind` and `changeNumber`, and `changeSpec` and `changeList`, a change build's input the launcher copied from the
+ *   spec version, so the task reads nothing outside `BUILD#*`);
  * - BUILDER_BUILD_UPDATE_ATTRIBUTES: UpdateItem (claim, feed, hand-over, failure), every name in its update and
  *   condition expressions. `nickname` and `attemptId` (the launch the task belongs to, ticket 2.9 try 2) are only
  *   compared, never set. Never `participantId` (only
  *   read), `deployedCommit` or `liveAt` (the deployer's), `type`, `buildId` or `createdAt` (the AI worker's).
  */
-export const BUILDER_BUILD_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status"] as const;
+export const BUILDER_BUILD_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status", "kind", "changeNumber", "changeSpec", "changeList"] as const;
 export const BUILDER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "attemptId", "pushedCommit", "feed", "updatedAt", "finishedAt", "failureReasons"] as const;
 /** The attribute names the builder may name in `PARTICIPANT#*` (UpdateItem of the `USAGE` item only): the build's tokens and cost. */
 export const BUILDER_USAGE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "participantId", "updatedAt", "inputTokens", "outputTokens", "costUsd"] as const;
@@ -507,14 +509,31 @@ export const BUILD_CHECK_SCHEDULER_ROLE_NAME = `${PREFIX}-builds-check-scheduler
  * `BUILD#*` and `PARTICIPANT#*`: the build's nickname, participant and status, the profile's nickname, the
  * conversation's build and approved version, and the approved spec version's text.
  */
-export const LAUNCHER_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId", "status", "buildId", "approvedSpecVersion", "specVersion", "text", "approvedAt", "queueKey"] as const;
+export const LAUNCHER_READ_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "nickname",
+  "participantId",
+  "status",
+  "buildId",
+  "approvedSpecVersion",
+  "specVersion",
+  "text",
+  "approvedAt",
+  "queueKey",
+  // Ticket 3.7: a change build's kind and number (the build), and its version's "What changes" list (the spec version).
+  "kind",
+  "changeNumber",
+  "whatChanges",
+] as const;
 /**
  * The attribute names the launcher may name in `BUILD#*` (UpdateItem, also inside its claim transaction): the move from
  * `queued` to `building` under a new launch (`attemptId`, ticket 2.9 try 2), the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only
  * compared (IAM counts condition names). Ticket 3.4: `queueKey`, the build's place in the waiting line (set when the
  * launcher first sees it, removed by the claim); also ConditionCheckItem, for the slot release (SLOT_RELEASE_CHECK_ATTRIBUTES).
  * Ticket 3.5: `feed`, removed (with the attempt, launch time and task) when the global Stop puts a running build back in
- * the queue, so it starts again from the beginning.
+ * the queue, so it starts again from the beginning. Ticket 3.7: `changeSpec` and `changeList`, a change build's input
+ * (only the launcher writes them; the builder task reads them).
  */
 export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = [
   "pk",
@@ -531,6 +550,9 @@ export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = [
   "finishedAt",
   "queueKey",
   "feed",
+  // Ticket 3.7: a change build's input for its runner (the spec version's text and "What changes" list), set before the task starts.
+  "changeSpec",
+  "changeList",
 ] as const;
 /** The watch list's attribute names (`LAUNCHES` partition: PutItem, UpdateItem, DeleteItem, Query). */
 export const LAUNCHER_LAUNCH_ATTRIBUTES = ["pk", "sk", "type", "buildId", "taskArn", "claimedAt"] as const;

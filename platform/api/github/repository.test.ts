@@ -15,6 +15,7 @@ import {
   commitRequest,
   openRepositoryAdmin,
   prepareRepository,
+  readRepositoryMain,
   repositoryNameFor,
   withSpec,
   removeEmailAddresses,
@@ -254,6 +255,34 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     const { github, deps } = setup();
     github.addRepository("ssd-gail", { private: true });
     await expect(prepareRepository({ credentials, nickname: "gail", spec: SPEC, templateFiles: template }, deps)).rejects.toThrow(/not public/);
+  });
+});
+
+describe("readRepositoryMain (ticket 3.7: where a change build starts)", () => {
+  it("answers main's commit and writes nothing", async () => {
+    const { github, deps } = setup();
+    const first = await prepareRepository({ credentials, nickname: "Joan", spec: SPEC, templateFiles: template }, deps);
+    const before = github.history("ssd-joan").map((c) => c.sha);
+    const calls = github.calls.length;
+    expect(await readRepositoryMain(credentials, "JOAN", deps)).toBe(first.commit);
+    expect(github.history("ssd-joan").map((c) => c.sha)).toEqual(before);
+    // Only reads after the token: the branch, never a blob, tree, commit or ref update.
+    const after = github.calls.slice(calls).filter((c) => c.path.startsWith("/repos/"));
+    expect(after.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /repos/ssd-workshop-apps/ssd-joan/git/ref/heads/main"]);
+  });
+
+  it("fails plainly for a repository without main (no app to change) and for a missing one", async () => {
+    const { github, deps } = setup();
+    github.addRepository("ssd-kim");
+    await expect(readRepositoryMain(credentials, "kim", deps)).rejects.toThrow(/no main branch to change/);
+    await expect(readRepositoryMain(credentials, "nobody", deps)).rejects.toThrow();
+  });
+
+  it("refuses an answer whose commit id is not 40 hex digits", async () => {
+    const s = setup();
+    await prepareRepository({ credentials, nickname: "Luna", spec: SPEC, templateFiles: template }, s.deps);
+    intercept(s, (url) => (url.endsWith("/git/ref/heads/main") ? new Response(JSON.stringify({ object: { sha: "../../x" } }), { status: 200 }) : undefined));
+    await expect(readRepositoryMain(credentials, "Luna", s.deps)).rejects.toThrow(/no valid id/);
   });
 });
 

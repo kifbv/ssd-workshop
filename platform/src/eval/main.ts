@@ -1,4 +1,4 @@
-// `npm run eval -- guardrails | clarify | spec | readiness | build | suggestions` (tickets 1.7, 1.8, 1.9, 2.7, 2.8 and 3.6): the real
+// `npm run eval -- guardrails | clarify | spec | readiness | build | suggestions | change` (tickets 1.7, 1.8, 1.9, 2.7, 2.8, 3.6 and 3.7): the real
 // guardrail check, the real step 1 or step 2 answer call, the real readiness check, or the real builder (./build.ts),
 // against Claude on Bedrock with your own AWS credentials.
 // The scoring lives in ./logic.ts; spec diagrams are parsed and drawn by Mermaid in Chromium (./diagram.ts).
@@ -14,10 +14,14 @@ import { addUsage, BedrockModel, usageOf } from "../../api/conversation/model.js
 import { suggestChanges } from "../../api/conversation/suggestions.js";
 import { MODEL_ID, MODELS, REGION, type ModelSetting } from "../../api/settings.js";
 import { proxyFromEnv, redactError } from "../smoke/logic.js";
-import { evalBuild, launchBrowser } from "./build.js";
+import { evalBuild, evalChange, launchBrowser } from "./build.js";
 import { openDiagramChecker } from "./diagram.js";
 import {
   type BuildEvalResult,
+  type ChangeEvalResult,
+  CHANGE_EVAL_REQUEST,
+  formatChangeResult,
+  scoreChange,
   exitCode,
   formatBuildResult,
   formatBuildSummary,
@@ -84,6 +88,38 @@ async function runBuildSuite(modelId: string | undefined, only: number | undefin
   }
 }
 
+/**
+ * The change suite (ticket 3.7): the fitness example (the readiness file's first workshop example) built, then changed
+ * by a change build after the real change call wrote the new version.
+ */
+async function runChangeSuite(changeModel: BedrockModel): Promise<number> {
+  const all = parseReadinessExamples(readFileSync(examplesFile("readiness"), "utf8"));
+  if ("error" in all) {
+    console.error(all.error);
+    return 1;
+  }
+  const fitness = all.find((example) => example.category === "example");
+  if (fitness === undefined) {
+    console.error("no workshop example spec");
+    return 1;
+  }
+  console.log(`Model: ${MODELS.build.modelId} (${REGION}) for the builds, ${MODEL_ID} for the change call; ${fitness.name}: "${CHANGE_EVAL_REQUEST}"`);
+  const browser = await launchBrowser();
+  try {
+    let result: ChangeEvalResult;
+    try {
+      const outcome = await evalChange(fitness.spec, CHANGE_EVAL_REQUEST, MODELS.build, changeModel, browser, (entry) => console.log(`     . ${JSON.stringify(entry)}`));
+      result = { outcome, ...scoreChange(outcome) };
+    } catch (error) {
+      result = { pass: false, detail: `eval failed: ${redactError(error instanceof Error ? `${error.name}: ${error.message}` : String(error))}` };
+    }
+    for (const line of formatChangeResult(result)) console.log(line);
+    return exitCode([result]);
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main(): Promise<number> {
   const parsed = parseEvalArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -101,6 +137,7 @@ async function main(): Promise<number> {
     }),
   });
   const model = new BedrockModel(client, MODEL_ID);
+  if (parsed.suite === "change") return runChangeSuite(model);
   if (parsed.suite === "suggestions") {
     // The workshop's example specs (the readiness file's "example" category), as the live specs of built apps.
     const all = parseReadinessExamples(readFileSync(examplesFile("readiness"), "utf8"));

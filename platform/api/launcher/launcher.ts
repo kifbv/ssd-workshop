@@ -11,7 +11,9 @@
  *    without a write.
  * 2. Claim: one transaction moves the build from `queued` to `building` (conditional, so a second message for the same
  *    build is a duplicate and never starts a second task) and adds it to the watch list (`LAUNCHES`).
- * 3. Reads the approved spec, prepares the repository (ticket 2.6, the template bundled with the function), mints the
+ * 3. Reads the approved spec, prepares the repository (ticket 2.6, the template bundled with the function; ticket 3.7: a
+ *    change build instead reads `main`'s current commit, writes nothing to the repository, and copies the version's text
+ *    and "What changes" list onto the build for the runner, `setChangeInput`), mints the
  *    builder's one-repository token, and starts the task (cluster `ssd-workshop-builds`, the two workshop subnets, a
  *    public IP). The token goes in RunTask's container override `BUILDER_GITHUB_TOKEN` (Franck accepted the risk,
  *    decision "(2.9) Token hand-off"); the app's key and the organization-wide token never leave this process.
@@ -61,7 +63,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/app.js";
-import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
+import { builderToken, GIT_ID_PATTERN, prepareRepository, readRepositoryMain, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN, newQueueKey } from "../keys.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
@@ -86,6 +88,29 @@ export interface LaunchBuild {
   status: BuildStatus;
   /** Ticket 3.4: its place in the waiting line, once the launcher saw it queued. */
   queueKey?: string;
+  /**
+   * Ticket 3.7: a change build (`kind: "change"`, written by the AI worker with the build, ticket 3.6) edits the
+   * repository's current `main`; anything else is a first build (the template and the spec).
+   */
+  kind?: "first" | "change";
+  /** Change builds: the change's number (1 for a participant's first change) and the spec version it builds. */
+  changeNumber?: number;
+  specVersion?: number;
+}
+
+/** An approved spec version (ticket 3.7: with the "What changes" list a change version carries). */
+export interface ApprovedSpec {
+  text: string;
+  whatChanges?: string[];
+}
+
+/**
+ * Ticket 3.7: what the launcher copies onto a change build for its runner (attributes only the launcher writes):
+ * the spec version's text and its "What changes" list, read from that participant's `SPEC#<specVersion>`.
+ */
+export interface ChangeInput {
+  spec: string;
+  whatChanges: string[];
 }
 
 /** The slot counter (ticket 3.4): slots in use, and a number every claim, release and repair moves up. */
@@ -122,8 +147,13 @@ export interface LaunchRecords {
   readProfileNickname(participantId: string): Promise<string | undefined>;
   /** The participant's conversation: the build it started and the approved spec version. */
   readConversation(participantId: string): Promise<{ buildId?: string; approvedSpecVersion?: number }>;
-  /** The text of the spec version, only when that version exists and was approved. */
-  readApprovedSpec(participantId: string, version: number): Promise<string | undefined>;
+  /** The spec version (text, and its "What changes" list when it has one), only when it exists and was approved. */
+  readApprovedSpec(participantId: string, version: number): Promise<ApprovedSpec | undefined>;
+  /**
+   * Ticket 3.7: stores a change build's input (`changeSpec`, `changeList`) on the build, only while it is `building`
+   * under this launch without a task. False when refused.
+   */
+  setChangeInput(buildId: string, attemptId: string, input: ChangeInput, nowIso: string): Promise<boolean>;
   /**
    * The workshop settings (the `SETTINGS` item through settingsFromItem): builds at once (ticket 3.4; 15 when unset), the
    * global Stop and the last Resume's time (ticket 3.5).
@@ -210,7 +240,10 @@ export interface TaskStart {
   buildId: string;
   /** The build's one-repository token. */
   token: string;
-  /** The commit `prepareRepository` left on `main`: the runner builds from it or fails. */
+  /**
+   * The commit the runner builds from (or fails): what `prepareRepository` left on `main` for a first build, `main`'s
+   * current commit for a change build (ticket 3.7).
+   */
   baseCommit: string;
   /** The launch's attempt id, stored on the build by the claim. */
   attemptId: string;
@@ -378,8 +411,13 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
       deps.records.readProfileNickname(build.participantId),
       deps.records.readConversation(build.participantId),
     ]);
+    // Ticket 3.7: a change build builds the version stored on it, which must still be the conversation's approved one.
+    const isChange = build.kind === "change";
     checked = {
-      ok: profileNickname === build.nickname && conversation.buildId === buildId,
+      ok:
+        profileNickname === build.nickname &&
+        conversation.buildId === buildId &&
+        (!isChange || (build.specVersion !== undefined && build.changeNumber !== undefined && build.specVersion === conversation.approvedSpecVersion)),
       ...(conversation.approvedSpecVersion === undefined ? {} : { specVersion: conversation.approvedSpecVersion }),
     };
     if (!checked.ok) {
@@ -432,11 +470,24 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
     const spec = version === undefined ? undefined : await deps.records.readApprovedSpec(participantId, version);
     if (spec === undefined) throw new LaunchFailure(SPEC_MISSING_REASON);
     const credentials = await deps.credentials();
-    const prepared = await prepareRepository({ credentials, nickname, spec, templateFiles: await deps.templateFiles() }, deps.github);
+    let baseCommit: string;
+    if (build.kind === "change") {
+      // Ticket 3.7: a change build edits the app as it is on `main` (never the template). The runner gets the version's
+      // text and "What changes" list from the build, copied here from the stored version, and starts only from this commit.
+      const whatChanges = spec.whatChanges ?? [];
+      if (whatChanges.length === 0) throw new LaunchFailure(SPEC_MISSING_REASON);
+      baseCommit = await readRepositoryMain(credentials, nickname, deps.github);
+      if (!GIT_ID_PATTERN.test(baseCommit)) throw new LaunchFailure(LAUNCH_SERVICE_REASON);
+      if (!(await deps.records.setChangeInput(buildId, attemptId, { spec: spec.text, whatChanges }, deps.now().toISOString()))) {
+        throw new LaunchFailure(LAUNCH_SERVICE_REASON);
+      }
+    } else {
+      baseCommit = (await prepareRepository({ credentials, nickname, spec: spec.text, templateFiles: await deps.templateFiles() }, deps.github)).commit;
+    }
     const { token } = await builderToken(credentials, nickname, deps.github);
-    // The prepared commit pins what the runner builds from (a push to main after this point fails the build), and the
+    // The base commit pins what the runner builds from (a push to main after this point fails the build), and the
     // deadline's signal keeps RunTask from outlasting the reserve the failure write needs.
-    const result = await deps.tasks.start({ buildId, token, baseCommit: prepared.commit, attemptId }, deps.signal);
+    const result = await deps.tasks.start({ buildId, token, baseCommit, attemptId }, deps.signal);
     if ("failure" in result) throw new LaunchFailure(START_FAILED_REASON);
     taskArn = result.taskArn;
     await deps.records.recordTask(buildId, taskArn, deps.now().toISOString());

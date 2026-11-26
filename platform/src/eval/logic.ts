@@ -1,7 +1,8 @@
 // `npm run eval -- <suite>` (ticket 1.7): runs a suite of examples against the real model and
 // scores the answers. `guardrails` (ticket 1.7), `clarify` (ticket 1.8), `spec` (ticket 1.9), `readiness` (ticket 2.7)
 // and `build` (ticket 2.8: the coding agent and the runner, with GitHub, the table and the queue in memory), and
-// `suggestions` (ticket 3.6: three suggested changes for each workshop example spec).
+// `suggestions` (ticket 3.6: three suggested changes for each workshop example spec), and `change` (ticket 3.7: a change
+// build on a built example).
 // The scoring is pure and unit tested; ./main.ts calls Bedrock.
 import type { Exchange } from "../../api/conversation/answer.js";
 import { addUsage } from "../../api/conversation/model.js";
@@ -9,7 +10,7 @@ import type { ReadinessVerdict } from "../../api/conversation/readiness.js";
 import { checkSpec, extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import type { GuardrailVerdict, TokenUsage } from "../../api/types.js";
 
-export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build", "suggestions"] as const;
+export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build", "suggestions", "change"] as const;
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
@@ -40,6 +41,12 @@ Suites:
   suggestions  the readiness file's workshop example specs through the real suggestions call (ticket 3.6): each
                gets exactly three suggested changes, each under 80 characters, and each passes the real
                guardrail check as on-path (a suggestion is sent as a change request when tapped)
+  change       ticket 3.7: builds the fitness example (the readiness file's first workshop example) with the real
+               runner and coding agent, asks the real change conversation to add a weekly chart, then runs the
+               change build on the repository's main: the result must pass the deploy check, load at 375 px with
+               no console error and nothing scrolling sideways, show the new spec's title and screens and every
+               screen of the previous spec, and be one commit "Change 1: ..." holding the new SPEC.md; prints the
+               duration, tokens and cost of each step (about $2 in all)
 
 Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example; build about $1 per spec).`;
 
@@ -751,4 +758,71 @@ export function formatSuggestionsSummary(results: readonly SuggestionsEvalResult
   const passed = results.filter((r) => r.pass).length;
   const total = addUsage(...results.map((r) => r.outcome?.usage));
   return [`Suggestions: ${passed}/${results.length} passed`, `Tokens: ${total.inputTokens} in, ${total.outputTokens} out, cost $${total.costUsd.toFixed(4)}`];
+}
+
+// ---- change (ticket 3.7) ----
+
+/** The change the eval asks for, on the fitness example (the brief's example). */
+export const CHANGE_EVAL_REQUEST = "Please add a weekly chart of the distance I ran each week.";
+
+export interface ChangeEvalOutcome {
+  /** The first build of the example (scored as the build eval scores it). */
+  first: BuildEvalOutcome;
+  /** The change conversation's call (ticket 3.6's answerChange) that wrote the new version. */
+  specUsage: TokenUsage & { durationMs?: number };
+  specProblem?: string;
+  newSpec?: string;
+  whatChanges: string[];
+  /** The change build, scored on the new spec's title and screens. */
+  change?: BuildEvalOutcome;
+  /** The pushed commit's message. */
+  commitMessage?: string;
+  /** The pushed commit's SPEC.md is the new version (email addresses removed). */
+  specCommitted: boolean;
+  /** Screens of the previous spec no longer found on the changed page. */
+  previousMissing: string[];
+}
+
+export interface ChangeEvalResult extends ClarifyScore {
+  outcome?: ChangeEvalOutcome;
+}
+
+/**
+ * Scores the change eval: the first build passes, the change call wrote a version, and the change build passes the
+ * build eval's checks on the new spec (handed over, check passed, no console error, no overflow, title and screens),
+ * keeps every screen of the previous spec, and is one commit "Change 1: ..." holding the new SPEC.md.
+ */
+export function scoreChange(outcome: ChangeEvalOutcome): ClarifyScore {
+  const first = scoreBuild(outcome.first);
+  if (!first.pass) return { pass: false, detail: `first build: ${first.detail}` };
+  if (outcome.specProblem !== undefined) return { pass: false, detail: outcome.specProblem };
+  if (outcome.change === undefined) return { pass: false, detail: "no change build" };
+  const problems: string[] = [];
+  const change = scoreBuild(outcome.change);
+  if (!change.pass) problems.push(change.detail);
+  if (outcome.change.outcome === "handed-over") {
+    if (outcome.change.commits !== 1) problems.push(`${outcome.change.commits} commits (one expected)`);
+    if (!/^Change 1: \S/.test(outcome.commitMessage ?? "")) problems.push(`commit message "${outcome.commitMessage ?? ""}"`);
+    if (!outcome.specCommitted) problems.push("SPEC.md is not the new version");
+    if (outcome.previousMissing.length > 0) problems.push(`previous screens missing: ${outcome.previousMissing.join(", ")}`);
+  }
+  return problems.length === 0
+    ? { pass: true, detail: `"${outcome.commitMessage ?? ""}": check passed, no console error, previous and new screens shown, SPEC.md is the new version` }
+    : { pass: false, detail: problems.join("; ") };
+}
+
+/** The result's lines: verdict, then the time, tokens and cost of the first build, the change call and the change build, and their total. */
+export function formatChangeResult(result: ChangeEvalResult): string[] {
+  const lines = [`${result.pass ? "PASS" : "FAIL"} change: ${result.detail}`];
+  const o = result.outcome;
+  if (o === undefined) return lines;
+  const cost = (u: TokenUsage): string => `${u.inputTokens} tokens in, ${u.outputTokens} out, cost $${u.costUsd.toFixed(4)}`;
+  lines.push(`     | first build: ${minutes(o.first.durationMs)}, ${cost(o.first.usage)}`);
+  lines.push(`     | change call: ${minutes(o.specUsage.durationMs ?? 0)}, ${cost(o.specUsage)}${o.whatChanges.length > 0 ? `; what changes: ${o.whatChanges.join(" | ")}` : ""}`);
+  if (o.change !== undefined) lines.push(`     | change build: ${minutes(o.change.durationMs)}, ${o.change.files} files written, ${cost(o.change.usage)}`);
+  const total = addUsage(o.first.usage, o.specUsage, o.change?.usage);
+  const duration = o.first.durationMs + (o.specUsage.durationMs ?? 0) + (o.change?.durationMs ?? 0);
+  lines.push(`Change: ${result.pass ? 1 : 0}/1 passed`);
+  lines.push(`Duration: ${minutes(duration)} in all (change build ${minutes(o.change?.durationMs ?? 0)}); tokens: ${total.inputTokens} in, ${total.outputTokens} out, cost $${total.costUsd.toFixed(4)}`);
+  return lines;
 }

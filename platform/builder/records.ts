@@ -1,6 +1,7 @@
 /**
  * The builder's view of the table (ticket 2.8): its build record (with the live feed the step 3 page shows, ticket
- * 2.10) and the participant's usage totals. Its read is a GetItem naming only BUILDER_BUILD_READ_ATTRIBUTES; every write is an UpdateItem naming only
+ * 2.10) and the participant's usage totals (ticket 3.7: a change build's input, which the launcher copied onto the build, so
+ * the task reads nothing outside `BUILD#*`). Its read is a GetItem naming only BUILDER_BUILD_READ_ATTRIBUTES; every write is an UpdateItem naming only
  * BUILDER_BUILD_UPDATE_ATTRIBUTES (in `BUILD#*`) or BUILDER_USAGE_UPDATE_ATTRIBUTES (the `USAGE` item), both in infra/lib/config.ts, for ticket 2.9's
  * `dynamodb:Attributes` condition; no call returns attributes (ReturnValues NONE). Ticket 3.4: it never touches the build
  * slots (it runs next to the AI agent): a build it marks failed is freed by the launcher's minute check.
@@ -37,11 +38,27 @@ export const MAX_FEED_FILES = 200;
 /** At most this many web fetch events are kept (ticket 2.15); later fetches still happen but are not shown. */
 export const MAX_FEED_FETCHES = 50;
 
+/**
+ * Ticket 3.7: a change build's input, copied onto the build by the launcher from the participant's stored spec version
+ * (`changeSpec`, `changeList`, attributes only the launcher writes), and its number (`changeNumber`, the AI worker's).
+ */
+export interface ChangeToBuild {
+  /** 1 for the participant's first change. */
+  number: number;
+  /** The new spec version's text (SPEC.md is replaced by it). */
+  spec: string;
+  /** Its "What changes" list (1 to 5 lines). */
+  whatChanges: string[];
+}
+
 /** What the builder reads of its build. */
 export interface BuildToRun {
   nickname: string;
   participantId: string;
   status: BuildStatus;
+  /** Ticket 3.7: `change` when the build says `kind: "change"` (then `change` holds its input, when complete). */
+  kind: "first" | "change";
+  change?: ChangeToBuild;
 }
 
 export interface BuildRecords {
@@ -117,8 +134,16 @@ export class DynamoBuildRecords implements BuildRecords {
         TableName: this.table,
         Key: keyOf(buildKey(buildId)),
         ConsistentRead: true,
-        ProjectionExpression: "#nickname, #participantId, #status",
-        ExpressionAttributeNames: { "#nickname": "nickname", "#participantId": "participantId", "#status": "status" },
+        ProjectionExpression: "#nickname, #participantId, #status, #kind, #changeNumber, #changeSpec, #changeList",
+        ExpressionAttributeNames: {
+          "#nickname": "nickname",
+          "#participantId": "participantId",
+          "#status": "status",
+          "#kind": "kind",
+          "#changeNumber": "changeNumber",
+          "#changeSpec": "changeSpec",
+          "#changeList": "changeList",
+        },
       }),
     );
     const item = answer.Item;
@@ -126,7 +151,13 @@ export class DynamoBuildRecords implements BuildRecords {
     const participantId = item?.participantId?.S;
     const status = item?.status?.S;
     if (nickname === undefined || participantId === undefined || !(STATUSES as readonly string[]).includes(status ?? "")) return undefined;
-    return { nickname, participantId, status: status as BuildStatus };
+    const base = { nickname, participantId, status: status as BuildStatus };
+    if (item?.kind?.S !== "change") return { ...base, kind: "first" };
+    const number = Number(item.changeNumber?.N);
+    const spec = item.changeSpec?.S;
+    const whatChanges = (item.changeList?.L ?? []).flatMap((line) => (line.S === undefined ? [] : [line.S]));
+    const complete = Number.isInteger(number) && number >= 1 && spec !== undefined && spec.trim() !== "" && whatChanges.length > 0;
+    return { ...base, kind: "change", ...(complete ? { change: { number, spec, whatChanges } } : {}) };
   }
 
   private async update(

@@ -92,16 +92,16 @@ const pkOf = (input: Named): string =>
 describe("DynamoLaunchRecords (ticket 2.9)", () => {
   async function everyRequest() {
     const { client, sent } = stub([
-      { Item: { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "queued" } } },
+      { Item: { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "queued" }, kind: { S: "change" }, changeNumber: { N: "2" }, specVersion: { N: "3" } } },
       { Item: { nickname: { S: "Ada" } } },
       { Item: { buildId: { S: "b-1" }, approvedSpecVersion: { N: "2" } } },
-      { Item: { specVersion: { N: "2" }, text: { S: "# Spec" }, approvedAt: { S: NOW } } },
+      { Item: { specVersion: { N: "2" }, text: { S: "# Spec" }, approvedAt: { S: NOW }, whatChanges: { L: [{ S: "Adds a chart" }] } } },
     ]);
     const records = new DynamoLaunchRecords(client, TABLE);
-    expect(await records.readBuild("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued" });
+    expect(await records.readBuild("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued", kind: "change", changeNumber: 2, specVersion: 3 });
     expect(await records.readProfileNickname("p-1")).toBe("Ada");
     expect(await records.readConversation("p-1")).toEqual({ buildId: "b-1", approvedSpecVersion: 2 });
-    expect(await records.readApprovedSpec("p-1", 2)).toBe("# Spec");
+    expect(await records.readApprovedSpec("p-1", 2)).toEqual({ text: "# Spec", whatChanges: ["Adds a chart"] });
     // Ticket 3.4: the cap, the waiting line and the slots.
     expect((await records.readSettings()).buildsAtOnce).toBe(15);
     expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);
@@ -117,6 +117,8 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
     expect(await records.listQueueEntries()).toEqual([]);
     await records.removeQueueEntry(QUEUE_KEY);
     expect(await records.claim("b-1", "Ada", "p-1", ATTEMPT, NOW, SLOT)).toBe("claimed");
+    // Ticket 3.7: a change build's input for its runner.
+    expect(await records.setChangeInput("b-1", ATTEMPT, { spec: "# Spec", whatChanges: ["Adds a chart"] }, NOW)).toBe(true);
     await records.recordTask("b-1", ARN, NOW);
     expect(await records.failUnstarted("b-1", ["x"], NOW)).toBe(true);
     expect(await records.failUnrecorded("b-1", NOW, ["x"], NOW)).toBe(true);
@@ -401,6 +403,18 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
       // Compared only, never set.
       expect(input?.UpdateExpression).not.toMatch(/#nickname|#pushedCommit|#participantId|#launchedAt/);
     }
+  });
+
+  it("ticket 3.7: writes a change build's input only while it is building under this launch without a task, and reads it back as sent", async () => {
+    const { client, sent } = stub([{}, Object.assign(new Error("no"), { name: "ConditionalCheckFailedException" })]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.setChangeInput("b-1", ATTEMPT, { spec: "# Spec", whatChanges: ["One", "Two"] }, NOW)).toBe(true);
+    expect(await records.setChangeInput("b-1", ATTEMPT, { spec: "# Spec", whatChanges: ["One"] }, NOW)).toBe(false);
+    const input = (sent[0] as UpdateItemCommand).input;
+    expect(input.ConditionExpression).toBe("#status = :building AND #attemptId = :attemptId AND attribute_not_exists(#taskArn)");
+    expect(input.UpdateExpression).toBe("SET #changeSpec = :spec, #changeList = :list, #updatedAt = :now");
+    expect(input.ExpressionAttributeValues?.[":list"]).toEqual({ L: [{ S: "One" }, { S: "Two" }] });
+    expect(input.ExpressionAttributeValues?.[":attemptId"]).toEqual({ S: ATTEMPT });
   });
 
   it("refuses an unapproved or different spec version", async () => {

@@ -353,6 +353,22 @@ export async function prepareRepository(
 }
 
 /**
+ * Ticket 3.7: where a change build starts. The repository must already exist with a `main` (a change follows a live
+ * build): reads `main`'s commit with a one-repository token (contents write, checked like the builder's), retried on
+ * GitHub's brief 404 or 409, and checks the id against GIT_ID_PATTERN. Nothing is written: the change build edits the
+ * repository's current files, never the template.
+ */
+export async function readRepositoryMain(credentials: AppCredentials, nickname: string, deps: GitHubDeps): Promise<string> {
+  const name = repositoryNameFor(nickname);
+  const jwt = appJwt(credentials, deps.now());
+  const installation = await findInstallation(deps, jwt);
+  const { token } = await repositoryToken(deps, jwt, installation.id, name);
+  const answer = await withRetry(deps, () => githubCall(deps, "get-branch", "GET", `/repos/${APPS_GITHUB_OWNER}/${name}/git/ref/heads/${APPS_DEFAULT_BRANCH}`, token));
+  if (answer.status === 404 || answer.status === 409) throw new GitHubProblem(`The app's repository has no ${APPS_DEFAULT_BRANCH} branch to change.`, answer.status);
+  return gitId(record(expectStatus(answer, "get-branch", 200).object).sha, "get-branch");
+}
+
+/**
  * True only for the platform's own opening commit left alone on `main` (an earlier try stopped half-way): no
  * parent, the opening message, and a tree of exactly BOOTSTRAP_FILE holding BOOTSTRAP_TEXT. Anything else with
  * that message (other files, other text) is kept as history: the new commit goes on top of it, never forced
