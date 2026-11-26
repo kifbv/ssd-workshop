@@ -294,7 +294,7 @@ follow-up.
    after the grace (`OUTSIDE_NO_SUBNET_GRACE_MS`, 5 minutes), logging its id (`outside-task`); a stray task can run for
    about a minute. Other clusters are not watched. The security-group half stays open: a task in a build subnet with
    another security group (or a public IP) is not caught, since DescribeTasks shows no security group; checking it would
-   need `ec2:DescribeNetworkInterfaces` for the launcher (Franck's call).
+   need `ec2:DescribeNetworkInterfaces` for the launcher. Accepted by Franck on 2026-11-26 ("we don't need to catch that").
 
    ```mermaid
    flowchart LR

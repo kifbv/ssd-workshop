@@ -895,6 +895,8 @@ The deploy fails (and rolls back the edge stack's WAF change, or the alerts stac
 
 ### 3.13 live check (criterion 2, after the deploy)
 
+Skipped for now (Franck, 2026-11-26): there is no outside host to send the requests from.
+
 Run by Franck from a machine outside the workshop room and outside a session with participants: it blocks that
 address from `/api/*` for about 5 minutes. It sends about 16,000 requests to a path the API has no route for (API
 Gateway answers 404 itself, no Lambda runs): a few cents of CloudFront, WAF and API Gateway requests. Some answers
