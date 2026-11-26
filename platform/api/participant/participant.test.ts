@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { handleAppDataRequest, type AppDataLogEntry } from "../app-data/data.js";
+import { FakeAppDataStore } from "../app-data/fakes.js";
+import { APP_TOKEN_PATTERN, hashAppToken, MAX_APP_TOKENS } from "../app-token/token.js";
 import { FakeTable } from "../fakes.js";
 import type { HttpRequest } from "../http.js";
 import { hashToken, SESSION_COOKIE } from "../session/session.js";
 import type { Role } from "../types.js";
 import {
+  APP_TOKEN_ROUTE,
   checkNickname,
   handleParticipantRequest,
   ME_ROUTE,
@@ -29,8 +33,12 @@ function setup(role: Role = "participant") {
   table.addSession(MINE, "me-1", NOW_S + 3600);
   table.addSession(THEIRS, "other-2", NOW_S + 3600);
   const logs: ParticipantLogEntry[] = [];
-  const deps: ParticipantDeps = { store: table, now: () => NOW, log: (e) => logs.push(e) };
-  return { table, logs, deps };
+  let counter = 0;
+  // A deterministic stand-in for crypto.randomBytes: each call fills with the next byte value.
+  const randomBytes = (size: number): Buffer => Buffer.alloc(size, ++counter);
+  const clock = { now: NOW };
+  const deps: ParticipantDeps = { store: table, now: () => clock.now, randomBytes, log: (e) => logs.push(e) };
+  return { table, logs, deps, clock };
 }
 
 const cookie = (t: string): string[] => [`${SESSION_COOKIE}=${t}`];
@@ -296,5 +304,150 @@ describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
     const res = await handleParticipantRequest(signOut(cookie(MINE)), s.deps);
     expect(res.statusCode).toBe(500);
     expect(s.logs).toEqual([{ event: "participant", route: "sign-out", outcome: "failed", error: "Error" }]);
+  });
+});
+
+// Ticket 3.24: POST /api/app-tokens, and the token it gives used on the real data API (in-memory stores).
+describe("app write tokens: POST /api/app-tokens (ticket 3.24)", () => {
+  const tokenRequest = (app: unknown, cookies: string[] | null = cookie(THEIRS), contentType = "application/json"): HttpRequest => ({
+    routeKey: APP_TOKEN_ROUTE,
+    headers: { "content-type": contentType },
+    body: JSON.stringify({ app }),
+    ...(cookies !== null ? { cookies } : {}),
+  });
+  /** Bob (other-2, nickname Bob) is signed in with THEIRS; Ada's app "ada" and Grace's "grace" are live. */
+  function live() {
+    const s = setup();
+    s.table.liveApps.add("ada");
+    s.table.liveApps.add("grace");
+    const data = new FakeAppDataStore();
+    data.live.add("ada");
+    data.live.add("grace");
+    const dataLogs: AppDataLogEntry[] = [];
+    const write = (app: string, token: string | undefined, method: "PUT" | "DELETE" = "PUT") =>
+      handleAppDataRequest(
+        {
+          routeKey: `${method} /api/apps/{nickname}/data/{key}`,
+          pathParameters: { nickname: app, key: "board" },
+          headers: { "content-type": "application/json", ...(token === undefined ? {} : { authorization: `Bearer ${token}` }) },
+          ...(method === "PUT" ? { body: '"hello"' } : {}),
+        },
+        { store: data, tokens: s.table.appTokens, now: () => s.clock.now, log: (e) => dataLogs.push(e), pause: async () => {} },
+      );
+    return { ...s, data, write, dataLogs };
+  }
+  const tokenOf = (response: { body?: string }): string => (JSON.parse(response.body ?? "{}") as { token: string }).token;
+
+  it("criterion 2 (API part): WHEN a signed-in participant asks for a live app THEN they get a token that writes to that app only, as their nickname", async () => {
+    const s = live();
+    const response = await handleParticipantRequest(tokenRequest("Ada"), s.deps);
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body ?? "") as Record<string, unknown>;
+    expect(body).toEqual({ token: expect.stringMatching(APP_TOKEN_PATTERN), app: "ada", nickname: "Bob", expiresAt: NOW_S + 3600 });
+    const token = tokenOf(response);
+    expect((await s.write("ada", token)).statusCode).toBe(204);
+    expect(s.data.values.get("ada/board")).toMatchObject({ json: '"hello"', updatedBy: "Bob" });
+    expect((await s.write("grace", token)).statusCode).toBe(401);
+    expect((await s.write("grace", token, "DELETE")).statusCode).toBe(401);
+    expect(s.data.values.has("grace/board")).toBe(false);
+    expect(s.logs.at(-1)).toEqual({ event: "participant", route: "app-token", outcome: "token" });
+  });
+
+  it("criterion 7 (token route part): only the token's SHA-256 is stored, and no log entry holds the token or its hash", async () => {
+    const s = live();
+    const token = tokenOf(await handleParticipantRequest(tokenRequest("ada"), s.deps));
+    expect([...s.table.appTokens.tokens.keys()]).toEqual([hashAppToken(token)]);
+    expect(JSON.stringify([...s.table.appTokens.tokens, ...s.table.appTokens.lists])).not.toContain(token);
+    await s.write("ada", token);
+    const logged = JSON.stringify([...s.logs, ...s.dataLogs]);
+    expect(logged).not.toContain(token);
+    expect(logged).not.toContain(hashAppToken(token));
+  });
+
+  it("ends a token after 12 hours, but never after the session it came from", async () => {
+    const s = live();
+    s.table.addSession(THEIRS, "other-2", NOW_S + 20 * 3600);
+    const long = JSON.parse((await handleParticipantRequest(tokenRequest("ada"), s.deps)).body ?? "") as { expiresAt: number };
+    expect(long.expiresAt).toBe(NOW_S + 12 * 3600);
+    s.table.addSession(THEIRS, "other-2", NOW_S + 600);
+    const short = JSON.parse((await handleParticipantRequest(tokenRequest("ada"), s.deps)).body ?? "") as { expiresAt: number };
+    expect(short.expiresAt).toBe(NOW_S + 600);
+  });
+
+  it("criterion 4: WHEN the token is 12 hours old, or its participant signed out THEN writes answer 401", async () => {
+    const s = live();
+    s.table.addSession(THEIRS, "other-2", NOW_S + 20 * 3600);
+    const first = tokenOf(await handleParticipantRequest(tokenRequest("ada"), s.deps));
+    s.clock.now = new Date((NOW_S + 12 * 3600) * 1000);
+    expect((await s.write("ada", first)).statusCode).toBe(401);
+    s.clock.now = NOW;
+    const second = tokenOf(await handleParticipantRequest(tokenRequest("ada"), s.deps));
+    const third = tokenOf(await handleParticipantRequest(tokenRequest("grace"), s.deps));
+    // Someone else's token is not touched by Bob's sign-out.
+    const myProfile = s.table.profiles.get("me-1");
+    if (myProfile === undefined) throw new Error("no profile");
+    s.table.profiles.set("me-1", { ...myProfile, nickname: "Me", step: "clarify" });
+    const mine = tokenOf(await handleParticipantRequest(tokenRequest("ada", cookie(MINE)), s.deps));
+    expect((await s.write("ada", second)).statusCode).toBe(204);
+    const out = await handleParticipantRequest({ routeKey: SIGN_OUT_ROUTE, cookies: cookie(THEIRS), headers: { "content-type": "application/json" }, body: "{}" }, s.deps);
+    expect(out.statusCode).toBe(200);
+    for (const token of [first, second, third]) expect((await s.write("ada", token)).statusCode).toBe(401);
+    expect((await s.write("grace", third)).statusCode).toBe(401);
+    expect((await s.write("ada", mine)).statusCode).toBe(204);
+    expect(s.table.appTokens.lists.has("other-2")).toBe(false);
+  });
+
+  it("criterion 3 (API part): WHEN `app` names no live app or is not a valid nickname THEN it answers 404 'This app is not live.' and makes no token", async () => {
+    const s = live();
+    for (const app of ["nobody", "ab", "ada lovelace", "../ada", "admin", "ADMIN", 42, null, ["ada"]]) {
+      const response = await handleParticipantRequest(tokenRequest(app), s.deps);
+      expect(response.statusCode, String(app)).toBe(404);
+      expect(JSON.parse(response.body ?? "")).toEqual({ message: "This app is not live.", reason: "not-live" });
+    }
+    const noBody = await handleParticipantRequest({ ...tokenRequest("ada"), body: "not json" }, s.deps);
+    expect(noBody.statusCode).toBe(404);
+    expect(s.table.appTokens.tokens.size).toBe(0);
+  });
+
+  it("refuses a caller without a session (401) or not sent as JSON (415), making no token", async () => {
+    const s = live();
+    for (const cookies of [null, cookie(token(9)), [`${SESSION_COOKIE}=bad`]]) {
+      expect((await handleParticipantRequest(tokenRequest("ada", cookies), s.deps)).statusCode).toBe(401);
+    }
+    s.table.addSession(token(8), "other-2", NOW_S - 1);
+    expect((await handleParticipantRequest(tokenRequest("ada", cookie(token(8))), s.deps)).statusCode).toBe(401);
+    expect((await handleParticipantRequest(tokenRequest("ada", cookie(THEIRS), "text/plain"), s.deps)).statusCode).toBe(415);
+    expect(s.table.appTokens.tokens.size).toBe(0);
+  });
+
+  it("asks a participant without a nickname to choose one first (409), making no token", async () => {
+    const s = live();
+    const response = await handleParticipantRequest(tokenRequest("ada", cookie(MINE)), s.deps);
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body ?? "")).toMatchObject({ reason: "no-nickname" });
+    expect(s.table.appTokens.tokens.size).toBe(0);
+  });
+
+  it(`refuses a token beyond ${MAX_APP_TOKENS} live ones (429); expired ones do not count; two lost races in a row answer 409`, async () => {
+    const s = live();
+    for (let i = 0; i < MAX_APP_TOKENS; i += 1) expect((await handleParticipantRequest(tokenRequest("ada"), s.deps)).statusCode).toBe(200);
+    const full = await handleParticipantRequest(tokenRequest("ada"), s.deps);
+    expect(full.statusCode).toBe(429);
+    expect(JSON.parse(full.body ?? "")).toMatchObject({ reason: "too-many" });
+    s.clock.now = new Date((NOW_S + 3600) * 1000);
+    s.table.addSession(THEIRS, "other-2", NOW_S + 7200);
+    expect((await handleParticipantRequest(tokenRequest("ada"), s.deps)).statusCode).toBe(200);
+    s.table.appTokens.createAppToken = async () => "conflict";
+    const lost = await handleParticipantRequest(tokenRequest("ada"), s.deps);
+    expect(lost.statusCode).toBe(409);
+    expect(JSON.parse(lost.body ?? "")).toMatchObject({ reason: "conflict" });
+  });
+
+  it("keeps the session when revoking the tokens fails on sign-out (500), so the person can try again", async () => {
+    const s = live();
+    s.table.failOn = "revokeAppTokens";
+    const out = await handleParticipantRequest({ routeKey: SIGN_OUT_ROUTE, cookies: cookie(THEIRS), headers: { "content-type": "application/json" }, body: "{}" }, s.deps);
+    expect(out.statusCode).toBe(500);
+    expect(s.table.sessions.has(hashToken(THEIRS))).toBe(true);
   });
 });

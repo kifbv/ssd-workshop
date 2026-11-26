@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomBytes } from "node:crypto";
 import { FakeConversationTable, FakeQueue } from "../conversation/fakes.js";
 import { FakeTable } from "../fakes.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
@@ -113,7 +114,7 @@ describe("sign-in verify and participant logs (ticket 1.5)", () => {
     expect(token).toHaveLength(43);
 
     // The participant routes, with the session: a nickname refused, then saved.
-    const participant = createParticipantHandler({ store: table, now: () => START, log: participantLogEntry });
+    const participant = createParticipantHandler({ store: table, now: () => START, randomBytes, log: participantLogEntry });
     const nickname = (value: string): HttpRequest => ({
       routeKey: "POST /api/me/nickname",
       cookies: [cookie],
@@ -185,7 +186,7 @@ describe("sessions follow the allow-list, and sign-out (ticket 3.1)", () => {
       expect(signed.statusCode).toBe(200);
       return signed.cookies?.[0]?.split(";")[0] ?? "";
     };
-    const participant = createParticipantHandler({ store: table, now: () => START, log: participantLogEntry });
+    const participant = createParticipantHandler({ store: table, now: () => START, randomBytes, log: participantLogEntry });
     const me = (cookie: string): HttpRequest => ({ routeKey: "GET /api/me", cookies: [cookie] });
     const conversation = createConversationHandler({
       sessions: table,

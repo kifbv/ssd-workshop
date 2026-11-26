@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { FakeAppDataStore } from "./fakes.js";
+import { hashAppToken } from "../app-token/token.js";
 import {
   APP_DATA_MESSAGES,
   APP_DATA_ROUTES,
@@ -31,16 +32,22 @@ import {
 
 const NICK = "Ada-42";
 const NOW = new Date("2026-11-24T10:00:00.000Z");
+/** Ticket 3.24: the write token every write below carries unless it says otherwise (made for each live app, writer Bob). */
+const WRITE_TOKEN = Buffer.alloc(32, 9).toString("base64url");
+const tokenFor = (nickname: string): string => Buffer.from(`${nickname.toLowerCase()}`.padEnd(32, "-")).toString("base64url");
 
 function setup(live: string[] = [NICK]) {
   const store = new FakeAppDataStore();
   for (const nickname of live) store.live.add(nickname.toLowerCase());
+  store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 3 * 86400 });
+  for (const nickname of live) store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 3 * 86400 });
   const logs: AppDataLogEntry[] = [];
   const clock = { now: NOW };
   let pauses = 0;
   const call = (request: HttpRequest): Promise<HttpResponse> =>
     handleAppDataRequest(request, {
       store,
+      tokens: store.tokens,
       now: () => clock.now,
       log: (entry) => logs.push(entry),
       pause: async () => {
@@ -52,8 +59,15 @@ function setup(live: string[] = [NICK]) {
 
 const route = (method: string) => `${method} /api/apps/{nickname}/data/{key}`;
 
-function request(method: string, key: string, options: { nickname?: string; body?: string; contentType?: string | null; cookies?: string[]; base64?: boolean } = {}): HttpRequest {
+function request(
+  method: string,
+  key: string,
+  options: { nickname?: string; body?: string; contentType?: string | null; cookies?: string[]; base64?: boolean; token?: string | null } = {},
+): HttpRequest {
   const headers: Record<string, string> = { origin: "null", accept: "application/json" };
+  // Ticket 3.24: writes carry the app's write token unless `token: null`.
+  const token = options.token === undefined ? (method === "PUT" || method === "DELETE" ? tokenFor(options.nickname ?? NICK) : null) : options.token;
+  if (token !== null) headers["authorization"] = `Bearer ${token}`;
   const contentType = options.contentType === undefined ? (method === "PUT" ? "application/json" : null) : options.contentType;
   if (contentType !== null) headers["content-type"] = contentType;
   return {
@@ -146,7 +160,7 @@ describe("criterion 1: an app stores a value and reads it back as the same JSON"
   it("stores canonical JSON (whitespace dropped) and counts its UTF-8 bytes", async () => {
     const { call, store } = setup();
     await call(request("PUT", "list", { body: ' [ 1 ,\n 2 , "é" ] ' }));
-    expect(store.values.get("ada-42/list")).toEqual({ json: '[1,2,"é"]', bytes: 10 });
+    expect(store.values.get("ada-42/list")).toEqual({ json: '[1,2,"é"]', bytes: 10, updatedBy: "Bob", updatedAt: NOW.toISOString() });
     expect(store.usage.get("ada-42")).toEqual({ bytes: 10, keys: 1 });
   });
 
@@ -687,7 +701,7 @@ describe("CORS: sandboxed apps (opaque origin) can read every answer", () => {
     expect(PREFLIGHT_HEADERS).toEqual({
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET, PUT, DELETE",
-      "access-control-allow-headers": "content-type, accept",
+      "access-control-allow-headers": "content-type, accept, authorization",
       "access-control-max-age": "600",
       "cache-control": "no-store",
     });
@@ -732,5 +746,111 @@ describe("logs", () => {
     ]);
     const text = JSON.stringify(logs);
     for (const secret of ["secret", "Ada", "ada-42", "nobody"]) expect(text).not.toContain(secret);
+  });
+});
+
+describe("ticket 3.24: writes need an app write token, reads stay public", () => {
+  const SIGN_IN = "Sign in to the workshop to save in this app.";
+
+  it("criterion 1: WHEN a visitor without a token sends PUT or DELETE THEN the API answers 401 'Sign in to the workshop to save in this app.' and stores nothing, while GET still answers the value", async () => {
+    const { call, store, logs } = setup();
+    await call(put("score", 42));
+    const before = snapshot(store);
+    store.reads.length = 0;
+    for (const response of [await call(put("score", 7, { token: null })), await call(request("DELETE", "score", { token: null }))]) {
+      expect(response.statusCode).toBe(401);
+      expect(JSON.parse(response.body ?? "")).toEqual({ message: SIGN_IN });
+      expect(response.headers).toMatchObject(CORS_HEADERS);
+      expect(response.headers?.["access-control-allow-credentials"]).toBeUndefined();
+    }
+    expect(APP_DATA_MESSAGES.signInToSave).toBe(SIGN_IN);
+    expect(snapshot(store)).toBe(before);
+    // Refused before the totals or the value are read: only the live markers.
+    expect(store.reads).toEqual(["live", "live"]);
+    expect(logs.slice(-2).map((l) => [l.method, l.outcome, l.status])).toEqual([
+      ["PUT", "unauthorized", 401],
+      ["DELETE", "unauthorized", 401],
+    ]);
+    const read = await call(request("GET", "score"));
+    expect([read.statusCode, read.body]).toEqual([200, "42"]);
+  });
+
+  it("refuses a malformed header, an unknown (revoked) token and the platform's session cookie alone with the same 401", async () => {
+    const { call, store } = setup();
+    const unknown = Buffer.alloc(32, 3).toString("base64url");
+    const answers = [
+      await call(put("score", 1, { token: `${tokenFor(NICK)}x` })),
+      await call({ ...put("score", 1, { token: null }), headers: { "content-type": "application/json", authorization: tokenFor(NICK) } }),
+      await call(put("score", 1, { token: unknown })),
+      await call(put("score", 1, { token: null, cookies: [`__Host-ssd_session=${tokenFor(NICK)}`] })),
+    ];
+    expect(answers.map((a) => [a.statusCode, JSON.parse(a.body ?? "").message])).toEqual(Array(4).fill([401, SIGN_IN]));
+    expect(store.values.size).toBe(0);
+  });
+
+  it("criterion 2 (API part): a token lets its holder write to its own app only: another app's token gets 401", async () => {
+    const { call, store } = setup([NICK, "grace"]);
+    expect((await call(put("score", 1, { nickname: "grace", token: tokenFor(NICK) }))).statusCode).toBe(401);
+    expect((await call(request("DELETE", "score", { nickname: "grace", token: tokenFor(NICK) }))).statusCode).toBe(401);
+    expect(store.values.has("grace/score")).toBe(false);
+    expect((await call(put("score", 1, { nickname: "grace", token: tokenFor("grace") }))).statusCode).toBe(204);
+    // The app is matched regardless of the letter case of its address.
+    expect((await call(put("score", 2, { nickname: "ADA-42", token: tokenFor(NICK) }))).statusCode).toBe(204);
+  });
+
+  it("criterion 4 (expiry): a token at or past its expiry answers 401, one second before it still writes", async () => {
+    const { call, store, clock } = setup();
+    store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 12 * 3600 });
+    clock.now = new Date(NOW.getTime() + 12 * 3600 * 1000 - 1000);
+    expect((await call(put("score", 1, { token: WRITE_TOKEN }))).statusCode).toBe(204);
+    clock.now = new Date(NOW.getTime() + 12 * 3600 * 1000);
+    expect((await call(put("score", 2, { token: WRITE_TOKEN }))).statusCode).toBe(401);
+    expect((await call(request("DELETE", "score", { token: WRITE_TOKEN }))).statusCode).toBe(401);
+    expect(store.values.get("ada-42/score")?.json).toBe("1");
+  });
+
+  it("criterion 5: WHEN a write succeeds THEN the value records updatedBy = the writer's nickname, and GET ...?info=1 answers {value, updatedBy, updatedAt}", async () => {
+    const { call, store } = setup();
+    expect((await call(put("board", { posts: ["hi"] }))).statusCode).toBe(204);
+    expect(store.values.get("ada-42/board")).toMatchObject({ updatedBy: "Bob", updatedAt: NOW.toISOString() });
+    const info = await call({ ...request("GET", "board"), queryStringParameters: { info: "1" } });
+    expect(info.statusCode).toBe(200);
+    expect(JSON.parse(info.body ?? "")).toEqual({ value: { posts: ["hi"] }, updatedBy: "Bob", updatedAt: NOW.toISOString() });
+    expect(info.headers).toMatchObject({ "content-type": "application/json", ...CORS_HEADERS });
+    // The plain GET contract is unchanged (any other `info` too).
+    expect((await call(request("GET", "board"))).body).toBe('{"posts":["hi"]}');
+    expect((await call({ ...request("GET", "board"), queryStringParameters: { info: "yes" } })).body).toBe('{"posts":["hi"]}');
+    // A missing key, and a value from before this ticket (no writer), answer nulls.
+    expect(JSON.parse((await call({ ...request("GET", "none"), queryStringParameters: { info: "1" } })).body ?? "")).toEqual({ value: null, updatedBy: null, updatedAt: null });
+    store.values.set("ada-42/old", { json: "3", bytes: 1 });
+    expect(JSON.parse((await call({ ...request("GET", "old"), queryStringParameters: { info: "1" } })).body ?? "")).toEqual({ value: 3, updatedBy: null, updatedAt: null });
+  });
+
+  it("criterion 6 (API part): the preflight allows `authorization`, and no answer carries Access-Control-Allow-Credentials", async () => {
+    const { call } = setup();
+    const preflight = await call({ ...request("OPTIONS", "score", { contentType: null }), headers: { origin: "null", "access-control-request-headers": "authorization,content-type" } });
+    expect(preflight.headers?.["access-control-allow-headers"]?.split(", ")).toContain("authorization");
+    const answers = [preflight, await call(put("score", 1)), await call(put("score", 1, { token: null })), await call({ ...request("GET", "score"), queryStringParameters: { info: "1" } })];
+    for (const answer of answers) expect(Object.keys(answer.headers ?? {})).not.toContain("access-control-allow-credentials");
+  });
+
+  it("criterion 7 (data API part): no log entry holds the token or its hash, refused or accepted", async () => {
+    const { call, logs } = setup();
+    await call(put("score", 1, { token: WRITE_TOKEN }));
+    await call(put("score", 1, { token: Buffer.alloc(32, 4).toString("base64url") }));
+    await call(put("score", 1));
+    await call(request("DELETE", "score"));
+    const text = JSON.stringify(logs);
+    for (const secret of [WRITE_TOKEN, hashAppToken(WRITE_TOKEN), tokenFor(NICK), hashAppToken(tokenFor(NICK)), Buffer.alloc(32, 4).toString("base64url"), "Bob"]) {
+      expect(text).not.toContain(secret);
+    }
+    for (const entry of logs) expect(Object.keys(entry).every((k) => ["event", "method", "outcome", "status", "bytes", "error"].includes(k))).toBe(true);
+  });
+
+  it("answers 500 (logged by name) when the token cannot be read", async () => {
+    const { call, store, logs } = setup();
+    store.tokens.failure = Object.assign(new Error(`down ${tokenFor(NICK)}`), { name: "InternalServerError" });
+    expect((await call(put("score", 1))).statusCode).toBe(500);
+    expect(logs.at(-1)).toEqual({ event: "app-data", method: "PUT", outcome: "failed", status: 500, error: "InternalServerError" });
   });
 });

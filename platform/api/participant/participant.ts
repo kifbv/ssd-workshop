@@ -1,7 +1,8 @@
 // The protected participant routes (ticket 1.5): `GET /api/me`, `POST /api/me/nickname` and
-// `GET /api/participants/{id}`, and `POST /api/sign-out` (ticket 3.1). Every one starts with the one
+// `GET /api/participants/{id}`, `POST /api/sign-out` (ticket 3.1), and `POST /api/app-tokens` (ticket 3.24: an app
+// write token for one live app, for the hand-off page /app-sign-in). Every one starts with the one
 // session check (../session/session.ts) and works only on the caller's own record: facilitator views
-// of others come in phase 3.
+// of others come in phase 3. Sign-out also revokes the caller's app write tokens (ticket 3.24).
 import {
   isJsonContentType,
   jsonResponse,
@@ -10,14 +11,20 @@ import {
   type HttpRequest,
   type HttpResponse,
 } from "../http.js";
+import { appTokenExpiry, hashAppToken, newAppToken, type AppTokenWriter } from "../app-token/token.js";
 import { clearedSessionCookie, requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
 import { errorName } from "../sign-in/code-request.js";
+import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 
 export const ME_ROUTE = "GET /api/me";
 export const NICKNAME_ROUTE = "POST /api/me/nickname";
 export const PARTICIPANT_ROUTE = "GET /api/participants/{id}";
 export const SIGN_OUT_ROUTE = "POST /api/sign-out";
-export const PARTICIPANT_ROUTES = [ME_ROUTE, NICKNAME_ROUTE, PARTICIPANT_ROUTE, SIGN_OUT_ROUTE] as const;
+/** Ticket 3.24: `{"app": "<nickname>"}` -> `{token, app, nickname, expiresAt}` for a live app. */
+export const APP_TOKEN_ROUTE = "POST /api/app-tokens";
+export const PARTICIPANT_ROUTES = [ME_ROUTE, NICKNAME_ROUTE, PARTICIPANT_ROUTE, SIGN_OUT_ROUTE, APP_TOKEN_ROUTE] as const;
+/** A token route whose list kept changing under it (two Continues at once) tries this many times before a 409. */
+export const APP_TOKEN_ATTEMPTS = 3;
 
 /** 3 to 20 letters, digits or dashes (ASCII). */
 export const NICKNAME_PATTERN = /^[A-Za-z0-9-]{3,20}$/;
@@ -79,7 +86,9 @@ export const NICKNAME_MESSAGES = {
 export type ClaimResult = "saved" | "taken" | "already-set";
 
 /** What the participant routes need from the table. */
-export interface ParticipantStore extends SessionReader {
+export interface ParticipantStore extends SessionReader, AppTokenWriter {
+  /** Ticket 3.24: true while the app's live marker (`APP#<lower-cased nickname>` / `LIVE`, its `liveAt`) is there. */
+  isAppLive(nickname: string): Promise<boolean>;
   /**
    * In one transaction: claims the nickname (lower-cased key, only if unclaimed) and sets it on the
    * participant's profile, moving the step from `nickname` to `clarify` (only if no nickname yet).
@@ -87,7 +96,7 @@ export interface ParticipantStore extends SessionReader {
   claimNickname(participantId: string, nickname: string, nowIso: string): Promise<ClaimResult>;
 }
 
-export type ParticipantRoute = "me" | "nickname" | "participant" | "sign-out" | "unknown";
+export type ParticipantRoute = "me" | "nickname" | "participant" | "sign-out" | "app-token" | "unknown";
 export type ParticipantOutcome =
   | "ok"
   | "signed-out"
@@ -101,9 +110,15 @@ export type ParticipantOutcome =
   | "already-set"
   | "invalid-request"
   | "unsupported-media-type"
+  /** Ticket 3.24, the token route: a token was made; or no live app; no nickname yet; too many tokens; lost races. */
+  | "token"
+  | "not-live"
+  | "no-nickname"
+  | "too-many"
+  | "conflict"
   | "failed";
 
-/** The only things ever logged: no nickname, no id, no token, no body. */
+/** The only things ever logged: no nickname, no id, no token (session or app), no body. */
 export interface ParticipantLogEntry {
   event: "participant";
   route: ParticipantRoute;
@@ -114,6 +129,8 @@ export interface ParticipantLogEntry {
 export interface ParticipantDeps {
   store: ParticipantStore;
   now: () => Date;
+  /** A cryptographic source such as `crypto.randomBytes` (ticket 3.24: app write tokens). */
+  randomBytes: (size: number) => Buffer;
   log: (entry: ParticipantLogEntry) => void;
 }
 
@@ -136,6 +153,8 @@ function routeOf(request: HttpRequest): ParticipantRoute {
       return "participant";
     case SIGN_OUT_ROUTE:
       return "sign-out";
+    case APP_TOKEN_ROUTE:
+      return "app-token";
     default:
       return "unknown";
   }
@@ -162,6 +181,37 @@ async function setNickname(
   return { outcome: "ok", response: jsonResponse(200, recordBody({ ...participant, nickname: trimmed, step: "clarify" })) };
 }
 
+type Routed = { outcome: ParticipantOutcome; response: HttpResponse };
+
+/**
+ * Ticket 3.24: a new app write token for the live app named in the body, for the caller. Any signed-in participant
+ * with a nickname may get one for any live app (decision "Who may save"). The token (random, stored only as its
+ * SHA-256) is answered once and never logged; it ends after 12 hours, never after the caller's session.
+ */
+async function createAppToken(request: HttpRequest, participant: ParticipantRecord, sessionExpiresAt: number, deps: ParticipantDeps): Promise<Routed> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  const app = readJsonObject(request)?.["app"];
+  // A name outside the nickname rules (or a reserved one) can never be an app: the same answer as a missing one, no read.
+  if (typeof app !== "string" || checkNickname(app) !== "ok" || !(await deps.store.isAppLive(app))) {
+    return { outcome: "not-live", response: jsonResponse(404, { message: APP_SIGN_IN_TEXTS.notLive, reason: "not-live" }) };
+  }
+  if (participant.nickname === undefined) {
+    return { outcome: "no-nickname", response: jsonResponse(409, { message: APP_SIGN_IN_TEXTS.noNickname, reason: "no-nickname" }) };
+  }
+  const now = deps.now();
+  const nowSeconds = Math.floor(now.getTime() / 1000);
+  const stored = { app: app.toLowerCase(), nickname: participant.nickname, expiresAt: appTokenExpiry(nowSeconds, sessionExpiresAt) };
+  for (let attempt = 0; attempt < APP_TOKEN_ATTEMPTS; attempt += 1) {
+    const token = newAppToken(deps.randomBytes);
+    const result = await deps.store.createAppToken(participant.id, hashAppToken(token), stored, nowSeconds);
+    if (result === "too-many") return { outcome: "too-many", response: jsonResponse(429, { message: APP_SIGN_IN_TEXTS.tooMany, reason: "too-many" }) };
+    if (result === "saved") {
+      return { outcome: "token", response: jsonResponse(200, { token, app: stored.app, nickname: stored.nickname, expiresAt: stored.expiresAt }) };
+    }
+  }
+  return { outcome: "conflict", response: jsonResponse(409, { message: APP_SIGN_IN_TEXTS.conflict, reason: "conflict" }) };
+}
+
 /** The answer to `POST /api/sign-out` also clears the cookie, whatever it is (the browser drops it). */
 function withClearedCookie(response: HttpResponse): HttpResponse {
   return { ...response, cookies: [clearedSessionCookie()] };
@@ -181,6 +231,9 @@ async function route(
   switch (which) {
     case "sign-out":
       if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+      // Ticket 3.24: the caller's app write tokens first (all of them, from every session), so a failure leaves them
+      // signed in to try again rather than signed out with tokens still working.
+      await deps.store.revokeAppTokens(participant.id);
       await deps.store.deleteSession(session.tokenHash);
       return { outcome: "signed-out", response: withClearedCookie(jsonResponse(200, { message: SIGNED_OUT_MESSAGE })) };
     case "me":
@@ -191,6 +244,8 @@ async function route(
       return { outcome: "ok", response: jsonResponse(200, recordBody(participant)) };
     case "nickname":
       return setNickname(request, participant, deps);
+    case "app-token":
+      return createAppToken(request, participant, session.expiresAt, deps);
     default:
       return { outcome: "not-found", response: notFoundResponse() };
   }

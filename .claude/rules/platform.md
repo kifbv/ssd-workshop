@@ -305,3 +305,9 @@ paths:
   times, not once (ticket 3.17: 4 of 33 before, 0 of 12 and 3 x 17/17 after).
 - Removing block tags (`</spec>`, `</message>`) from untrusted text is repeated until nothing changes (`withoutTags`,
   `api/conversation/tags.ts`): one pass lets nested tags rebuild one (`</parti</participant>cipant>`, ticket 3.16 try 2).
+- Saving from an app (ticket 3.24): every app route that writes, uploads or calls AI checks `checkAppWrite`
+  (`platform/api/app-token/token.ts`): `Authorization: Bearer <app write token>`, never a cookie (the sandboxed app's
+  opaque origin never sends the platform's `SameSite=Strict` one). Tokens are stored only as SHA-256 (`APPTOKEN#<hash>`),
+  reach the app only in the address's fragment (`/apps/<nick>/#wt=`), and are listed per participant (`TOKENS#<id>`,
+  capped) so sign-out and reset can delete them without a Scan. A route that adds a header for apps adds it to the
+  function's preflight AND bumps CloudFront's `ssd-workshop-app-data-v<N>` policy (it cannot be updated).

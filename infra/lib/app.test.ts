@@ -582,16 +582,19 @@ describe("buckets (criterion 2)", () => {
     expect(deployment?.[1].Properties?.DestinationBucketName).toBeDefined();
   });
 
-  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), the facilitator dashboard (ticket 3.11), no TypeScript or tests (ticket 1.6)", () => {
+  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), the facilitator dashboard (ticket 3.11), the hand-off page (ticket 3.24), no TypeScript or tests (ticket 1.6)", () => {
     // The built folder in the assembly, and the asset CDK staged from it (same content).
-    const site = ["404.html", "app.js", "diagram.js", "facilitator", "index.html", "style.css"];
+    const site = ["404.html", "app-sign-in", "app.js", "diagram.js", "facilitator", "index.html", "style.css"];
     const dashboard = ["dashboard.js", "index.html"];
+    const handOff = ["app-sign-in.js", "index.html"];
     expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(site);
     expect(readdirSync(join(dir, WEB_BUILD_FOLDER, "facilitator")).sort()).toEqual(dashboard);
+    expect(readdirSync(join(dir, WEB_BUILD_FOLDER, "app-sign-in")).sort()).toEqual(handOff);
     const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")) && existsSync(join(dir, name, "style.css")));
     expect(staged).toHaveLength(1);
     expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(site);
     expect(readdirSync(join(dir, staged[0] ?? "", "facilitator")).sort()).toEqual(dashboard);
+    expect(readdirSync(join(dir, staged[0] ?? "", "app-sign-in")).sort()).toEqual(handOff);
   });
 });
 
@@ -682,8 +685,8 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
   it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
     const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
     // /api/*, the data API's /api/apps/* (ticket 2.4), the apps' /apps/* (ticket 2.5) and the dashboard's /facilitator*
-    // (ticket 3.11), in this order.
-    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*"]);
+    // (ticket 3.11), and the hand-off page's /app-sign-in* (ticket 3.24), in this order.
+    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*", "/app-sign-in*"]);
     const behaviour = apiBehaviour();
     expect(behaviour).toMatchObject({
       PathPattern: "/api/*",
@@ -767,11 +770,11 @@ describe("CloudFront /api/apps/* behaviour: every data API answer readable by sa
     expect(appsPolicy).toEqual({ Ref: policy()?.[1] });
   });
 
-  it("names the policy ssd-workshop-app-data-v1 in the edge stack, retained, versioned in its logical id", () => {
+  it("names the policy ssd-workshop-app-data-v2 in the edge stack (v2 since ticket 3.24 allows `authorization`), retained, versioned in its logical id", () => {
     const [stackName, id, resource] = policy() ?? [];
     expect(stackName).toBe(STACK_NAMES.edge);
-    expect(APP_DATA_HEADERS_POLICY_NAME).toBe("ssd-workshop-app-data-v1");
-    expect(id).toMatch(/^AppDataHeadersV1[0-9A-F]{8}$/);
+    expect(APP_DATA_HEADERS_POLICY_NAME).toBe("ssd-workshop-app-data-v2");
+    expect(id).toMatch(/^AppDataHeadersV2[0-9A-F]{8}$/);
     expect(resource?.DeletionPolicy).toBe("Retain");
     expect(resource?.UpdateReplacePolicy).toBe("Retain");
   });
@@ -781,7 +784,8 @@ describe("CloudFront /api/apps/* behaviour: every data API answer readable by sa
       AccessControlAllowOrigins: { Items: ["*"] },
       AccessControlAllowCredentials: false,
       AccessControlAllowMethods: { Items: ["GET", "PUT", "DELETE"] },
-      AccessControlAllowHeaders: { Items: ["content-type", "accept"] },
+      // Ticket 3.24 criterion 6: `authorization` (app write tokens), and never credentials (below).
+      AccessControlAllowHeaders: { Items: ["content-type", "accept", "authorization"] },
       AccessControlMaxAgeSec: 600,
       OriginOverride: true,
     });
@@ -989,6 +993,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/me/nickname",
       "GET /api/participants/{id}",
       "POST /api/sign-out",
+      "POST /api/app-tokens",
       "GET /api/admin/settings",
       "PUT /api/admin/settings",
       "POST /api/admin/stop",
@@ -1515,8 +1520,8 @@ describe("api stack: participant function (ticket 1.5)", () => {
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("routes GET /api/me, POST /api/me/nickname, GET /api/participants/{id} and POST /api/sign-out (ticket 3.1) to it, invoked only by this API", () => {
-    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}", "POST /api/sign-out"]);
+  it("routes GET /api/me, POST /api/me/nickname, GET /api/participants/{id}, POST /api/sign-out (ticket 3.1) and POST /api/app-tokens (ticket 3.24) to it, invoked only by this API", () => {
+    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}", "POST /api/sign-out", "POST /api/app-tokens"]);
     for (const routeKey of PARTICIPANT_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
         IntegrationType: "AWS_PROXY",
@@ -1564,7 +1569,99 @@ describe("api stack: participant function (ticket 1.5)", () => {
         },
       },
       ...sessionCheckStatements(f.tableArn()),
+      // Ticket 3.24: app write tokens. The live marker's `liveAt` and the caller's token list, read with a projection.
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["liveAt"] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["tokens"] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "app", "nickname", "createdAt", "expiresAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "tokens", "expiresAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:DeleteItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*", "TOKENS#*"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
     ]);
+  });
+
+  it("ticket 3.24: only the participant function writes app write tokens, and only it and the data function read them", () => {
+    const like = (pattern: string, value: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(value);
+    // The token partitions never overlap each other or the partitions other roles hold.
+    for (const [pattern, key] of [
+      ["APP#*", "APPTOKEN#ab"],
+      ["APPDATA#*", "APPTOKEN#ab"],
+      ["APPTOKEN#*", "TOKENS#p-1"],
+      ["TOKENS#*", "APPTOKEN#ab"],
+      ["APPTOKEN#*", "APP#ada"],
+      ["PARTICIPANT#*", "TOKENS#p-1"],
+    ] as const) {
+      expect(like(pattern, key), `${pattern} ${key}`).toBe(false);
+    }
+    expect(like("APPTOKEN#*", "APPTOKEN#ab")).toBe(true);
+    // Every DynamoDB right in every stack that reaches a token item or a token list, by role name and action.
+    const roleNames = new Map(ofType("AWS::IAM::Role").map(([st, id, r]) => [`${st}/${id}`, String(r.Properties?.RoleName ?? id)]));
+    const reach = (sampleKey: string): string[] => {
+      const found: string[] = [];
+      for (const [st, , policy] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+        const roles = ((policy.Properties?.Roles ?? []) as { Ref?: string }[]).map((r) => roleNames.get(`${st}/${r.Ref ?? ""}`) ?? JSON.stringify(r));
+        for (const statement of (policy.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+          const actions = ([] as unknown[]).concat(statement.Action).map(String).filter((a) => a.startsWith("dynamodb:") || a === "*");
+          if (statement.Effect !== "Allow" || actions.length === 0) continue;
+          const conditions = (statement.Condition ?? {}) as Record<string, Record<string, unknown>>;
+          const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
+          // Statements on the table's items (an index Query has its own test); no partition list means every partition.
+          if (JSON.stringify(statement.Resource).includes("/index/")) continue;
+          if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, sampleKey))) continue;
+          for (const role of roles) for (const action of actions) found.push(`${role} ${action}`);
+        }
+      }
+      return [...new Set(found)].sort();
+    };
+    expect(reach(`APPTOKEN#${"a".repeat(64)}`)).toEqual(
+      [`${APP_DATA_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:PutItem`].sort(),
+    );
+    expect(reach("TOKENS#p-1")).toEqual(
+      [`${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:UpdateItem`].sort(),
+    );
+    expect(JSON.stringify(apiFunction(APP_DATA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
   });
 
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
@@ -2019,7 +2116,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     for (const [, , api] of ofType("AWS::ApiGatewayV2::Api")) expect(api.Properties?.CorsConfiguration).toBeUndefined();
   });
 
-  it("allows only its logs, GetItem in APP# and APPDATA#, and writes in APPDATA# of the data items' attributes only (never the live marker)", () => {
+  it("allows only its logs, GetItem in APP# and APPDATA#, writes in APPDATA# of the data items' attributes only (never the live marker), and (ticket 3.24) a projected GetItem of app write tokens", () => {
     expect(f.statements()).toEqual([
       {
         Effect: "Allow",
@@ -2038,7 +2135,19 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPDATA#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes", "sizes"] },
+          // Ticket 3.24: `updatedBy`, the writer's nickname on each value.
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "updatedBy", "writeDay", "writtenBytes", "sizes"] },
+        },
+      },
+      // Ticket 3.24: the write check reads a token's app, nickname and expiry only, never the rest of APPTOKEN#, never TOKENS#.
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["app", "nickname", "expiresAt"] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },
     ]);
@@ -3362,7 +3471,7 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
 
   it("keeps the API behaviours first: /apps/* cannot match an /api/ path", () => {
     const patterns = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).map((b) => b.PathPattern);
-    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*"]);
+    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*", "/app-sign-in*"]);
     const matches = (pattern: string, path: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(path);
     expect(matches("/apps/*", "/api/apps/ada/data/k")).toBe(false);
     expect(matches("/apps/*", "/apps/ada/index.html")).toBe(true);

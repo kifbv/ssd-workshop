@@ -149,7 +149,7 @@ export interface SessionDeps {
 export type SessionRefusal = "no-session" | "removed";
 
 export type SessionCheck =
-  | { ok: true; participant: ParticipantRecord; role: Role; tokenHash: string }
+  | { ok: true; participant: ParticipantRecord; role: Role; tokenHash: string; /** The session's end, epoch seconds (ticket 3.24: app tokens never outlive it). */ expiresAt: number }
   | { ok: false; response: HttpResponse; reason: SessionRefusal };
 
 export function signInRequiredResponse(): HttpResponse {
@@ -188,5 +188,5 @@ export async function requireSession(request: HttpRequest, deps: SessionDeps): P
     return refused("no-session");
   }
   const current = { ...participant, role: entry.role, group: entry.group };
-  return { ok: true, participant: current, role: entry.role, tokenHash };
+  return { ok: true, participant: current, role: entry.role, tokenHash, expiresAt: session.expiresAt };
 }

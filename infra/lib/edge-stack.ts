@@ -137,7 +137,8 @@ export class EdgeStack extends Stack {
         accessControlAllowOrigins: ["*"],
         accessControlAllowCredentials: false,
         accessControlAllowMethods: ["GET", "PUT", "DELETE"],
-        accessControlAllowHeaders: ["content-type", "accept"],
+        // Ticket 3.24 (policy v2): writes carry `Authorization: Bearer <app write token>`; still never credentials.
+        accessControlAllowHeaders: ["content-type", "accept", "authorization"],
         accessControlMaxAge: Duration.seconds(600),
         originOverride: true,
       },
@@ -228,7 +229,7 @@ export class EdgeStack extends Stack {
     // gets its slash, the folder its index.html. Same origin, cache and headers as the other pages.
     const siteIndex = new CloudFrontFunction(this, "SiteIndexFunction", {
       functionName: SITE_INDEX_FUNCTION_NAME,
-      comment: `${PREFIX} site: slash redirect and index.html for /facilitator/`,
+      comment: `${PREFIX} site: slash redirect and index.html for /facilitator/ and /app-sign-in/`,
       runtime: FunctionRuntime.JS_2_0,
       code: FunctionCode.fromFile({ filePath: SITE_INDEX_FUNCTION_FILE }),
     });
@@ -288,6 +289,8 @@ export class EdgeStack extends Stack {
         "/api/*": api,
         "/apps/*": apps,
         "/facilitator*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
+        // Ticket 3.24: the hand-off page for saving in apps, /app-sign-in/ (top level, the pages' CSP), like the dashboard.
+        "/app-sign-in*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
       },
       // Ticket 2.5: S3 behind an origin access control answers a missing key with 403 (CloudFront may not
       // list the bucket). Show the plain 404 page instead, with status 404, for apps and pages alike. The

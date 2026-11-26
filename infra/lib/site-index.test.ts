@@ -32,6 +32,17 @@ describe("CloudFront Function ssd-workshop-site-index (ticket 3.11)", () => {
     });
   });
 
+  it("ticket 3.24: redirects /app-sign-in to /app-sign-in/ keeping the app, and serves the folder's index.html", () => {
+    expect(run("/app-sign-in", { app: { value: "ada" } })).toEqual({
+      statusCode: 301,
+      statusDescription: "Moved Permanently",
+      headers: { location: { value: "/app-sign-in/?app=ada" } },
+    });
+    expect(run("/app-sign-in/", { app: { value: "ada" } })).toMatchObject({ uri: "/app-sign-in/index.html" });
+    expect(run("/app-sign-in/app-sign-in.js")).toMatchObject({ uri: "/app-sign-in/app-sign-in.js" });
+    expect(run("/app-sign-inx")).toMatchObject({ uri: "/app-sign-inx" });
+  });
+
   it("stays small (CloudFront Functions take at most 10 KB of code)", () => {
     expect(Buffer.byteLength(code)).toBeLessThan(10 * 1024);
   });

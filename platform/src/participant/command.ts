@@ -26,8 +26,9 @@ export const USAGE = `Usage: npm run participant -- reset <nickname> [--yes]
 
   reset <nickname>         show what a reset would delete; changes nothing
   reset <nickname> --yes   start the participant's workshop over: delete their messages, the AI's replies and
-                           every spec version, send them back to step 1 (Clarify), and delete their app's data,
-                           its live marker and its GitHub repository
+                           every spec version, send them back to step 1 (Clarify), end their sign-ins to save
+                           in apps (app write tokens), and delete their app's data, its live marker and its
+                           GitHub repository
 
 Kept: the allow-list entry, the nickname, sessions, AI usage totals and build records. The app's published
 files stay online until the next build's deploy replaces them. It refuses while a build is queued, building
@@ -104,7 +105,7 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   if (!command.confirmed) {
     deps.out(`${conversation}.`);
     deps.out(`App: ${describeAppData(appData)}, live marker ${live ? "present" : "absent"}, repository ${repository} ${repositoryExists ? "exists" : "already gone"}.`);
-    deps.out(`Nothing changed. Run again with --yes to delete all of this${stepName === undefined ? "" : ` and send ${nickname} back to step 1 (Clarify)`}.`);
+    deps.out(`Nothing changed. Run again with --yes to delete all of this${stepName === undefined ? "" : ` and send ${nickname} back to step 1 (Clarify)`}, and to end ${nickname}'s sign-ins to save in apps.`);
     deps.out(KEPT);
     return 0;
   }
@@ -122,6 +123,9 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
       `Reset ${nickname}: deleted ${plural(items.messages.length, "message or reply", "messages and replies")} and ${plural(items.specs.length, "spec version", "spec versions")}; back at step 1 (Clarify).`,
     );
   }
+  // Ticket 3.24: the participant's app write tokens (for any app) stop working at once; their sessions are kept.
+  const revoked = await store.revokeAppTokens(participantId);
+  deps.out(`Ended ${plural(revoked, "sign-in to save in apps", "sign-ins to save in apps")} (app write tokens).`);
   // The live marker before the data: without it the data API answers 404 to every new request. A request that read the
   // marker just before it went can still commit its write after the first listing (the API does not re-check the
   // marker inside its transaction), so after a pause the data is listed and deleted once more; a write held up longer

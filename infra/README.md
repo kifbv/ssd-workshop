@@ -487,6 +487,79 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$U"
 # expect: 204
 ```
 
+## Check after the sign-in-to-save deploy (ticket 3.24)
+
+```mermaid
+sequenceDiagram
+  participant V as Phone (signed in to the workshop)
+  participant W as /app-sign-in/?app=nick
+  participant P as ssd-workshop-api-participant
+  participant A as /apps/nick/ (sandboxed)
+  participant D as ssd-workshop-api-app-data
+  V->>W: open (or "Sign in to the workshop" first)
+  W->>P: POST /api/app-tokens {"app":"nick"} (session cookie)
+  P-->>W: {token, app, nickname, expiresAt} (stored as APPTOKEN#sha256)
+  W->>A: location.replace(/apps/nick/#wt=token)
+  A->>D: PUT/DELETE with Authorization: Bearer token
+  D-->>A: 204, or 401 "Sign in to the workshop to save in this app."
+```
+
+Deploy order: until ticket 3.25 ships the new `workshop-data.js` (and `npm run apps -- refresh` republishes the live
+apps), every save from an app already live answers 401; reads keep working. Merge 3.24 and 3.25 together, or 3.25 right
+after. Since this ticket the 3.17 check above needs a token too (`-H "authorization: Bearer $T"` on its `PUT` and
+`DELETE`).
+
+No credentials needed for 1 to 3; a live app's nickname `<nick>`, a key no app uses (`sign-in-check`):
+
+1. Writes need a token, reads do not:
+
+   ```sh
+   U=https://workshop.rankly.games/api/apps/<nick>/data/sign-in-check
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' --data '1' "$U"
+   # expect: 401 {"message":"Sign in to the workshop to save in this app."}
+   curl -sS -w '\n%{http_code}\n' -X DELETE -H 'origin: null' -H "authorization: Bearer $(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')" "$U"
+   # expect: 401 (an unknown token)
+   curl -sS -w '\n%{http_code}\n' -H 'origin: null' "$U"
+   # expect: 200 null (or the stored value)
+   ```
+
+2. The preflight allows `authorization`, never credentials, from the function and from CloudFront's new
+   `ssd-workshop-app-data-v2` policy (v1 is retained; Franck may delete it after the deploy):
+
+   ```sh
+   curl -sS -D - -o /dev/null -X OPTIONS -H 'origin: null' -H 'access-control-request-method: PUT' \
+     -H 'access-control-request-headers: authorization,content-type' "$U" | grep -i '^access-control-'
+   # expect: access-control-allow-headers: content-type, accept, authorization; allow-origin *; no allow-credentials
+   ```
+
+3. The hand-off page: `https://workshop.rankly.games/app-sign-in?app=nobody-here` redirects to `/app-sign-in/?app=...`
+   and, signed in, Continue says "This app is not live." and stays; `?app=../x` says it at once.
+
+On a phone signed in to the workshop (with a nickname):
+
+4. Open `https://workshop.rankly.games/app-sign-in?app=<nick>`: "Save in <nick>'s app as <your nickname>?". Press
+   Continue: the address becomes `/apps/<nick>/#wt=...` (until 3.25 the app does not read it). Copy the token from the
+   address bar into `T` on a computer (it is yours; do not paste it anywhere else), then:
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' \
+     -H "authorization: Bearer $T" --data '"hello"' "$U"
+   # expect: 204
+   curl -sS -H 'origin: null' "$U?info=1"
+   # expect: {"value":"hello","updatedBy":"<your nickname>","updatedAt":"<now>"}
+   curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' \
+     -H "authorization: Bearer $T" --data '1' https://workshop.rankly.games/api/apps/<another live nick>/data/sign-in-check
+   # expect: 401 (another app)
+   ```
+
+5. Sign out on the phone (Sign out on the workshop page), then repeat the first `PUT` of step 4: 401. Delete the key
+   with a new token, or leave it (it holds "hello").
+6. Logs: `ssd-workshop-api-participant` has `"route":"app-token","outcome":"token"` and `"route":"sign-out"` lines,
+   `ssd-workshop-api-app-data` `"outcome":"unauthorized","status":401` lines; no line holds the token or a nickname.
+   An `AccessDeniedException` in either means an IAM right is missing (`APPTOKEN#*`, `TOKENS#*`, `APP#*` `liveAt`).
+7. `npm run participant -- reset <test nick> --yes` prints "Ended N sign-ins to save in apps (app write tokens)."; a
+   token that participant held answers 401 afterwards.
+
 ## Check after the apps deploy (ticket 2.5)
 
 ```mermaid

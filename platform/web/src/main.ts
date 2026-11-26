@@ -56,6 +56,8 @@ import {
   type Proposal,
 } from "./live-view.js";
 import type { Conversation } from "./chat.js";
+import { appFromSearch, handOffAddress } from "./app-sign-in-view.js";
+import { appSignInNoteText } from "../../api/workshop/texts.js";
 
 type ScreenName = Screen | "loading";
 
@@ -1145,6 +1147,13 @@ function wire(): void {
       pendingEmail = null;
       emailInput.value = "";
       codeInput.value = "";
+      // Ticket 3.24: a sign-in opened from an app's "Sign in to save" goes back to the hand-off page for that app.
+      const app = appFromSearch(window.location.search);
+      const back = app === undefined ? undefined : handOffAddress(app);
+      if (back !== undefined) {
+        window.location.assign(back);
+        return;
+      }
       await goToOwnStep("code");
     });
   });
@@ -1344,6 +1353,15 @@ function wire(): void {
 }
 
 wire();
+// Ticket 3.24: say why the sign-in is asked when it comes from an app's "Sign in to save".
+{
+  const app = appFromSearch(window.location.search);
+  if (app !== undefined) {
+    const note = byId("app-sign-in-note");
+    note.textContent = appSignInNoteText(app);
+    note.hidden = false;
+  }
+}
 document.addEventListener("visibilitychange", syncStatusPolling);
 show("loading");
 // A returning person with a valid session goes straight to their step.

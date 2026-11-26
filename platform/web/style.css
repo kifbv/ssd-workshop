@@ -959,3 +959,22 @@ button.resume {
 .caps .message {
   margin: 0.75rem 0 0;
 }
+
+/* Ticket 3.24: the hand-off page for saving in apps (/app-sign-in/). */
+.app-sign-in .question {
+  font-size: 1.15rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.app-sign-in #continue-button,
+.app-sign-in .button-link {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.7rem 1rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+  text-decoration: none;
+}

@@ -103,9 +103,10 @@ export const PAGES_HEADERS_POLICY_NAME = `${PREFIX}-pages-v${PAGES_HEADERS_POLIC
  * Version of the data API's response headers policy (ticket 2.4, CloudFront `/api/apps/*`): the managed
  * SecurityHeadersPolicy's headers plus `Access-Control-Allow-Origin: *`, so that answers API Gateway or
  * CloudFront make themselves (a throttle's 429) are readable by sandboxed apps too. Created, never
- * updated, like the pages' policy: a change bumps this version.
+ * updated, like the pages' policy: a change bumps this version. v2 (ticket 3.24): `authorization` is an allowed
+ * header (app write tokens); v1 stays retained for Franck to delete.
  */
-export const APP_DATA_HEADERS_POLICY_VERSION = 1;
+export const APP_DATA_HEADERS_POLICY_VERSION = 2;
 export const APP_DATA_HEADERS_POLICY_NAME = `${PREFIX}-app-data-v${APP_DATA_HEADERS_POLICY_VERSION}`;
 /**
  * Content-Security-Policy of the pages: scripts, styles, connections and images from the site
@@ -336,7 +337,21 @@ export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
  * top-level names, so `sizes.<key>` counts as `sizes`). Never `liveAt` or `nickname` (the live
  * marker's, in `APP#*`, which only the deployer writes).
  */
-export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "writeDay", "writtenBytes", "sizes"] as const;
+export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "updatedBy", "writeDay", "writtenBytes", "sizes"] as const;
+
+/**
+ * App write tokens (ticket 3.24, platform/api/app-token/). The data function reads in `APPTOKEN#*` only these names
+ * (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES) and nothing else of the partition.
+ */
+export const APP_TOKEN_READ_ATTRIBUTES = ["app", "nickname", "expiresAt"] as const;
+/** The names the participant function may put in `APPTOKEN#*` (a new token item, conditions included). */
+export const APP_TOKEN_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", "createdAt", "expiresAt"] as const;
+/** The names the participant function may name in `TOKENS#*` (a participant's token list: its update, conditions included). */
+export const APP_TOKEN_LIST_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "tokens", "expiresAt"] as const;
+/** What the participant function reads of a token list (GetItem with a projection). */
+export const APP_TOKEN_LIST_READ_ATTRIBUTES = ["tokens"] as const;
+/** What the participant function reads of an app's live marker in `APP#*` (the token route answers only for a live app). */
+export const APP_LIVE_READ_ATTRIBUTES = ["liveAt"] as const;
 
 /**
  * Apps hosting and the deployer (ticket 2.5, stack `ssd-workshop-apps`). The bucket name holds the account,

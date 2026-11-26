@@ -28,6 +28,7 @@ import {
   type AppUsage,
   type DeleteResult,
   type PutResult,
+  type StoredValue,
   type WriteCharge,
 } from "./data.js";
 
@@ -109,9 +110,25 @@ export class DynamoAppDataStore implements AppDataStore {
     return (await this.get(appLiveKey(nickname), "liveAt", true))?.S !== undefined;
   }
 
-  /** Eventually consistent: half the cost; right after a write it may, rarely, still give the previous value. */
-  async getValue(nickname: string, key: string): Promise<string | undefined> {
-    return (await this.get(appDataKey(nickname, key), "value", false))?.S;
+  /**
+   * Eventually consistent: half the cost; right after a write it may, rarely, still give the previous value. The writer
+   * and time come with it (ticket 3.24): a read bills the whole item whatever the projection, so they cost nothing more.
+   */
+  async getValue(nickname: string, key: string): Promise<StoredValue | undefined> {
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: keyOf(appDataKey(nickname, key)),
+        ConsistentRead: false,
+        ProjectionExpression: "#value, #updatedBy, #updatedAt",
+        ExpressionAttributeNames: { "#value": "value", "#updatedBy": "updatedBy", "#updatedAt": "updatedAt" },
+      }),
+    );
+    const json = output.Item?.["value"]?.S;
+    if (json === undefined) return undefined;
+    const updatedBy = output.Item?.["updatedBy"]?.S;
+    const updatedAt = output.Item?.["updatedAt"]?.S;
+    return { json, ...(updatedBy === undefined ? {} : { updatedBy }), ...(updatedAt === undefined ? {} : { updatedAt }) };
   }
 
   async getUsage(nickname: string): Promise<AppUsage> {
@@ -141,11 +158,11 @@ export class DynamoAppDataStore implements AppDataStore {
     };
   }
 
-  async putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, nowIso: string, charge: WriteCharge): Promise<PutResult> {
+  async putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, nowIso: string, charge: WriteCharge, updatedBy: string): Promise<PutResult> {
     const value = {
       Put: {
         TableName: this.tableName,
-        Item: { ...keyOf(appDataKey(nickname, key)), type: str("app-data"), value: str(json), bytes: num(bytes), updatedAt: str(nowIso) },
+        Item: { ...keyOf(appDataKey(nickname, key)), type: str("app-data"), value: str(json), bytes: num(bytes), updatedAt: str(nowIso), updatedBy: str(updatedBy) },
       },
     };
     const budget = budgetParts(charge);

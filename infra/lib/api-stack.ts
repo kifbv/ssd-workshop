@@ -22,6 +22,11 @@ import {
   API_NAME,
   APP_DATA_FUNCTION_NAME,
   APP_DATA_WRITE_ATTRIBUTES,
+  APP_LIVE_READ_ATTRIBUTES,
+  APP_TOKEN_LIST_READ_ATTRIBUTES,
+  APP_TOKEN_LIST_UPDATE_ATTRIBUTES,
+  APP_TOKEN_PUT_ATTRIBUTES,
+  APP_TOKEN_READ_ATTRIBUTES,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   BUILD_QUEUE_NAME,
   BUILD_QUEUE_PARTITION,
@@ -103,8 +108,10 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
   { path: "/api/me/nickname", method: HttpMethod.POST },
   { path: "/api/participants/{id}", method: HttpMethod.GET },
-  // Ticket 3.1: deletes the caller's own session and clears its cookie.
+  // Ticket 3.1: deletes the caller's own session and clears its cookie (ticket 3.24: and revokes their app write tokens).
   { path: "/api/sign-out", method: HttpMethod.POST },
+  // Ticket 3.24: an app write token for one live app, for the hand-off page /app-sign-in.
+  { path: "/api/app-tokens", method: HttpMethod.POST },
 ] as const;
 
 /** The admin routes (ticket 3.2; Stop and Resume from 3.5), served by their own function: the only role that may write `SETTINGS`. */
@@ -381,6 +388,68 @@ export class ApiStack extends Stack {
       }),
     );
     addSessionCheckRights(participant, this.table);
+    // Ticket 3.24: app write tokens. It reads an app's live marker (`liveAt` only) and the caller's token list
+    // (`tokens` only), puts token items (`APPTOKEN#*`, their names only), updates token lists (`TOKENS#*`, their names
+    // only) and deletes both (sign-out). It never reads a token item back, and no call returns an item.
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_LIVE_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_LIST_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_PUT_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_LIST_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:DeleteItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*", "TOKENS#*"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
     // One invoke permission for the function, scoped to this API (`<api id>/*/*/*`) instead of one
     // per route: CDK's per-route source ARN would hold `{id}` literally for the path parameter route.
     const participantIntegration = new HttpLambdaIntegration("ParticipantIntegration", participant, {
@@ -671,6 +740,20 @@ export class ApiStack extends Stack {
         conditions: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPDATA#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_DATA_WRITE_ATTRIBUTES] },
+        },
+      }),
+    );
+    // Ticket 3.24: the write check reads an app write token by its hash (`app`, `nickname` and `expiresAt` only, with a
+    // projection); nothing else in `APPTOKEN#*`, and nothing at all in `TOKENS#*`.
+    appData.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       }),
     );
