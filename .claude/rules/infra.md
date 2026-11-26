@@ -342,5 +342,7 @@ paths:
   token through, so a route throttle shared by every caller (API Gateway's per-route rate) can be held at 429 by one
   address: add a per-address WAF rate rule scoped to that route (rate-based statement with a scope-down AND of method
   and path; 3.18's `ssd-workshop-media-write-rate`, 150 per 5 minutes) so filling the shared throttle takes several
-  addresses.
+  addresses. Cover every method of the route (3.18: `PUT` and `DELETE` counted; the `OPTIONS` preflight, one per upload,
+  gets a route throttle above what one address may send under the 3.13 rule instead), and match paths after
+  `URL_DECODE` then `NORMALIZE_PATH`, or `/api//apps/...` skips a `STARTS_WITH "/api/apps/"` match.
 - A WAF web ACL's `Description` must match `^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+...$` (no `;`, no quotes): `cdk synth` prints only a warning (F3031) and the deploy would fail; the synth test checks it (ticket 3.18 try 2).

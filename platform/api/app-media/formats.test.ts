@@ -312,7 +312,8 @@ describe("try 3: hostile files stay within time and memory", () => {
     if (kind === "jpeg") expect(result.bytes).toBe(result.inputBytes);
     if (kind === "webm") expect(result.seconds).toBeCloseTo(7, 3);
     if (kind === "mp4") expect(result.seconds).toBeCloseTo(10, 3);
-    expect(result.ms).toBeLessThan(2000);
+    // Over 10x the measured 200-400 ms (CI runners are slower and run Chromium beside it; .claude/rules/platform.md).
+    expect(result.ms).toBeLessThan(5000);
     expect(result.peakGrowthMb).toBeLessThan(100);
   }, 60_000);
 });

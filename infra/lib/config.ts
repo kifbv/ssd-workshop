@@ -841,6 +841,20 @@ export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "Sign in to the wor
  */
 export const WAF_MEDIA_WRITE_RATE_RULE_NAME = `${PREFIX}-media-write-rate`;
 export const WAF_MEDIA_WRITE_RATE_LIMIT = 150;
+/**
+ * Ticket 3.18 (access review of try 3): the per-address rule counts uploads AND deletes (the delete route's throttle,
+ * 10/s, is shared by every app too). Preflights are not counted (each upload sends one, so counting them would halve a
+ * room's uploads); the preflight route's throttle is raised above what one address may send under the 3.13 rule instead.
+ */
+export const WAF_MEDIA_WRITE_RATE_METHODS = ["PUT", "DELETE"] as const;
+/**
+ * Ticket 3.18 (access review of try 3): media path matches decode, then normalize the path (`/api//apps/...`,
+ * `/api/./apps/...`), so a path variant cannot skip the media rules.
+ */
+export const WAF_MEDIA_PATH_TRANSFORMATIONS = [
+  { priority: 0, type: "URL_DECODE" },
+  { priority: 1, type: "NORMALIZE_PATH" },
+];
 export const WAF_MEDIA_WRITE_RATE_BODY_KEY = "too-many-uploads";
 export const WAF_MEDIA_WRITE_RATE_BODY = JSON.stringify({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
 /**

@@ -1,8 +1,8 @@
 // The media API's table and bucket access (ticket 3.18). The rules live in ./media.ts.
 //
 // The function's role (infra/lib/api-stack.ts) may read the live marker's `liveAt` (`APP#*`, GetItem and the finish
-// transaction's ConditionCheck), app write tokens (3.24's projected read) and `APPMEDIA#*` items, and put, update and
-// delete only in `APPMEDIA#*`, naming only APP_MEDIA_WRITE_ATTRIBUTES; in the bucket it may only put and delete under
+// transaction's ConditionCheck), app write tokens (3.24's projected read) and `APPMEDIA#*` items, and put and update
+// only in `APPMEDIA#*` (no record is deleted since try 3: every end is a tombstone), naming only APP_MEDIA_WRITE_ATTRIBUTES; in the bucket it may only put and delete under
 // `app-media/`. Every transaction is authorized item by item; no call returns an item's attributes.
 //
 // Items: `APPMEDIA#<nickname>` / `MEDIA_USAGE` (bytes, files, the day's uploads: `uploadDay`, `uploadedBytes`) and

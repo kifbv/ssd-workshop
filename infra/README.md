@@ -647,7 +647,7 @@ sequenceDiagram
 
 Before merging (Franck): the edge stack adds three WAF rules to `ssd-workshop-edge` (`ssd-workshop-media-rate`: 3,000
 requests to `/app-media/*` per address in 5 minutes; `ssd-workshop-media-auth`: a media `PUT`/`DELETE` without
-`Authorization: Bearer ...`, in any case, gets WAF's 401; `ssd-workshop-media-write-rate`: more than 150 media `PUT`s
+`Authorization: Bearer ...`, in any case, gets WAF's 401; `ssd-workshop-media-write-rate`: more than 150 media `PUT`s and `DELETE`s together
 per address in 5 minutes get WAF's 429 "Too many uploads from this address. Please wait a few minutes and try
 again."). That is a `wafv2:UpdateWebACL`, which the deploy role already holds through
 the standalone policy `ssd-workshop-deploy-safety-nets` from ticket 3.13 (statement `WafManageWorkshopAcl`, on
@@ -739,6 +739,14 @@ newid() { head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
      | grep -i -E '^(HTTP|access-control-allow-origin)|uploads'
    # expect: 429, access-control-allow-origin: * (once, not doubled by the /api/apps/* headers policy), and
    #         {"message":"Too many uploads from this address. Please wait a few minutes and try again."}
+   ```
+
+   A path variant must not skip the media rules (access review of try 3, `NORMALIZE_PATH`): with no token,
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' --data-binary 'x' \
+     "https://workshop.rankly.games/api//apps/<nick>/media/$(newid)"
+   # expect: WAF's 401 (or a 404 that never reaches the media function: no line in its log group)
    ```
 
    Downloads (`/app-media/...`) and the data API from the same address still answer as before. Not verified until this

@@ -119,7 +119,9 @@ export const APP_DATA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as 
  */
 export const APP_MEDIA_UPLOAD_THROTTLE = { rateLimit: 2, burstLimit: 10 } as const;
 export const APP_MEDIA_DELETE_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
-export const APP_MEDIA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+// Above the 50/s one address may send under the 3.13 WAF rule, so one address cannot hold every app's upload
+// preflights at 429 (access review of 3.18 try 3); preflights are answered by the function without a body.
+export const APP_MEDIA_PREFLIGHT_THROTTLE = { rateLimit: 60, burstLimit: 120 } as const;
 /** The media function: 512 MB for a 4 MB body (base64 text, decoded copy, stripped copy) and faster CPU. */
 export const APP_MEDIA_MEMORY_MB = 512;
 /**

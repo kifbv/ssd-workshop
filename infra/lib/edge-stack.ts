@@ -73,6 +73,8 @@ import {
   WAF_MEDIA_WRITE_RATE_BODY,
   WAF_MEDIA_WRITE_RATE_BODY_KEY,
   WAF_MEDIA_WRITE_RATE_LIMIT,
+  WAF_MEDIA_WRITE_RATE_METHODS,
+  WAF_MEDIA_PATH_TRANSFORMATIONS,
   WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
@@ -345,7 +347,7 @@ export class EdgeStack extends Stack {
                   fieldToMatch: { uriPath: {} },
                   positionalConstraint: "STARTS_WITH",
                   searchString: WAF_MEDIA_PATH_PREFIX,
-                  textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                  textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
                 },
               },
             },
@@ -382,7 +384,7 @@ export class EdgeStack extends Stack {
                     fieldToMatch: { uriPath: {} },
                     positionalConstraint: "STARTS_WITH",
                     searchString: WAF_MEDIA_API_PREFIX,
-                    textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                    textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
                   },
                 },
                 {
@@ -390,7 +392,7 @@ export class EdgeStack extends Stack {
                     fieldToMatch: { uriPath: {} },
                     positionalConstraint: "CONTAINS",
                     searchString: WAF_MEDIA_API_SEGMENT,
-                    textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                    textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
                   },
                 },
                 {
@@ -432,13 +434,19 @@ export class EdgeStack extends Stack {
               scopeDownStatement: {
                 andStatement: {
                   statements: [
-                    { byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: "PUT", textTransformations: [{ priority: 0, type: "NONE" }] } },
+                    {
+                      orStatement: {
+                        statements: WAF_MEDIA_WRITE_RATE_METHODS.map((method) => ({
+                          byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: method, textTransformations: [{ priority: 0, type: "NONE" }] },
+                        })),
+                      },
+                    },
                     {
                       byteMatchStatement: {
                         fieldToMatch: { uriPath: {} },
                         positionalConstraint: "STARTS_WITH",
                         searchString: WAF_MEDIA_API_PREFIX,
-                        textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
                       },
                     },
                     {
@@ -446,7 +454,7 @@ export class EdgeStack extends Stack {
                         fieldToMatch: { uriPath: {} },
                         positionalConstraint: "CONTAINS",
                         searchString: WAF_MEDIA_API_SEGMENT,
-                        textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
                       },
                     },
                   ],

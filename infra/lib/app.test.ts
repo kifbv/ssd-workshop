@@ -2255,7 +2255,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     expect(stage?.Properties?.RouteSettings).toEqual({
       [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 2, ThrottlingBurstLimit: 10 },
       [`DELETE ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
-      [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+      [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 60, ThrottlingBurstLimit: 120 },
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       [`PUT ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
@@ -3728,7 +3728,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
                 FieldToMatch: { UriPath: {} },
                 PositionalConstraint: "STARTS_WITH",
                 SearchString: WAF_MEDIA_PATH_PREFIX,
-                TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }],
+                TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }],
               },
             },
           },
@@ -3754,10 +3754,10 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
                 },
               },
               {
-                ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+                ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
               },
               {
-                ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+                ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
               },
               {
                 NotStatement: {
@@ -3793,12 +3793,18 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
             ScopeDownStatement: {
               AndStatement: {
                 Statements: [
-                  { ByteMatchStatement: { FieldToMatch: { Method: {} }, PositionalConstraint: "EXACTLY", SearchString: "PUT", TextTransformations: [{ Priority: 0, Type: "NONE" }] } },
                   {
-                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+                    OrStatement: {
+                      Statements: ["PUT", "DELETE"].map((method) => ({
+                        ByteMatchStatement: { FieldToMatch: { Method: {} }, PositionalConstraint: "EXACTLY", SearchString: method, TextTransformations: [{ Priority: 0, Type: "NONE" }] },
+                      })),
+                    },
                   },
                   {
-                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
+                  },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
                   },
                 ],
               },
@@ -4072,7 +4078,9 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     // Try 2 (cost, accepted by Franck 2026-11-26): 2/s, burst 10.
     expect(APP_MEDIA_UPLOAD_THROTTLE).toEqual({ rateLimit: 2, burstLimit: 10 });
     expect(APP_MEDIA_DELETE_THROTTLE).toEqual({ rateLimit: 10, burstLimit: 20 });
-    expect(APP_MEDIA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    expect(APP_MEDIA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 60, burstLimit: 120 });
+    // Access review of 3.18 try 3: one address may send WAF_API_RATE_LIMIT per window; the shared preflight route must take more.
+    expect(APP_MEDIA_PREFLIGHT_THROTTLE.rateLimit).toBeGreaterThan(WAF_API_RATE_LIMIT / WAF_RATE_WINDOW_SECONDS);
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
     for (const routeKey of keys) {
       const routeId = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === routeKey)?.[0];
