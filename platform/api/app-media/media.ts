@@ -12,7 +12,7 @@
 //
 // Race safety: the room and the day's budget are taken in one DynamoDB transaction BEFORE the file goes to S3 (the
 // file's record, `uploading`, created only if absent, and the app's totals moved only while they stay within the limits),
-// so parallel uploads can never pass them; a failed upload gives the room back. The record turns `stored` only while
+// so parallel uploads can never pass them; a failed upload gives the room back and leaves a tombstone (its id is never reused). The record turns `stored` only while
 // the app is still live (a ConditionCheck on the live marker), so a reset that deleted the marker makes a late upload
 // delete its own file. Never logs a token, an email, the app's nickname or an id: method, outcome, status, size, kind
 // and (after the token check) the writer's nickname, like the data API.
@@ -23,7 +23,7 @@ import { checkNickname } from "../participant/participant.js";
 import { SITE_DOMAIN } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
 import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
-import { detectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripJpegMetadata, stripRecordingMetadata, type MediaKind } from "./formats.js";
+import { inspectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripRecordingMetadata, type MediaKind } from "./formats.js";
 
 export const APP_MEDIA_PATH = "/api/apps/{nickname}/media/{id}";
 export const APP_MEDIA_METHODS = ["PUT", "DELETE", "OPTIONS"] as const;
@@ -170,7 +170,7 @@ export interface AppMediaStore {
   reserve(nickname: string, id: string, file: NewMedia, nowIso: string, created: boolean, charge: UploadCharge): Promise<ReserveResult>;
   /** Marks the record `stored`, only while it is still `uploading` and the app still live; false otherwise. */
   finish(nickname: string, id: string): Promise<boolean>;
-  /** Gives a failed upload's room back: deletes its record (only while `uploading`) and takes it off the totals (not the day's uploads). */
+  /** Gives a failed upload's room back: turns its record into a tombstone (`deleted`, only while `uploading`, try 3) and takes it off the totals (not the day's uploads). */
   release(nickname: string, id: string, bytes: number, nowIso: string): Promise<void>;
   /** Turns the record into a tombstone (`deleted`) and takes it off the totals, only while it is as read; `conflict` when it changed. */
   remove(nickname: string, id: string, record: MediaRecord, nowIso: string): Promise<"deleted" | "conflict">;
@@ -281,16 +281,17 @@ async function quietly(work: () => Promise<unknown>): Promise<void> {
 async function putMedia(request: HttpRequest, nickname: string, id: string, writer: string, deps: AppMediaDeps): Promise<Answer> {
   const body = readBody(request);
   if (!body.ok) return body.answer;
-  const kind = detectMedia(body.bytes);
-  if (kind === undefined) return refuse(415, "unsupported-media-type", APP_MEDIA_MESSAGES.unsupported);
+  const found = inspectMedia(body.bytes);
+  if (found === undefined) return refuse(415, "unsupported-media-type", APP_MEDIA_MESSAGES.unsupported);
+  const kind = found.kind;
   if (kind !== "jpeg") {
     // At most 5 minutes (plus the margin), from the container's own timing; a length that cannot be read is refused.
     const seconds = recordingSeconds(body.bytes, kind);
     if (seconds === undefined) return { ...refuse(415, "unknown-length", APP_MEDIA_MESSAGES.unknownLength), kind };
     if (seconds > MAX_RECORDING_SECONDS + RECORDING_MARGIN_SECONDS) return { ...refuse(413, "recording-too-long", APP_MEDIA_MESSAGES.recordingTooLong), kind };
   }
-  // detectMedia accepted the JPEG, so stripping it succeeds; a recording's metadata is blanked in place (same size).
-  const file = kind === "jpeg" ? (stripJpegMetadata(body.bytes) as Buffer) : stripRecordingMetadata(body.bytes, kind);
+  // A photo was stripped once, while it was checked (try 3); a recording's metadata is blanked in place (same size).
+  const file = found.kind === "jpeg" ? found.photo : stripRecordingMetadata(body.bytes, found.kind);
   const contentType = MEDIA_CONTENT_TYPES[kind];
   const sized = { bytes: file.length, kind };
   for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt += 1) {

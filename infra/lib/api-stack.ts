@@ -851,7 +851,8 @@ export class ApiStack extends Stack {
     appMedia.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
-        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        // No DeleteItem (try 3): every end of a record is a tombstone (`deleted`), so the id is never freed.
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
         resources: [this.table.tableArn],
         conditions: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPMEDIA#*"] },

@@ -101,7 +101,8 @@ export class FakeAppMediaStore implements AppMediaStore {
     const record = this.records.get(FakeAppMediaStore.id(nickname, id));
     const usage = this.usage.get(nickname.toLowerCase());
     if (record?.status !== "uploading" || usage === undefined) return;
-    this.records.delete(FakeAppMediaStore.id(nickname, id));
+    // A tombstone (try 3): the id stays taken.
+    record.status = "deleted";
     usage.bytes -= bytes;
     usage.files -= 1;
   }

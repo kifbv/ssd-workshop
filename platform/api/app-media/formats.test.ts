@@ -1,8 +1,10 @@
 // Ticket 3.18: the media checks on the bytes themselves (criteria 3 and 4). Real encoder output (Chromium's JPEG and
 // MediaRecorder's WebM) and the decoding of a stripped photo are proved in browser.test.ts.
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { exifWithGps, fragmentedMp4, jpegOfSize, mp4OfSize, mp4TitleBox, mp4WithSampleTable, oggOfSize, PNG_SIGNATURE, segment, webmOfSize, webmTags, xmpWithGps } from "./fixtures.js";
-import { detectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripJpegMetadata, stripRecordingMetadata } from "./formats.js";
+import { exifWithGps, filler, fragmentedMp4, jpegOfSize, mp4OfSize, mp4TitleBox, mp4WithSampleTable, oggOfSize, PNG_SIGNATURE, segment, webmOfSize, webmTags, xmpWithGps } from "./fixtures.js";
+import { detectMedia, inspectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripJpegMetadata, stripRecordingMetadata } from "./formats.js";
 
 const KB = 1024;
 
@@ -247,4 +249,70 @@ describe("try 2: a recording's metadata is blanked in place", () => {
     const ogg = oggOfSize(10 * KB);
     expect(stripRecordingMetadata(ogg, "ogg").equals(ogg)).toBe(true);
   });
+});
+
+describe("try 3: APP0 and APP14 are kept only when they are JFIF and Adobe's", () => {
+  const jfif = segment(0xe0, Buffer.from("JFIF\0\x01\x02\0\0\x01\0\x01\0\0", "latin1"));
+  const adobe = segment(0xee, Buffer.from("Adobe\0\x64\0\0\0\0\x01", "latin1"));
+  /** A JPEG whose APP0 (right after SOI) is `app0`, then `extra`. */
+  const photoWith = (app0: Buffer, extra: Buffer[]): Buffer => {
+    const plain = jpegOfSize(6 * KB, extra);
+    // jpegOfSize's own APP0 (JFIF, 18 bytes) follows SOI: replace it.
+    return Buffer.concat([plain.subarray(0, 2), app0, plain.subarray(2 + jfif.length)]);
+  };
+
+  it("drops a JFXX APP0 (its own thumbnail), an APP0 with text and a location, and an APP14 that is not Adobe's", () => {
+    const jfxx = segment(0xe0, Buffer.concat([Buffer.from("JFXX\0\x10", "latin1"), filler(300, 5)]));
+    const textApp0 = segment(0xe0, Buffer.from("GPS 48.8566 N 2.3522 E taken at home", "latin1"));
+    const almostJfif = segment(0xe0, Buffer.from("JFIF", "latin1"));
+    const otherApp14 = segment(0xee, Buffer.from("Adobf location Paris", "latin1"));
+    const shortApp14 = segment(0xee, Buffer.from("Ado", "latin1"));
+    const photo = photoWith(jfxx, [textApp0, almostJfif, otherApp14, shortApp14]);
+    const kept = stripJpegMetadata(photo) as Buffer;
+    expect(kept).toBeDefined();
+    for (const gone of ["JFXX", "GPS", "taken at home", "Adobf", "Paris", "Ado"]) expect(kept.includes(Buffer.from(gone)), gone).toBe(false);
+    expect(kept.includes(filler(300, 5))).toBe(false);
+    expect(markers(kept)).toEqual([0xdb, 0xc0, 0xc4, 0xda]);
+    expect(kept.length).toBe(photo.length - [jfxx, textApp0, almostJfif, otherApp14, shortApp14].reduce((n, s) => n + s.length, 0));
+    expect(detectMedia(kept)).toBe("jpeg");
+  });
+
+  it("keeps a real JFIF APP0 and a real Adobe APP14, byte for byte", () => {
+    const photo = photoWith(jfif, [adobe]);
+    const kept = stripJpegMetadata(photo) as Buffer;
+    expect(kept.equals(photo)).toBe(true);
+    expect(markers(kept)).toEqual([0xe0, 0xee, 0xdb, 0xc0, 0xc4, 0xda]);
+  });
+});
+
+describe("try 3: hostile files stay within time and memory", () => {
+  it("inspectMedia returns the photo stripped once, the same bytes stripJpegMetadata gives", () => {
+    const photo = jpegOfSize(20 * KB, [exifWithGps(), xmpWithGps()]);
+    const found = inspectMedia(photo);
+    expect(found?.kind).toBe("jpeg");
+    expect(found?.kind === "jpeg" && found.photo.equals(stripJpegMetadata(photo) as Buffer)).toBe(true);
+    expect(inspectMedia(webmOfSize(2000))).toEqual({ kind: "webm" });
+    expect(inspectMedia(PNG_SIGNATURE)).toBeUndefined();
+  });
+
+  // Each case runs in a child process under a 32 MB JavaScript heap (try 2's walks ran out of heap there: one Buffer per
+  // restart marker or segment, one object per EBML element or MP4 box, 2 million of them) and reports its peak memory.
+  const probe = fileURLToPath(new URL("./hostile-probe.ts", import.meta.url));
+  it.each([
+    ["restarts", "jpeg"],
+    ["segments", "jpeg"],
+    ["webm", "webm"],
+    ["mp4", "mp4"],
+  ])("4 MB of tiny parts (%s): checked, measured and stripped in under 2 s with under 100 MB more memory", (which, kind) => {
+    const run = spawnSync(process.execPath, ["--max-old-space-size=32", "--import", "tsx", probe, which], { encoding: "utf8", timeout: 30_000 });
+    expect(run.status, run.stderr).toBe(0);
+    const result = JSON.parse(run.stdout) as { kind: string; bytes: number; ms: number; peakGrowthMb: number; inputBytes: number; seconds?: number };
+    expect(result.kind).toBe(kind);
+    expect(result.inputBytes).toBeGreaterThan(4_000_000);
+    if (kind === "jpeg") expect(result.bytes).toBe(result.inputBytes);
+    if (kind === "webm") expect(result.seconds).toBeCloseTo(7, 3);
+    if (kind === "mp4") expect(result.seconds).toBeCloseTo(10, 3);
+    expect(result.ms).toBeLessThan(2000);
+    expect(result.peakGrowthMb).toBeLessThan(100);
+  }, 60_000);
 });

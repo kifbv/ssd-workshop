@@ -30,6 +30,7 @@ import {
 } from "./api-stack.js";
 import { APP_DATA_ROUTES as APP_DATA_ROUTE_KEYS, PREFLIGHT_HEADERS } from "../../platform/api/app-data/data.js";
 import { STALE_PENDING_SECONDS } from "../../platform/api/conversation/state.js";
+import { readBearerToken } from "../../platform/api/app-token/token.js";
 import { WRITE_RESERVE_MS } from "../../platform/api/handlers/ai-worker.js";
 import { CONVERSATION_ROUTES as CONVERSATION_ROUTE_KEYS } from "../../platform/api/conversation/conversation.js";
 import { buildApp } from "./app.js";
@@ -156,6 +157,10 @@ import {
   WAF_MEDIA_PATH_PREFIX,
   WAF_MEDIA_RATE_LIMIT,
   WAF_MEDIA_RATE_RULE_NAME,
+  WAF_MEDIA_WRITE_RATE_BODY,
+  WAF_MEDIA_WRITE_RATE_BODY_KEY,
+  WAF_MEDIA_WRITE_RATE_LIMIT,
+  WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
 } from "./config.js";
@@ -3680,11 +3685,12 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(resource.Properties).toMatchObject({ Name: WEB_ACL_NAME, Scope: "CLOUDFRONT", DefaultAction: { Allow: {} } });
     expect(WEB_ACL_NAME).toBe("ssd-workshop-edge");
     expect(tagsOf(resource)[TAG_KEY]).toBe(TAG_VALUE);
-    expect(resource.Properties?.VisibilityConfig).toEqual({ CloudWatchMetricsEnabled: true, MetricName: WEB_ACL_NAME, SampledRequestsEnabled: true });    // WAF's own pattern for a description (no ";": try 2's first wording failed cdk's validation).
+    expect(resource.Properties?.VisibilityConfig).toEqual({ CloudWatchMetricsEnabled: true, MetricName: WEB_ACL_NAME, SampledRequestsEnabled: true });
+    // WAF's own pattern for a description (no ";": try 2's first wording failed cdk's validation).
     expect(resource.Properties?.Description).toMatch(/^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+[a-zA-Z0-9+=:#@/\-,.]{1,256}$/);
   });
 
-  it("has exactly three rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401", () => {
+  it("has exactly four rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401; try 3: at most 150 uploads per address in 5 minutes", () => {
     const rules = acl()[2].Properties?.Rules as Record<string, unknown>[];
     expect(rules).toEqual([
       {
@@ -3756,11 +3762,12 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
               {
                 NotStatement: {
                   Statement: {
+                    // Try 3: lower-cased first, so `bearer x` and `BEARER x` pass on as checkAppWrite accepts them.
                     ByteMatchStatement: {
                       FieldToMatch: { SingleHeader: { Name: "authorization" } },
                       PositionalConstraint: "STARTS_WITH",
-                      SearchString: "Bearer ",
-                      TextTransformations: [{ Priority: 0, Type: "NONE" }],
+                      SearchString: "bearer ",
+                      TextTransformations: [{ Priority: 0, Type: "LOWERCASE" }],
                     },
                   },
                 },
@@ -3770,13 +3777,50 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
         },
         VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_AUTH_RULE_NAME, SampledRequestsEnabled: true },
       },
+      {
+        Name: WAF_MEDIA_WRITE_RATE_RULE_NAME,
+        Priority: 3,
+        Action: {
+          Block: {
+            CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: WAF_MEDIA_WRITE_RATE_BODY_KEY, ResponseHeaders: [{ Name: "access-control-allow-origin", Value: "*" }] },
+          },
+        },
+        Statement: {
+          RateBasedStatement: {
+            Limit: 150,
+            EvaluationWindowSec: 300,
+            AggregateKeyType: "IP",
+            ScopeDownStatement: {
+              AndStatement: {
+                Statements: [
+                  { ByteMatchStatement: { FieldToMatch: { Method: {} }, PositionalConstraint: "EXACTLY", SearchString: "PUT", TextTransformations: [{ Priority: 0, Type: "NONE" }] } },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+                  },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }] },
+                  },
+                ],
+              },
+            },
+          },
+        },
+        VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_WRITE_RATE_RULE_NAME, SampledRequestsEnabled: true },
+      },
     ]);
+    // Try 3: one address (a made-up `Bearer x` passes the junk filter) can no longer hold the shared 2/s upload
+    // throttle at 429 for every app: 150 per 5 minutes is 0.5/s, so filling the throttle takes at least 4 addresses.
+    expect(WAF_MEDIA_WRITE_RATE_RULE_NAME).toBe("ssd-workshop-media-write-rate");
+    expect(WAF_MEDIA_WRITE_RATE_LIMIT).toBe(150);
+    expect(WAF_MEDIA_WRITE_RATE_LIMIT / WAF_RATE_WINDOW_SECONDS).toBeLessThan(APP_MEDIA_UPLOAD_THROTTLE.rateLimit / 3);
+    expect(JSON.parse(WAF_MEDIA_WRITE_RATE_BODY)).toEqual({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
     expect(WAF_MEDIA_AUTH_RULE_NAME).toBe("ssd-workshop-media-auth");
     // The same answer as the media API's own 401 (workshop-data.js shows `message`).
     expect(JSON.parse(WAF_MEDIA_AUTH_BODY)).toEqual({ message: APP_MEDIA_MESSAGES.signInToSave });
     expect(WAF_MEDIA_AUTH_STATUS).toBe(401);
-    // The token header the media API reads is exactly `Bearer <token>` (3.24's checkAppWrite).
-    expect(WAF_BEARER_PREFIX).toBe("Bearer ");
+    // checkAppWrite (3.24) reads `Bearer <token>` in any case (`/^Bearer .../i`): the filter compares lower-cased (try 3).
+    expect(WAF_BEARER_PREFIX).toBe("bearer ");
+    for (const scheme of ["Bearer", "bearer", "BEARER"]) expect(readBearerToken({ headers: { authorization: `${scheme} ${"a".repeat(43)}` } } as never), scheme).toBe("a".repeat(43));
     expect(WAF_MEDIA_RATE_RULE_NAME).toBe("ssd-workshop-media-rate");
     expect(WAF_MEDIA_PATH_PREFIX).toBe("/app-media/");
     // Try 2 (cost, accepted by Franck 2026-11-26): 3,000. A room behind one venue address, each person opening ~60
@@ -3789,6 +3833,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(acl()[2].Properties?.CustomResponseBodies).toEqual({
       [WAF_BLOCK_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_BLOCK_BODY },
       [WAF_MEDIA_AUTH_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_MEDIA_AUTH_BODY },
+      [WAF_MEDIA_WRITE_RATE_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_MEDIA_WRITE_RATE_BODY },
     });
     expect(JSON.parse(WAF_BLOCK_BODY)).toEqual({ message: "Too Many Requests" });
     // A room behind one venue address must never reach it: ~45 people polling every 2 s (150 requests per 5 minutes
@@ -4064,7 +4109,9 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
       },
       {
         Effect: "Allow",
-        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        // Try 3: no DeleteItem. A failed upload and a DELETE both leave a tombstone, so the function never deletes a
+        // record (only the reset, with Franck's credentials, does), and an id can never be freed for other bytes.
+        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPMEDIA#*"] },

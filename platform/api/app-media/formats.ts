@@ -17,14 +17,26 @@ export const MEDIA_CONTENT_TYPES: Record<MediaKind, string> = {
   mp4: "audio/mp4",
 };
 
-/** The kind of these bytes, or undefined when they are none of the accepted formats. */
-export function detectMedia(bytes: Buffer): MediaKind | undefined {
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return stripJpegMetadata(bytes) === undefined ? undefined : "jpeg";
-  if (bytes.length >= 4 && bytes.readUInt32BE(0) === 0x1a45dfa3) return isWebmAudio(bytes) ? "webm" : undefined;
-  if (bytes.length >= 4 && bytes.toString("latin1", 0, 4) === "OggS") return isOggOpus(bytes) ? "ogg" : undefined;
-  if (bytes.length >= 8 && bytes.toString("latin1", 4, 8) === "ftyp") return isMp4Audio(bytes) ? "mp4" : undefined;
+/** What `inspectMedia` found: a photo comes with its copy without metadata, made once (try 3). */
+export type InspectedMedia = { kind: "jpeg"; photo: Buffer } | { kind: RecordingKind };
+
+/**
+ * The kind of these bytes, or undefined when they are none of the accepted formats. Checking a JPEG means walking it
+ * whole, which is also how its metadata is removed: the stripped photo is returned with it, so the API walks it once.
+ */
+export function inspectMedia(bytes: Buffer): InspectedMedia | undefined {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    const photo = stripJpegMetadata(bytes);
+    return photo === undefined ? undefined : { kind: "jpeg", photo };
+  }
+  if (bytes.length >= 4 && bytes.readUInt32BE(0) === 0x1a45dfa3) return isWebmAudio(bytes) ? { kind: "webm" } : undefined;
+  if (bytes.length >= 4 && bytes.toString("latin1", 0, 4) === "OggS") return isOggOpus(bytes) ? { kind: "ogg" } : undefined;
+  if (bytes.length >= 8 && bytes.toString("latin1", 4, 8) === "ftyp") return isMp4Audio(bytes) ? { kind: "mp4" } : undefined;
   return undefined;
 }
+
+/** The kind of these bytes, or undefined when they are none of the accepted formats. */
+export const detectMedia = (bytes: Buffer): MediaKind | undefined => inspectMedia(bytes)?.kind;
 
 // ---- JPEG ----
 
@@ -45,16 +57,21 @@ const PICTURE_SEGMENTS = new Set([0xc4, 0xcc, 0xdb, 0xdc, 0xdd, SOS]);
 
 /**
  * The segments that are kept (an allow-list, ticket 3.18 try 2): the picture's own (frames SOFn, DHT, DAC, DQT, DNL,
- * DRI, SOS; restart markers, SOI and EOI are handled apart) and three metadata segments: APP0 (JFIF), APP2 only when it
- * is an ICC colour profile (an MPF APP2 points at the extra pictures after the end, which are dropped) and APP14 (Adobe:
- * how to read the colours). Everything else goes: every other APPn (APP1 Exif and XMP with the location, APP13 IPTC,
+ * DRI, SOS; restart markers, SOI and EOI are handled apart) and three metadata segments, each only by its identifier:
+ * APP0 only when it is JFIF (`JFIF\0`; a JFXX extension holds a thumbnail, try 3), APP2 only when it is an ICC colour
+ * profile (an MPF APP2 points at the extra pictures after the end, which are dropped) and APP14 only when it is Adobe's
+ * (`Adobe`: how to read the colours). Everything else goes: every other APPn (APP1 Exif and XMP with the location, APP13 IPTC,
  * makers' own), comments (COM), JPG and JPGn extensions (C8, F0 to FD), DHP and EXP (hierarchical JPEG, which browsers
  * do not decode) and reserved markers (02 to BF), any of which could carry text.
  */
-function keepSegment(marker: number, data: Buffer): boolean {
+function keepSegment(marker: number, bytes: Buffer, dataStart: number, dataEnd: number): boolean {
   if (isFrame(marker) || PICTURE_SEGMENTS.has(marker)) return true;
-  if (marker === APP0 || marker === APP14) return true;
-  if (marker === APP2) return data.toString("latin1", 0, 12) === "ICC_PROFILE\0";
+  // Each by its identifier, never by its marker alone (try 3): an APP0 that is JFXX (an extension with its own
+  // thumbnail) or anything else, or an APP14 that is not Adobe's, could carry any text, a location included.
+  const startsWith = (id: string): boolean => dataEnd - dataStart >= id.length && bytes.toString("latin1", dataStart, dataStart + id.length) === id;
+  if (marker === APP0) return startsWith("JFIF\0");
+  if (marker === APP14) return startsWith("Adobe");
+  if (marker === APP2) return startsWith("ICC_PROFILE\0");
   return false;
 }
 
@@ -62,28 +79,43 @@ function keepSegment(marker: number, data: Buffer): boolean {
  * The JPEG without its metadata (see keepSegment) and without anything after its end (EOI): the same picture, which
  * still decodes. Undefined when the bytes are not a whole JPEG: no SOI, a segment running past the end, no frame,
  * no scan, or no EOI.
+ *
+ * Memory (try 3): the walk only notes the kept byte ranges, merging touching ones (millions of restart markers or tiny
+ * segments are one range), then copies them once into a buffer of the final size: never one object per segment.
  */
 export function stripJpegMetadata(bytes: Buffer): Buffer | undefined {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== SOI) return undefined;
-  const kept: Buffer[] = [bytes.subarray(0, 2)];
+  // Kept ranges as [start, end) pairs, flat.
+  const ranges: number[] = [];
+  let total = 0;
+  const keep = (start: number, end: number): void => {
+    if (end <= start) return;
+    total += end - start;
+    if (ranges.length > 0 && ranges[ranges.length - 1] === start) ranges[ranges.length - 1] = end;
+    else ranges.push(start, end);
+  };
+  keep(0, 2);
   let pos = 2;
   let frame = false;
   let scan = false;
   while (pos < bytes.length) {
     if (bytes[pos] !== 0xff) return undefined;
-    // Fill bytes (FF FF ...) before a marker.
+    // Fill bytes (FF FF ...) before a marker: dropped, the kept marker is the last FF and the marker byte.
     let at = pos + 1;
     while (at < bytes.length && bytes[at] === 0xff) at += 1;
     if (at >= bytes.length) return undefined;
     const marker = bytes[at] as number;
     if (marker === EOI) {
       if (!frame || !scan) return undefined;
-      kept.push(Buffer.from([0xff, EOI]));
-      return Buffer.concat(kept);
+      keep(at - 1, at + 1);
+      const out = Buffer.allocUnsafe(total);
+      let written = 0;
+      for (let i = 0; i < ranges.length; i += 2) written += bytes.copy(out, written, ranges[i] as number, ranges[i + 1] as number);
+      return out;
     }
     if (marker === SOI || marker === 0x00) return undefined;
     if (isStandalone(marker)) {
-      if (isRestart(marker)) kept.push(Buffer.from([0xff, marker]));
+      if (isRestart(marker)) keep(at - 1, at + 1);
       pos = at + 1;
       continue;
     }
@@ -91,13 +123,13 @@ export function stripJpegMetadata(bytes: Buffer): Buffer | undefined {
     const length = bytes.readUInt16BE(at + 1);
     const end = at + 1 + length;
     if (length < 2 || end > bytes.length) return undefined;
-    const data = bytes.subarray(at + 3, end);
+    const dataStart = at + 3;
     if (isFrame(marker)) {
       // Precision, height, width, components: a frame of at least 1 x 1 with at least one component.
-      if (data.length < 6 || data.readUInt16BE(1) === 0 || data.readUInt16BE(3) === 0 || data[5] === 0) return undefined;
+      if (end - dataStart < 6 || bytes.readUInt16BE(dataStart + 1) === 0 || bytes.readUInt16BE(dataStart + 3) === 0 || bytes[dataStart + 5] === 0) return undefined;
       frame = true;
     }
-    if (keepSegment(marker, data)) kept.push(Buffer.concat([Buffer.from([0xff, marker]), bytes.subarray(at + 1, end)]));
+    if (keepSegment(marker, bytes, dataStart, end)) keep(at - 1, end);
     pos = end;
     if (marker === SOS) {
       if (!frame) return undefined;
@@ -112,7 +144,7 @@ export function stripJpegMetadata(bytes: Buffer): Buffer | undefined {
           i += next === 0xff ? 1 : 2;
         } else i += 1;
       }
-      kept.push(bytes.subarray(pos, i));
+      keep(pos, i);
       pos = i;
     }
   }
@@ -158,18 +190,30 @@ function readElement(bytes: Buffer, pos: number, limit: number): Element | undef
   return { id: id.value as number, dataStart, dataEnd };
 }
 
-/** The child elements of [start, end); an element of unknown size ends the list (it runs to the end). */
-function children(bytes: Buffer, start: number, end: number): Element[] | undefined {
-  const found: Element[] = [];
+/**
+ * Calls `visit` on each child element of [start, end), in order, without building a list (try 3: a crafted file can
+ * hold millions of two-byte children); an element of unknown size is the last (it runs to the end). False when an
+ * element is broken or `visit` returns false (which stops the walk); true when every child was visited.
+ */
+function eachChild(bytes: Buffer, start: number, end: number, visit: (el: Element) => boolean): boolean {
   let pos = start;
   while (pos < end) {
     const el = readElement(bytes, pos, end);
-    if (el === undefined) return undefined;
-    found.push(el);
-    if (el.dataEnd === undefined) return found;
+    if (el === undefined || !visit(el)) return false;
+    if (el.dataEnd === undefined) return true;
     pos = el.dataEnd;
   }
-  return found;
+  return true;
+}
+
+/** The first child with this id, when every child is whole (as a list's `find` after a full read would give it). */
+function firstChild(bytes: Buffer, start: number, end: number, id: number): Element | undefined {
+  let found: Element | undefined;
+  const whole = eachChild(bytes, start, end, (el) => {
+    if (found === undefined && el.id === id) found = el;
+    return true;
+  });
+  return whole ? found : undefined;
 }
 
 const EBML_HEADER = 0x1a45dfa3;
@@ -186,7 +230,7 @@ const AUDIO_TRACK = 2;
 function isWebmAudio(bytes: Buffer): boolean {
   const header = readElement(bytes, 0, bytes.length);
   if (header?.id !== EBML_HEADER || header.dataEnd === undefined) return false;
-  const docType = children(bytes, header.dataStart, header.dataEnd)?.find((el) => el.id === DOC_TYPE);
+  const docType = firstChild(bytes, header.dataStart, header.dataEnd, DOC_TYPE);
   if (docType?.dataEnd === undefined || bytes.toString("latin1", docType.dataStart, docType.dataEnd) !== "webm") return false;
   const segment = readElement(bytes, header.dataEnd, bytes.length);
   if (segment?.id !== SEGMENT) return false;
@@ -203,16 +247,17 @@ function isWebmAudio(bytes: Buffer): boolean {
 }
 
 function tracksAreOpusAudio(bytes: Buffer, start: number, end: number): boolean {
-  const entries = children(bytes, start, end)?.filter((el) => el.id === TRACK_ENTRY);
-  if (entries === undefined || entries.length === 0) return false;
-  return entries.every((entry) => {
+  let entries = 0;
+  const whole = eachChild(bytes, start, end, (entry) => {
+    if (entry.id !== TRACK_ENTRY) return true;
+    entries += 1;
     if (entry.dataEnd === undefined) return false;
-    const fields = children(bytes, entry.dataStart, entry.dataEnd);
-    const type = fields?.find((el) => el.id === TRACK_TYPE);
-    const codec = fields?.find((el) => el.id === CODEC_ID);
+    const type = firstChild(bytes, entry.dataStart, entry.dataEnd, TRACK_TYPE);
+    const codec = firstChild(bytes, entry.dataStart, entry.dataEnd, CODEC_ID);
     if (type?.dataEnd === undefined || codec?.dataEnd === undefined) return false;
     return bytes.readUIntBE(type.dataStart, Math.min(6, Math.max(1, type.dataEnd - type.dataStart))) === AUDIO_TRACK && bytes.toString("latin1", codec.dataStart, codec.dataEnd) === "A_OPUS";
   });
+  return whole && entries > 0;
 }
 
 // ---- Ogg ----
@@ -247,40 +292,66 @@ interface Box {
   end: number;
 }
 
-/** The boxes in [start, end); undefined when one runs past the end. */
-function boxes(bytes: Buffer, start: number, end: number): Box[] | undefined {
-  const found: Box[] = [];
+/**
+ * Calls `visit` on each box in [start, end), in order, without building a list (try 3: a crafted file can hold half
+ * a million 8-byte boxes). False when a box runs past the end or `visit` returns false (which stops the walk); true
+ * when every box was visited and they fill [start, end) exactly.
+ */
+function eachBox(bytes: Buffer, start: number, end: number, visit: (box: Box) => boolean): boolean {
   let pos = start;
   while (pos + 8 <= end) {
     let size = bytes.readUInt32BE(pos);
     const type = bytes.toString("latin1", pos + 4, pos + 8);
     let header = 8;
     if (size === 1) {
-      if (pos + 16 > end) return undefined;
+      if (pos + 16 > end) return false;
       size = Number(bytes.readBigUInt64BE(pos + 8));
       header = 16;
     } else if (size === 0) size = end - pos;
-    if (size < header || pos + size > end) return undefined;
-    found.push({ type, at: pos, start: pos + header, end: pos + size });
+    if (size < header || pos + size > end) return false;
+    if (!visit({ type, at: pos, start: pos + header, end: pos + size })) return false;
     pos += size;
   }
-  return pos === end ? found : undefined;
+  return pos === end;
+}
+
+/** Whether the boxes in [start, end) are all whole. */
+const wholeBoxes = (bytes: Buffer, start: number, end: number): boolean => eachBox(bytes, start, end, () => true);
+
+/** The first box of this type in [start, end), when every box there is whole. */
+function firstBox(bytes: Buffer, start: number, end: number, type: string): Box | undefined {
+  let found: Box | undefined;
+  const whole = eachBox(bytes, start, end, (box) => {
+    if (found === undefined && box.type === type) found = box;
+    return true;
+  });
+  return whole ? found : undefined;
 }
 
 const child = (bytes: Buffer, parent: Box | undefined, type: string): Box | undefined =>
-  parent === undefined ? undefined : boxes(bytes, parent.start, parent.end)?.find((b) => b.type === type);
+  parent === undefined ? undefined : firstBox(bytes, parent.start, parent.end, type);
+
+/** Calls `visit` on each box of this type in `parent`, when all its boxes are whole; false when one is not or `visit` says so. */
+function eachChildBox(bytes: Buffer, parent: Box, type: string, visit: (box: Box) => boolean): boolean {
+  return wholeBoxes(bytes, parent.start, parent.end) && eachBox(bytes, parent.start, parent.end, (box) => box.type !== type || visit(box));
+}
 
 /** Audio sample entries in an MP4: AAC (`mp4a`) and Opus (`Opus`), as phone browsers record them. */
 const MP4_AUDIO_ENTRIES = ["mp4a", "Opus"];
 
 /** An MP4 (`ftyp` first) whose `moov` holds at least one track, every one a sound track (`soun`) of AAC or Opus. */
 function isMp4Audio(bytes: Buffer): boolean {
-  const top = boxes(bytes, 0, bytes.length);
-  if (top === undefined || top[0]?.type !== "ftyp") return false;
-  const moov = top.find((b) => b.type === "moov");
-  const tracks = moov === undefined ? undefined : boxes(bytes, moov.start, moov.end)?.filter((b) => b.type === "trak");
-  if (tracks === undefined || tracks.length === 0) return false;
-  return tracks.every((trak) => {
+  let first: string | undefined;
+  const whole = eachBox(bytes, 0, bytes.length, (box) => {
+    first ??= box.type;
+    return true;
+  });
+  if (!whole || first !== "ftyp") return false;
+  const moov = firstBox(bytes, 0, bytes.length, "moov");
+  if (moov === undefined) return false;
+  let tracks = 0;
+  const allAudio = eachChildBox(bytes, moov, "trak", (trak) => {
+    tracks += 1;
     const mdia = child(bytes, trak, "mdia");
     const hdlr = child(bytes, mdia, "hdlr");
     // hdlr: version and flags (4), pre_defined (4), handler_type (4).
@@ -288,9 +359,14 @@ function isMp4Audio(bytes: Buffer): boolean {
     const stsd = child(bytes, child(bytes, child(bytes, mdia, "minf"), "stbl"), "stsd");
     // stsd: version and flags (4), entry count (4), then the sample entries (boxes).
     if (stsd === undefined || stsd.end - stsd.start < 8 || bytes.readUInt32BE(stsd.start + 4) < 1) return false;
-    const entries = boxes(bytes, stsd.start + 8, stsd.end);
-    return entries !== undefined && entries.length > 0 && entries.every((entry) => MP4_AUDIO_ENTRIES.includes(entry.type));
+    let entries = 0;
+    const audio = eachBox(bytes, stsd.start + 8, stsd.end, (entry) => {
+      entries += 1;
+      return MP4_AUDIO_ENTRIES.includes(entry.type);
+    });
+    return audio && entries > 0;
   });
+  return allAudio && tracks > 0;
 }
 
 // ---- Recording length (ticket 3.18 try 2) ----
@@ -356,11 +432,24 @@ function webmSeconds(bytes: Buffer): number | undefined {
     if (el.dataEnd === undefined) return undefined;
     const size = el.dataEnd - el.dataStart;
     if (el.id === INFO) {
-      for (const field of children(bytes, el.dataStart, el.dataEnd) ?? []) {
-        if (field.dataEnd === undefined) return undefined;
+      // Read as before try 3 (a broken Info is ignored, a field of unknown size refuses the file), without a list.
+      let infoScale = scale;
+      let infoDeclared = declared;
+      let unknownSize = false;
+      const whole = eachChild(bytes, el.dataStart, el.dataEnd, (field) => {
+        if (field.dataEnd === undefined) {
+          unknownSize = true;
+          return true;
+        }
         const length = field.dataEnd - field.dataStart;
-        if (field.id === TIMECODE_SCALE && length >= 1 && length <= 8) scale = readUnsigned(bytes, field.dataStart, length);
-        if (field.id === DURATION && (length === 4 || length === 8)) declared = length === 4 ? bytes.readFloatBE(field.dataStart) : bytes.readDoubleBE(field.dataStart);
+        if (field.id === TIMECODE_SCALE && length >= 1 && length <= 8) infoScale = readUnsigned(bytes, field.dataStart, length);
+        if (field.id === DURATION && (length === 4 || length === 8)) infoDeclared = length === 4 ? bytes.readFloatBE(field.dataStart) : bytes.readDoubleBE(field.dataStart);
+        return true;
+      });
+      if (whole) {
+        if (unknownSize) return undefined;
+        scale = infoScale;
+        declared = infoDeclared;
       }
     } else if (el.id === CLUSTER_TIMECODE) {
       if (size < 1 || size > 8) return undefined;
@@ -432,96 +521,104 @@ function scaleAndDuration(bytes: Buffer, box: Box): { scale: number; duration: n
 }
 
 function mp4Seconds(bytes: Buffer): number | undefined {
-  const top = boxes(bytes, 0, bytes.length);
-  const moov = top?.find((b) => b.type === "moov");
-  if (top === undefined || moov === undefined) return undefined;
-  const moovChildren = boxes(bytes, moov.start, moov.end);
-  if (moovChildren === undefined) return undefined;
+  // Every walk below goes box by box without building a list (try 3); a list that is not whole gives up as before.
+  const moov = firstBox(bytes, 0, bytes.length, "moov");
+  if (moov === undefined || !wholeBoxes(bytes, moov.start, moov.end)) return undefined;
   let seconds: number | undefined;
   const consider = (units: number | undefined, scale: number): void => {
     if (units !== undefined && scale > 0) seconds = larger(seconds, units / scale);
   };
-  const mvhd = moovChildren.find((b) => b.type === "mvhd");
+  const mvhd = child(bytes, moov, "mvhd");
   const movie = mvhd === undefined ? undefined : scaleAndDuration(bytes, mvhd);
   if (movie !== undefined) consider(movie.duration, movie.scale);
   const trackScale = new Map<number, number>();
   const trackDefault = new Map<number, number>();
-  for (const trak of moovChildren.filter((b) => b.type === "trak")) {
+  const tracksRead = eachChildBox(bytes, moov, "trak", (trak) => {
     const tkhd = child(bytes, trak, "tkhd");
     const mdia = child(bytes, trak, "mdia");
     const mdhd = child(bytes, mdia, "mdhd");
-    if (tkhd === undefined || mdhd === undefined) return undefined;
+    if (tkhd === undefined || mdhd === undefined) return false;
     const idAt = tkhd.start + (fullBoxVersion(bytes, tkhd) === 1 ? 20 : 12);
     const media = scaleAndDuration(bytes, mdhd);
-    if (idAt + 4 > tkhd.end || media === undefined) return undefined;
+    if (idAt + 4 > tkhd.end || media === undefined) return false;
     trackScale.set(bytes.readUInt32BE(idAt), media.scale);
     consider(media.duration, media.scale);
     // A plain file's sample table: entry count, then (sample count, sample duration) pairs.
     const stts = child(bytes, child(bytes, child(bytes, mdia, "minf"), "stbl"), "stts");
     if (stts !== undefined && stts.start + 8 <= stts.end) {
       const entries = bytes.readUInt32BE(stts.start + 4);
-      if (stts.start + 8 + entries * 8 > stts.end) return undefined;
+      if (stts.start + 8 + entries * 8 > stts.end) return false;
       let units = 0;
       for (let i = 0; i < entries; i += 1) units += bytes.readUInt32BE(stts.start + 8 + i * 8) * bytes.readUInt32BE(stts.start + 12 + i * 8);
       if (entries > 0) consider(units, media.scale);
     }
-  }
-  const mvex = moovChildren.find((b) => b.type === "mvex");
-  for (const box of (mvex === undefined ? [] : boxes(bytes, mvex.start, mvex.end)) ?? []) {
-    if (box.type === "mehd" && movie !== undefined) {
-      const length = fullBoxVersion(bytes, box) === 1 ? 8 : 4;
-      if (box.start + 4 + length > box.end) return undefined;
-      const units = readUnsigned(bytes, box.start + 4, length);
-      if (units > 0) consider(units, movie.scale);
-    }
-    // trex: version and flags, track_ID, default_sample_description_index, default_sample_duration.
-    if (box.type === "trex") {
-      if (box.start + 16 > box.end) return undefined;
-      trackDefault.set(bytes.readUInt32BE(box.start + 4), bytes.readUInt32BE(box.start + 12));
-    }
+    return true;
+  });
+  if (!tracksRead) return undefined;
+  const mvex = child(bytes, moov, "mvex");
+  // A broken mvex is ignored (as before try 3); a cut mehd or trex in a whole one refuses the file.
+  if (mvex !== undefined && wholeBoxes(bytes, mvex.start, mvex.end)) {
+    const mvexRead = eachBox(bytes, mvex.start, mvex.end, (box) => {
+      if (box.type === "mehd" && movie !== undefined) {
+        const length = fullBoxVersion(bytes, box) === 1 ? 8 : 4;
+        if (box.start + 4 + length > box.end) return false;
+        const units = readUnsigned(bytes, box.start + 4, length);
+        if (units > 0) consider(units, movie.scale);
+      }
+      // trex: version and flags, track_ID, default_sample_description_index, default_sample_duration.
+      if (box.type === "trex") {
+        if (box.start + 16 > box.end) return false;
+        trackDefault.set(bytes.readUInt32BE(box.start + 4), bytes.readUInt32BE(box.start + 12));
+      }
+      return true;
+    });
+    if (!mvexRead) return undefined;
   }
   const trackEnd = new Map<number, number>();
-  for (const moof of top.filter((b) => b.type === "moof")) {
-    for (const traf of boxes(bytes, moof.start, moof.end)?.filter((b) => b.type === "traf") ?? []) {
-      const parts = boxes(bytes, traf.start, traf.end);
-      const tfhd = parts?.find((b) => b.type === "tfhd");
-      if (parts === undefined || tfhd === undefined || tfhd.start + 8 > tfhd.end) return undefined;
-      const tfhdFlags = bytes.readUInt32BE(tfhd.start) & 0xffffff;
-      const track = bytes.readUInt32BE(tfhd.start + 4);
-      const scale = trackScale.get(track);
-      if (scale === undefined) return undefined;
-      // tfhd's optional fields: base data offset (8), sample description index (4), then the default duration (4).
-      const defaultAt = tfhd.start + 8 + ((tfhdFlags & 0x01) !== 0 ? 8 : 0) + ((tfhdFlags & 0x02) !== 0 ? 4 : 0);
-      if ((tfhdFlags & 0x08) !== 0 && defaultAt + 4 > tfhd.end) return undefined;
-      const defaultDuration = (tfhdFlags & 0x08) !== 0 ? bytes.readUInt32BE(defaultAt) : trackDefault.get(track);
-      const tfdt = parts.find((b) => b.type === "tfdt");
-      let start = trackEnd.get(track) ?? 0;
-      if (tfdt !== undefined) {
-        const length = fullBoxVersion(bytes, tfdt) === 1 ? 8 : 4;
-        if (tfdt.start + 4 + length > tfdt.end) return undefined;
-        start = readUnsigned(bytes, tfdt.start + 4, length);
-      }
-      let units = 0;
-      for (const trun of parts.filter((b) => b.type === "trun")) {
-        if (trun.start + 8 > trun.end) return undefined;
-        const flags = bytes.readUInt32BE(trun.start) & 0xffffff;
-        const count = bytes.readUInt32BE(trun.start + 4);
-        // Optional data offset (4) and first sample flags (4), then per sample: duration, size, flags, composition offset.
-        const first = trun.start + 8 + ((flags & 0x01) !== 0 ? 4 : 0) + ((flags & 0x04) !== 0 ? 4 : 0);
-        const perSample = 4 * [0x100, 0x200, 0x400, 0x800].filter((bit) => (flags & bit) !== 0).length;
-        if (first + count * perSample > trun.end) return undefined;
-        if ((flags & 0x100) !== 0) {
-          for (let i = 0; i < count; i += 1) units += bytes.readUInt32BE(first + i * perSample);
-        } else if (count > 0) {
-          if (defaultDuration === undefined) return undefined;
-          units += count * defaultDuration;
-        }
-      }
-      trackEnd.set(track, start + units);
-      if (units > 0) consider(start + units, scale);
+  const fragment = (traf: Box): boolean => {
+    if (!wholeBoxes(bytes, traf.start, traf.end)) return false;
+    const tfhd = child(bytes, traf, "tfhd");
+    if (tfhd === undefined || tfhd.start + 8 > tfhd.end) return false;
+    const tfhdFlags = bytes.readUInt32BE(tfhd.start) & 0xffffff;
+    const track = bytes.readUInt32BE(tfhd.start + 4);
+    const scale = trackScale.get(track);
+    if (scale === undefined) return false;
+    // tfhd's optional fields: base data offset (8), sample description index (4), then the default duration (4).
+    const defaultAt = tfhd.start + 8 + ((tfhdFlags & 0x01) !== 0 ? 8 : 0) + ((tfhdFlags & 0x02) !== 0 ? 4 : 0);
+    if ((tfhdFlags & 0x08) !== 0 && defaultAt + 4 > tfhd.end) return false;
+    const defaultDuration = (tfhdFlags & 0x08) !== 0 ? bytes.readUInt32BE(defaultAt) : trackDefault.get(track);
+    const tfdt = child(bytes, traf, "tfdt");
+    let start = trackEnd.get(track) ?? 0;
+    if (tfdt !== undefined) {
+      const length = fullBoxVersion(bytes, tfdt) === 1 ? 8 : 4;
+      if (tfdt.start + 4 + length > tfdt.end) return false;
+      start = readUnsigned(bytes, tfdt.start + 4, length);
     }
-  }
-  return seconds;
+    let units = 0;
+    const runsRead = eachChildBox(bytes, traf, "trun", (trun) => {
+      if (trun.start + 8 > trun.end) return false;
+      const flags = bytes.readUInt32BE(trun.start) & 0xffffff;
+      const count = bytes.readUInt32BE(trun.start + 4);
+      // Optional data offset (4) and first sample flags (4), then per sample: duration, size, flags, composition offset.
+      const first = trun.start + 8 + ((flags & 0x01) !== 0 ? 4 : 0) + ((flags & 0x04) !== 0 ? 4 : 0);
+      const perSample = 4 * [0x100, 0x200, 0x400, 0x800].filter((bit) => (flags & bit) !== 0).length;
+      if (first + count * perSample > trun.end) return false;
+      if ((flags & 0x100) !== 0) {
+        for (let i = 0; i < count; i += 1) units += bytes.readUInt32BE(first + i * perSample);
+      } else if (count > 0) {
+        if (defaultDuration === undefined) return false;
+        units += count * defaultDuration;
+      }
+      return true;
+    });
+    if (!runsRead) return false;
+    trackEnd.set(track, start + units);
+    if (units > 0) consider(start + units, scale);
+    return true;
+  };
+  // A broken moof is skipped (as before try 3); a broken traf in a whole moof refuses the file.
+  const fragmentsRead = eachBox(bytes, 0, bytes.length, (moof) => moof.type !== "moof" || !wholeBoxes(bytes, moof.start, moof.end) || eachChildBox(bytes, moof, "traf", fragment));
+  return fragmentsRead ? seconds : undefined;
 }
 
 // ---- Recording metadata (ticket 3.18 try 2) ----
@@ -544,19 +641,25 @@ export function stripRecordingMetadata(bytes: Buffer, kind: RecordingKind): Buff
 const MP4_METADATA = ["udta", "meta"];
 
 function blankMp4Metadata(bytes: Buffer): void {
-  const blank = (list: Box[] | undefined): void => {
-    for (const box of list ?? []) {
-      if (!MP4_METADATA.includes(box.type)) continue;
-      bytes.write("free", box.at + 4, "latin1");
-      bytes.fill(0, box.start, box.end);
-    }
+  // Only in whole lists (a checked file's are), box by box (try 3); a box keeps its place and size.
+  const blankIn = (start: number, end: number): void => {
+    if (!wholeBoxes(bytes, start, end)) return;
+    eachBox(bytes, start, end, (box) => {
+      if (MP4_METADATA.includes(box.type)) {
+        bytes.write("free", box.at + 4, "latin1");
+        bytes.fill(0, box.start, box.end);
+      }
+      return true;
+    });
   };
-  const top = boxes(bytes, 0, bytes.length);
-  blank(top);
-  const moov = top?.find((b) => b.type === "moov");
-  const moovChildren = moov === undefined ? undefined : boxes(bytes, moov.start, moov.end);
-  blank(moovChildren);
-  for (const trak of moovChildren?.filter((b) => b.type === "trak") ?? []) blank(boxes(bytes, trak.start, trak.end));
+  blankIn(0, bytes.length);
+  const moov = firstBox(bytes, 0, bytes.length, "moov");
+  if (moov === undefined) return;
+  blankIn(moov.start, moov.end);
+  eachChildBox(bytes, moov, "trak", (trak) => {
+    blankIn(trak.start, trak.end);
+    return true;
+  });
 }
 
 /** Turns the element [start, end) into a Void element of the same total size, its content zeros. */

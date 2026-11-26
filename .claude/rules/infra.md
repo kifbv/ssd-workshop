@@ -337,4 +337,10 @@ paths:
   (`{ Name: "authorization" }`), and add header names (`SingleHeader.Name`, a custom response's `ResponseHeaders[].Name`)
   to the names test's `NOT_NAME_PATHS`. A WAF answer an app must read (3.18's media-auth 401) carries
   `access-control-allow-origin: *` in its custom response headers and the API's own JSON body (a custom response body).
+- A WAF junk filter on a header must agree with how the function parses it: `checkAppWrite` reads `Bearer` in any case,
+  so the filter compares after a `LOWERCASE` transformation with `bearer ` (3.18 try 3). A junk filter lets a made-up
+  token through, so a route throttle shared by every caller (API Gateway's per-route rate) can be held at 429 by one
+  address: add a per-address WAF rate rule scoped to that route (rate-based statement with a scope-down AND of method
+  and path; 3.18's `ssd-workshop-media-write-rate`, 150 per 5 minutes) so filling the shared throttle takes several
+  addresses.
 - A WAF web ACL's `Description` must match `^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+...$` (no `;`, no quotes): `cdk synth` prints only a warning (F3031) and the deploy would fail; the synth test checks it (ticket 3.18 try 2).

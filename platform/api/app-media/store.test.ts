@@ -57,6 +57,8 @@ function expectWithinIam(command: Sent | undefined): void {
       continue;
     }
     expect(item.pk).toBe("APPMEDIA#ada-42");
+    // Try 3: the media role has no DeleteItem; every end of a record is a tombstone.
+    expect(["Put", "Update"]).toContain(item.kind);
     for (const name of item.names) expect(APP_MEDIA_WRITE_ATTRIBUTES as readonly string[], name).toContain(name);
     expect(item.part["ReturnValues"]).toBeUndefined();
     expect(item.part["ReturnValuesOnConditionCheckFailure"]).toBeUndefined();
@@ -156,18 +158,19 @@ describe("DynamoAppMediaStore writes", () => {
     expect(stuck.sent).toHaveLength(FINISH_ATTEMPTS);
   });
 
-  it("release deletes the record and remove leaves a tombstone, each only as read, and both give its room back (not the day's uploads)", async () => {
+  it("release (try 3) and remove both leave a tombstone, each only as read, and both give its room back (not the day's uploads)", async () => {
     const { client, sent } = stubClient([{}, {}, cancelled(["ConditionalCheckFailed", "None"]), cancelled(["ConditionalCheckFailed", "None"])]);
     const store = new DynamoAppMediaStore(client, TABLE);
     await store.release("Ada-42", ID, 300_000, NOW_ISO);
     expect(await store.remove("Ada-42", ID, { bytes: 300_000, status: "stored", createdAt: NOW_ISO }, NOW_ISO)).toBe("deleted");
     await expect(store.release("Ada-42", ID, 300_000, NOW_ISO)).resolves.toBeUndefined();
     expect(await store.remove("Ada-42", ID, { bytes: 300_000, status: "stored", createdAt: NOW_ISO }, NOW_ISO)).toBe("conflict");
-    for (const [i, command] of sent.entries()) {
+    for (const command of sent) {
       const [record, usage] = itemsOf(command);
-      // release deletes an upload's record; remove (try 2) leaves a tombstone: status `deleted`, so the id stays taken.
-      expect(record?.kind).toBe(i % 2 === 0 ? "Delete" : "Update");
-      if (i % 2 === 1) expect(record?.part["UpdateExpression"]).toBe("SET #status = :deleted");
+      // Both leave a tombstone (release since try 3, remove since try 2): status `deleted`, so the id stays taken and an
+      // address never serves other bytes than a failed upload may have left in a cache. Nothing is deleted.
+      expect(record?.kind).toBe("Update");
+      expect(record?.part["UpdateExpression"]).toBe("SET #status = :deleted");
       expect(record?.part["ConditionExpression"]).toMatch(/^#status = :(uploading|status) AND #bytes = :size$/);
       expect(usage?.part["UpdateExpression"]).toBe("SET #bytes = #bytes - :size, #files = #files - :one, #updatedAt = :now");
       expect(usage?.part["UpdateExpression"]).not.toContain("uploaded");

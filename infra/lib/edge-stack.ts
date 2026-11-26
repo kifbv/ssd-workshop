@@ -70,6 +70,10 @@ import {
   WAF_MEDIA_PATH_PREFIX,
   WAF_MEDIA_RATE_LIMIT,
   WAF_MEDIA_RATE_RULE_NAME,
+  WAF_MEDIA_WRITE_RATE_BODY,
+  WAF_MEDIA_WRITE_RATE_BODY_KEY,
+  WAF_MEDIA_WRITE_RATE_LIMIT,
+  WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
 } from "./config.js";
@@ -296,11 +300,12 @@ export class EdgeStack extends Stack {
     const webAcl = new CfnWebACL(this, "WebAcl", {
       name: WEB_ACL_NAME,
       scope: "CLOUDFRONT",
-      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX} and ${WAF_MEDIA_PATH_PREFIX}, media writes need a Bearer token`,
+      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX}, ${WAF_MEDIA_PATH_PREFIX} and media uploads, media writes need a Bearer token`,
       defaultAction: { allow: {} },
       customResponseBodies: {
         [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY },
         [WAF_MEDIA_AUTH_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_AUTH_BODY },
+        [WAF_MEDIA_WRITE_RATE_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_WRITE_RATE_BODY },
       },
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WEB_ACL_NAME, sampledRequestsEnabled: true },
       rules: [
@@ -347,8 +352,8 @@ export class EdgeStack extends Stack {
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_RATE_RULE_NAME, sampledRequestsEnabled: true },
         },
-        // Ticket 3.18 try 2: a media upload or delete without `Authorization: Bearer ...` never reaches API Gateway or
-        // Lambda (a junk filter; the function still checks every token). Answered like the API's own 401, with the CORS
+        // Ticket 3.18 try 2: a media upload or delete without `Authorization: Bearer ...` (any case, try 3) never reaches
+        // API Gateway or Lambda (a junk filter; the function still checks every token). Answered like the API's own 401, with the CORS
         // header, so an app can read the reason.
         {
           name: WAF_MEDIA_AUTH_RULE_NAME,
@@ -395,7 +400,7 @@ export class EdgeStack extends Stack {
                         fieldToMatch: { singleHeader: { Name: "authorization" } },
                         positionalConstraint: "STARTS_WITH",
                         searchString: WAF_BEARER_PREFIX,
-                        textTransformations: [{ priority: 0, type: "NONE" }],
+                        textTransformations: [{ priority: 0, type: "LOWERCASE" }],
                       },
                     },
                   },
@@ -404,6 +409,52 @@ export class EdgeStack extends Stack {
             },
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_AUTH_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.18 try 3: uploads per address, so one address with a made-up token cannot hold the upload route's
+        // shared throttle at 429 for every app (see WAF_MEDIA_WRITE_RATE_LIMIT).
+        {
+          name: WAF_MEDIA_WRITE_RATE_RULE_NAME,
+          priority: 3,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_BLOCK_STATUS,
+                customResponseBodyKey: WAF_MEDIA_WRITE_RATE_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_MEDIA_WRITE_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    { byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: "PUT", textTransformations: [{ priority: 0, type: "NONE" }] } },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_MEDIA_API_PREFIX,
+                        textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "CONTAINS",
+                        searchString: WAF_MEDIA_API_SEGMENT,
+                        textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_WRITE_RATE_RULE_NAME, sampledRequestsEnabled: true },
         },
       ],
     });

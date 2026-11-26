@@ -238,12 +238,15 @@ export class DynamoAppMediaStore implements AppMediaStore {
     try {
       await this.transact([
         {
-          Delete: {
+          // A tombstone (try 3), never a delete: the failed put may have reached S3 (and a cache) before its key was
+          // deleted again, so the id must never serve other bytes later.
+          Update: {
             TableName: this.tableName,
             Key: keyOf(appMediaKey(nickname, id)),
+            UpdateExpression: "SET #status = :deleted",
             ConditionExpression: "#status = :uploading AND #bytes = :size",
             ExpressionAttributeNames: { "#status": "status", "#bytes": "bytes" },
-            ExpressionAttributeValues: { ":uploading": str("uploading"), ":size": num(bytes) },
+            ExpressionAttributeValues: { ":deleted": str("deleted"), ":uploading": str("uploading"), ":size": num(bytes) },
           },
         },
         this.giveBack(nickname, bytes, nowIso),

@@ -1,5 +1,6 @@
 // Ticket 3.18: the media API's rules on the in-memory store and bucket (criteria 1 to 6; 7 and 9 are synth tests in
 // infra/lib/app.test.ts, 8 is the reset's test, and real browsers are in browser.test.ts).
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { hashAppToken } from "../app-token/token.js";
@@ -469,7 +470,8 @@ describe("failures and resets during an upload", () => {
     const answer = await call(put(jpegOfSize(5000)));
     expect(answer.statusCode).toBe(500);
     expect(message(answer)).toBe(APP_MEDIA_MESSAGES.failed);
-    expect(store.records.size).toBe(0);
+    // Try 3: a tombstone, out of the totals.
+    expect([...store.records.values()].map((r) => r.status)).toEqual(["deleted"]);
     expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
     expect(logs).toEqual([{ event: "app-media", method: "PUT", outcome: "failed", status: 500, writer: "Bob", error: "S3ServiceException" }]);
   });
@@ -482,8 +484,14 @@ describe("failures and resets during an upload", () => {
     expect(bucket.objects.size).toBe(0);
     expect(bucket.calls).toEqual([`put app-media/ada-42/${ID}`, `delete app-media/ada-42/${ID}`]);
     expect(store.calls.slice(-1)).toEqual(["release"]);
-    expect(store.records.size).toBe(0);
     expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
+    // Try 3: the record stays as a tombstone (out of the room and the file count), so the id can never be used again.
+    expect([...store.records.values()].map((r) => r.status)).toEqual(["deleted"]);
+    bucket.putFailureAfterStoring = undefined;
+    const again = await call(put(jpegOfSize(5000)));
+    expect(again.statusCode).toBe(409);
+    expect(message(again)).toBe(APP_MEDIA_MESSAGES.idTaken);
+    expect(bucket.objects.size).toBe(0);
   });
 
   it("WHEN the app stops being live while the file uploads (a reset) THEN the file is deleted again and the API answers 404", async () => {
@@ -492,7 +500,8 @@ describe("failures and resets during an upload", () => {
     const answer = await call(put(jpegOfSize(5000)));
     expect(answer.statusCode).toBe(404);
     expect(bucket.objects.size).toBe(0);
-    expect(store.records.size).toBe(0);
+    expect([...store.records.values()].map((r) => r.status)).toEqual(["deleted"]);
+    expect(store.usage.get("ada-42")).toMatchObject({ bytes: 0, files: 0 });
   });
 
   it("WHEN the table fails THEN 500, logged by the error's name only", async () => {
@@ -501,5 +510,14 @@ describe("failures and resets during an upload", () => {
     const answer = await call(put(jpegOfSize(5000)));
     expect(answer.statusCode).toBe(500);
     expect(JSON.stringify(logs)).not.toContain("ada-42");
+  });
+});
+
+describe("try 3: the messages are listed for veto", () => {
+  it("every APP_MEDIA_MESSAGES text is in docs/decisions.md's \"(3.18) Messages\" line", () => {
+    const decisions = readFileSync(new URL("../../../docs/decisions.md", import.meta.url), "utf8");
+    const line = decisions.split("\n").find((l) => l.startsWith("- **(3.18) Messages"));
+    expect(line).toBeDefined();
+    for (const text of Object.values(APP_MEDIA_MESSAGES)) expect(line, text).toContain(`"${text}"`);
   });
 });

@@ -344,7 +344,18 @@ paths:
   Metadata in a recording is blanked IN PLACE (MP4 `udta`/`meta` -> `free`, WebM Tags/Title -> Void): a plain MP4's
   sample offsets point into the file, so removing bytes would break it.
 - An id that must never serve other bytes (media ids, browsers cache by address) keeps a tombstone on delete (status
-  `deleted`, out of the totals) so a create-only PUT still finds it taken; only a full reset deletes tombstones.
+  `deleted`, out of the totals) so a create-only PUT still finds it taken; only a full reset deletes tombstones. EVERY
+  end of the record is a tombstone, a failed upload's release included (3.18 try 3: its put may have reached S3 and a
+  cache), and the function's role then needs no `DeleteItem`.
+- A parser of untrusted binary (3.18's JPEG, WebM, MP4 walks) allocates nothing per element: a 4 MB file of 2-byte
+  restart markers or EBML elements, or 8-byte MP4 boxes, is millions of them (try 2's one Buffer per segment reached
+  ~620 MB RSS against a 512 MB function). Visit children with a callback (`eachChild`, `eachBox`) instead of building
+  lists, note kept `[start, end)` ranges (merging touching ones) and copy once into a buffer of the final size, and
+  do the walk once per request (`inspectMedia` returns the stripped photo). Test memory in a child process under a
+  small heap (`--max-old-space-size=32`, `--import tsx`, `app-media/hostile-probe.ts`) reporting `resourceUsage().maxRSS`
+  growth; Buffers live outside the JS heap, so `heapUsed` alone misses them. Check the test fails on the old code.
+- A metadata allow-list keeps a segment by its identifier, never by its marker alone: APP0 only `JFIF\0` (JFXX holds a
+  thumbnail), APP2 only `ICC_PROFILE\0`, APP14 only `Adobe` (3.18 try 3).
 - An operator cleanup racing a Lambda that may still be running (3.18's reset vs an upload in flight) waits longer than
   that function's timeout before its last pass, and a failed put that may have stored the object deletes the key (best
   effort) before giving the reservation back.

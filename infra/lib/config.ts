@@ -817,7 +817,7 @@ export const WAF_MEDIA_PATH_PREFIX = "/app-media/";
 export const WAF_MEDIA_RATE_LIMIT = 3_000;
 /**
  * Ticket 3.18 try 2: a junk filter in the same web ACL (its own rule, priority 2): a `PUT` or `DELETE` to
- * `/api/apps/<nickname>/media/<id>` whose `authorization` header does not start with `Bearer ` is answered by WAF
+ * `/api/apps/<nickname>/media/<id>` whose `authorization` header does not start with `Bearer ` (in any case, try 3) is answered by WAF
  * (WAF_MEDIA_AUTH_STATUS, the API's own 401 body and CORS header), never reaching API Gateway or Lambda. It does not stop
  * a made-up token (the function checks tokens); it only keeps token-less floods off the paid path.
  */
@@ -825,11 +825,24 @@ export const WAF_MEDIA_AUTH_RULE_NAME = `${PREFIX}-media-auth`;
 export const WAF_MEDIA_API_PREFIX = "/api/apps/";
 export const WAF_MEDIA_API_SEGMENT = "/media/";
 export const WAF_MEDIA_AUTH_METHODS = ["PUT", "DELETE"] as const;
-export const WAF_BEARER_PREFIX = "Bearer ";
+/** Compared after a LOWERCASE transformation (try 3), as checkAppWrite reads the scheme in any case. */
+export const WAF_BEARER_PREFIX = "bearer ";
 export const WAF_MEDIA_AUTH_STATUS = 401;
 export const WAF_MEDIA_AUTH_BODY_KEY = "sign-in-to-save";
 /** The media API's own 401 answer (platform APP_SIGN_IN_TEXTS.signInToSave; a synth test keeps them equal). */
 export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "Sign in to the workshop to save in this app." });
+/**
+ * Ticket 3.18 try 3: per address, at most WAF_MEDIA_WRITE_RATE_LIMIT media uploads (`PUT /api/apps/<nickname>/media/<id>`)
+ * in WAF_RATE_WINDOW_SECONDS (priority 3, after the junk filter), then 429 with its own body and the CORS header. The
+ * junk filter lets a made-up `Bearer x` through, and the upload route's throttle (APP_MEDIA_UPLOAD_THROTTLE, 2/s) is
+ * shared by every app: without this rule one address could keep it at 429 for everyone. 150 per 5 minutes is 0.5/s, so
+ * filling the throttle now takes at least 4 addresses. A room behind one venue address shares the 150 (~3 photos each
+ * for 45 people in 5 minutes); please veto.
+ */
+export const WAF_MEDIA_WRITE_RATE_RULE_NAME = `${PREFIX}-media-write-rate`;
+export const WAF_MEDIA_WRITE_RATE_LIMIT = 150;
+export const WAF_MEDIA_WRITE_RATE_BODY_KEY = "too-many-uploads";
+export const WAF_MEDIA_WRITE_RATE_BODY = JSON.stringify({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
 /**
  * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
  * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would
