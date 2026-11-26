@@ -1,10 +1,15 @@
 // An in-memory stand-in for the app write tokens' table access (ticket 3.24), shared by the tests of the token route,
 // the data API and the reset (not bundled: no handler imports it). Same rules as DynamoAppTokenStore: a participant's
 // list drops expired entries on each new token and refuses one when MAX_APP_TOKENS are live; revocation deletes every
-// listed token and the list.
+// listed token and the list, and no token is made once the session is gone (`sessionExists`). Each call is atomic here,
+// so the version races of DynamoAppTokenStore cannot happen (they are tested in store.test.ts); the DynamoDB list is
+// emptied rather than deleted, which callers cannot tell apart.
 import { MAX_APP_TOKENS, type AppTokenReader, type AppTokenWriter, type CreateTokenResult, type StoredAppToken } from "./token.js";
 
 export class FakeAppTokenStore implements AppTokenReader, AppTokenWriter {
+  /** Whether a session (by its token's hash) still exists; every session does unless a test says otherwise. */
+  constructor(private readonly sessionExists: (sessionTokenHash: string) => boolean = () => true) {}
+
   /** Token items by hash. */
   readonly tokens = new Map<string, StoredAppToken>();
   /** Each participant's list: hash -> expiry. */
@@ -25,8 +30,9 @@ export class FakeAppTokenStore implements AppTokenReader, AppTokenWriter {
     return token && { ...token };
   }
 
-  async createAppToken(participantId: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
+  async createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
     this.check();
+    if (!this.sessionExists(sessionTokenHash)) return "no-session";
     const list = this.lists.get(participantId) ?? new Map<string, number>();
     for (const [hash, expiresAt] of list) if (!(expiresAt > nowSeconds)) list.delete(hash);
     if (list.size >= MAX_APP_TOKENS) return "too-many";

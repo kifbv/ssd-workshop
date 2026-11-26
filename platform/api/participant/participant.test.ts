@@ -443,6 +443,20 @@ describe("app write tokens: POST /api/app-tokens (ticket 3.24)", () => {
     expect(JSON.parse(lost.body ?? "")).toMatchObject({ reason: "conflict" });
   });
 
+  it("WHEN the caller signs out after the request's session check THEN no token is made and it answers 401 (ticket 3.24 try 2)", async () => {
+    const s = live();
+    const isAppLive = s.table.isAppLive.bind(s.table);
+    // A sign-out on another tab lands between this request's session check and its token transaction.
+    s.table.isAppLive = async (nickname: string) => {
+      s.table.sessions.delete(hashToken(THEIRS));
+      return isAppLive(nickname);
+    };
+    const response = await handleParticipantRequest(tokenRequest("ada"), s.deps);
+    expect(response.statusCode).toBe(401);
+    expect(s.table.appTokens.tokens.size).toBe(0);
+    expect(s.logs.at(-1)).toEqual({ event: "participant", route: "app-token", outcome: "unauthorized" });
+  });
+
   it("keeps the session when revoking the tokens fails on sign-out (500), so the person can try again", async () => {
     const s = live();
     s.table.failOn = "revokeAppTokens";

@@ -12,6 +12,8 @@ import {
   type QueryCommandOutput,
   type TransactWriteItemsCommand,
   type TransactWriteItemsCommandOutput,
+  type UpdateItemCommand,
+  type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { DynamoAppTokenStore } from "../../api/app-token/store.js";
 import { appDataUsageKey, appLiveKey } from "../../api/keys.js";
@@ -37,6 +39,7 @@ export interface ParticipantResetSender extends ResetSender {
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
   send(command: BatchWriteItemCommand): Promise<BatchWriteItemCommandOutput>;
   send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
+  send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });

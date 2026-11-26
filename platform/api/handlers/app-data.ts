@@ -12,7 +12,10 @@ import { TABLE_NAME } from "../settings.js";
  * token (ticket 3.24, ../app-token/). Rules in ../app-data/.
  */
 
-/** One JSON line per request: method, outcome, status and size only (never a nickname, a key, a value, a token or the event). */
+/**
+ * One JSON line per request: method, outcome, status and size, and for a write or delete with a valid token the writer's
+ * nickname (never the app's nickname, a key, a value, a token, its hash, an email or the event).
+ */
 export function logEntry(entry: AppDataLogEntry): void {
   console.log(JSON.stringify(entry));
 }

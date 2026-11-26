@@ -199,7 +199,7 @@ paths:
 - A custom CloudFront policy (the pages' `ssd-workshop-pages-v1` response headers policy, ticket 1.6) can be created but
   never updated: a change to any of its settings must bump `PAGES_HEADERS_POLICY_VERSION`, which changes the name
   and the logical id (a new name alone is an in-place update), or the deploy fails on `UpdateResponseHeadersPolicy`.
-  The same holds for the apps' policy (`APPS_HEADERS_POLICY_VERSION`, v2 since ticket 2.14's CSP change); the old
+  The same holds for the apps' policy (`APPS_HEADERS_POLICY_VERSION`, v2 since ticket 2.14's CSP change, v3 since 3.24's `allow-popups-to-escape-sandbox`); the old
   version stays retained for Franck to delete.
 - The site stack builds the pages (`buildWeb`, esbuild) at synth time into `cdk.out/ssd-workshop-web` and uploads that
   folder, not `platform/web`: a new static file must be added to `STATIC_FILES` in `platform/web/build.ts`.

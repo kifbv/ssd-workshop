@@ -2,7 +2,9 @@
 // in-memory app data store and the in-memory GitHub. Test names start with the criterion they prove (AC1 to AC5).
 import { describe, expect, it } from "vitest";
 import { FakeAppDataStore } from "../../api/app-data/fakes.js";
+import { handleAppDataRequest } from "../../api/app-data/data.js";
 import { FakeAppTokenStore } from "../../api/app-token/fakes.js";
+import { hashAppToken } from "../../api/app-token/token.js";
 import { FakeConversationTable } from "../../api/conversation/fakes.js";
 import { parseGitHubSecret, type GitHubDeps } from "../../api/github/app.js";
 import { FAKE_TOKEN_PREFIX, FakeGitHub, TEST_SECRET_TEXT } from "../../api/github/fakes.js";
@@ -336,6 +338,32 @@ describe("AC2: reset --yes at any step", () => {
     expect(s.out[0]).toBe("Ended 2 sign-ins to save in apps (app write tokens).");
     expect(s.out[1]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
     expectBobUntouched(s);
+  });
+});
+
+describe("ticket 3.24: reset ends the participant's app write tokens", () => {
+  it("WHEN `participant reset --yes` ran THEN a PUT with the reset participant's token answers 401, while another participant's token still saves", async () => {
+    const s = setup();
+    // Real tokens made through the token store, as POST /api/app-tokens makes them: Ada's for Bob's app, Bob's for his own.
+    const adaToken = Buffer.alloc(32, 1).toString("base64url");
+    const bobToken = Buffer.alloc(32, 2).toString("base64url");
+    await s.store.tokens.createAppToken(ADA_ID, "5".repeat(64), hashAppToken(adaToken), { app: "bob", nickname: "Ada", expiresAt: NOW_S + 3600 }, NOW_S);
+    await s.store.tokens.createAppToken(BOB_ID, "6".repeat(64), hashAppToken(bobToken), { app: "bob", nickname: "Bob", expiresAt: NOW_S + 3600 }, NOW_S);
+    const put = (token: string) =>
+      handleAppDataRequest(
+        {
+          routeKey: "PUT /api/apps/{nickname}/data/{key}",
+          pathParameters: { nickname: "bob", key: "board" },
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: '"hello"',
+        },
+        { store: s.apps, tokens: s.store.tokens, now: () => NOW, log: () => undefined, pause: async () => {} },
+      );
+    expect((await put(adaToken)).statusCode).toBe(204);
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    const refused = await put(adaToken);
+    expect(refused.statusCode).toBe(401);
+    expect((await put(bobToken)).statusCode).toBe(204);
   });
 });
 

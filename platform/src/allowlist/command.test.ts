@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { FakeAppTokenStore } from "../../api/app-token/fakes.js";
+import { hashAppToken } from "../../api/app-token/token.js";
 import { findRepoRoot, runAllowlist, type CommandDeps } from "./command.js";
 import type { GroupRole } from "./logic.js";
-import type { AllowListInput, AllowListStore } from "./store.js";
+import type { AllowListInput, AllowListStore, RemoveResult } from "./store.js";
 
 /** In-memory allow-list with the same contract as the DynamoDB store. */
 class FakeStore implements AllowListStore {
@@ -31,8 +33,13 @@ class FakeStore implements AllowListStore {
     return this.items.has(email);
   }
 
-  async remove(email: string): Promise<boolean> {
-    return this.items.delete(email);
+  /** Ticket 3.24: the participants' app write tokens (the same in-memory store the API's tests use). */
+  readonly tokens = new FakeAppTokenStore();
+
+  async remove(email: string): Promise<RemoveResult> {
+    const participantId = this.items.get(email)?.participantId;
+    const revokedTokens = participantId === undefined ? 0 : await this.tokens.revokeAppTokens(participantId);
+    return { removed: this.items.delete(email), revokedTokens };
   }
 }
 
@@ -177,7 +184,7 @@ describe("allowlist import", () => {
       },
       listAll: async () => [],
       exists: async () => false,
-      remove: async () => false,
+      remove: async () => ({ removed: false, revokedTokens: 0 }),
     };
     expect(await runAllowlist(["import", join(dir, "people.csv")], deps({ createStore: () => failing }))).toBe(1);
     expect(stdout.join("\n")).toBe("Added: 1\nUpdated: 0\nRejected: 0");
@@ -327,7 +334,7 @@ describe("allowlist remove (ticket 3.1)", () => {
     listed();
     expect(await runAllowlist(["remove", "Jane.Doe@Example.COM", "--yes"], deps())).toBe(0);
     expect(stdout).toEqual([
-      "Removed the allow-list entry for this address. Their sessions end at their next call; their profile and app are kept.",
+      "Removed the allow-list entry for this address and ended 0 sign-ins to save in apps. Their sessions end at their next call; their profile and app are kept.",
     ]);
     expect([...store.items.keys()]).toEqual([BOB]);
     // Again: there is nothing left to remove.
@@ -335,6 +342,31 @@ describe("allowlist remove (ticket 3.1)", () => {
     expect(stdout[1]).toBe("This address has no allow-list entry. Nothing was changed.");
     expect([...store.items.keys()]).toEqual([BOB]);
     expect(output()).not.toContain("@");
+  });
+
+  it("ticket 3.24: WHEN a linked person is removed with --yes THEN their app write tokens end at once (others' stay), and only their number is printed", async () => {
+    store.items.set(JANE, { email: JANE, group: "alpha", role: "participant", createdAt: "t", participantId: "p-jane-1" });
+    store.items.set(BOB, { email: BOB, group: "alpha", role: "participant", createdAt: "t", participantId: "p-bob-2" });
+    const tokens = { jane1: Buffer.alloc(32, 1).toString("base64url"), jane2: Buffer.alloc(32, 2).toString("base64url"), bob: Buffer.alloc(32, 3).toString("base64url") };
+    for (const [participantId, token, nickname] of [
+      ["p-jane-1", tokens.jane1, "Jane"],
+      ["p-jane-1", tokens.jane2, "Jane"],
+      ["p-bob-2", tokens.bob, "Bob"],
+    ] as const) {
+      expect(await store.tokens.createAppToken(participantId, "5".repeat(64), hashAppToken(token), { app: "ada", nickname, expiresAt: 2_000_000_000 }, 1_800_000_000)).toBe("saved");
+    }
+    expect(await runAllowlist(["remove", JANE, "--yes"], deps())).toBe(0);
+    expect(stdout).toEqual([
+      "Removed the allow-list entry for this address and ended 2 sign-ins to save in apps. Their sessions end at their next call; their profile and app are kept.",
+    ]);
+    expect(await store.tokens.getAppToken(hashAppToken(tokens.jane1))).toBeUndefined();
+    expect(await store.tokens.getAppToken(hashAppToken(tokens.jane2))).toBeUndefined();
+    expect(await store.tokens.getAppToken(hashAppToken(tokens.bob))).toMatchObject({ nickname: "Bob" });
+    // Without --yes nothing is revoked.
+    expect(await runAllowlist(["remove", BOB], deps())).toBe(0);
+    expect(await store.tokens.getAppToken(hashAppToken(tokens.bob))).toMatchObject({ nickname: "Bob" });
+    const text = output();
+    for (const secret of ["@", "p-jane-1", "p-bob-2", tokens.jane1, hashAppToken(tokens.jane1)]) expect(text, secret).not.toContain(secret);
   });
 
   it("refuses a missing, invalid or extra argument before any AWS call, without repeating what was typed", async () => {

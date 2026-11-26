@@ -1586,7 +1586,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["tokens"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["tokens", "version"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },
@@ -1606,7 +1606,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "tokens", "expiresAt"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "tokens", "expiresAt", "version"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
         },
       },
@@ -1615,8 +1615,18 @@ describe("api stack: participant function (ticket 1.5)", () => {
         Action: "dynamodb:DeleteItem",
         Resource: f.tableArn(),
         Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*", "TOKENS#*"] },
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      // Ticket 3.24 try 2: no token once the session is gone. Only that the session item exists (`pk`), nothing else of it.
+      {
+        Effect: "Allow",
+        Action: "dynamodb:ConditionCheckItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk"] },
         },
       },
     ]);
@@ -1659,7 +1669,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
       [`${APP_DATA_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:PutItem`].sort(),
     );
     expect(reach("TOKENS#p-1")).toEqual(
-      [`${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:UpdateItem`].sort(),
+      [`${PARTICIPANT_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:UpdateItem`].sort(),
     );
     expect(JSON.stringify(apiFunction(APP_DATA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
   });
@@ -3486,7 +3496,7 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
       ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
     });
     expect(APPS_CONTENT_SECURITY_POLICY).toBe(
-      "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'",
+      "sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox; default-src 'self'; connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'",
     );
     // Ticket 2.14: data and images from any HTTPS address, never plain http:, and no script, style or font source beyond 'self'.
     expect(APPS_CONTENT_SECURITY_POLICY).not.toMatch(/http:|script-src|style-src|font-src|\*/);
@@ -3495,11 +3505,11 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
     expect(config.CustomHeadersConfig).toBeUndefined();
   });
 
-  it("names the policy ssd-workshop-apps-v2 in the edge stack (ticket 2.14's CSP change), retained, versioned in its logical id", () => {
+  it("names the policy ssd-workshop-apps-v3 in the edge stack (ticket 3.24's popups escaping the sandbox), retained, versioned in its logical id", () => {
     const [stackName, id, resource] = policy() ?? [];
     expect(stackName).toBe(STACK_NAMES.edge);
-    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v2");
-    expect(id).toMatch(/^AppsHeadersV2[0-9A-F]{8}$/);
+    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v3");
+    expect(id).toMatch(/^AppsHeadersV3[0-9A-F]{8}$/);
     expect(resource).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 

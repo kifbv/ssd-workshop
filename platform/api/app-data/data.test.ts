@@ -732,20 +732,38 @@ describe("CORS: sandboxed apps (opaque origin) can read every answer", () => {
 });
 
 describe("logs", () => {
-  it("logs method, outcome, status and size only: never the nickname, the key or the value", async () => {
+  it("logs method, outcome, status and size, plus the writer's nickname on a PUT or DELETE (ticket 3.24 try 2): never the app's nickname, the key or the value", async () => {
     const { call, logs } = setup();
     await call(put("secret_key", "secret value"));
     await call(request("GET", "secret_key"));
     await call(request("DELETE", "secret_key"));
+    // Deleting a key that is not there is logged with its writer too: no silent gap.
+    await call(request("DELETE", "secret_key"));
     await call(request("GET", "k", { nickname: "nobody" }));
     expect(logs).toEqual([
-      { event: "app-data", method: "PUT", outcome: "saved", status: 204, bytes: 14 },
+      { event: "app-data", method: "PUT", outcome: "saved", status: 204, writer: "Bob", bytes: 14 },
       { event: "app-data", method: "GET", outcome: "read", status: 200, bytes: 14 },
-      { event: "app-data", method: "DELETE", outcome: "deleted", status: 204 },
+      { event: "app-data", method: "DELETE", outcome: "deleted", status: 204, writer: "Bob" },
+      { event: "app-data", method: "DELETE", outcome: "deleted", status: 204, writer: "Bob" },
       { event: "app-data", method: "GET", outcome: "not-found", status: 404 },
     ]);
     const text = JSON.stringify(logs);
     for (const secret of ["secret", "Ada", "ada-42", "nobody"]) expect(text).not.toContain(secret);
+  });
+
+  it("ticket 3.24 try 2: logs the writer on every outcome after the token check (refusals and failures included), never on a 401", async () => {
+    const { call, store, logs } = setup();
+    await call(put("big", valueOfBytes(MAX_VALUE_BYTES + 1)));
+    await call(put("score", 1, { token: null }));
+    store.getUsage = async () => {
+      throw Object.assign(new Error("down"), { name: "InternalServerError" });
+    };
+    await call(put("score", 2));
+    expect(logs.map((l) => [l.method, l.outcome, l.writer])).toEqual([
+      ["PUT", "value-too-big", "Bob"],
+      ["PUT", "unauthorized", undefined],
+      ["PUT", "failed", "Bob"],
+    ]);
   });
 });
 
@@ -841,10 +859,12 @@ describe("ticket 3.24: writes need an app write token, reads stay public", () =>
     await call(put("score", 1));
     await call(request("DELETE", "score"));
     const text = JSON.stringify(logs);
-    for (const secret of [WRITE_TOKEN, hashAppToken(WRITE_TOKEN), tokenFor(NICK), hashAppToken(tokenFor(NICK)), Buffer.alloc(32, 4).toString("base64url"), "Bob"]) {
+    for (const secret of [WRITE_TOKEN, hashAppToken(WRITE_TOKEN), tokenFor(NICK), hashAppToken(tokenFor(NICK)), Buffer.alloc(32, 4).toString("base64url"), "@"]) {
       expect(text).not.toContain(secret);
     }
-    for (const entry of logs) expect(Object.keys(entry).every((k) => ["event", "method", "outcome", "status", "bytes", "error"].includes(k))).toBe(true);
+    for (const entry of logs) expect(Object.keys(entry).every((k) => ["event", "method", "outcome", "status", "writer", "bytes", "error"].includes(k))).toBe(true);
+    // The writer is the token's nickname only, on accepted writes; a refused token logs none.
+    expect(logs.map((l) => l.writer)).toEqual(["Bob", undefined, "Bob", "Bob"]);
   });
 
   it("answers 500 (logged by name) when the token cannot be read", async () => {

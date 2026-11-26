@@ -6,7 +6,7 @@
 // `email`), delete in `SESSION#*` (sign-out and removed people, ticket 3.1), update in `PARTICIPANT#*`
 // only `nickname`, `step` and `stepSince` (ticket 3.2), and put in `NICK#*` only the claim's attribute names. Ticket 3.24:
 // it reads an app's live marker (`APP#*`, `liveAt` only) and makes and revokes app write tokens (`APPTOKEN#*`,
-// `TOKENS#*`, ../app-token/store.ts). A transaction is
+// `TOKENS#*`, ../app-token/store.ts), checking inside the create transaction that the session still exists. A transaction is
 // authorized item by item as PutItem and UpdateItem. The conversation function reads sessions through
 // this store too, with the same session rights.
 import {
@@ -17,6 +17,8 @@ import {
   type DeleteItemCommandOutput,
   type GetItemCommandOutput,
   type TransactWriteItemsCommandOutput,
+  type UpdateItemCommand,
+  type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { DynamoAppTokenStore } from "../app-token/store.js";
 import type { CreateTokenResult, StoredAppToken } from "../app-token/token.js";
@@ -29,6 +31,7 @@ export interface ParticipantSender {
   send(command: GetItemCommand): Promise<GetItemCommandOutput>;
   send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
+  send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -65,8 +68,8 @@ export class DynamoParticipantStore implements ParticipantStore {
     return output.Item?.["liveAt"]?.S !== undefined;
   }
 
-  createAppToken(participantId: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
-    return this.tokens.createAppToken(participantId, tokenHash, token, nowSeconds);
+  createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
+    return this.tokens.createAppToken(participantId, sessionTokenHash, tokenHash, token, nowSeconds);
   }
 
   revokeAppTokens(participantId: string): Promise<number> {

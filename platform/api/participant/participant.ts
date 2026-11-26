@@ -11,8 +11,8 @@ import {
   type HttpRequest,
   type HttpResponse,
 } from "../http.js";
-import { appTokenExpiry, hashAppToken, newAppToken, type AppTokenWriter } from "../app-token/token.js";
-import { clearedSessionCookie, requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
+import { appTokenExpiry, hashAppToken, newAppToken, signOutWithAppTokens, type AppTokenWriter } from "../app-token/token.js";
+import { clearedSessionCookie, requireSession, signInRequiredResponse, type ParticipantRecord, type SessionReader } from "../session/session.js";
 import { errorName } from "../sign-in/code-request.js";
 import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 
@@ -188,7 +188,7 @@ type Routed = { outcome: ParticipantOutcome; response: HttpResponse };
  * with a nickname may get one for any live app (decision "Who may save"). The token (random, stored only as its
  * SHA-256) is answered once and never logged; it ends after 12 hours, never after the caller's session.
  */
-async function createAppToken(request: HttpRequest, participant: ParticipantRecord, sessionExpiresAt: number, deps: ParticipantDeps): Promise<Routed> {
+async function createAppToken(request: HttpRequest, participant: ParticipantRecord, sessionTokenHash: string, sessionExpiresAt: number, deps: ParticipantDeps): Promise<Routed> {
   if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
   const app = readJsonObject(request)?.["app"];
   // A name outside the nickname rules (or a reserved one) can never be an app: the same answer as a missing one, no read.
@@ -203,7 +203,9 @@ async function createAppToken(request: HttpRequest, participant: ParticipantReco
   const stored = { app: app.toLowerCase(), nickname: participant.nickname, expiresAt: appTokenExpiry(nowSeconds, sessionExpiresAt) };
   for (let attempt = 0; attempt < APP_TOKEN_ATTEMPTS; attempt += 1) {
     const token = newAppToken(deps.randomBytes);
-    const result = await deps.store.createAppToken(participant.id, hashAppToken(token), stored, nowSeconds);
+    const result = await deps.store.createAppToken(participant.id, sessionTokenHash, hashAppToken(token), stored, nowSeconds);
+    // Signed out since the session check (the transaction found no session): no token, the same 401 as no session.
+    if (result === "no-session") return { outcome: "unauthorized", response: signInRequiredResponse() };
     if (result === "too-many") return { outcome: "too-many", response: jsonResponse(429, { message: APP_SIGN_IN_TEXTS.tooMany, reason: "too-many" }) };
     if (result === "saved") {
       return { outcome: "token", response: jsonResponse(200, { token, app: stored.app, nickname: stored.nickname, expiresAt: stored.expiresAt }) };
@@ -232,9 +234,9 @@ async function route(
     case "sign-out":
       if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
       // Ticket 3.24: the caller's app write tokens first (all of them, from every session), so a failure leaves them
-      // signed in to try again rather than signed out with tokens still working.
-      await deps.store.revokeAppTokens(participant.id);
-      await deps.store.deleteSession(session.tokenHash);
+      // signed in to try again rather than signed out with tokens still working; a second pass after the session's
+      // delete ends any token made in between (signOutWithAppTokens).
+      await signOutWithAppTokens(deps.store, participant.id, session.tokenHash);
       return { outcome: "signed-out", response: withClearedCookie(jsonResponse(200, { message: SIGNED_OUT_MESSAGE })) };
     case "me":
       return { outcome: "ok", response: jsonResponse(200, recordBody(participant)) };
@@ -245,7 +247,7 @@ async function route(
     case "nickname":
       return setNickname(request, participant, deps);
     case "app-token":
-      return createAppToken(request, participant, session.expiresAt, deps);
+      return createAppToken(request, participant, session.tokenHash, session.expiresAt, deps);
     default:
       return { outcome: "not-found", response: notFoundResponse() };
   }

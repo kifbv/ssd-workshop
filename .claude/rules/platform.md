@@ -311,3 +311,12 @@ paths:
   reach the app only in the address's fragment (`/apps/<nick>/#wt=`), and are listed per participant (`TOKENS#<id>`,
   capped) so sign-out and reset can delete them without a Scan. A route that adds a header for apps adds it to the
   function's preflight AND bumps CloudFront's `ssd-workshop-app-data-v<N>` policy (it cannot be updated).
+- A tab a sandboxed app opens inherits the app's sandbox (opaque origin, no cookies) unless the apps' CSP has
+  `allow-popups-to-escape-sandbox` (ticket 3.24 try 2): a platform page an app opens must be proved in Playwright with the
+  REAL apps CSP on the opener (`platform/web/app-sign-in-popup.test.ts`), not only opened directly.
+- An optimistic lock on a list item (3.24's `TOKENS#<id>`) uses a `version` that every writer raises by one and every
+  write is conditional on, never a size (an add and a remove leave the size unchanged), and the item is emptied, not
+  deleted, so the version never goes back. Something that must stop once a session ends (a token create) checks the
+  session item inside its own transaction (`ConditionCheck`), and the ending runs its cleanup again after deleting the
+  session. Prove such races over every interleaving against a small condition-evaluating stand-in for DynamoDB
+  (`MiniDynamo` in `app-token/store.test.ts`), with a control showing the old order fails.

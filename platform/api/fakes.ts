@@ -28,7 +28,7 @@ export class FakeTable implements VerifyStore, ParticipantStore {
   readonly nicknames = new Map<string, { nickname: string; participantId: string }>();
   /** Ticket 3.24: lower-cased nicknames of live apps, and the app write tokens (the data API's tests read them too). */
   readonly liveApps = new Set<string>();
-  readonly appTokens = new FakeAppTokenStore();
+  readonly appTokens = new FakeAppTokenStore((sessionTokenHash) => this.sessions.has(sessionTokenHash));
   failOn: Method | undefined;
   failure: Error = new Error("boom");
   /** Runs once before the next getCode returns (simulates another writer in between). */
@@ -138,9 +138,9 @@ export class FakeTable implements VerifyStore, ParticipantStore {
     return this.liveApps.has(nickname.toLowerCase());
   }
 
-  async createAppToken(participantId: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
+  async createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
     this.maybeFail("createAppToken");
-    return this.appTokens.createAppToken(participantId, tokenHash, token, nowSeconds);
+    return this.appTokens.createAppToken(participantId, sessionTokenHash, tokenHash, token, nowSeconds);
   }
 
   async revokeAppTokens(participantId: string): Promise<number> {

@@ -168,12 +168,18 @@ export type AppDataOutcome =
   | "write-budget"
   | "failed";
 
-/** The only things ever logged: no nickname, no key, no value, no header, no token. */
+/**
+ * The only things ever logged: no app nickname, no key, no value, no header, no token or its hash, no email. Ticket 3.24
+ * try 2: a `PUT` or `DELETE` whose token passed the check also logs the writer's nickname (a public name, shown on
+ * the value with `?info=1` anyway), so every write and delete can be traced to a participant.
+ */
 export interface AppDataLogEntry {
   event: "app-data";
   method: AppDataMethod | "other";
   outcome: AppDataOutcome;
   status: number;
+  /** The writer's nickname (`PUT`/`DELETE` with a valid token only, whatever the outcome after that). */
+  writer?: string;
   /** The value's size (reads and writes that got that far). */
   bytes?: number;
   /** The error's name (failures only). */
@@ -358,7 +364,7 @@ async function deleteValue(nickname: string, key: string, deps: AppDataDeps): Pr
   return refuse(409, "conflict", APP_DATA_MESSAGES.conflict);
 }
 
-async function route(request: HttpRequest, method: AppDataMethod | "other", deps: AppDataDeps): Promise<Answer> {
+async function route(request: HttpRequest, method: AppDataMethod | "other", deps: AppDataDeps, seen: { writer?: string }): Promise<Answer> {
   if (method === "other") return notFound();
   // The preflight carries no data and reads nothing: the same answer for every address.
   if (method === "OPTIONS") return { outcome: "preflight", response: { statusCode: 204, headers: { ...PREFLIGHT_HEADERS } } };
@@ -382,18 +388,22 @@ async function route(request: HttpRequest, method: AppDataMethod | "other", deps
   // Ticket 3.24: every write needs a valid token for this app, checked before the body is read.
   const write = await checkAppWrite(request, nickname, deps.tokens, deps.now());
   if (!write.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.signInToSave);
+  seen.writer = write.writer;
   return method === "PUT" ? putValue(request, nickname, key, write.writer, deps) : deleteValue(nickname, key, deps);
 }
 
 /** Answers one request; table failures give a 500 with a plain message (logged by error name only). */
 export async function handleAppDataRequest(request: HttpRequest, deps: AppDataDeps): Promise<HttpResponse> {
   const method = methodOf(request);
+  // Ticket 3.24 try 2: the writer, once the token check has named one (also on a failure after it).
+  const seen: { writer?: string } = {};
+  const writer = () => (seen.writer === undefined ? {} : { writer: seen.writer });
   try {
-    const { outcome, response, bytes } = await route(request, method, deps);
-    deps.log({ event: "app-data", method, outcome, status: response.statusCode, ...(bytes === undefined ? {} : { bytes }) });
+    const { outcome, response, bytes } = await route(request, method, deps, seen);
+    deps.log({ event: "app-data", method, outcome, status: response.statusCode, ...writer(), ...(bytes === undefined ? {} : { bytes }) });
     return response;
   } catch (error) {
-    deps.log({ event: "app-data", method, outcome: "failed", status: 500, error: errorName(error) });
+    deps.log({ event: "app-data", method, outcome: "failed", status: 500, ...writer(), error: errorName(error) });
     return json(500, JSON.stringify({ message: APP_DATA_MESSAGES.failed }));
   }
 }

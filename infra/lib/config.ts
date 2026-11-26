@@ -136,9 +136,13 @@ export const PAGES_CONTENT_SECURITY_POLICY = [
  * images (`img-src`) from any `https:` address, so it can use free keyless services (Wikipedia, Open-Meteo,
  * ...). Scripts, styles and fonts still come only from its own files (`default-src 'self'`), forms still post
  * only to itself, and `http:` stays blocked. Tested in Chromium in `platform/api/build/template.test.ts`.
+ * Ticket 3.24 try 2 (spec delta, approved by Franck 2026-11-26): `allow-popups-to-escape-sandbox`, so a tab an app opens (the
+ * "Sign in to save" hand-off page `/app-sign-in`) is a normal page under its own CSP, not sandboxed in an opaque origin
+ * where it could not see the workshop's session. The app itself stays sandboxed and cannot read the tab
+ * (`platform/web/app-sign-in-popup.test.ts`).
  */
 export const APPS_CONTENT_SECURITY_POLICY = [
-  "sandbox allow-scripts allow-forms allow-modals allow-popups",
+  "sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox",
   "default-src 'self'",
   "connect-src 'self' https:",
   "img-src 'self' data: https:",
@@ -346,10 +350,15 @@ export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", 
 export const APP_TOKEN_READ_ATTRIBUTES = ["app", "nickname", "expiresAt"] as const;
 /** The names the participant function may put in `APPTOKEN#*` (a new token item, conditions included). */
 export const APP_TOKEN_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", "createdAt", "expiresAt"] as const;
-/** The names the participant function may name in `TOKENS#*` (a participant's token list: its update, conditions included). */
-export const APP_TOKEN_LIST_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "tokens", "expiresAt"] as const;
+/**
+ * The names the participant function may name in `TOKENS#*` (a participant's token list: its update, conditions
+ * included). `version` (ticket 3.24 try 2) rises with every change, and every create and revocation is conditional on it.
+ */
+export const APP_TOKEN_LIST_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "tokens", "expiresAt", "version"] as const;
 /** What the participant function reads of a token list (GetItem with a projection). */
-export const APP_TOKEN_LIST_READ_ATTRIBUTES = ["tokens"] as const;
+export const APP_TOKEN_LIST_READ_ATTRIBUTES = ["tokens", "version"] as const;
+/** What the token create transaction's ConditionCheck names in `SESSION#*`: that the caller's session still exists. */
+export const APP_TOKEN_SESSION_CHECK_ATTRIBUTES = ["pk"] as const;
 /** What the participant function reads of an app's live marker in `APP#*` (the token route answers only for a live app). */
 export const APP_LIVE_READ_ATTRIBUTES = ["liveAt"] as const;
 
@@ -395,8 +404,10 @@ export const DEPLOYER_LIVE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "nickname", 
  * referrer policy. Created, never updated, like the pages' policy: a change bumps this version.
  * Version 2 (ticket 2.14): `https:` added to `connect-src` and `img-src`; `ssd-workshop-apps-v1` stays
  * (retained) for Franck to delete once v2 is live.
+ * Version 3 (ticket 3.24 try 2): `allow-popups-to-escape-sandbox` added to the sandbox; `ssd-workshop-apps-v2` stays
+ * (retained) for Franck to delete once v3 is live.
  */
-export const APPS_HEADERS_POLICY_VERSION = 2;
+export const APPS_HEADERS_POLICY_VERSION = 3;
 export const APPS_HEADERS_POLICY_NAME = `${PREFIX}-apps-v${APPS_HEADERS_POLICY_VERSION}`;
 /** The CloudFront Function on `/apps/*` (viewer request): trailing slash and lower-case redirects, `index.html` for folders. */
 export const APPS_INDEX_FUNCTION_NAME = `${PREFIX}-apps-index`;

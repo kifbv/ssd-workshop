@@ -2,18 +2,21 @@
 //
 // Rights (infra/lib/api-stack.ts): the data function may only read `APPTOKEN#*` items' `app`, `nickname` and
 // `expiresAt` (projection required). The participant function may put in `APPTOKEN#*` and update in `TOKENS#*` only
-// the names below, read `TOKENS#*` items' `tokens`, and delete in both partitions (sign-out). The reset command
+// the names below, read `TOKENS#*` items' `tokens` and `version`, delete in `APPTOKEN#*` (sign-out), and check that a
+// `SESSION#*` item exists (ConditionCheckItem, inside the create transaction). The reset command
 // (`npm run participant -- reset`) runs with the owner's own credentials. No call returns old or new items.
 import {
   DeleteItemCommand,
   GetItemCommand,
   TransactWriteItemsCommand,
+  UpdateItemCommand,
   type AttributeValue,
   type DeleteItemCommandOutput,
   type GetItemCommandOutput,
   type TransactWriteItemsCommandOutput,
+  type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { appTokenKey, appTokenListKey, type ItemKey } from "../keys.js";
+import { appTokenKey, appTokenListKey, sessionKey, type ItemKey } from "../keys.js";
 import { APP_TOKEN_TTL_SECONDS, MAX_APP_TOKENS, type AppTokenReader, type AppTokenWriter, type CreateTokenResult, type StoredAppToken } from "./token.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -21,6 +24,7 @@ export interface AppTokenSender {
   send(command: GetItemCommand): Promise<GetItemCommandOutput>;
   send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
+  send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
 }
 
 /** Revocation reads the list again when a token was added meanwhile, this many times in all. */
@@ -29,6 +33,13 @@ export const REVOKE_ATTEMPTS = 3;
 const str = (value: string): AttributeValue => ({ S: value });
 const num = (value: number): AttributeValue => ({ N: String(value) });
 const keyOf = (key: ItemKey): Record<string, AttributeValue> => ({ pk: str(key.pk), sk: str(key.sk) });
+
+/** True when a cancelled transaction failed on the condition of its item number `index`. */
+function failedAt(error: unknown, index: number): boolean {
+  if (!(error instanceof Error) || error.name !== "TransactionCanceledException") return false;
+  const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? [];
+  return reasons[index]?.Code === "ConditionalCheckFailed";
+}
 
 function isConditionFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -62,34 +73,35 @@ export class DynamoAppTokenStore implements AppTokenReader, AppTokenWriter {
     return { app, nickname, expiresAt };
   }
 
-  /** The participant's list: hash -> expiry (epoch seconds), or undefined when there is none. */
-  private async readList(participantId: string): Promise<Map<string, number> | undefined> {
+  /** The participant's list (hash -> expiry, epoch seconds) and its version, or undefined when there is none. */
+  private async readList(participantId: string): Promise<TokenList | undefined> {
     const output = await this.client.send(
       new GetItemCommand({
         TableName: this.tableName,
         Key: keyOf(appTokenListKey(participantId)),
         ConsistentRead: true,
-        ProjectionExpression: "#tokens",
-        ExpressionAttributeNames: { "#tokens": "tokens" },
+        ProjectionExpression: "#tokens, #version",
+        ExpressionAttributeNames: { "#tokens": "tokens", "#version": "version" },
       }),
     );
-    const map = output.Item?.["tokens"]?.M;
-    if (map === undefined) return undefined;
+    if (output.Item === undefined) return undefined;
     const tokens = new Map<string, number>();
-    for (const [hash, value] of Object.entries(map)) tokens.set(hash, Number(value.N));
-    return tokens;
+    for (const [hash, value] of Object.entries(output.Item["tokens"]?.M ?? {})) tokens.set(hash, Number(value.N));
+    const version = Number(output.Item["version"]?.N);
+    return { tokens, version: Number.isSafeInteger(version) ? version : undefined };
   }
 
   /**
-   * One transaction: the token item (only if new) and its entry in the participant's list, which drops expired entries.
-   * The list's update holds only while its size is still the one read (else another token was added or removed
-   * meanwhile: `conflict`, the caller tries again), and is refused before writing when MAX_APP_TOKENS are live.
+   * One transaction: the token item (only if new), its entry in the participant's list (which drops expired entries and
+   * bumps the list's `version`), and a check that the session still exists. The list's update holds only while its
+   * version is still the one read (else a token was added or the list emptied meanwhile: `conflict`, the caller tries
+   * again), and is refused before writing when MAX_APP_TOKENS are live; a missing session is `no-session`.
    */
-  async createAppToken(participantId: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
+  async createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
     const list = await this.readList(participantId);
-    const expired = [...(list ?? new Map<string, number>())].filter(([, expiresAt]) => !(expiresAt > nowSeconds)).map(([hash]) => hash);
-    const live = (list?.size ?? 0) - expired.length;
-    if (live >= MAX_APP_TOKENS) return "too-many";
+    const entries = [...(list?.tokens ?? new Map<string, number>())];
+    const expired = entries.filter(([, expiresAt]) => !(expiresAt > nowSeconds)).map(([hash]) => hash);
+    if (entries.length - expired.length >= MAX_APP_TOKENS) return "too-many";
     // The list outlives every token in it (each ends within 12 hours of being made); the table's TTL removes it.
     const listExpiresAt = nowSeconds + APP_TOKEN_TTL_SECONDS;
     const put = {
@@ -107,28 +119,23 @@ export class DynamoAppTokenStore implements AppTokenReader, AppTokenWriter {
         ExpressionAttributeNames: { "#pk": "pk" },
       },
     };
-    const names: Record<string, string> = { "#type": "type", "#tokens": "tokens", "#expiresAt": "expiresAt" };
-    const values: Record<string, AttributeValue> = { ":type": str("app-tokens"), ":listExpiresAt": num(listExpiresAt) };
-    let update;
+    const version = versionCondition(list?.version);
+    const names: Record<string, string> = { "#type": "type", "#tokens": "tokens", "#expiresAt": "expiresAt", ...version.names };
+    const values: Record<string, AttributeValue> = { ":type": str("app-tokens"), ":listExpiresAt": num(listExpiresAt), ...version.values };
+    let set: string;
+    let removed: string[] = [];
     if (list === undefined) {
       // The first token: the map is created with the item (a nested SET on a missing map fails).
       values[":tokens"] = { M: { [tokenHash]: num(token.expiresAt) } };
-      update = {
-        UpdateExpression: "SET #type = :type, #tokens = :tokens, #expiresAt = :listExpiresAt",
-        ConditionExpression: "attribute_not_exists(#tokens)",
-      };
+      set = "#tokens = :tokens";
     } else {
       names["#new"] = tokenHash;
       values[":expiresAt"] = num(token.expiresAt);
-      values[":size"] = num(list.size);
-      const removed = expired.map((hash, i) => {
+      set = "#tokens.#new = :expiresAt";
+      removed = expired.map((hash, i) => {
         names[`#old${i}`] = hash;
         return `#tokens.#old${i}`;
       });
-      update = {
-        UpdateExpression: `SET #type = :type, #tokens.#new = :expiresAt, #expiresAt = :listExpiresAt${removed.length > 0 ? ` REMOVE ${removed.join(", ")}` : ""}`,
-        ConditionExpression: "size(#tokens) = :size",
-      };
     }
     try {
       await this.client.send(
@@ -139,9 +146,19 @@ export class DynamoAppTokenStore implements AppTokenReader, AppTokenWriter {
               Update: {
                 TableName: this.tableName,
                 Key: keyOf(appTokenListKey(participantId)),
-                ...update,
+                UpdateExpression: `SET #type = :type, ${set}, #expiresAt = :listExpiresAt, ${version.set}${removed.length > 0 ? ` REMOVE ${removed.join(", ")}` : ""}`,
+                ConditionExpression: version.condition,
                 ExpressionAttributeNames: names,
                 ExpressionAttributeValues: values,
+              },
+            },
+            {
+              // No token once the session is gone (a sign-out that ran after this request's session check).
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: keyOf(sessionKey(sessionTokenHash)),
+                ConditionExpression: "attribute_exists(#pk)",
+                ExpressionAttributeNames: { "#pk": "pk" },
               },
             },
           ],
@@ -149,39 +166,63 @@ export class DynamoAppTokenStore implements AppTokenReader, AppTokenWriter {
       );
       return "saved";
     } catch (error) {
+      if (failedAt(error, 2)) return "no-session";
       if (isConditionFailure(error)) return "conflict";
       throw error;
     }
   }
 
   /**
-   * Deletes every listed token, then the list, only while it still holds as many entries as were read (a token added
-   * meanwhile is read and deleted on the next pass). Tokens first: a failure leaves the list, and a retry finishes.
+   * Deletes every listed token, then empties the list, only while its version is still the one read (a token added
+   * meanwhile is read and deleted on the next pass). The list item is kept (emptied, its version bumped), so the version
+   * only ever rises and a create that read the list before can never commit after. Tokens first: a failure leaves the
+   * list, and a retry finishes.
    */
   async revokeAppTokens(participantId: string): Promise<number> {
     for (let attempt = 0; attempt < REVOKE_ATTEMPTS; attempt += 1) {
       const list = await this.readList(participantId);
-      if (list === undefined) return 0;
+      if (list === undefined || list.tokens.size === 0) return 0;
       await Promise.all(
-        [...list.keys()].map((hash) =>
+        [...list.tokens.keys()].map((hash) =>
           /^[0-9a-f]{64}$/.test(hash) ? this.client.send(new DeleteItemCommand({ TableName: this.tableName, Key: keyOf(appTokenKey(hash)) })) : Promise.resolve(),
         ),
       );
+      const version = versionCondition(list.version);
       try {
         await this.client.send(
-          new DeleteItemCommand({
+          new UpdateItemCommand({
             TableName: this.tableName,
             Key: keyOf(appTokenListKey(participantId)),
-            ConditionExpression: "attribute_not_exists(#pk) OR size(#tokens) = :size",
-            ExpressionAttributeNames: { "#pk": "pk", "#tokens": "tokens" },
-            ExpressionAttributeValues: { ":size": num(list.size) },
+            UpdateExpression: `SET #tokens = :empty, ${version.set}`,
+            ConditionExpression: version.condition,
+            ExpressionAttributeNames: { "#tokens": "tokens", ...version.names },
+            ExpressionAttributeValues: { ":empty": { M: {} }, ...version.values },
           }),
         );
-        return list.size;
+        return list.tokens.size;
       } catch (error) {
         if (!isConditionFailure(error)) throw error;
       }
     }
     throw new Error("app tokens kept changing during revocation");
   }
+}
+
+interface TokenList {
+  tokens: Map<string, number>;
+  /** Rises by one with every change of the list; undefined only before its first token. */
+  version: number | undefined;
+}
+
+/** The list's version condition and its bump: equal to the one read, or absent (the first token) and then 1. */
+function versionCondition(read: number | undefined): { condition: string; set: string; names: Record<string, string>; values: Record<string, AttributeValue> } {
+  if (read === undefined) {
+    return { condition: "attribute_not_exists(#version)", set: "#version = :nextVersion", names: { "#version": "version" }, values: { ":nextVersion": num(1) } };
+  }
+  return {
+    condition: "#version = :version",
+    set: "#version = :nextVersion",
+    names: { "#version": "version" },
+    values: { ":version": num(read), ":nextVersion": num(read + 1) },
+  };
 }

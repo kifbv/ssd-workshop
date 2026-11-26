@@ -27,6 +27,7 @@ import {
   APP_TOKEN_LIST_UPDATE_ATTRIBUTES,
   APP_TOKEN_PUT_ATTRIBUTES,
   APP_TOKEN_READ_ATTRIBUTES,
+  APP_TOKEN_SESSION_CHECK_ATTRIBUTES,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   BUILD_QUEUE_NAME,
   BUILD_QUEUE_PARTITION,
@@ -389,8 +390,8 @@ export class ApiStack extends Stack {
     );
     addSessionCheckRights(participant, this.table);
     // Ticket 3.24: app write tokens. It reads an app's live marker (`liveAt` only) and the caller's token list
-    // (`tokens` only), puts token items (`APPTOKEN#*`, their names only), updates token lists (`TOKENS#*`, their names
-    // only) and deletes both (sign-out). It never reads a token item back, and no call returns an item.
+    // (`tokens`, `version`), puts token items (`APPTOKEN#*`, their names only), updates token lists (`TOKENS#*`, their names
+    // only) and deletes token items (sign-out). It never reads a token item back, and no call returns an item.
     participant.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
@@ -439,14 +440,27 @@ export class ApiStack extends Stack {
         },
       }),
     );
+    // Sign-out deletes token items; a list is only ever emptied (an update), never deleted, so its version only rises.
     participant.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["dynamodb:DeleteItem"],
         resources: [this.table.tableArn],
         conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*", "TOKENS#*"] },
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    // Ticket 3.24 try 2: the create transaction checks that the caller's session still exists (no token after sign-out).
+    participant.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:ConditionCheckItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_SESSION_CHECK_ATTRIBUTES] },
         },
       }),
     );

@@ -37,15 +37,40 @@ export interface AppTokenReader {
   getAppToken(tokenHash: string): Promise<StoredAppToken | undefined>;
 }
 
-/** `too-many`: MAX_APP_TOKENS live tokens already; `conflict`: the participant's list changed while being written (try again). */
-export type CreateTokenResult = "saved" | "too-many" | "conflict";
+/**
+ * `too-many`: MAX_APP_TOKENS live tokens already; `conflict`: the participant's list changed while being written (try
+ * again); `no-session`: the session the request came with is gone (signed out meanwhile), so no token was made.
+ */
+export type CreateTokenResult = "saved" | "too-many" | "conflict" | "no-session";
 
 /** What the token route, sign-out and the reset need from the table. */
 export interface AppTokenWriter {
-  /** Stores a new token (by hash) and adds it to the participant's list, only while they hold fewer than MAX_APP_TOKENS live ones. */
-  createAppToken(participantId: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult>;
-  /** Deletes every token of the participant, then their list; returns how many tokens were listed. */
+  /**
+   * Stores a new token (by hash) and adds it to the participant's list, only while they hold fewer than MAX_APP_TOKENS
+   * live ones, the list is unchanged since it was read (its `version`), and the session (by its token's hash) still
+   * exists, all in one transaction.
+   */
+  createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult>;
+  /** Deletes every token of the participant, then empties their list (bumping its `version`); returns how many were listed. */
   revokeAppTokens(participantId: string): Promise<number>;
+}
+
+/** What a sign-out needs: the tokens' revocation and the session's delete. */
+export interface SignOutStore extends AppTokenWriter {
+  deleteSession(tokenHash: string): Promise<void>;
+}
+
+/**
+ * Sign-out (ticket 3.24 try 2): the participant's tokens, then the session, then the tokens once more.
+ * The first pass comes before the session's delete, so a failure there leaves the person signed in to try again. A
+ * token whose request passed the session check can still be committed between that pass and the session's delete;
+ * once the session is gone none can be (the create transaction checks the session item), and every committed token is
+ * in the list (its `version` condition), so the last pass deletes whatever the first one missed.
+ */
+export async function signOutWithAppTokens(store: SignOutStore, participantId: string, sessionTokenHash: string): Promise<void> {
+  await store.revokeAppTokens(participantId);
+  await store.deleteSession(sessionTokenHash);
+  await store.revokeAppTokens(participantId);
 }
 
 /** A new token from a cryptographic source such as `crypto.randomBytes` (same form as a session token). */

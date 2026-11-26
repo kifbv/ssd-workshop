@@ -199,9 +199,10 @@ describe("DynamoParticipantStore: app tokens (ticket 3.24)", () => {
   it("makes and revokes tokens through the token store (APPTOKEN# and TOKENS# items)", async () => {
     const { client, sent } = stubClient([{}, {}, {}]);
     const store = new DynamoParticipantStore(client, TABLE);
-    await expect(store.createAppToken("p-1", "b".repeat(64), { app: "ada", nickname: "Bob", expiresAt: 2 }, 1)).resolves.toBe("saved");
+    await expect(store.createAppToken("p-1", "c".repeat(64), "b".repeat(64), { app: "ada", nickname: "Bob", expiresAt: 2 }, 1)).resolves.toBe("saved");
     await expect(store.revokeAppTokens("p-1")).resolves.toBe(0);
     expect((sent[1] as TransactWriteItemsCommand).input.TransactItems?.[0]?.Put?.Item?.["pk"]).toEqual({ S: `APPTOKEN#${"b".repeat(64)}` });
+    expect((sent[1] as TransactWriteItemsCommand).input.TransactItems?.[2]?.ConditionCheck?.Key).toEqual({ pk: { S: `SESSION#${"c".repeat(64)}` }, sk: { S: "SESSION" } });
     expect((sent[2] as GetItemCommand).input.Key).toEqual({ pk: { S: "TOKENS#p-1" }, sk: { S: "TOKENS" } });
   });
 });

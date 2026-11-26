@@ -10,8 +10,12 @@ import {
   type DeleteItemCommandOutput,
   type GetItemCommandOutput,
   type ScanCommandOutput,
+  type TransactWriteItemsCommand,
+  type TransactWriteItemsCommandOutput,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
+import { DynamoAppTokenStore } from "../../api/app-token/store.js";
+import type { AppTokenWriter } from "../../api/app-token/token.js";
 import { allowListKey, participantKey } from "../../api/keys.js";
 import type { Role } from "../../api/types.js";
 import type { GroupRole } from "./logic.js";
@@ -41,15 +45,23 @@ export interface AllowListStore {
   /** True when this (normalized) address has an entry; reads only the key (consistent read). */
   exists(email: string): Promise<boolean>;
   /**
-   * Deletes this address's entry; false when there was none. A linked profile gets the role REMOVED_ROLE (ticket 3.10);
-   * nothing else is touched.
+   * Deletes this address's entry (`removed` false when there was none). A linked profile gets the role REMOVED_ROLE
+   * (ticket 3.10), and the linked participant's app write tokens are revoked (ticket 3.24: `revokedTokens`, how many
+   * were listed); nothing else is touched.
    */
-  remove(email: string): Promise<boolean>;
+  remove(email: string): Promise<RemoveResult>;
+}
+
+export interface RemoveResult {
+  removed: boolean;
+  /** App write tokens of the linked participant that were ended (0 without a link). */
+  revokedTokens: number;
 }
 
 /** The one method of DynamoDBClient this store uses, so tests can stub it. */
 export interface DynamoSender {
   send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
+  send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
   send(command: ScanCommand): Promise<ScanCommandOutput>;
   send(command: GetItemCommand): Promise<GetItemCommandOutput>;
   send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
@@ -60,11 +72,16 @@ const isConditionFailed = (error: unknown): boolean =>
   error instanceof ConditionalCheckFailedException || (error as { name?: unknown } | null)?.name === "ConditionalCheckFailedException";
 
 export class DynamoAllowListStore implements AllowListStore {
+  private readonly tokens: Pick<AppTokenWriter, "revokeAppTokens">;
+
   constructor(
     private readonly client: DynamoSender,
     private readonly tableName: string,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+    tokens?: Pick<AppTokenWriter, "revokeAppTokens">,
+  ) {
+    this.tokens = tokens ?? new DynamoAppTokenStore(client, tableName);
+  }
 
   async upsert(entry: AllowListInput): Promise<"added" | "updated"> {
     const key = allowListKey(entry.email);
@@ -170,13 +187,20 @@ export class DynamoAllowListStore implements AllowListStore {
     return output.Item !== undefined;
   }
 
-  async remove(email: string): Promise<boolean> {
+  async remove(email: string): Promise<RemoveResult> {
     const key = allowListKey(email);
-    // Read the link before the entry goes (the delete itself returns no old values).
+    // Read the link before the entry goes (the delete itself returns no old values). The participant id is the only
+    // thing read, never printed; the address itself is only the key.
     const participantId = await this.linkedParticipant(email);
-    // Profile first: if the delete then fails, a second `remove` still finds the entry and finishes; the other order
-    // would leave a person off the list but still on the dashboard, with nothing left to rerun.
-    if (participantId !== undefined) await this.updateProfile(participantId, { role: REMOVED_ROLE });
+    // Profile and tokens first: if the delete then fails, a second `remove` still finds the entry (and its link) and
+    // finishes; the other order would leave a person off the list but still on the dashboard, or holding app write
+    // tokens, with nothing left to rerun.
+    let revokedTokens = 0;
+    if (participantId !== undefined) {
+      await this.updateProfile(participantId, { role: REMOVED_ROLE });
+      // Ticket 3.24: their app write tokens stop at once (sign-out's revocation, through the token list, no Scan).
+      revokedTokens = await this.tokens.revokeAppTokens(participantId);
+    }
     try {
       // The condition tells "removed" from "there was none" without returning the old item.
       await this.client.send(
@@ -187,9 +211,9 @@ export class DynamoAllowListStore implements AllowListStore {
         }),
       );
     } catch (error) {
-      if (isConditionFailed(error)) return false;
+      if (isConditionFailed(error)) return { removed: false, revokedTokens };
       throw error;
     }
-    return true;
+    return { removed: true, revokedTokens };
   }
 }

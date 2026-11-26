@@ -49,11 +49,11 @@ const req = (method: string, key: string, body?: string, extra: Partial<HttpRequ
 });
 
 describe("criterion 6: the function's logs hold no stored value", () => {
-  it("writes one line per request with method, outcome, status and size, and none of the values, keys or nicknames", async () => {
+  it("writes one line per request with method, outcome, status and size (and the writer's nickname on accepted writes), and none of the values, keys, app nicknames or tokens", async () => {
     const capture = captureConsole();
     const store = new FakeAppDataStore();
     store.live.add(NICK.toLowerCase());
-    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "WRITER-MARKER", expiresAt: Date.parse("2026-11-25T10:00:00.000Z") / 1000 });
+    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", expiresAt: Date.parse("2026-11-25T10:00:00.000Z") / 1000 });
     const call = createHandler({ store, tokens: store.tokens, now: () => new Date("2026-11-24T10:00:00.000Z"), log: logEntry, pause: async () => {} });
     const values = [
       "VALUE-MARKER-TEXT",
@@ -85,9 +85,17 @@ describe("criterion 6: the function's logs hold no stored value", () => {
     const output = capture.output();
     expect(capture.lines()).toBe(statuses.length);
     for (const line of output.split("\n")) expect(Object.keys(JSON.parse(line) as object).sort()).toEqual(expect.arrayContaining(["event", "method", "outcome", "status"]));
-    for (const marker of ["VALUE-MARKER", "secretField", "987654321", "KEYMARKER", "Marker-Nick", "marker-nick", "Other-Marker", "COOKIE-MARKER", TOKEN, TOKEN.slice(0, 20), hashAppToken(TOKEN), "WRITER-MARKER", "Bearer"]) {
+    for (const marker of ["VALUE-MARKER", "secretField", "987654321", "KEYMARKER", "Marker-Nick", "marker-nick", "Other-Marker", "COOKIE-MARKER", TOKEN, TOKEN.slice(0, 20), hashAppToken(TOKEN), "Bearer", "@"]) {
       expect(output, marker).not.toContain(marker);
     }
+    // Ticket 3.24 try 2: the writer's nickname (public) is logged on the writes and the delete whose token passed, and
+    // nowhere else: not on reads, refusals before the token check, or a refused token.
+    const writers = output.split("\n").map((line) => (JSON.parse(line) as { method: string; writer?: string }));
+    expect(writers.filter((l) => l.writer !== undefined).map((l) => [l.method, l.writer])).toEqual([
+      // Four saves, then the too-big, broken and text/plain bodies (refused after the token check).
+      ...Array(7).fill(["PUT", "Writer-Nick"]),
+      ["DELETE", "Writer-Nick"],
+    ]);
   });
 
   it("the handler's code logs only through logEntry, never the event", () => {
