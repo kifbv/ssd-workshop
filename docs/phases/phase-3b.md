@@ -149,6 +149,58 @@ Acceptance criteria (each starts as FAIL):
 - WHEN Clarify discusses a photo idea THEN it mentions once that anyone with the link can see the photos and suggests not photographing people or confidential papers (live eval case).
 - WHEN the prompts change THEN their versions change and all existing prompt evals still pass.
 
+### 3.21 AI tasks for apps: API, budgets and switch (proposed 2026-11-26, needs Franck's yes)
+
+A route `POST /api/apps/{nickname}/ai` runs one of three fixed tasks on Claude Haiku 4.5 (EU
+profile): `tag-photo` (a photo of this app and a list of tags, or none to let the AI suggest up to
+5), `read-photo` (a photo of this app and up to 12 named fields typed text, number, date or money)
+and `sort-text` (up to 2,000 characters and up to 20 categories). Never a free prompt. The answer is
+strict JSON holding only what was asked, checked against the request. Each call's cost counts
+against the app's daily AI budget ($0.50) and the workshop's daily total for apps ($5); the admin
+page gets a switch "Apps may use AI", off by default, and the global Stop also stops it. App AI
+spend is kept apart from the participant's $5.
+
+Depends on: 3.18. Areas: infra, api, web (admin switch).
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN the switch is off, or the global Stop is on THEN the route answers 503 with "AI is switched off for apps right now" and makes no Bedrock call (unit test).
+- WHEN the photo address is not under `/app-photos/<this nickname>/` THEN the route answers 400 and makes no Bedrock call (unit test).
+- WHEN the request names a task other than the three, or carries a prompt, or too many fields, tags or characters THEN it answers 400 (unit test).
+- WHEN the model answers with fields or tags not asked for, or not valid JSON THEN only the asked ones are kept, each cut to 200 characters, and an unusable answer is 502 "The AI could not read this" (unit test).
+- WHEN the app's $0.50 or the workshop's $5 for the UTC day is spent THEN the route answers 429 with the matching message and makes no Bedrock call (unit test).
+- WHEN `read-photo` runs on a test receipt photo THEN shop, date and total come back right (live eval).
+- WHEN `npm run synth` runs THEN the AI function's role may invoke only the Haiku 4.5 EU profile and read only `ssd-workshop-app-photos` (synth test).
+
+### 3.22 AI tasks in the app template
+
+`workshop-data.js` gets `ai.tagPhoto`, `ai.readPhoto` and `ai.sortText`, each showing the API's
+message on refusal; `AGENTS.md` gains a rule: AI suggestions are shown for the visitor to accept or
+change, never saved silently, and shown with `textContent`. The builder eval gets two cases: a
+gallery that suggests tags and an expense app that reads receipts.
+
+Depends on: 3.19, 3.21. Areas: templates, eval.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN the template test calls each helper against a fake API THEN it sends the documented request and returns the parsed answer (Playwright).
+- WHEN the API refuses (switched off, budget spent) THEN the helper's error carries the API's message and the app shows it (Playwright).
+- WHEN `npm run eval -- build` runs the two AI cases THEN both builds pass their checks and call the helpers (live eval).
+
+### 3.23 The AI guide knows the AI tasks
+
+`clarify`, `spec` and `readiness` prompts say apps may suggest tags for photos, read fields from a
+photo (receipts, labels, business cards excluded: other people's contact details) and sort text into
+categories, and nothing else with AI: no chat, no writing texts, no free questions.
+
+Depends on: 3.20, 3.22. Areas: api (prompts), eval.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN the readiness eval runs "an expense log that reads the total from a receipt photo" THEN it is ready (live eval).
+- WHEN the readiness eval runs "a chatbot that answers questions about our team" THEN it stays not-ready with "outside service" (live eval).
+- WHEN Clarify discusses a gallery idea THEN it may offer automatic tag suggestions (live eval case).
+
 ## Questions for Franck
 
 1. Approve the spec delta above (10 MB data, 500 MB of photos per app, photos stripped of location data). Suggested: yes.
@@ -157,6 +209,7 @@ Acceptance criteria (each starts as FAIL):
 4. Photo content is not checked by any AI (text is, by the guardrail). Someone could put an offensive or private photo on a public app. Suggested: accept for the workshop; facilitators can wipe an app with `npm run participant -- reset`; Clarify warns about people and confidential papers (3.20).
 5. Replies in the participant's language (3.16): the AI-written texts (decline sentence, readiness reasons, all chat) follow the participant's language; the page's fixed buttons and messages stay English. Suggested: yes.
 6. Keep photos after the workshop? Suggested: they follow the apps (phase 5 removal workflow deletes them with the app); no automatic expiry now.
+7. (Added 2026-11-26, open) AI tasks for apps, 3.21 to 3.23: spec delta ADDED section 4 item 1 "An app may use three AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories), never a free prompt"; CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps $0.50 per app per day and $5 a day for all apps, admin switch off by default (worst case about $5 per day it is on). Suggested: yes.
 
 ## Blocked
 
