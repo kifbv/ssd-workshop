@@ -126,7 +126,7 @@ Acceptance criteria (each starts as FAIL):
 re-encodes it as JPEG, uploads it, returns its address), `recordVoice()` (records with the
 microphone through `MediaRecorder`, stops at 5 minutes, uploads, returns the address) and
 `deleteMedia(address)`. Recordings play with a plain `<audio controls>`. Microphone access from the
-apps' sandbox (opaque origin) is not proved yet: this ticket proves it in Chromium and on an iPhone,
+apps' sandbox (opaque origin) is not proved yet: this ticket proves it in Chromium, on an iPhone and on an Android phone,
 and falls back to `<input type="file" accept="audio/*" capture>` (the phone's own recorder) where it is refused. `AGENTS.md`
 gains a rule for photo apps: an `<input type="file" accept="image/*" capture="environment">` button,
 thumbnails with `loading="lazy"`, the photo's address kept in the data API with its other fields.
@@ -139,7 +139,7 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the template test picks a 12-megapixel JPEG in Chromium under the sandbox CSP THEN `savePhoto` uploads a file of at most 2,560 px on its long side and returns an address the page then shows (Playwright, fake API).
 - WHEN the picked file is a PNG or HEIC the browser can decode THEN it is uploaded as a JPEG (Playwright).
 - WHEN the upload is refused THEN the API's message is shown to the visitor (Playwright).
-- WHEN `recordVoice()` runs in Chromium with a fake microphone under the sandbox CSP THEN a recording is uploaded and plays back from its address (Playwright); WHEN Franck records on an iPhone (Safari) THEN it works directly or through the fallback (live check, `infra/README.md`).
+- WHEN `recordVoice()` runs in Chromium with a fake microphone under the sandbox CSP THEN a recording is uploaded and plays back from its address (Playwright); WHEN Franck records on an iPhone (Safari) and on an Android phone (Chrome) THEN it works directly or through the fallback on each (live check, `infra/README.md`).
 - WHEN `npm run eval -- build` runs the photo-gallery case THEN the build passes its checks and the app shows a photo button and a tag filter (live eval); the same for a voice-message case with a record button and topics.
 
 ### 3.20 The AI knows apps can keep photos and recordings
@@ -180,6 +180,7 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the app's $1 or the workshop's $10 for the UTC day is spent THEN the route answers 429 with the matching message and makes no Bedrock call (unit test).
 - WHEN `read-photo` runs on a test receipt photo THEN shop, date and total come back right (live eval).
 - WHEN question 8 is yes and `transcribe` runs on a recording of this app THEN it answers its text through Amazon Transcribe (batch job on the stored file, language detected, at most 5 minutes), its cost ($0.024 a minute) counts against the same budgets, and `sort-text` can then give its topics (unit test with a fake Transcribe; live eval on a French and an English recording).
+- WHEN the access stack is checked THEN the boundary and the deploy policy allow the AI function's role only `transcribe:StartTranscriptionJob`, `GetTranscriptionJob` and `DeleteTranscriptionJob` in eu-central-1, reading from `ssd-workshop-app-media` and writing results to its own `transcripts/` prefix (access-stack test; Franck applies the access stack before the deploy).
 - WHEN `npm run synth` runs THEN the AI function's role may invoke only the Haiku 4.5 EU profile and read only `ssd-workshop-app-media` (synth test).
 
 ### 3.22 AI tasks in the app template
@@ -220,7 +221,7 @@ Acceptance criteria (each starts as FAIL):
 5. Replies in the participant's language (3.16): the AI-written texts (decline sentence, readiness reasons, all chat) follow the participant's language; the page's fixed buttons and messages stay English. Suggested: yes.
 6. Keep photos after the workshop? Suggested: they follow the apps (phase 5 removal workflow deletes them with the app); no automatic expiry now.
 7. (Added 2026-11-26, open) AI tasks for apps, 3.21 to 3.23: spec delta ADDED section 4 item 1 "An app may use three AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories), never a free prompt"; CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps $0.50 per app per day and $5 a day for all apps, admin switch off by default. **Answered 2026-11-26: yes, with caps doubled ($1 per app per day, $10 a day for all apps; worst case about $10 per day the switch is on), and photos widened to media (voice recordings too).**
-8. (Added 2026-11-26, open; Stop-and-ask 3, new paid service) Amazon Transcribe for a `transcribe` AI task, so voice messages can be tagged by topic (Claude on Bedrock takes no audio). About $0.024 a minute in eu-central-1, counted inside the $10 daily cap, so it adds no new worst case. Audio goes to Transcribe in eu-central-1; AWS does not use it for training when the account opts out of AI service improvement (an organisation-level opt-out policy, Franck's account setting). Suggested: yes; without it, voice messages get topics picked by hand.
+8. (Added 2026-11-26, open; Stop-and-ask 3, new paid service) Amazon Transcribe for a `transcribe` AI task, so voice messages can be tagged by topic (Claude on Bedrock takes no audio). About $0.024 a minute in eu-central-1, counted inside the $10 daily cap, so it adds no new worst case. Audio goes to Transcribe in eu-central-1; AWS does not use it for training when the account opts out of AI service improvement (an organisation-level opt-out policy, Franck's account setting). Suggested: yes; without it, voice messages get topics picked by hand. **Answered 2026-11-26: yes.**
 
 ## Blocked
 

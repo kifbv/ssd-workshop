@@ -23,6 +23,8 @@ Franck's answers to the brief's questions (2026-11-26, `docs/phases/phase-3b.md`
 - **Language:** AI-written texts (decline sentence, readiness reasons, chat) follow the participant's language; the page's fixed buttons and messages stay English.
 - **AI tasks for apps (spec delta, approved by Franck 2026-11-26, question 7):** ADDED section 4 item 1: "An app may use the AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories, and with question 8 transcribe a recording), never a free prompt." CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps doubled from the suggestion ("these little apps will be used only briefly"): $1 per app per day, $10 a day for all apps, admin switch "Apps may use AI" off by default; app AI spend is kept apart from the participant's $5.
 - **Media, not only photos (Franck, 2026-11-26):** the store takes voice recordings too (WebM/Opus, Ogg/Opus, MP4/AAC, at most 5 minutes), in the same 500 MB and 2,000 files per app; bucket `ssd-workshop-app-media`, served at `/app-media/*`. Video stays out (size).
+- **Amazon Transcribe (new paid service, approved by Franck 2026-11-26, question 8):** a `transcribe` AI task turns an app's voice recording into text (then `sort-text` gives topics); about $0.024 a minute in eu-central-1, counted inside the $10 daily cap for all apps. Needs an access-stack change Franck applies.
+- **Microphone check on both platforms (Franck, 2026-11-26):** ticket 3.19's live check covers an iPhone (Safari) and an Android phone (Chrome).
 - **Retention:** photos follow their app (the phase 5 removal workflow deletes them); no automatic expiry before that.
 
 ## Phase 3: iterate and supervise
