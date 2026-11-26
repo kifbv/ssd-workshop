@@ -112,3 +112,33 @@ export function rebuildNotReadyText(reasons: readonly string[]): string {
     "Change SPEC.md in your repository, then press Rebuild from my repository again. Your live app stays as it is.",
   ].join("\n");
 }
+
+/**
+ * Ticket 3.11: the facilitator dashboard's own lines (its actions' answers come from the API, `FACILITATOR_TEXTS` in
+ * platform/api/facilitator/facilitator.ts; a participant sees `PHASE_3_TEXTS.facilitatorsOnly`). No line names an
+ * email address or a participant id.
+ */
+export const DASHBOARD_TEXTS = {
+  loading: "Loading the participants…",
+  loadFailed: "The list could not be read just now. It tries again in 5 seconds.",
+  offline: "We couldn't reach the workshop. The list tries again in 5 seconds.",
+  noParticipants: "No participants to show.",
+  noNickname: "No nickname yet",
+  gone: "This participant is no longer on the list.",
+  actionFailed: "That did not work. Please try again in a moment.",
+  actionOffline: "We couldn't reach the workshop. Check your connection and try again.",
+  workshopStopped: "The workshop is stopped (the admin's Stop is on): messages and builds wait until Resume.",
+  conversationEmpty: "No messages yet.",
+} as const;
+
+/** Ticket 3.11: after Add $2 ("Added $2 of AI budget. Budget now $7.00."). */
+export function budgetNowText(added: string, budgetUsd: number): string {
+  return `${added} Budget now $${budgetUsd.toFixed(2)}.`;
+}
+
+/** Ticket 3.11: flags the group filter hides ("1 flagged message in another group: choose Everyone to see it."). */
+export function otherGroupFlagsText(count: number): string {
+  return count === 1
+    ? "1 flagged message in another group: choose Everyone to see it."
+    : `${count} flagged messages in other groups: choose Everyone to see them.`;
+}

@@ -233,6 +233,21 @@ Acceptance criteria (each starts as FAIL):
 - WHEN a task runs in a build subnet THEN nothing happens (test)
 - WHEN the synthesized stack is inspected THEN the rule matches only the builds cluster and the Lambda may stop only tasks there (synth test)
 
+### 3.15 Edit the spec on the page (beginner track)
+
+Added on 2026-11-26 (Franck's choice, spec delta below). Step 4 gets **Edit my spec**: it opens the live `SPEC.md` text in a text box; **Rebuild with my edits** sends the edited text through the same path as 3.9 from the cleaning step on (same-spec check, the platform's shape check, the guardrail, the readiness check), stores it as a new spec version and queues a change build that counts against the 5. The builder commits the new `SPEC.md` with the change, so the repository keeps the history. No GitHub account is needed.
+
+Depends on: 3.9. Areas: api, web.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN a participant edits the spec on the page and presses Rebuild with my edits THEN it is stored as a new spec version and a change build is queued that counts against the 5 (test)
+- WHEN the edited text is unchanged THEN the page says "Your spec has not changed." and nothing is queued (test)
+- WHEN the edited text fails the shape check, is off path or not ready THEN the answer is shown, nothing is queued and nothing counts (test)
+- WHEN the edited text is over 8,000 characters THEN it is refused without an AI call (test)
+- WHEN another participant's session is used THEN only the caller's own spec can be edited (test: 404)
+- WHEN the page is 375 px wide THEN the editor and its buttons fit with nothing scrolling sideways (Playwright)
+
 ## Decisions taken in this brief (please veto)
 
 - A change goes through a spec update that the participant sees and confirms with **Build this change**, so they see the spec-to-code link each time (spec: "a short spec update and a rebuild").

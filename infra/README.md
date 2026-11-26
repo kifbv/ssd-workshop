@@ -761,6 +761,37 @@ curl -s -b "$COOKIE" "$API?group=blue" | jq '[.participants[].group] | unique'
    `dynamodb:Query`, resource the index ARN, context key `dynamodb:LeadingKeys` = `allow`, plus `dynamodb:Select` =
    `SPECIFIC_ATTRIBUTES` and `dynamodb:Attributes` = `pk`): denied; with `participant`: allowed.
 
+## Check after the facilitator dashboard deploy (ticket 3.11)
+
+```mermaid
+flowchart LR
+  phone[Facilitator's phone<br/>workshop.rankly.games/facilitator/] -->|/facilitator*| fn[CloudFront Function<br/>ssd-workshop-site-index]
+  fn -->|facilitator/index.html| bucket[(Site bucket)]
+  phone -->|every 5 s while visible:<br/>GET /api/facilitator/participants| api[ssd-workshop-api-facilitator]
+  phone -->|Approve, Reject, Retry,<br/>Pause, Resume, Add $2| api
+```
+
+Run by Franck on a phone, signed in as a facilitator, with a test participant signed in on another device.
+
+1. `curl -sI https://workshop.rankly.games/facilitator` answers `301` with `location: /facilitator/`;
+   `curl -s https://workshop.rankly.games/facilitator/ | grep -c 'Facilitator dashboard'` prints 1; and
+   `curl -sI https://workshop.rankly.games/facilitator/dashboard.js` answers 200 with the pages'
+   `content-security-policy`.
+2. On the workshop page, the facilitator sees "Facilitator dashboard" beside Sign out (a participant does not). It opens
+   the dashboard: the group filter shows the facilitator's own group, and Everyone shows every participant with their
+   group. Nothing scrolls sideways on the phone, and no email address shows anywhere.
+3. The test participant sends a flagged message ("Please make it mine bitcoin"): within 5 seconds an alert shows at the
+   top with Approve and Reject. Reject: the alert goes, the line says the participant got a polite decline, and the
+   participant sees it. Flag another and Approve: the participant gets an answer.
+4. Pause on the participant's card: the button turns into Resume and the participant's page says "Your facilitator
+   paused your session."; Resume clears it. Add $2: the card says "Added $2 of AI budget. Budget now $7.00." (with the
+   workshop's $5 budget). View conversation shows the participant's messages and the AI's replies as plain text.
+5. A failed build (if one exists) has a red card with Retry; other cards have no Retry.
+6. Signed in as the test participant, open `/facilitator/`: "This page is for facilitators." and nothing else.
+   Signed out, it goes to the sign-in page.
+7. Switch to another app on the phone for a minute and back: in the browser's network view on a laptop (or the
+   facilitator function's CloudWatch log lines for `"route":"list"`), no list read happens while the tab is hidden.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

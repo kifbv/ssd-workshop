@@ -45,10 +45,13 @@ import {
   REGION,
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
+  SITE_INDEX_FUNCTION_NAME,
 } from "./config.js";
 
 /** The code of the CloudFront Function on `/apps/*` (plain JavaScript, unit-tested by evaluating it). */
 export const APPS_INDEX_FUNCTION_FILE = fileURLToPath(new URL("./apps-index.js", import.meta.url));
+/** The code of the CloudFront Function on `/facilitator*` (ticket 3.11). */
+export const SITE_INDEX_FUNCTION_FILE = fileURLToPath(new URL("./site-index.js", import.meta.url));
 
 /** How long CloudFront keeps the 404 page it shows for a missing address (S3's 403), in seconds. */
 export const NOT_FOUND_CACHE_SECONDS = 60;
@@ -202,6 +205,25 @@ export class EdgeStack extends Stack {
       responseHeadersPolicy: ResponseHeadersPolicy.SECURITY_HEADERS,
     };
 
+    // The pages, from the site bucket.
+    const site: BehaviorOptions = {
+      origin: S3BucketOrigin.withOriginAccessControl(bucket, {
+        originAccessControl,
+      }),
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+      responseHeadersPolicy: pagesHeaders,
+    };
+
+    // Ticket 3.11: the facilitator dashboard at /facilitator/ (the bucket's `facilitator/index.html`): `/facilitator`
+    // gets its slash, the folder its index.html. Same origin, cache and headers as the other pages.
+    const siteIndex = new CloudFrontFunction(this, "SiteIndexFunction", {
+      functionName: SITE_INDEX_FUNCTION_NAME,
+      comment: `${PREFIX} site: slash redirect and index.html for /facilitator/`,
+      runtime: FunctionRuntime.JS_2_0,
+      code: FunctionCode.fromFile({ filePath: SITE_INDEX_FUNCTION_FILE }),
+    });
+
     this.distribution = new Distribution(this, "Distribution", {
       comment: `${PREFIX} site`,
       domainNames: [DOMAIN],
@@ -209,14 +231,7 @@ export class EdgeStack extends Stack {
       defaultRootObject: "index.html",
       priceClass: PriceClass.PRICE_CLASS_100,
       httpVersion: HttpVersion.HTTP2_AND_3,
-      defaultBehavior: {
-        origin: S3BucketOrigin.withOriginAccessControl(bucket, {
-          originAccessControl,
-        }),
-        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        cachePolicy: CachePolicy.CACHING_OPTIMIZED,
-        responseHeadersPolicy: pagesHeaders,
-      },
+      defaultBehavior: site,
       // CloudFront takes the first matching pattern: the data API's comes before /api/*. Both use
       // the same origin and settings; only the headers policy differs. The apps' /apps/* (ticket 2.5)
       // never matches an /api/ path; it comes last.
@@ -224,6 +239,7 @@ export class EdgeStack extends Stack {
         "/api/apps/*": { ...api, responseHeadersPolicy: appDataHeaders },
         "/api/*": api,
         "/apps/*": apps,
+        "/facilitator*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
       },
       // Ticket 2.5: S3 behind an origin access control answers a missing key with 403 (CloudFront may not
       // list the bucket). Show the plain 404 page instead, with status 404, for apps and pages alike. The

@@ -636,3 +636,163 @@ button.suggestion {
 .advanced button {
   margin-top: 0.5rem;
 }
+
+/* The Facilitator dashboard link beside Sign out, and the dashboard's link back (ticket 3.11). */
+.account a {
+  color: var(--accent);
+}
+.account-link {
+  margin-right: 1rem;
+}
+
+/* The facilitator dashboard (ticket 3.11): cards on a phone, a grid of cards on a laptop. */
+:root {
+  --alert: #a3241a;
+  --alert-bg: #fbe9e7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --alert: #ff8f80;
+    --alert-bg: #3b1d19;
+  }
+}
+body.dashboard main {
+  max-width: 72rem;
+}
+.dashboard-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 1rem;
+}
+.dashboard-filter .help {
+  flex-basis: 100%;
+}
+.dashboard-filter select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+}
+.dashboard-filter select:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.flag-list,
+.rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+.flag,
+.participant {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--card);
+}
+.flag {
+  border: 2px solid var(--accent);
+  border-left-width: 6px;
+}
+.flag-head,
+.participant-head {
+  margin: 0 0 0.5rem;
+}
+.flag-text {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--border);
+  background: var(--bg);
+  white-space: pre-wrap;
+}
+.flag .help {
+  margin: 0 0 0.75rem;
+}
+.flag-buttons,
+.participant-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.flag-buttons button,
+.participant-actions button:not(.link) {
+  padding: 0.6rem 0.9rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+}
+.flag-buttons .primary {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.flag-buttons .secondary,
+.participant-actions .secondary {
+  border: 2px solid var(--accent);
+  background: none;
+  color: var(--accent);
+}
+.participant-group {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.badge {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border: 1px solid var(--accent);
+  border-radius: 1rem;
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.participant-line {
+  margin: 0 0 0.25rem;
+}
+.participant-line.help {
+  margin-bottom: 0.75rem;
+}
+/* A failed build, or one in Build for over 15 minutes: red, with the reason in words on the build line. */
+.participant[data-alert] {
+  border: 2px solid var(--alert);
+  border-left-width: 6px;
+  background: var(--alert-bg);
+}
+.participant[data-alert] .participant-build {
+  color: var(--alert);
+  font-weight: 600;
+}
+.participant .message {
+  margin: 0.5rem 0 0;
+}
+.conversation-log {
+  max-height: 24rem;
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.75rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  list-style: none;
+}
+.conversation-log li {
+  margin: 0 0 0.5rem;
+}
+.log-label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.log-text {
+  white-space: pre-wrap;
+}

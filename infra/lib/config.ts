@@ -383,6 +383,8 @@ export const APPS_HEADERS_POLICY_VERSION = 2;
 export const APPS_HEADERS_POLICY_NAME = `${PREFIX}-apps-v${APPS_HEADERS_POLICY_VERSION}`;
 /** The CloudFront Function on `/apps/*` (viewer request): trailing slash and lower-case redirects, `index.html` for folders. */
 export const APPS_INDEX_FUNCTION_NAME = `${PREFIX}-apps-index`;
+/** Ticket 3.11: the CloudFront Function on `/facilitator*` (viewer request): the slash redirect and `index.html` for the folder. */
+export const SITE_INDEX_FUNCTION_NAME = `${PREFIX}-site-index`;
 
 /** Lambda function, role and log group of the conversation routes (ticket 1.7). */
 export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
