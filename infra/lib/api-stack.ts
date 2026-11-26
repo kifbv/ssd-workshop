@@ -23,6 +23,11 @@ import {
   APP_DATA_FUNCTION_NAME,
   APP_DATA_WRITE_ATTRIBUTES,
   APP_LIVE_READ_ATTRIBUTES,
+  APP_MEDIA_BUCKET_NAME,
+  APP_MEDIA_FUNCTION_NAME,
+  APP_MEDIA_KEY_PREFIX,
+  APP_MEDIA_READ_ATTRIBUTES,
+  APP_MEDIA_WRITE_ATTRIBUTES,
   APP_TOKEN_LIST_READ_ATTRIBUTES,
   APP_TOKEN_LIST_UPDATE_ATTRIBUTES,
   APP_TOKEN_PUT_ATTRIBUTES,
@@ -105,6 +110,22 @@ export const APP_DATA_READ_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const
 /** The data API's CORS preflight: browsers keep its answer 600 s, so few are sent; each still invokes the function. */
 export const APP_DATA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
 
+/**
+ * Route throttles for the media API (ticket 3.18), for all apps together. An upload carries up to 4 MB, so PUT gets
+ * 5 requests/s (burst 20): a room of 45 taking photos at once still passes in a few seconds, and each app's daily
+ * budget caps what the requests cost. DELETE 10/s (burst 20); the preflight as for the data API.
+ */
+export const APP_MEDIA_UPLOAD_THROTTLE = { rateLimit: 5, burstLimit: 20 } as const;
+export const APP_MEDIA_DELETE_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
+export const APP_MEDIA_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+/** The media function: 512 MB for a 4 MB body (base64 text, decoded copy, stripped copy) and faster CPU. */
+export const APP_MEDIA_MEMORY_MB = 512;
+/**
+ * 25 s: two S3 attempts of at most 1 s + 8 s (platform/api/handlers/app-media.ts S3_TIMEOUTS) plus the table calls,
+ * under API Gateway's 30 s.
+ */
+export const APP_MEDIA_TIMEOUT_SECONDS = 25;
+
 /** The protected participant routes (ticket 1.5), all served by one function behind one session check. */
 export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
@@ -167,6 +188,10 @@ export const CONVERSATION_ROUTES = [
  */
 export const APP_DATA_PATH = "/api/apps/{nickname}/data/{key}";
 export const APP_DATA_METHODS = [HttpMethod.GET, HttpMethod.PUT, HttpMethod.DELETE, HttpMethod.OPTIONS] as const;
+
+/** The media API for apps (ticket 3.18), one function; `OPTIONS` is its own route, as for the data API. */
+export const APP_MEDIA_PATH = "/api/apps/{nickname}/media/{id}";
+export const APP_MEDIA_METHODS = [HttpMethod.PUT, HttpMethod.DELETE, HttpMethod.OPTIONS] as const;
 
 /**
  * The AI worker's timeout (ticket 1.7): a guardrail call and an answer of up to 2000 tokens fit with
@@ -791,6 +816,61 @@ export class ApiStack extends Stack {
       integration: new HttpLambdaIntegration("AppDataIntegration", appData, { scopePermissionToRoute: false }),
     });
 
+    // Ticket 3.18: the media API for apps, reachable by anyone with an app's address, writing only with an app write
+    // token. It reads the live marker (`APP#*`, also as a transaction's ConditionCheck), app write tokens (projected) and
+    // its own `APPMEDIA#*` items (projected), writes only in `APPMEDIA#*` with the media items' attribute names, and puts
+    // and deletes objects only under `app-media/` in the media bucket (whose policy refuses every other writer).
+    const appMedia = workshopFunction(this, "AppMedia", APP_MEDIA_FUNCTION_NAME, "app-media.ts", APP_MEDIA_MEMORY_MB, APP_MEDIA_TIMEOUT_SECONDS);
+    const projectedRead = (prefix: string, attributes: readonly string[]): PolicyStatement =>
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [prefix] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...attributes] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      });
+    appMedia.addToRolePolicy(projectedRead("APP#*", APP_LIVE_READ_ATTRIBUTES));
+    appMedia.addToRolePolicy(projectedRead("APPTOKEN#*", APP_TOKEN_READ_ATTRIBUTES));
+    appMedia.addToRolePolicy(projectedRead("APPMEDIA#*", APP_MEDIA_READ_ATTRIBUTES));
+    appMedia.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:ConditionCheckItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_LIVE_READ_ATTRIBUTES] },
+        },
+      }),
+    );
+    appMedia.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPMEDIA#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_MEDIA_WRITE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    appMedia.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:PutObject", "s3:DeleteObject"],
+        resources: [`arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/${APP_MEDIA_KEY_PREFIX}*`],
+      }),
+    );
+    const appMediaRoutes = this.api.addRoutes({
+      path: APP_MEDIA_PATH,
+      methods: [...APP_MEDIA_METHODS],
+      integration: new HttpLambdaIntegration("AppMediaIntegration", appMedia, { scopePermissionToRoute: false }),
+    });
+
     // Route-level throttles (L1 RouteSettings; the L2 stage has no per-route option). A route must
     // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
     const cfnStage = stage.node.defaultChild as CfnStage;
@@ -814,7 +894,18 @@ export class ApiStack extends Stack {
         ThrottlingBurstLimit: throttle.burstLimit,
       });
     }
-    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes, ...appDataRoutes]) cfnStage.node.addDependency(route);
+    const appMediaThrottles = [
+      [HttpMethod.PUT, APP_MEDIA_UPLOAD_THROTTLE],
+      [HttpMethod.DELETE, APP_MEDIA_DELETE_THROTTLE],
+      [HttpMethod.OPTIONS, APP_MEDIA_PREFLIGHT_THROTTLE],
+    ] as const;
+    for (const [method, throttle] of appMediaThrottles) {
+      cfnStage.addPropertyOverride(`RouteSettings.${method} ${APP_MEDIA_PATH}`, {
+        ThrottlingRateLimit: throttle.rateLimit,
+        ThrottlingBurstLimit: throttle.burstLimit,
+      });
+    }
+    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes, ...appDataRoutes, ...appMediaRoutes]) cfnStage.node.addDependency(route);
 
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",

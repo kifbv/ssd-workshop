@@ -370,6 +370,38 @@ export const APP_TOKEN_PROFILE_CHECK_ATTRIBUTES = ["pk", "sk", "role"] as const;
 export const APP_LIVE_READ_ATTRIBUTES = ["pk", "sk", "liveAt"] as const;
 
 /**
+ * Ticket 3.18: the media API (photos and voice recordings of apps), its own function and role. It reads the live
+ * marker's `liveAt` (APP_LIVE_READ_ATTRIBUTES: GetItem, and the ConditionCheck that a finished upload's app is still
+ * live), app write tokens (APP_TOKEN_READ_ATTRIBUTES) and, in `APPMEDIA#*` only, reads and writes these names (a file's
+ * record and the app's media totals; conditions included). Never `liveAt` or `nickname` writes, never `APPDATA#*`.
+ */
+export const APP_MEDIA_FUNCTION_NAME = `${PREFIX}-api-app-media`;
+export const APP_MEDIA_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${APP_MEDIA_FUNCTION_NAME}`;
+/** The same role without its path (see DEPLOYER_ROLE_ARN_WITHOUT_PATH): the media bucket's policy names both forms. */
+export const APP_MEDIA_ROLE_ARN_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/${APP_MEDIA_FUNCTION_NAME}`;
+export const APP_MEDIA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "bytes", "files", "contentType", "status", "uploadedBy", "createdAt", "updatedAt", "uploadDay", "uploadedBytes"] as const;
+/** What the media function reads in `APPMEDIA#*` (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES). */
+export const APP_MEDIA_READ_ATTRIBUTES = ["pk", "sk", "bytes", "files", "status", "createdAt", "uploadDay", "uploadedBytes"] as const;
+/**
+ * The private media bucket (ticket 3.18, apps stack), named with the account like the other buckets (S3 names are
+ * global). Files live under APP_MEDIA_KEY_PREFIX, which CloudFront serves at `/app-media/*` (the same path).
+ */
+export const APP_MEDIA_BUCKET_NAME = `${PREFIX}-app-media-${ACCOUNT}`;
+export const APP_MEDIA_BUCKET_REGIONAL_DOMAIN = `${APP_MEDIA_BUCKET_NAME}.s3.${REGION}.amazonaws.com`;
+export const APP_MEDIA_KEY_PREFIX = "app-media/";
+export const APP_MEDIA_PATH_PATTERN = "/app-media/*";
+/**
+ * Response headers of `/app-media/*` (ticket 3.18): nosniff (the stored type, from the API's allow-list, is the only
+ * one a browser may use), HSTS, the referrer policy and a CSP that makes a file opened on its own inert: nothing may
+ * load and the document is sandboxed (no script, opaque origin), so even a file a browser tried to render as a page
+ * could run nothing. An `<img>` or `<audio>` in an app is not affected (a subresource's own CSP does not apply).
+ * Created, never updated, like the other policies: a change bumps this version.
+ */
+export const APP_MEDIA_HEADERS_POLICY_VERSION = 1;
+export const APP_MEDIA_HEADERS_POLICY_NAME = `${PREFIX}-app-media-v${APP_MEDIA_HEADERS_POLICY_VERSION}`;
+export const APP_MEDIA_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
+
+/**
  * Apps hosting and the deployer (ticket 2.5, stack `ssd-workshop-apps`). The bucket name holds the account,
  * like the site's (S3 names are global); every app's files live under `apps/<lower-cased nickname>/`.
  */
@@ -773,6 +805,15 @@ export const WAF_API_RATE_RULE_NAME = `${PREFIX}-api-rate`;
 export const WAF_API_PATH_PREFIX = "/api/";
 export const WAF_API_RATE_LIMIT = 15_000;
 export const WAF_RATE_WINDOW_SECONDS = 300;
+/**
+ * Ticket 3.18 (decision "Abuse cost", question 3): a second rule, per address, at most WAF_MEDIA_RATE_LIMIT requests to
+ * `/app-media/*` in WAF_RATE_WINDOW_SECONDS, counted apart from `/api/*` so a room loading photos never blocks the API.
+ * Sized for a room behind one venue address: browsers keep a file a year, so each person fetches each photo or recording
+ * once; ~45 people each opening ~100 files within 5 minutes is ~4,500. Above it, 429 like the API rule.
+ */
+export const WAF_MEDIA_RATE_RULE_NAME = `${PREFIX}-media-rate`;
+export const WAF_MEDIA_PATH_PREFIX = "/app-media/";
+export const WAF_MEDIA_RATE_LIMIT = 6_000;
 /**
  * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
  * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would

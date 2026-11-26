@@ -322,3 +322,10 @@ paths:
   with caching off and the AllViewer / AllViewerExceptHostHeader origin request policy, which the `/api/*` behaviours
   use. A route that needs the header on a GET (3.25 try 2's `?whoami=1`) is checked live after the deploy
   (`infra/README.md`), and the client must degrade if it arrives without it.
+- A bucket only one role writes but an operator command must clean (the media bucket, ticket 3.18): the bucket policy
+  denies only the Put-type object actions to everyone but that role, and leaves `DeleteObject` to identity policies, so
+  Franck's `npm run participant -- reset` can delete; the synth test then fails when any IAM policy but that role's may
+  write OR delete there. Files that anyone with a token can delete get a short CloudFront `s-maxage` (a day) instead of
+  an invalidation per delete: invalidations cost $0.005 a path beyond 1,000 a month, and a caller could drive them.
+- A change to the WAF web ACL (a new rule, ticket 3.18) needs `wafv2:UpdateWebACL`, which the repository's access stack
+  does not grant yet (3.13 listed the wafv2 rights for Franck): say so before merging, or the edge stack rolls back.

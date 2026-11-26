@@ -66,6 +66,11 @@ export const APPS_BUCKET_NAME = `ssd-workshop-apps-${ACCOUNT}`;
 export const APPS_KEY_PREFIX = "apps/";
 /** The live CloudFront distribution of workshop.rankly.games (edge stack); the deployer invalidates `/apps/<nickname>/*` on it. */
 export const DISTRIBUTION_ID = "E2TOZV0ERAXKZ9";
+/**
+ * Ticket 3.18: the private bucket of apps' photos and recordings, served at `/app-media/*`; every app's files live under
+ * `app-media/<lower-cased nickname>/`. Only the media function's role may put files there (bucket policy).
+ */
+export const APP_MEDIA_BUCKET_NAME = `ssd-workshop-app-media-${ACCOUNT}`;
 /** The free GitHub organization that holds the participants' public repositories (Franck, 2026-11-23). */
 export const APPS_GITHUB_OWNER = "ssd-workshop-apps";
 /** A participant's repository: `ssd-<lower-cased nickname>` in APPS_GITHUB_OWNER. */

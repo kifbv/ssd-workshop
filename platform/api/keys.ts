@@ -139,6 +139,22 @@ export const appDataKey = (nickname: string, key: string): ItemKey => ({
 /** The running totals of an app's data (ticket 2.4): bytes and keys, written with every value. */
 export const appDataUsageKey = (nickname: string): ItemKey => ({ pk: appDataPk(nickname), sk: "DATA_USAGE" });
 
+/** Prefix of every photo's or recording's sort key in an app's media partition (ticket 3.18). */
+export const APP_MEDIA_PREFIX = "MEDIA#";
+
+/**
+ * An app's media records (ticket 3.18): `APPMEDIA#<lower-cased nickname>`. Its own prefix: IAM's `APP#*` never matches
+ * `APPMEDIA#...` (the character after `APP` is `M`), nor `APPDATA#*` or `APPTOKEN#*`, so the media function's role
+ * cannot touch the live marker, the data or the tokens, and the data function's cannot touch the media.
+ */
+const appMediaPk = (nickname: string): string => `APPMEDIA#${checkId("nickname", nickname).toLowerCase()}`;
+
+/** One stored photo or recording (ticket 3.18), at `APPMEDIA#<nickname>` / `MEDIA#<id>`: its size, type and state. */
+export const appMediaKey = (nickname: string, id: string): ItemKey => ({ pk: appMediaPk(nickname), sk: `${APP_MEDIA_PREFIX}${checkId("media id", id)}` });
+
+/** The running totals of an app's media (ticket 3.18): bytes, files and the day's uploads. */
+export const appMediaUsageKey = (nickname: string): ItemKey => ({ pk: appMediaPk(nickname), sk: "MEDIA_USAGE" });
+
 /**
  * An app write token (ticket 3.24), by the SHA-256 (hex) of the token: `APPTOKEN#<hash>` / `TOKEN`. Its own partition
  * prefix: IAM's `APP#*` and `APPDATA#*` never match `APPTOKEN#...` (the character after `APP` is `T`), and `APPTOKEN#*`

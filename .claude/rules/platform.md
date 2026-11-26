@@ -326,3 +326,14 @@ paths:
   parsed strictly beside the deploy job) and lets the deployer do it. A file a Lambda needs at run time travels with its
   code (`afterBundling` copy, read from `LAMBDA_TASK_ROOT`); a synth test that `require`s the bundle sets
   `LAMBDA_TASK_ROOT` to the asset folder.
+- Binary uploads through the HTTP API (the media API, ticket 3.18) arrive base64 (`isBase64Encoded`) only for non-text
+  content types: check the base64 length against the limit before decoding, and remember Lambda's 6 MB request limit
+  (4 MB of bytes is ~5.6 MB of base64). Judge a file's format from its bytes (magic numbers and the container's own
+  track/codec fields), never the declared type, and serve it with a fixed type per format plus `nosniff`. Remove photo
+  metadata by walking the JPEG segments (drop APP1/APP13/COM and every APPn but JFIF, ICC and Adobe, and anything after
+  EOI); prove "still decodes" on a JPEG Chromium encodes (`app-media/browser.test.ts`).
+- Browser code in a `platform/api` test (no DOM types in that tsconfig) goes to `page.evaluate` as plain JavaScript text
+  (`inPage` in `app-media/browser.test.ts`), not as a typed function; `platform/web` tests have DOM types.
+- Media in sandboxed apps: `<img>` and `<audio>` from the workshop's own `/app-media/...` load under the apps' CSP
+  (`img-src 'self'`, `media-src` falling back to `default-src 'self'`): `'self'` is the served address, not the opaque
+  origin (proved in Chromium, ticket 3.18).

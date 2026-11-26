@@ -20,6 +20,13 @@ import {
   APP_DATA_PREFLIGHT_THROTTLE,
   APP_DATA_READ_THROTTLE,
   APP_DATA_WRITE_THROTTLE,
+  APP_MEDIA_DELETE_THROTTLE,
+  APP_MEDIA_MEMORY_MB,
+  APP_MEDIA_METHODS,
+  APP_MEDIA_PATH,
+  APP_MEDIA_PREFLIGHT_THROTTLE,
+  APP_MEDIA_TIMEOUT_SECONDS,
+  APP_MEDIA_UPLOAD_THROTTLE,
 } from "./api-stack.js";
 import { APP_DATA_ROUTES as APP_DATA_ROUTE_KEYS, PREFLIGHT_HEADERS } from "../../platform/api/app-data/data.js";
 import { STALE_PENDING_SECONDS } from "../../platform/api/conversation/state.js";
@@ -57,6 +64,19 @@ import {
   APP_DATA_HEADERS_POLICY_NAME,
   APPS_BUCKET_NAME,
   APPS_BUCKET_REGIONAL_DOMAIN,
+  APP_MEDIA_BUCKET_NAME,
+  APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
+  APP_MEDIA_CONTENT_SECURITY_POLICY,
+  APP_MEDIA_FUNCTION_NAME,
+  APP_MEDIA_HEADERS_POLICY_NAME,
+  APP_MEDIA_KEY_PREFIX,
+  APP_MEDIA_PATH_PATTERN,
+  APP_MEDIA_READ_ATTRIBUTES,
+  APP_MEDIA_ROLE_ARN,
+  APP_MEDIA_ROLE_ARN_WITHOUT_PATH,
+  APP_MEDIA_WRITE_ATTRIBUTES,
+  APP_LIVE_READ_ATTRIBUTES,
+  APP_TOKEN_READ_ATTRIBUTES,
   APPS_CONTENT_SECURITY_POLICY,
   APPS_HEADERS_POLICY_NAME,
   APPS_INDEX_FUNCTION_NAME,
@@ -128,6 +148,9 @@ import {
   WAF_BLOCK_BODY,
   WAF_BLOCK_BODY_KEY,
   WAF_BLOCK_STATUS,
+  WAF_MEDIA_PATH_PREFIX,
+  WAF_MEDIA_RATE_LIMIT,
+  WAF_MEDIA_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
 } from "./config.js";
@@ -137,8 +160,17 @@ import { BUILD_RETRIES_PK, SETTINGS_PK } from "../../platform/api/keys.js";
 import { FACILITATOR_ROUTES as FACILITATOR_ROUTE_KEYS } from "../../platform/api/facilitator/facilitator.js";
 import { BY_TYPE_INDEX_KEY as PLATFORM_BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME } from "../../platform/api/settings.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
+import {
+  APP_MEDIA_ROUTES as APP_MEDIA_ROUTE_KEYS,
+  MEDIA_CACHE_CONTROL,
+  MEDIA_KEY_PREFIX,
+  MEDIA_PREFLIGHT_HEADERS,
+  mediaAddress,
+} from "../../platform/api/app-media/media.js";
+import { S3_TIMEOUTS } from "../../platform/api/handlers/app-media.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 import {
+  APP_MEDIA_OBJECT_WRITE_ACTIONS,
   APPS_OBJECT_WRITE_ACTIONS,
   DATA_CLIENT_FILE,
   DEPLOY_QUEUE_MAX_RECEIVES,
@@ -161,6 +193,7 @@ import {
 import { LAUNCH_RESERVE_MS } from "../../platform/api/handlers/builds-launcher.js";
 import {
   APPS_BUCKET_NAME as PLATFORM_APPS_BUCKET_NAME,
+  APP_MEDIA_BUCKET_NAME as PLATFORM_APP_MEDIA_BUCKET_NAME,
   BUILD_QUEUE_NAME as PLATFORM_BUILD_QUEUE_NAME,
   DEPLOY_MAX_RECEIVES as PLATFORM_DEPLOY_MAX_RECEIVES,
   DEPLOY_QUEUE_NAME as PLATFORM_DEPLOY_QUEUE_NAME,
@@ -495,14 +528,14 @@ describe("tags, boundary and names (criterion 3)", () => {
     for (const path of EXPECTED_NAME_PATHS) expect(seen, path).toContain(path);
   });
 
-  it("names the Origin Access Controls ssd-workshop-site and, from ticket 2.5, ssd-workshop-apps", () => {
+  it("names the Origin Access Controls ssd-workshop-site and, from ticket 2.5, ssd-workshop-apps (3.18: ssd-workshop-app-media)", () => {
     const oacs = ofType("AWS::CloudFront::OriginAccessControl");
-    expect(oacs.map(([, , r]) => (r.Properties?.OriginAccessControlConfig as { Name?: string }).Name).sort()).toEqual(["ssd-workshop-apps", "ssd-workshop-site"]);
+    expect(oacs.map(([, , r]) => (r.Properties?.OriginAccessControlConfig as { Name?: string }).Name).sort()).toEqual(["ssd-workshop-app-media", "ssd-workshop-apps", "ssd-workshop-site"]);
   });
 
   it("retains the Origin Access Controls (the deploy rights cannot update or delete one)", () => {
     const oacs = ofType("AWS::CloudFront::OriginAccessControl");
-    expect(oacs).toHaveLength(2);
+    expect(oacs).toHaveLength(3);
     for (const [, , oac] of oacs) expect(oac).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 
@@ -530,9 +563,9 @@ describe("tags, boundary and names (criterion 3)", () => {
 });
 
 describe("buckets (criterion 2)", () => {
-  it("creates the assets bucket and the site bucket with their fixed names", () => {
+  it("creates the assets bucket and the site bucket with their fixed names (2.5: apps; 3.18: app media)", () => {
     const names = ofType("AWS::S3::Bucket").map(([, , r]) => r.Properties?.BucketName);
-    expect(names.sort()).toEqual([ASSETS_BUCKET_NAME, SITE_BUCKET_NAME, APPS_BUCKET_NAME].sort());
+    expect(names.sort()).toEqual([ASSETS_BUCKET_NAME, SITE_BUCKET_NAME, APPS_BUCKET_NAME, APP_MEDIA_BUCKET_NAME].sort());
   });
 
   it("blocks all public access, turns ACLs off and encrypts every bucket", () => {
@@ -645,14 +678,15 @@ describe("certificate, CloudFront and DNS (criteria 1, 4, 5)", () => {
       },
     });
 
-    // Three origins: the site bucket (default), from ticket 1.2 the HTTP API, from ticket 2.5 the apps bucket.
+    // Four origins: the site bucket (default), from ticket 1.2 the HTTP API, from ticket 2.5 the apps bucket, from
+    // ticket 3.18 the media bucket.
     const origins = config.Origins as Record<string, unknown>[];
-    expect(origins).toHaveLength(3);
+    expect(origins).toHaveLength(4);
     const siteOrigin = origins.find((o) => o.DomainName === SITE_BUCKET_REGIONAL_DOMAIN);
     expect(siteOrigin).toBeDefined();
     expect(siteOrigin?.OriginAccessControlId).toBeDefined();
     expect((config.DefaultCacheBehavior as Record<string, unknown>).TargetOriginId).toBe(siteOrigin?.Id);
-    expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(2);
+    expect(ofType("AWS::CloudFront::OriginAccessControl")).toHaveLength(3);
   });
 
   it("changes only the workshop.rankly.games records (A and AAAA aliases to CloudFront)", () => {
@@ -686,8 +720,8 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
   it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
     const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
     // /api/*, the data API's /api/apps/* (ticket 2.4), the apps' /apps/* (ticket 2.5) and the dashboard's /facilitator*
-    // (ticket 3.11), and the hand-off page's /app-sign-in* (ticket 3.24), in this order.
-    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*", "/app-sign-in*"]);
+    // (ticket 3.11), the hand-off page's /app-sign-in* (ticket 3.24) and apps' media /app-media/* (ticket 3.18), in this order.
+    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/app-media/*", "/facilitator*", "/app-sign-in*"]);
     const behaviour = apiBehaviour();
     expect(behaviour).toMatchObject({
       PathPattern: "/api/*",
@@ -720,11 +754,11 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
     }
     // The CloudFront Functions are the apps' (ticket 2.5), on /apps/* only, and the site's (ticket 3.11), on /facilitator* only.
     expect(ofType("AWS::CloudFront::Function").map(([, , r]) => r.Properties?.Name).sort()).toEqual([APPS_INDEX_FUNCTION_NAME, SITE_INDEX_FUNCTION_NAME].sort());
-    // The pages' headers policy (ticket 1.6), the data API's (ticket 2.4) and the apps' (ticket 2.5) are the
-    // only custom CloudFront policies, and /api/* keeps the managed SecurityHeadersPolicy (asserted above).
+    // The pages' headers policy (ticket 1.6), the data API's (ticket 2.4), the apps' (ticket 2.5) and the media's (ticket
+    // 3.18) are the only custom CloudFront policies, and /api/* keeps the managed SecurityHeadersPolicy (asserted above).
     const custom = ofType("AWS::CloudFront::ResponseHeadersPolicy");
     expect(custom.map(([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name).sort()).toEqual(
-      [APP_DATA_HEADERS_POLICY_NAME, APPS_HEADERS_POLICY_NAME, PAGES_HEADERS_POLICY_NAME].sort(),
+      [APP_DATA_HEADERS_POLICY_NAME, APPS_HEADERS_POLICY_NAME, PAGES_HEADERS_POLICY_NAME, APP_MEDIA_HEADERS_POLICY_NAME].sort(),
     );
     for (const [, id] of custom) expect(JSON.stringify(apiBehaviour())).not.toContain(id);
   });
@@ -766,7 +800,7 @@ describe("CloudFront /api/apps/* behaviour: every data API answer readable by sa
     // Same origin, methods, HTTPS only, caching disabled, origin request policy.
     expect(appsRest).toEqual(apiRest);
     expect(appsRest).toMatchObject({ ViewerProtocolPolicy: "https-only", CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac" });
-    expect((distributionConfig().Origins as unknown[]).length).toBe(3);
+    expect((distributionConfig().Origins as unknown[]).length).toBe(4);
     expect(apiPolicy).toBe("67f7725c-6f97-4210-82d7-5512b31e9d03");
     expect(appsPolicy).toEqual({ Ref: policy()?.[1] });
   });
@@ -1016,13 +1050,16 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
       "OPTIONS /api/apps/{nickname}/data/{key}",
+      "PUT /api/apps/{nickname}/media/{id}",
+      "DELETE /api/apps/{nickname}/media/{id}",
+      "OPTIONS /api/apps/{nickname}/media/{id}",
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(8);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(9);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -1079,6 +1116,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       AI_WORKER_FUNCTION_NAME,
       FACILITATOR_FUNCTION_NAME,
       APP_DATA_FUNCTION_NAME,
+      APP_MEDIA_FUNCTION_NAME,
     ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
       Runtime: "nodejs22.x",
@@ -1645,7 +1683,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
     ]);
   });
 
-  it("ticket 3.24: only the participant function writes app write tokens, and only it and the data function read them", () => {
+  it("ticket 3.24: only the participant function writes app write tokens, and only it and the data function (3.18: and the media function) read them", () => {
     const like = (pattern: string, value: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(value);
     // The token partitions never overlap each other or the partitions other roles hold.
     for (const [pattern, key] of [
@@ -1679,12 +1717,18 @@ describe("api stack: participant function (ticket 1.5)", () => {
       return [...new Set(found)].sort();
     };
     expect(reach(`APPTOKEN#${"a".repeat(64)}`)).toEqual(
-      [`${APP_DATA_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:PutItem`].sort(),
+      [
+        `${APP_DATA_FUNCTION_NAME} dynamodb:GetItem`,
+        `${APP_MEDIA_FUNCTION_NAME} dynamodb:GetItem`,
+        `${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`,
+        `${PARTICIPANT_FUNCTION_NAME} dynamodb:PutItem`,
+      ].sort(),
     );
     expect(reach("TOKENS#p-1")).toEqual(
       [`${PARTICIPANT_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:UpdateItem`].sort(),
     );
     expect(JSON.stringify(apiFunction(APP_DATA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
+    expect(JSON.stringify(apiFunction(APP_MEDIA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
   });
 
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
@@ -2193,8 +2237,11 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     expect(APP_DATA_READ_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     expect(APP_DATA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
-    // Every route setting of the stage, exactly: the sign-in routes' and the data API's.
+    // Every route setting of the stage, exactly: the sign-in routes', the data API's and (ticket 3.18) the media API's.
     expect(stage?.Properties?.RouteSettings).toEqual({
+      [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 20 },
+      [`DELETE ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
+      [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       [`PUT ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
@@ -3517,9 +3564,12 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
 
   it("keeps the API behaviours first: /apps/* cannot match an /api/ path", () => {
     const patterns = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).map((b) => b.PathPattern);
-    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*", "/app-sign-in*"]);
+    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/app-media/*", "/facilitator*", "/app-sign-in*"]);
     const matches = (pattern: string, path: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(path);
     expect(matches("/apps/*", "/api/apps/ada/data/k")).toBe(false);
+    // Ticket 3.18: the media path never matches an API or app path, nor the reverse.
+    expect(matches("/app-media/*", "/api/apps/ada/media/x")).toBe(false);
+    expect(matches("/apps/*", "/app-media/ada/x")).toBe(false);
     expect(matches("/apps/*", "/apps/ada/index.html")).toBe(true);
   });
 
@@ -3586,8 +3636,8 @@ describe("CloudFront /facilitator* behaviour: the facilitator dashboard at /faci
     expect(rest).toEqual(defaults);
     expect(defaults.FunctionAssociations).toBeUndefined();
     expect(FunctionAssociations).toEqual([{ EventType: "viewer-request", FunctionARN: { "Fn::GetAtt": [fn()?.[1], "FunctionARN"] } }]);
-    // One site origin for both (no second origin, no second origin access control).
-    expect((distributionConfig().Origins as unknown[]).length).toBe(3);
+    // One site origin for both (no second origin, no second origin access control): site, API, apps, media.
+    expect((distributionConfig().Origins as unknown[]).length).toBe(4);
   });
 
   it("cannot match an /api/ or /apps/ path, and the dashboard's files are under it", () => {
@@ -3624,7 +3674,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(resource.Properties?.VisibilityConfig).toEqual({ CloudWatchMetricsEnabled: true, MetricName: WEB_ACL_NAME, SampledRequestsEnabled: true });
   });
 
-  it("has exactly one rule: per address, at most the limit of requests to /api/* in 5 minutes, then blocked (429)", () => {
+  it("has exactly two rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429)", () => {
     const rules = acl()[2].Properties?.Rules as Record<string, unknown>[];
     expect(rules).toEqual([
       {
@@ -3648,7 +3698,32 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
         },
         VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_API_RATE_RULE_NAME, SampledRequestsEnabled: true },
       },
+      {
+        Name: WAF_MEDIA_RATE_RULE_NAME,
+        Priority: 1,
+        Action: { Block: { CustomResponse: { ResponseCode: WAF_BLOCK_STATUS, CustomResponseBodyKey: WAF_BLOCK_BODY_KEY } } },
+        Statement: {
+          RateBasedStatement: {
+            Limit: WAF_MEDIA_RATE_LIMIT,
+            EvaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+            AggregateKeyType: "IP",
+            ScopeDownStatement: {
+              ByteMatchStatement: {
+                FieldToMatch: { UriPath: {} },
+                PositionalConstraint: "STARTS_WITH",
+                SearchString: WAF_MEDIA_PATH_PREFIX,
+                TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }],
+              },
+            },
+          },
+        },
+        VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_RATE_RULE_NAME, SampledRequestsEnabled: true },
+      },
     ]);
+    expect(WAF_MEDIA_RATE_RULE_NAME).toBe("ssd-workshop-media-rate");
+    expect(WAF_MEDIA_PATH_PREFIX).toBe("/app-media/");
+    // A room behind one venue address, each person opening ~100 files once in 5 minutes (browsers keep them a year).
+    expect(WAF_MEDIA_RATE_LIMIT).toBeGreaterThanOrEqual(45 * 100);
     expect(WAF_API_PATH_PREFIX).toBe("/api/");
     expect(WAF_RATE_WINDOW_SECONDS).toBe(300);
     // API Gateway's throttle answer, so pages and apps read a block as "too many requests".
@@ -3734,5 +3809,270 @@ describe("Cost Anomaly Detection (ticket 3.13 criterion 3)", () => {
       expect(found.filter((address) => address !== SENDER_ADDRESS), name).toEqual([]);
     }
     expect(JSON.stringify(stack(STACK_NAMES.alerts).template.Parameters ?? {})).toBe("{}");
+  });
+});
+
+describe("ticket 3.18: the media bucket, the media function and /app-media/*", () => {
+  const appsResources = () => resources(STACK_NAMES.apps);
+  const bucketEntry = () => appsResources().find(([, r]) => r.Type === "AWS::S3::Bucket" && r.Properties?.BucketName === APP_MEDIA_BUCKET_NAME);
+  const bucketStatements = () =>
+    (
+      appsResources().find(([, r]) => r.Type === "AWS::S3::BucketPolicy" && JSON.stringify(r.Properties?.Bucket) === JSON.stringify({ Ref: bucketEntry()?.[0] }))?.[1]
+        .Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }
+    ).Statement;
+  const bucketArn = () => ({ "Fn::GetAtt": [bucketEntry()?.[0], "Arn"] });
+  const MEDIA_BUCKET_ARNS = [`arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}`, `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/app-media/ada/x`];
+  const reachesMedia = (resource: unknown): boolean =>
+    resourceReaches(resource, MEDIA_BUCKET_ARNS, bucketEntry() === undefined ? [] : [bucketEntry()?.[0] ?? "?"], [APP_MEDIA_BUCKET_NAME, "ssd-workshop-app-media"]);
+  const f = apiFunction(APP_MEDIA_FUNCTION_NAME);
+  const distributionConfig = (): Record<string, unknown> =>
+    ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as Record<string, unknown>;
+  const behaviour = () => (distributionConfig().CacheBehaviors as Record<string, unknown>[]).find((b) => b.PathPattern === "/app-media/*");
+  const headersPolicy = () =>
+    ofType("AWS::CloudFront::ResponseHeadersPolicy").find(
+      ([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name === APP_MEDIA_HEADERS_POLICY_NAME,
+    );
+
+  it("criterion 9: creates the private bucket ssd-workshop-app-media-<account> in the apps stack: tagged, no public access, ACLs off, encrypted, retained", () => {
+    expect(APP_MEDIA_BUCKET_NAME).toBe(`ssd-workshop-app-media-${ACCOUNT}`);
+    expect(PLATFORM_APP_MEDIA_BUCKET_NAME).toBe(APP_MEDIA_BUCKET_NAME);
+    const [, resource] = must(bucketEntry());
+    expect(resource).toMatchObject({
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+      Properties: {
+        BucketName: APP_MEDIA_BUCKET_NAME,
+        OwnershipControls: { Rules: [{ ObjectOwnership: "BucketOwnerEnforced" }] },
+        PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true },
+        BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: "AES256" } }] },
+      },
+    });
+    expect(tagsOf(resource)[TAG_KEY]).toBe(TAG_VALUE);
+    // No website, CORS, lifecycle, logging or notification settings.
+    for (const prop of ["WebsiteConfiguration", "CorsConfiguration", "LoggingConfiguration", "NotificationConfiguration", "ReplicationConfiguration"]) {
+      expect(resource.Properties?.[prop], prop).toBeUndefined();
+    }
+  });
+
+  it("criteria 7 and 9: only the workshop's distribution (its exact ARN) may read, only over TLS (enforceSSL), and nobody lists the bucket", () => {
+    const allows = bucketStatements().filter((st) => st.Effect === "Allow");
+    expect(allows).toEqual([
+      {
+        Sid: "CloudFrontReadOnly",
+        Effect: "Allow",
+        Action: "s3:GetObject",
+        Principal: { Service: "cloudfront.amazonaws.com" },
+        Resource: { "Fn::Join": ["", [bucketArn(), "/*"]] },
+        Condition: { StringEquals: { "AWS:SourceAccount": ACCOUNT, "AWS:SourceArn": `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}` } },
+      },
+    ]);
+    expect(bucketStatements()).toContainEqual(
+      expect.objectContaining({ Effect: "Deny", Action: "s3:*", Principal: { AWS: "*" }, Condition: { Bool: { "aws:SecureTransport": "false" } } }),
+    );
+    expect(JSON.stringify(bucketStatements())).not.toContain("distribution/*");
+    expect(JSON.stringify(bucketStatements())).not.toContain("s3:ListBucket");
+  });
+
+  it("criterion 9: the bucket policy refuses every object write to any principal but the media function's role (with and without its path)", () => {
+    expect(bucketStatements().find((st) => st.Sid === "OnlyTheMediaFunctionWrites")).toEqual({
+      Sid: "OnlyTheMediaFunctionWrites",
+      Effect: "Deny",
+      Action: [...APP_MEDIA_OBJECT_WRITE_ACTIONS],
+      Principal: { AWS: "*" },
+      Resource: { "Fn::Join": ["", [bucketArn(), "/*"]] },
+      Condition: { ArnNotEquals: { "aws:PrincipalArn": [APP_MEDIA_ROLE_ARN, APP_MEDIA_ROLE_ARN_WITHOUT_PATH] } },
+    });
+    for (const action of ["s3:PutObject", "s3:PutObjectAcl", "s3:PutObjectTagging", "s3:RestoreObject", "s3:ReplicateObject"]) {
+      expect(APP_MEDIA_OBJECT_WRITE_ACTIONS, action).toContain(action);
+    }
+    expect(APP_MEDIA_ROLE_ARN).toBe(`arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-api-app-media`);
+    expect(APP_MEDIA_ROLE_ARN_WITHOUT_PATH).toBe(`arn:aws:iam::${ACCOUNT}:role/ssd-workshop-api-app-media`);
+    // The media function's role is that ARN: its name, its path and the boundary.
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ RoleName: APP_MEDIA_FUNCTION_NAME, Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+  });
+
+  it("criterion 9: no IAM policy in any stack, other than the media function's, may write or delete in the media bucket", () => {
+    const writes = (action: string): boolean => action === "*" || /^s3:(\*|Put|Delete|Restore|Replicate|Abort|Object)/i.test(action) || /^s3:.*\*/.test(action);
+    for (const pattern of ["*", "arn:aws:s3:::ssd-*", "arn:aws:s3:::*/app-media/*", "arn:aws:s3:::ssd-workshop-app-?edia-*/*"]) expect(reachesMedia(pattern), pattern).toBe(true);
+    expect(reachesMedia(`arn:aws:s3:::${APPS_BUCKET_NAME}/apps/*`)).toBe(false);
+    const mediaRole = f.roleEntry()?.[0];
+    let checked = 0;
+    let own = 0;
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      const forMedia = s === STACK_NAMES.api && JSON.stringify(r.Properties?.Roles) === JSON.stringify([{ Ref: mediaRole }]);
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        assertNoExclusions(`${s}/${id}`, st);
+        if (st.Effect !== "Allow") continue;
+        if (!([st.Action].flat() as string[]).some(writes)) continue;
+        checked += 1;
+        if (forMedia) {
+          own += 1;
+          continue;
+        }
+        for (const resource of [st.Resource].flat()) expect(reachesMedia(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
+      }
+    }
+    expect(own).toBe(1);
+    expect(checked).toBeGreaterThanOrEqual(3);
+  });
+
+  it("criterion 9: no IAM policy, the media function's included, may change the media bucket's policy, lifecycle, website, CORS or delete it", () => {
+    const bucketActions = ["s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutLifecycleConfiguration", "s3:PutBucketWebsite", "s3:PutBucketCORS", "s3:DeleteBucket", "s3:PutBucketPublicAccessBlock"];
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        const granted = [st.Action].flat() as string[];
+        const covered = bucketActions.filter((action) => granted.some((g) => actionCovers(g, action)));
+        if (covered.length === 0) continue;
+        for (const resource of [st.Resource].flat()) expect(reachesMedia(resource), `${s}/${id} ${covered.join(",")}: ${JSON.stringify(st)}`).toBe(false);
+      }
+    }
+  });
+
+  it("names the function, role and log group ssd-workshop-api-app-media; Node.js 22 arm64, 512 MB, 25 s (two S3 attempts fit, under API Gateway's 30 s), tagged", () => {
+    expect(APP_MEDIA_FUNCTION_NAME).toBe("ssd-workshop-api-app-media");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({
+      Runtime: "nodejs22.x",
+      Architectures: ["arm64"],
+      MemorySize: APP_MEDIA_MEMORY_MB,
+      Timeout: APP_MEDIA_TIMEOUT_SECONDS,
+      Code: { S3Bucket: ASSETS_BUCKET_NAME },
+    });
+    expect(APP_MEDIA_MEMORY_MB).toBe(512);
+    expect(2 * (S3_TIMEOUTS.connectionTimeout + S3_TIMEOUTS.requestTimeout) + 5000).toBeLessThanOrEqual(APP_MEDIA_TIMEOUT_SECONDS * 1000);
+    expect(APP_MEDIA_TIMEOUT_SECONDS).toBeLessThan(30);
+    expect(tagsOf(f.fnEntry()?.[1] as Resource)[TAG_KEY]).toBe(TAG_VALUE);
+    expect(f.apiResources().find(([id]) => id === f.logGroupId())?.[1].Properties).toMatchObject({ LogGroupName: APP_MEDIA_FUNCTION_NAME, RetentionInDays: 14 });
+    expect(f.roleEntry()?.[1].Properties?.ManagedPolicyArns).toBeUndefined();
+  });
+
+  it("routes PUT, DELETE and OPTIONS /api/apps/{nickname}/media/{id} to it (the platform's routes), invoked only by this API, throttled after the routes exist", () => {
+    const keys = APP_MEDIA_METHODS.map((method) => `${method} ${APP_MEDIA_PATH}`);
+    expect(keys).toEqual([...APP_MEDIA_ROUTE_KEYS]);
+    for (const routeKey of keys) {
+      expect(f.integrationOf(routeKey), routeKey).toMatchObject({
+        IntegrationType: "AWS_PROXY",
+        PayloadFormatVersion: "2.0",
+        IntegrationUri: { "Fn::GetAtt": [f.fnEntry()?.[0], "Arn"] },
+      });
+    }
+    expect(f.permissions()).toHaveLength(1);
+    const source = JSON.stringify(f.permissions()[0]?.[2].Properties?.SourceArn);
+    expect(source).toContain(`:execute-api:${REGION}:${ACCOUNT}:`);
+    expect(source).toContain('"/*/*/*"');
+    expect(APP_MEDIA_UPLOAD_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 20 });
+    expect(APP_MEDIA_DELETE_THROTTLE).toEqual({ rateLimit: 10, burstLimit: 20 });
+    expect(APP_MEDIA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
+    for (const routeKey of keys) {
+      const routeId = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === routeKey)?.[0];
+      expect(routeId, routeKey).toBeDefined();
+      expect([stage?.DependsOn].flat(), routeKey).toContain(routeId);
+      expect((stage?.Properties?.RouteSettings as Record<string, unknown>)[routeKey], routeKey).toBeDefined();
+    }
+  });
+
+  it("allows only its logs, projected reads of the live marker, app write tokens and its own items, the live marker's ConditionCheck, writes in APPMEDIA# of the media attributes only, and S3 put/delete under app-media/ of the media bucket", () => {
+    const projected = (prefix: string, attributes: readonly string[]) => ({
+      Effect: "Allow",
+      Action: "dynamodb:GetItem",
+      Resource: f.tableArn(),
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [prefix] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...attributes] },
+        StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    });
+    expect(f.statements()).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
+      projected("APP#*", APP_LIVE_READ_ATTRIBUTES),
+      projected("APPTOKEN#*", APP_TOKEN_READ_ATTRIBUTES),
+      projected("APPMEDIA#*", APP_MEDIA_READ_ATTRIBUTES),
+      {
+        Effect: "Allow",
+        Action: "dynamodb:ConditionCheckItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_LIVE_READ_ATTRIBUTES] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPMEDIA#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_MEDIA_WRITE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      },
+      { Effect: "Allow", Action: ["s3:PutObject", "s3:DeleteObject"], Resource: `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/app-media/*` },
+    ]);
+    // pk and sk are in every list; the live marker's `liveAt` is never writable; `APPMEDIA#*` never matches `APP#` or `APPDATA#` keys.
+    for (const list of [APP_MEDIA_WRITE_ATTRIBUTES, APP_MEDIA_READ_ATTRIBUTES, APP_LIVE_READ_ATTRIBUTES]) expect(list).toEqual(expect.arrayContaining(["pk", "sk"]));
+    expect(APP_MEDIA_WRITE_ATTRIBUTES).not.toContain("liveAt");
+    for (const key of ["APP#ada", "APPDATA#ada", "APPTOKEN#ab"]) expect(actionCovers("APPMEDIA#*", key), key).toBe(false);
+    expect(actionCovers("APP#*", "APPMEDIA#ada")).toBe(false);
+    expect(actionCovers("APPDATA#*", "APPMEDIA#ada")).toBe(false);
+  });
+
+  it("criterion 1: the platform stores under app-media/<nickname>/ and answers https://workshop.rankly.games/app-media/<nickname>/<id>, which the behaviour serves", () => {
+    expect(MEDIA_KEY_PREFIX).toBe(APP_MEDIA_KEY_PREFIX);
+    expect(`/${MEDIA_KEY_PREFIX}*`).toBe(APP_MEDIA_PATH_PATTERN);
+    expect(mediaAddress("Ada", "A".repeat(22))).toBe(`https://${DOMAIN}/app-media/ada/${"A".repeat(22)}`);
+    expect(behaviour()).toBeDefined();
+  });
+
+  it("criterion 7: serves /app-media/* from the media bucket through the ssd-workshop-app-media origin access control: GET and HEAD, HTTPS (redirect), managed CachingOptimized (follows the stored Cache-Control)", () => {
+    expect(behaviour()).toMatchObject({
+      AllowedMethods: ["GET", "HEAD"],
+      ViewerProtocolPolicy: "redirect-to-https",
+      CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6",
+      ResponseHeadersPolicyId: { Ref: headersPolicy()?.[1] },
+    });
+    expect(behaviour()?.FunctionAssociations).toBeUndefined();
+    expect(behaviour()?.OriginRequestPolicyId).toBeUndefined();
+    const origin = (distributionConfig().Origins as Record<string, unknown>[]).find((o) => o.Id === behaviour()?.TargetOriginId);
+    expect(origin?.DomainName).toBe(APP_MEDIA_BUCKET_REGIONAL_DOMAIN);
+    expect(APP_MEDIA_BUCKET_REGIONAL_DOMAIN).toBe(`${APP_MEDIA_BUCKET_NAME}.s3.${REGION}.amazonaws.com`);
+    const oac = ofType("AWS::CloudFront::OriginAccessControl").find(([, , r]) => (r.Properties?.OriginAccessControlConfig as { Name?: string }).Name === "ssd-workshop-app-media");
+    expect(origin?.OriginAccessControlId).toEqual({ "Fn::GetAtt": [oac?.[1], "Id"] });
+    expect(oac?.[2].Properties?.OriginAccessControlConfig).toMatchObject({ OriginAccessControlOriginType: "s3", SigningBehavior: "always", SigningProtocol: "sigv4" });
+    // A long cache time: a year in browsers (immutable: an id is never reused), a day in CloudFront.
+    expect(MEDIA_CACHE_CONTROL).toBe("public, max-age=31536000, s-maxage=86400, immutable");
+  });
+
+  it("criterion 7: answers every file with nosniff, HSTS, the referrer policy and an inert sandbox CSP, no CORS; the policy is ssd-workshop-app-media-v1, retained, versioned in its logical id", () => {
+    const [stackName, id, resource] = must(headersPolicy());
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(APP_MEDIA_HEADERS_POLICY_NAME).toBe("ssd-workshop-app-media-v1");
+    expect(id).toMatch(/^AppMediaHeadersV1[0-9A-F]{8}$/);
+    expect(resource).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+    const config = resource.Properties?.ResponseHeadersPolicyConfig as Record<string, unknown>;
+    expect(config.SecurityHeadersConfig).toEqual({
+      ContentSecurityPolicy: { ContentSecurityPolicy: APP_MEDIA_CONTENT_SECURITY_POLICY, Override: true },
+      ContentTypeOptions: { Override: true },
+      StrictTransportSecurity: { AccessControlMaxAgeSec: 31536000, IncludeSubdomains: false, Preload: false, Override: true },
+      ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
+    });
+    expect(APP_MEDIA_CONTENT_SECURITY_POLICY).toBe("default-src 'none'; sandbox");
+    expect(config.CorsConfig).toBeUndefined();
+    expect(config.CustomHeadersConfig).toBeUndefined();
+  });
+
+  it("the /api/apps/* CloudFront CORS policy covers the media API's preflight (methods and headers)", () => {
+    const policy = ofType("AWS::CloudFront::ResponseHeadersPolicy").find(([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name === APP_DATA_HEADERS_POLICY_NAME);
+    const cors = (policy?.[2].Properties?.ResponseHeadersPolicyConfig as { CorsConfig: { AccessControlAllowMethods: { Items: string[] }; AccessControlAllowHeaders: { Items: string[] } } }).CorsConfig;
+    for (const method of MEDIA_PREFLIGHT_HEADERS["access-control-allow-methods"].split(", ")) expect(cors.AccessControlAllowMethods.Items, method).toContain(method);
+    expect(cors.AccessControlAllowHeaders.Items.join(", ")).toBe(MEDIA_PREFLIGHT_HEADERS["access-control-allow-headers"]);
+    expect(MEDIA_PREFLIGHT_HEADERS["access-control-allow-origin"]).toBe("*");
+  });
+
+  it("bundles the handler into a self-contained index.js that answers the preflight with CORS, without the table or the bucket", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number; headers?: Record<string, string> }> }>();
+    const answer = await quietly(() => bundle.handler({ routeKey: `OPTIONS ${APP_MEDIA_PATH}` }));
+    expect(answer.statusCode).toBe(204);
+    expect(answer.headers?.["access-control-allow-origin"]).toBe("*");
   });
 });

@@ -36,6 +36,12 @@ import {
   APPS_INDEX_FUNCTION_NAME,
   APP_DATA_HEADERS_POLICY_NAME,
   APP_DATA_HEADERS_POLICY_VERSION,
+  APP_MEDIA_BUCKET_NAME,
+  APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
+  APP_MEDIA_CONTENT_SECURITY_POLICY,
+  APP_MEDIA_HEADERS_POLICY_NAME,
+  APP_MEDIA_HEADERS_POLICY_VERSION,
+  APP_MEDIA_PATH_PATTERN,
   DOMAIN,
   HOSTED_ZONE_ID,
   HOSTED_ZONE_NAME,
@@ -53,6 +59,9 @@ import {
   WAF_BLOCK_BODY,
   WAF_BLOCK_BODY_KEY,
   WAF_BLOCK_STATUS,
+  WAF_MEDIA_PATH_PREFIX,
+  WAF_MEDIA_RATE_LIMIT,
+  WAF_MEDIA_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
 } from "./config.js";
@@ -199,6 +208,41 @@ export class EdgeStack extends Stack {
       functionAssociations: [{ function: appsIndex, eventType: FunctionEventType.VIEWER_REQUEST }],
     };
 
+    // Ticket 3.18: photos and recordings that apps upload, at /app-media/<nickname>/<id>, from the media bucket (apps
+    // stack, imported by name; its policy lets this distribution only read it) through its own origin access control
+    // (retained, like the others). Each file keeps the type the media API stored (from its allow-list) and S3's
+    // Cache-Control (a year in browsers, a day in CloudFront: a deleted file stops being served within a day).
+    const mediaBucket = Bucket.fromBucketAttributes(this, "AppMediaBucket", {
+      bucketName: APP_MEDIA_BUCKET_NAME,
+      bucketRegionalDomainName: APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
+      region: REGION,
+    });
+    const mediaAccessControl = new S3OriginAccessControl(this, "AppMediaOriginAccessControl", {
+      originAccessControlName: `${PREFIX}-app-media`,
+    });
+    mediaAccessControl.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    // nosniff (a file is only ever its stored type), HSTS, the referrer policy, and a CSP that leaves a file opened on
+    // its own inert (nothing loads, sandboxed, no script). No CORS: apps show media with <img> and <audio>, which need
+    // none. Retained and versioned like the others.
+    const mediaHeaders = new ResponseHeadersPolicy(this, `AppMediaHeadersV${APP_MEDIA_HEADERS_POLICY_VERSION}`, {
+      responseHeadersPolicyName: APP_MEDIA_HEADERS_POLICY_NAME,
+      comment: `${PREFIX} app media: nosniff, inert sandbox Content-Security-Policy and security headers`,
+      securityHeadersBehavior: {
+        contentSecurityPolicy: { contentSecurityPolicy: APP_MEDIA_CONTENT_SECURITY_POLICY, override: true },
+        contentTypeOptions: { override: true },
+        strictTransportSecurity: { accessControlMaxAge: Duration.days(365), includeSubdomains: false, preload: false, override: true },
+        referrerPolicy: { referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN, override: true },
+      },
+    });
+    mediaHeaders.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const media: BehaviorOptions = {
+      origin: S3BucketOrigin.withOriginAccessControl(mediaBucket, { originAccessControl: mediaAccessControl }),
+      allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+      responseHeadersPolicy: mediaHeaders,
+    };
+
     // Ticket 1.2: pages and API share one origin (no CORS, no new DNS record).
     const api: BehaviorOptions = {
       origin: new HttpOrigin(API_ORIGIN_DOMAIN, {
@@ -243,7 +287,7 @@ export class EdgeStack extends Stack {
     const webAcl = new CfnWebACL(this, "WebAcl", {
       name: WEB_ACL_NAME,
       scope: "CLOUDFRONT",
-      description: `${PREFIX}: per-address rate limit on ${WAF_API_PATH_PREFIX}`,
+      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX} and ${WAF_MEDIA_PATH_PREFIX}`,
       defaultAction: { allow: {} },
       customResponseBodies: { [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY } },
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WEB_ACL_NAME, sampledRequestsEnabled: true },
@@ -269,6 +313,28 @@ export class EdgeStack extends Stack {
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_API_RATE_RULE_NAME, sampledRequestsEnabled: true },
         },
+        // Ticket 3.18: downloads of apps' media are counted apart (their own limit), so photos never block the API.
+        {
+          name: WAF_MEDIA_RATE_RULE_NAME,
+          priority: 1,
+          action: { block: { customResponse: { responseCode: WAF_BLOCK_STATUS, customResponseBodyKey: WAF_BLOCK_BODY_KEY } } },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_MEDIA_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                byteMatchStatement: {
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: "STARTS_WITH",
+                  searchString: WAF_MEDIA_PATH_PREFIX,
+                  textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
       ],
     });
 
@@ -288,6 +354,7 @@ export class EdgeStack extends Stack {
         "/api/apps/*": { ...api, responseHeadersPolicy: appDataHeaders },
         "/api/*": api,
         "/apps/*": apps,
+        [APP_MEDIA_PATH_PATTERN]: media,
         "/facilitator*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
         // Ticket 3.24: the hand-off page for saving in apps, /app-sign-in/ (top level, the pages' CSP), like the dashboard.
         "/app-sign-in*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
@@ -302,7 +369,7 @@ export class EdgeStack extends Stack {
     // CDK cannot add to an imported bucket's policy; the site and apps stacks do it.
     Annotations.of(this.distribution).acknowledgeWarning(
       "@aws-cdk/aws-cloudfront-origins:updateImportedBucketPolicyOac",
-      "The site stack's bucket policy grants this account's distributions read access; the apps stack's grants this distribution only (DISTRIBUTION_ARN)",
+      "The site stack's bucket policy grants this account's distributions read access; the apps stack's (apps and app media buckets) grant this distribution only (DISTRIBUTION_ARN)",
     );
 
     const target = RecordTarget.fromAlias(new CloudFrontTarget(this.distribution));

@@ -1,5 +1,5 @@
 // The full reset's table access (ticket 2.13): the conversation reset store (../conversation/store.ts, which also
-// reads the build's status) plus the app's data partition and its live marker. It runs with the owner's own AWS credentials.
+// reads the build's status) plus the app's data partition and its live marker, and (ticket 3.18) the app's media records. It runs with the owner's own AWS credentials.
 import {
   DeleteItemCommand,
   QueryCommand,
@@ -16,7 +16,7 @@ import {
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { DynamoAppTokenStore } from "../../api/app-token/store.js";
-import { appDataUsageKey, appLiveKey } from "../../api/keys.js";
+import { appDataUsageKey, appLiveKey, appMediaUsageKey } from "../../api/keys.js";
 import { DynamoResetStore, type ResetSender, type ResetStore } from "../conversation/store.js";
 
 export interface ParticipantResetStore extends ResetStore {
@@ -28,6 +28,10 @@ export interface ParticipantResetStore extends ResetStore {
   hasLiveMarker(nickname: string): Promise<boolean>;
   /** Deletes the live marker; true when this call deleted it, false when it was already gone. */
   deleteLiveMarker(nickname: string): Promise<boolean>;
+  /** Ticket 3.18: sort keys of every item in the app's media partition `APPMEDIA#<lower-cased nickname>` (`MEDIA#*`, `MEDIA_USAGE`). */
+  listAppMedia(nickname: string): Promise<string[]>;
+  /** Deletes the given sort keys of the app's media partition. */
+  deleteAppMedia(nickname: string, sortKeys: readonly string[]): Promise<void>;
   /** Ticket 3.24: deletes every app write token of the participant and their list; returns how many were listed. */
   revokeAppTokens(participantId: string): Promise<number>;
 }
@@ -57,8 +61,20 @@ export class DynamoParticipantResetStore extends DynamoResetStore implements Par
     return new DynamoAppTokenStore(this.client, this.table).revokeAppTokens(participantId);
   }
 
-  async listAppData(nickname: string): Promise<string[]> {
-    const pk = appDataUsageKey(nickname).pk;
+  listAppData(nickname: string): Promise<string[]> {
+    return this.listPartition(appDataUsageKey(nickname).pk);
+  }
+
+  listAppMedia(nickname: string): Promise<string[]> {
+    return this.listPartition(appMediaUsageKey(nickname).pk);
+  }
+
+  async deleteAppMedia(nickname: string, sortKeys: readonly string[]): Promise<void> {
+    await this.deleteKeys(appMediaUsageKey(nickname).pk, sortKeys);
+  }
+
+  /** Every sort key of one partition, page by page, reading only `sk`. */
+  private async listPartition(pk: string): Promise<string[]> {
     const keys: string[] = [];
     let startKey: Record<string, AttributeValue> | undefined;
     do {

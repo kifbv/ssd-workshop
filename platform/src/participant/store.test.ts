@@ -65,6 +65,24 @@ describe("DynamoParticipantResetStore", () => {
     expect(waits).toEqual([200]);
   });
 
+  it("ticket 3.18: lists and deletes the app's media records in APPMEDIA#<lower-cased nickname>, reading only sk", async () => {
+    const { store, sent } = stub([{ Items: [{ sk: { S: "MEDIA#abc" } }], LastEvaluatedKey: { pk: { S: "y" } } }, { Items: [{ sk: { S: "MEDIA_USAGE" } }] }, {}]);
+    await expect(store.listAppMedia("Ada")).resolves.toEqual(["MEDIA#abc", "MEDIA_USAGE"]);
+    expect((sent[0] as QueryCommand).input).toMatchObject({
+      KeyConditionExpression: "#pk = :pk",
+      ExpressionAttributeValues: { ":pk": { S: "APPMEDIA#ada" } },
+      ProjectionExpression: "#sk",
+      ConsistentRead: true,
+    });
+    expect((sent[1] as QueryCommand).input.ExclusiveStartKey).toEqual({ pk: { S: "y" } });
+    await store.deleteAppMedia("Ada", ["MEDIA#abc", "MEDIA_USAGE"]);
+    const requests = (sent[2] as BatchWriteItemCommand).input.RequestItems?.["ssd-workshop-data"] ?? [];
+    expect(requests.map((r) => r.DeleteRequest?.Key)).toEqual([
+      { pk: { S: "APPMEDIA#ada" }, sk: { S: "MEDIA#abc" } },
+      { pk: { S: "APPMEDIA#ada" }, sk: { S: "MEDIA_USAGE" } },
+    ]);
+  });
+
   it("reads and deletes the live marker at APP#<lower-cased nickname> / LIVE, saying whether this call deleted it", async () => {
     const { store, sent } = stub([{ Item: { pk: { S: "APP#ada" } } }, {}, { Attributes: { pk: { S: "APP#ada" } } }, {}]);
     await expect(store.hasLiveMarker("Ada")).resolves.toBe(true);

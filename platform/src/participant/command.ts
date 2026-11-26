@@ -27,8 +27,8 @@ export const USAGE = `Usage: npm run participant -- reset <nickname> [--yes]
   reset <nickname>         show what a reset would delete; changes nothing
   reset <nickname> --yes   start the participant's workshop over: delete their messages, the AI's replies and
                            every spec version, send them back to step 1 (Clarify), end their sign-ins to save
-                           in apps (app write tokens), and delete their app's data, its live marker and its
-                           GitHub repository
+                           in apps (app write tokens), and delete their app's data, its photos and recordings,
+                           its live marker and its GitHub repository
 
 Kept: the allow-list entry, the nickname, sessions, AI usage totals and build records. The app's published
 files stay online until the next build's deploy replaces them. It refuses while a build is queued, building
@@ -36,9 +36,21 @@ or deploying, or while the AI is answering. A run that stopped part way finishes
 
 Runs with your own AWS credentials (AWS_PROFILE); reads the GitHub App's key from the secret ssd-workshop-github.`;
 
+/** Ticket 3.18: the app's photos and recordings in the media bucket, and CloudFront's copies of them. */
+export interface AppMediaFiles {
+  /** Keys of every file of the app (under `app-media/<lower-cased nickname>/`). */
+  list(nickname: string): Promise<string[]>;
+  /** Deletes these files (a key already gone is fine). */
+  remove(keys: readonly string[]): Promise<void>;
+  /** Makes CloudFront stop serving the app's media (`/app-media/<lower-cased nickname>/*`). */
+  forget(nickname: string): Promise<void>;
+}
+
 export interface ParticipantDeps {
   /** Called only once the arguments are accepted, so a usage error makes no AWS call. */
   createStore: () => ParticipantResetStore;
+  /** Ticket 3.18: the media bucket and the distribution; called with createStore. */
+  createMediaFiles: () => AppMediaFiles;
   /** Reads the GitHub App's secret and mints the administration token; called before anything changes. */
   openGitHub: () => Promise<RepositoryAdmin>;
   now: () => Date;
@@ -69,7 +81,12 @@ function describeAppData(keys: readonly string[]): string {
   return `${plural(values, "stored value", "stored values")}${totals ? " and the app's data totals" : ""}`;
 }
 
-async function reset(command: ResetCommand, deps: ParticipantDeps, store: ParticipantResetStore): Promise<number> {
+/** "3 photos and recordings", "no photos or recordings". */
+function describeMedia(files: number): string {
+  return files === 0 ? "no photos or recordings" : plural(files, "photo or recording", "photos and recordings");
+}
+
+async function reset(command: ResetCommand, deps: ParticipantDeps, store: ParticipantResetStore, media: AppMediaFiles): Promise<number> {
   const { nickname } = command;
   const participantId = await store.findParticipantId(nickname);
   if (participantId === undefined) {
@@ -92,6 +109,7 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   }
   const items = stepName === undefined ? { messages: [], specs: [] } : await store.listResetItems(participantId);
   const appData = await store.listAppData(nickname);
+  const mediaFiles = await media.list(nickname);
   const live = await store.hasLiveMarker(nickname);
   // GitHub before any change: a missing secret or an unreachable GitHub stops the reset with nothing changed.
   const github = await deps.openGitHub();
@@ -104,7 +122,7 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
       : `${nickname} is at ${stepName}, with ${plural(items.messages.length, "message or reply", "messages and replies")} and ${plural(items.specs.length, "spec version", "spec versions")}`;
   if (!command.confirmed) {
     deps.out(`${conversation}.`);
-    deps.out(`App: ${describeAppData(appData)}, live marker ${live ? "present" : "absent"}, repository ${repository} ${repositoryExists ? "exists" : "already gone"}.`);
+    deps.out(`App: ${describeAppData(appData)}, ${describeMedia(mediaFiles.length)}, live marker ${live ? "present" : "absent"}, repository ${repository} ${repositoryExists ? "exists" : "already gone"}.`);
     deps.out(`Nothing changed. Run again with --yes to delete all of this${stepName === undefined ? "" : ` and send ${nickname} back to step 1 (Clarify)`}, and to end ${nickname}'s sign-ins to save in apps.`);
     deps.out(KEPT);
     return 0;
@@ -130,14 +148,27 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   // marker just before it went can still commit its write after the first listing (the API does not re-check the
   // marker inside its transaction), so after a pause the data is listed and deleted once more; a write held up longer
   // than SETTLE_MS could still land afterwards (decision "(2.13) Reset order").
+  // Ticket 3.18: the media the same way, files before their records. An upload that read the marker before it went and
+  // stores its file after the first pass finds the marker gone when it finishes and deletes its own file; the second
+  // pass catches what it had not yet cleaned. Then CloudFront forgets the app's media (always: a run that stopped after
+  // the deletes still makes the cached copies go).
   const markerDeleted = await store.deleteLiveMarker(nickname);
-  const firstPass = await store.listAppData(nickname);
-  await store.deleteAppData(nickname, firstPass);
+  const passes = { data: [] as string[], files: [] as string[] };
+  const deletePass = async (): Promise<void> => {
+    const data = await store.listAppData(nickname);
+    await store.deleteAppData(nickname, data);
+    const files = await media.list(nickname);
+    await media.remove(files);
+    await store.deleteAppMedia(nickname, await store.listAppMedia(nickname));
+    passes.data.push(...data);
+    passes.files.push(...files);
+  };
+  await deletePass();
   await deps.sleep(SETTLE_MS);
-  const secondPass = await store.listAppData(nickname);
-  await store.deleteAppData(nickname, secondPass);
-  const deletedData = [...new Set([...firstPass, ...secondPass])];
-  deps.out(`Deleted ${describeAppData(deletedData)}; ${markerDeleted ? "deleted the live marker" : "the live marker was already gone"}.`);
+  await deletePass();
+  await media.forget(nickname);
+  deps.out(`Deleted ${describeAppData([...new Set(passes.data)])}; ${markerDeleted ? "deleted the live marker" : "the live marker was already gone"}.`);
+  deps.out(`Deleted ${describeMedia(new Set(passes.files).size)}; CloudFront stops serving the app's media within minutes.`);
   const removed = await github.remove(nickname);
   deps.out(removed ? `Repository ${repository} deleted.` : `Repository ${repository} was already gone.`);
   deps.out(KEPT);
@@ -153,7 +184,7 @@ export async function runParticipant(args: readonly string[], deps: ParticipantD
     return 1;
   }
   try {
-    return await reset(parsed, deps, deps.createStore());
+    return await reset(parsed, deps, deps.createStore(), deps.createMediaFiles());
   } catch (error) {
     // A GitHubProblem's message is written to be shown (step and status, or what to load in the secret).
     const reason = error instanceof GitHubProblem ? `${errorName(error)}: ${error.message.replace(/\.$/, "")}` : errorName(error);
