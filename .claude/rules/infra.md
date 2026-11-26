@@ -314,3 +314,5 @@ paths:
   `ecs:cluster` = the cluster's ARN, and it must also be in the boundary (`AccountWideServiceCalls`, ticket 3.14). Watching
   tasks for something IAM cannot pin (RunTask's subnets, risk 1) goes in the launcher's minute check, the only role
   allowed to describe and stop build tasks (`WatchBuildsLauncherOnly`); an EventBridge rule on ECS events is refused.
+- A `beforeAll` that synthesizes the CDK app needs an explicit timeout (`120_000`): CI runners are slower than vitest's
+  default 10 s (`HookTimeoutError` in the Deploy run on main, `infra/lib/app.test.ts`).

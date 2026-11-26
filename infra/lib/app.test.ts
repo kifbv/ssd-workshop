@@ -302,10 +302,11 @@ const EXPECTED_NAME_PATHS = [
 let dir: string;
 let assembly: CloudAssembly;
 
+// Synthesizing the whole app takes over vitest's default 10 s on GitHub's runners (Deploy run on main): explicit timeout.
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "ssd-workshop-cdk-"));
   assembly = buildApp({ outdir: dir }).synth();
-});
+}, 120_000);
 
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
