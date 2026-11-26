@@ -676,8 +676,8 @@ export function missingScreens(title: string | undefined, screens: readonly stri
 /**
  * Ticket 3.25: what a visitor (no token) sees of the workshop's sign-in in the published app. `shown`: elements with
  * `data-workshop-sign-in` that read "Sign in" (text or aria-label) and that the visitor sees once the app shows the part
- * they are in (try 2: hidden only by an ancestor's `hidden` attribute, the way apps switch screens and show result panels,
- * never by their own `hidden`, CSS `display: none`, `visibility: hidden` or transparency); `visible`: those really visible
+ * they are in (try 3: however an ancestor hides it, by the `hidden` attribute or by CSS, the way apps switch screens and
+ * show result panels; never hidden by its own `hidden`, or its own `display: none`, `visibility: hidden` or opacity 0); `visible`: those really visible
  * when the app opens (`checkVisibility`, a box larger than 0), the first one pressed; `opens`: whether pressing the first visible one opened the hand-off page
  * (`/app-sign-in/?app=<nickname>`) in a new tab (undefined when none is on the first screen).
  */
@@ -692,21 +692,19 @@ export interface SignInCheck {
  * src/eval/build.ts; the first `visible` one is marked `data-eval-sign-in` so the harness can press it).
  */
 export const SIGN_IN_SCRIPT = `(() => {
-  // Try 2 (checker, finding D): not merely without its own hidden attribute. Shown: the element is not hidden itself, not
-  // display:none, visibility:hidden or transparent, and every ancestor that hides it does so with the hidden attribute
-  // only (a screen or a result panel the app shows after an action, AGENTS.md rule 2), never with CSS (display:none
-  // without the attribute, opacity 0). Visible: really visible now (checkVisibility) and taking room: the one pressed.
+  // Shown (try 3): the element is in the page, reads "Sign in", and hides itself in no way: not its own hidden attribute,
+  // not display:none, visibility:hidden (its own, not inherited) or opacity 0 from its own styles. However an ancestor
+  // hides it (a screen or a result panel the app shows later, by the hidden attribute or by CSS such as
+  // .screen.hidden { display: none }), the visitor sees it once the app shows that part. Visible: really visible now
+  // (checkVisibility) and taking room: the one pressed.
   const reads = (el) => /sign in/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || ""));
   const shownOnceRevealed = (el) => {
     if (el.hidden) return false;
     const own = getComputedStyle(el);
-    if (own.display === "none" || own.visibility !== "visible") return false;
-    for (let node = el; node !== null && node !== document.documentElement; node = node.parentElement) {
-      const style = getComputedStyle(node);
-      if (Number(style.opacity) === 0) return false;
-      if (style.display === "none" && !(node !== el && node.hidden)) return false;
-    }
-    return true;
+    if (own.display === "none" || Number(own.opacity) === 0) return false;
+    const parent = el.parentElement;
+    const inherited = parent === null ? "visible" : getComputedStyle(parent).visibility;
+    return own.visibility === "visible" || own.visibility === inherited;
   };
   const shown = Array.from(document.querySelectorAll("[data-workshop-sign-in]")).filter((el) => reads(el) && shownOnceRevealed(el));
   const visible = shown.filter((el) => {

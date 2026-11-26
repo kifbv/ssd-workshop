@@ -20,7 +20,9 @@
  *   api.anthropic.com is skipped (`skipWebFetchPreflight` in the flag settings, AGENT_SETTINGS; decision "(2.15) WebFetch
  *   preflight"): the hook is the gate, and the builder sends nothing to Anthropic's own API.
  */
+import { readFileSync } from "node:fs";
 import type { Agent as HttpAgent } from "node:http";
+import { Script } from "node:vm";
 import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { plainLineWithoutEmails } from "../api/github/repository.js";
 import { startBedrockProxy, type BedrockProxyLogEntry, type CredentialSource } from "./bedrock-proxy.js";
@@ -229,6 +231,31 @@ export function writtenPath(workspace: string, toolName: unknown, toolInput: unk
 }
 
 /**
+ * Ticket 3.25 try 3: after a Write or Edit of a `.js` file in the workspace, the file's syntax error as a classic script
+ * (AGENTS.md rule 1), for the agent to fix while it still can: the deploy check does not parse JavaScript, and a live
+ * eval left app.js with "missing ) after argument list" (a quote inside a string written with the same quote). The
+ * file is only compiled (`vm.Script`), never run. Undefined when it parses, or for any other tool, file or path.
+ */
+export function scriptSyntaxProblem(workspace: string, toolName: unknown, toolInput: unknown): string | undefined {
+  const path = writtenPath(workspace, toolName, toolInput);
+  if (path === undefined || !path.endsWith(".js")) return undefined;
+  let text: string;
+  try {
+    text = readFileSync(`${workspace}/${path}`, "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    new Script(text, { filename: path });
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) return undefined;
+    const line = /:(\d+)$/.exec(error.stack?.split("\n")[0] ?? "")?.[1];
+    return `${path} has a JavaScript syntax error${line === undefined ? "" : ` at line ${line}`}: ${error.message}. The browser would run none of this file: fix it before you finish (for example a quote inside a string written with the same quote: use the other quote).`;
+  }
+}
+
+/**
  * Flag settings (`--settings`, applied even with `settingSources: []`): skip WebFetch's domain check, a call from the
  * agent to api.anthropic.com naming each host before it is fetched (decision "(2.15) WebFetch preflight").
  */
@@ -290,7 +317,10 @@ export function agentOptions(run: Omit<AgentRun, "prompt" | "onTokens">, abortCo
             async (input) => {
               const path = writtenPath(run.workspace, toolName(input), toolInput(input));
               if (path !== undefined) run.onFileWritten(path);
-              if (toolName(input) !== "WebFetch") return {};
+              if (toolName(input) !== "WebFetch") {
+                const problem = scriptSyntaxProblem(run.workspace, toolName(input), toolInput(input));
+                return problem === undefined ? {} : { hookSpecificOutput: { hookEventName: "PostToolUse" as const, additionalContext: problem } };
+              }
               const response = toolResponse(input);
               const host = fetchSucceeded(response) ? fetchedHost(toolInput(input)) : undefined;
               if (host !== undefined) run.onWebFetch(host);

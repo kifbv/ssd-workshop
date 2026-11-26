@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, SIGN_IN_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
@@ -86,6 +86,36 @@ describe("the agent's settings (criterion 2)", () => {
     await post("Write", { file_path: join(ws, "app.js"), content: "x" }, {});
     expect(fetched).toEqual(["en.wikipedia.org"]);
     expect(written).toEqual(["app.js"]);
+  });
+
+  // Ticket 3.25 try 3: live builds left app.js with a syntax error ("missing ) after argument list", "Unexpected
+  // string"), which the deploy check does not see; the agent now hears of it after each write, while it can still fix it.
+  it("tells the agent after a Write or Edit of a .js file that does not parse as a classic script, with the line, and nothing else", async () => {
+    const hook = options.hooks?.PostToolUse?.[0]?.hooks[0];
+    const signal = new AbortController().signal;
+    const post = (tool_name: string, file_path: string) =>
+      hook?.({ hook_event_name: "PostToolUse", tool_name, tool_input: { file_path, content: "x" }, tool_response: {}, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: ws }, "t", { signal });
+    writeFileSync(join(ws, "app.js"), "const a = 1;\nshow('Use the workshop's sign-in');\n");
+    const problem = scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "app.js") });
+    expect(problem).toContain("app.js");
+    expect(problem).toContain("line 2");
+    expect(problem).toContain("missing ) after argument list");
+    expect(await post("Write", join(ws, "app.js"))).toEqual({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: problem } });
+    expect(await post("Edit", "app.js")).toEqual({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: problem } });
+    // Never run: a script that would throw or loop when run parses fine.
+    writeFileSync(join(ws, "app.js"), '"use strict";\nwhile (true) {}\nthrow new Error("x");\ndocument.addEventListener("click", async () => { await 1; });\n');
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "app.js") })).toBeUndefined();
+    expect(await post("Write", join(ws, "app.js"))).toEqual({});
+    // A module statement is an error in the app's classic script (AGENTS.md rule 1).
+    writeFileSync(join(ws, "app.js"), 'import x from "./x.js";\n');
+    expect(scriptSyntaxProblem(ws, "Edit", { file_path: join(ws, "app.js") })).toContain("line 1");
+    // Other files, other tools and paths outside the workspace are not parsed.
+    writeFileSync(join(ws, "notes.md"), "show('it's');\n");
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "notes.md") })).toBeUndefined();
+    expect(scriptSyntaxProblem(ws, "Read", { file_path: join(ws, "app.js") })).toBeUndefined();
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: "/etc/x.js" })).toBeUndefined();
+    expect(scriptSyntaxProblem(ws, "Write", { file_path: join(ws, "missing.js") })).toBeUndefined();
+    writeFileSync(join(ws, "app.js"), "x");
   });
 
   it("counts and feeds a WebFetch only when the page answered 2xx: not a redirect reply, 4xx, 5xx or a missing answer (ticket 2.15 try 2)", async () => {

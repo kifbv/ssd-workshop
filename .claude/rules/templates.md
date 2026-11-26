@@ -52,7 +52,8 @@ paths:
 - The build eval is noisy: a change to AGENTS.md or the builder's prompt can tip one example (ticket 3.25: placing new
   prompt lines before the WebFetch lines made the Wikipedia example skip WebFetch 3 times in a row). Run the changed
   example several times (`npm run eval -- build --example <n>`), compare with a baseline on `main` before blaming the
-  change, then run the whole suite once. A field beside a button in a flex row needs `min-width: 0` (AGENTS.md rule 9).
+  change, then run the whole suite once. Keep the published files with `EVAL_DUMP_DIR=<absolute folder>` and look at a
+  failed app before guessing (3.25 try 3). A field beside a button in a flex row needs `min-width: 0` (AGENTS.md rule 9).
 - `whoAmI()` (3.25 try 2) is a promise of the nickname the data API confirms for the token (`GET .../data/whoami?whoami=1`
   with the token, once per page load), never a name from the address. A name an app stores inside a value is the app's
   word, not the server's: show who posted from `getInfo(key).updatedBy`.
@@ -67,3 +68,9 @@ paths:
 - In Playwright, a document served through `page.route` cannot load files from a real loopback server (Chromium's
   private network check, "Permission was denied for this request to access the `loopback` address space"): route every
   file of such a page, or serve the page from the server and route only one script.
+- Apps hide screens both ways (3.25 try 3): with the `hidden` attribute and with CSS classes (`.screen.hidden { display: none }`,
+  a class named `hidden`, not the attribute). A check of "what a visitor sees once the screen is open" looks at the element's
+  own hiding only (its `hidden`, its own `display`/`opacity`, its `visibility` unless inherited), never at its ancestors.
+  `workshop-data.js` shows only the sign-in elements present at `DOMContentLoaded`: AGENTS.md puts them in `index.html`.
+- The deploy check does not parse JavaScript; the builder's PostToolUse hook does (`scriptSyntaxProblem`, 3.25 try 3), so
+  the agent hears of a syntax error (a `'` inside a `'...'` string: "missing ) after argument list") while it can fix it.
