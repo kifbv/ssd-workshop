@@ -284,6 +284,39 @@ describe("readRepositoryMain (ticket 3.7: where a change build starts)", () => {
     intercept(s, (url) => (url.endsWith("/git/ref/heads/main") ? new Response(JSON.stringify({ object: { sha: "../../x" } }), { status: 200 }) : undefined));
     await expect(readRepositoryMain(credentials, "Luna", s.deps)).rejects.toThrow(/no valid id/);
   });
+
+  it("asks for a read-only token (contents read) for that one repository, and the token cannot write", async () => {
+    const { github, deps } = setup();
+    await prepareRepository({ credentials, nickname: "Mia", spec: SPEC, templateFiles: template }, deps);
+    const calls = github.calls.length;
+    await readRepositoryMain(credentials, "Mia", deps);
+    const ask = github.calls.slice(calls).find((c) => c.path.endsWith("/access_tokens"));
+    expect(ask?.body).toEqual({ repositories: ["ssd-mia"], permissions: { contents: "read" } });
+    const [token] = [...github.grants].filter(([, grant]) => grant.permissions.contents === "read").map(([t]) => t);
+    expect(github.grants.get(token ?? "")).toEqual({ permissions: { contents: "read", metadata: "read" }, repositories: ["ssd-mia"] });
+    // The fake, like GitHub, refuses a write with it.
+    const put = await github.fetch("https://api.github.com/repos/ssd-workshop-apps/ssd-mia/contents/x.txt", {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token ?? ""}`, "x-github-api-version": "2022-11-28", "user-agent": "test" },
+      body: JSON.stringify({ message: "x", content: "eA==" }),
+    });
+    expect(put.status).toBe(404);
+  });
+
+  it("refuses a token answer with write rights, more rights, or another repository", async () => {
+    const answers = [
+      { permissions: { contents: "write", metadata: "read" } },
+      { permissions: { contents: "read", metadata: "read", administration: "write" } },
+      { repository_selection: "all" },
+      { repositories: [{ full_name: "ssd-workshop-apps/ssd-other" }] },
+    ];
+    for (const answer of answers) {
+      const s = setup();
+      await prepareRepository({ credentials, nickname: "Mia", spec: SPEC, templateFiles: template }, s.deps);
+      s.github.overrideTokenAnswer = answer;
+      await expect(readRepositoryMain(credentials, "Mia", s.deps), JSON.stringify(answer)).rejects.toThrow(/contents read, so it was not used/);
+    }
+  });
 });
 
 describe("builderToken (criterion 3)", () => {

@@ -187,9 +187,11 @@ export class FakeGitHub {
     return this.grants.get(authorization.replace(/^Bearer /, ""));
   }
 
-  private canUse(authorization: string, repo: string | undefined, permission: string): boolean {
+  /** A `read` need is met by `read` or `write` (as GitHub does); a `write` need only by `write`. */
+  private canUse(authorization: string, repo: string | undefined, permission: string, level: "read" | "write" = "write"): boolean {
     const grant = this.grantOf(authorization);
-    if (!grant || grant.permissions[permission] !== "write") return false;
+    const granted = grant?.permissions[permission];
+    if (!grant || !(granted === "write" || (level === "read" && granted === "read"))) return false;
     return repo === undefined || grant.repositories === undefined || grant.repositories.includes(repo);
   }
 
@@ -268,7 +270,7 @@ export class FakeGitHub {
       this.deleted.push(name);
       return new Response(null, { status: 204 });
     }
-    if (!repo || !this.canUse(auth, name, "contents")) return json(404, { message: "Not Found" });
+    if (!repo || !this.canUse(auth, name, "contents", method === "GET" ? "read" : "write")) return json(404, { message: "Not Found" });
     if (method === "PUT" && rest.startsWith("/contents/")) {
       // As GitHub does: the file is added to the default branch's tree, in a commit on top of it when it exists;
       // a file that is already there needs its blob id (`sha`), else 422.

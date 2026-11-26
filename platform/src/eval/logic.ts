@@ -46,7 +46,7 @@ Suites:
                change build on the repository's main: the result must pass the deploy check, load at 375 px with
                no console error and nothing scrolling sideways, show the new spec's title and screens and every
                screen of the previous spec, and be one commit "Change 1: ..." holding the new SPEC.md; prints the
-               duration, tokens and cost of each step (about $2 in all)
+               duration, tokens and cost of each step (about $0.50 in all)
 
 Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example; build about $1 per spec).`;
 

@@ -1,5 +1,5 @@
 // Ticket 2.9: the build launcher and its stuck-build check, against the in-memory table, tasks, queues and GitHub.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "../github/app.js";
 import { FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../github/fakes.js";
 import { SPEC_FILE } from "../github/repository.js";
@@ -342,6 +342,36 @@ describe("launching a change build (ticket 3.7)", () => {
       expect(s.tasks.started).toEqual([]);
       expect(s.table.builds.get(CHANGE)?.status).toBe("queued");
     }
+  });
+
+  it("access review of 3.7: WHEN the version's text or What changes list holds an email address THEN the build's stored input holds none", async () => {
+    const s = changeSetup();
+    const spec = must(s.table.specs.get(`${PARTICIPANT}#3`));
+    spec.text = "# Run log\n\nQuestions go to ada.lovelace@example.org or coach&#64;club.example.com.";
+    spec.whatChanges = ["Adds a weekly chart sent to ada.lovelace@example.org", "Shows the coach (coach@club.example.com) on the home screen"];
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("started");
+    const build = must(s.table.builds.get(CHANGE));
+    const stored = JSON.stringify([build.changeSpec, build.changeList]);
+    expect(stored).not.toMatch(/ada\.lovelace|coach@|coach&#64;|club\.example/);
+    expect(build.changeSpec).toBe("# Run log\n\nQuestions go to [email removed] or [email removed].");
+    expect(build.changeList).toEqual(["Adds a weekly chart sent to [email removed]", "Shows the coach ([email removed]) on the home screen"]);
+  });
+
+  it("ignores a change build whose participant is not the conversation's owner: no spec read across participants, no task", async () => {
+    const s = changeSetup();
+    // Another participant with their own approved version 3 and the same nickname on their profile.
+    const OTHER = "p-other";
+    s.table.profiles.set(OTHER, NICKNAME);
+    s.table.conversations.set(OTHER, { buildId: "another-build", approvedSpecVersion: 3 });
+    s.table.specs.set(`${OTHER}#3`, { text: "# Their app", approved: true, whatChanges: ["Their change"] });
+    must(s.table.builds.get(CHANGE)).participantId = OTHER;
+    const read = vi.spyOn(s.table, "readApprovedSpec");
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("ignored");
+    expect(read).not.toHaveBeenCalled();
+    expect(s.tasks.started).toEqual([]);
+    expect(s.table.builds.get(CHANGE)).toMatchObject({ status: "queued" });
+    expect(s.table.builds.get(CHANGE)?.changeSpec).toBeUndefined();
+    expect(s.github.calls.filter((c) => c.path.startsWith("/repos/"))).toEqual([]);
   });
 
   it("marks a change build failed, without a task, when its version has no What changes list or the repository has no main", async () => {

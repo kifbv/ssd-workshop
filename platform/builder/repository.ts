@@ -12,7 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { expectStatus, githubCall, GitHubProblem, type GitHubDeps, type GitHubStep } from "../api/github/app.js";
-import { commitRequest, GIT_ID_PATTERN, removeEmailAddresses, repositoryNameFor, SPEC_FILE, withRetry, type RepositoryFile } from "../api/github/repository.js";
+import { commitRequest, GIT_ID_PATTERN, plainLineWithoutEmails, repositoryNameFor, SPEC_FILE, withRetry, type RepositoryFile } from "../api/github/repository.js";
 import { APPS_DEFAULT_BRANCH, APPS_GITHUB_OWNER } from "../api/settings.js";
 
 const record = (value: unknown): Record<string, unknown> =>
@@ -137,22 +137,25 @@ export const CHANGE_COMMIT_FALLBACK = "update the app to the new spec";
  * Ticket 3.7: a change build's commit message, "Change <n>: <summary>": `n` is the build's `changeNumber` (1 for the
  * participant's first change, so the count matches the step 4 page's), the summary the first line of its "What
  * changes" list (the platform's stored list, AI-written from the participant's request and checked by the guardrail):
- * email-shaped text removed, control characters and runs of spaces as one space, a leading "- " dropped, and the whole
- * message cut to CHANGE_COMMIT_MAX characters on a word boundary with "...".
+ * control and format characters removed (line breaks and tabs as spaces), runs of spaces as one, then email-shaped
+ * text removed, a leading "- " dropped, and the whole message cut to CHANGE_COMMIT_MAX characters (code points) on a
+ * word boundary with "...".
  */
 export function changeCommitMessage(number: number, whatChanges: readonly string[]): string {
   const head = `Change ${number}: `;
-  const first = whatChanges.find((line) => line.trim() !== "") ?? "";
-  // eslint-disable-next-line no-control-regex
-  let summary = removeEmailAddresses(first).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\s]+/g, " ").replace(/^[\s\-*•]+/u, "").trim();
-  if (summary === "") summary = CHANGE_COMMIT_FALLBACK;
-  if (head.length + summary.length > CHANGE_COMMIT_MAX) {
-    const room = CHANGE_COMMIT_MAX - head.length - 3;
+  // The first line that still says something once cleaned (plainLineWithoutEmails: control and format characters out
+  // first, so an address split by one is still caught, then email addresses), a leading "- " dropped.
+  const first = whatChanges.map((line) => plainLineWithoutEmails(line).replace(/^[\s\-*•]+/u, "").trim()).find((line) => line !== "");
+  // Measured and cut in whole characters (code points), so an emoji at the cut is never split into a lone surrogate.
+  let summary = Array.from(first ?? CHANGE_COMMIT_FALLBACK);
+  const headLength = Array.from(head).length;
+  if (headLength + summary.length > CHANGE_COMMIT_MAX) {
+    const room = CHANGE_COMMIT_MAX - headLength - 3;
     const cut = summary.slice(0, room);
     const space = cut.lastIndexOf(" ");
-    summary = `${(space > room / 2 ? cut.slice(0, space) : cut).trimEnd()}...`;
+    summary = [...(space > room / 2 ? cut.slice(0, space) : cut).join("").trimEnd(), ..."..."];
   }
-  return `${head}${summary}`;
+  return `${head}${summary.join("")}`;
 }
 
 /**

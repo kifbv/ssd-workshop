@@ -22,6 +22,7 @@
  */
 import type { Agent as HttpAgent } from "node:http";
 import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { plainLineWithoutEmails } from "../api/github/repository.js";
 import { startBedrockProxy, type BedrockProxyLogEntry, type CredentialSource } from "./bedrock-proxy.js";
 import { ALLOWED_TOOLS, DISALLOWED_TOOLS, checkToolCall, fetchedHost, insideWorkspace, workspacePath } from "./permissions.js";
 import { NO_TOKENS, addTokens, type AgentTokens } from "./usage.js";
@@ -72,10 +73,13 @@ export function buildPrompt(workspace: string): string {
   ].join("\n");
 }
 
-/** One line of plain text for the prompt: control characters and runs of spaces become one space, at most 200 characters. */
+/**
+ * One line of plain text for the prompt (plainLineWithoutEmails: no control or format characters, no email address,
+ * as defence in depth: the launcher already removed addresses from the stored list), at most 200 characters, cut on
+ * whole characters.
+ */
 function promptLine(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\s]+/g, " ").trim().slice(0, 200);
+  return Array.from(plainLineWithoutEmails(text)).slice(0, 200).join("").trim();
 }
 
 /**

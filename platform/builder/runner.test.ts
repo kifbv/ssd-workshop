@@ -673,6 +673,20 @@ describe("change builds edit the existing app (ticket 3.7)", () => {
     }
   });
 
+  it("access review of 3.7: WHEN the What changes list holds an email address THEN the agent's prompt holds none", async () => {
+    const list = ["Adds a weekly chart mailed to ada.lovelace@example.org", "Shows the coach (coach\u0001@club.example.com)", "Lists bob&#64;example.net as \u202eadmin"];
+    const t = await changeSetup([{ write: "index.html", content: CHART_PAGE }], { changeList: list });
+    expect(await runBuild(changeJob(t), t.deps)).toBe("handed-over");
+    const prompt = t.agent.runs[0]?.prompt ?? "";
+    expect(prompt).not.toMatch(/ada\.lovelace|coach.?@|club\.example|bob|example\.net/);
+    expect(prompt).not.toMatch(/[\p{Cf}]/u);
+    expect(prompt).not.toContain("\u0001");
+    expect(prompt).toContain("- Adds a weekly chart mailed to [email removed]");
+    expect(prompt).toContain("- Shows the coach ([email removed])");
+    expect(prompt).toContain("- Lists [email removed] as admin");
+    expect(t.github.history("ssd-ada")[0]?.message).toBe("Change 2: Adds a weekly chart mailed to [email removed]");
+  });
+
   it("a change build fails before the agent when main moved since the launch", async () => {
     const t = await changeSetup([{ write: "index.html", content: CHART_PAGE }]);
     t.github.seedCommit("ssd-ada", { "index.html": "pushed by someone else" }, "Elsewhere", [t.built]);
@@ -694,6 +708,24 @@ describe("changeCommitMessage and planChangeCommit (ticket 3.7)", () => {
     expect(long.length).toBeLessThanOrEqual(CHANGE_COMMIT_MAX);
     expect(long).toMatch(/^Change 5: Adds a weekly chart .*\.\.\.$/);
     expect(changeCommitMessage(6, ["x".repeat(300)]).length).toBeLessThanOrEqual(CHANGE_COMMIT_MAX);
+  });
+
+  it("access review of 3.7: strips bidi and zero-width characters, catches an address split by a control character, and never cuts a character in half", () => {
+    // A right-to-left override (and the other bidi controls) and zero-width characters are removed, not kept.
+    expect(changeCommitMessage(1, ["Adds \u202emargorp\u202c a chart"])).toBe("Change 1: Adds margorp a chart");
+    expect(changeCommitMessage(1, ["\u2066Adds\u2069 a\u200b chart\ufeff"])).toBe("Change 1: Adds a chart");
+    // An address split by a control character (or a zero-width one) is still removed.
+    expect(changeCommitMessage(2, ["Mail ada@example\u0001.org the chart"])).toBe("Change 2: Mail [email removed] the chart");
+    expect(changeCommitMessage(2, ["Mail ada\u0007@\u200bexample.org"])).toBe("Change 2: Mail [email removed]");
+    expect(changeCommitMessage(2, ["Mail ada@example.\u0085org"])).not.toMatch(/ada@/);
+    // An emoji (two UTF-16 units) at the cut point is kept whole or dropped whole: no lone surrogate.
+    for (let pad = 50; pad <= 62; pad += 1) {
+      const message = changeCommitMessage(7, [`${"a".repeat(pad)}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}`]);
+      expect(Array.from(message).length, String(pad)).toBeLessThanOrEqual(CHANGE_COMMIT_MAX);
+      expect(message, String(pad)).not.toMatch(/\p{Cs}/u);
+    }
+    // A line that is only control and format characters is skipped like a blank one.
+    expect(changeCommitMessage(4, ["\u202e\u200b\u0001", "Second"])).toBe("Change 4: Second");
   });
 
   it("plans one commit with the whole app when a file other than SPEC.md changed, none otherwise", () => {

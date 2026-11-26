@@ -91,6 +91,22 @@ export function removeEmailAddresses(text: string): string {
 }
 
 /**
+ * Ticket 3.7 (access review): one line of plain text from a stored list line, for the coding agent's prompt and a change
+ * commit's message. In this order: format characters (`\p{Cf}`: bidi controls such as U+202E and U+2066-2069, zero-width
+ * characters, the BOM) and lone surrogates are removed; tabs and line breaks become spaces; every other control
+ * character (C0, DEL, C1 including NEL) is removed, so it cannot split an address; runs of spaces become one; then
+ * email-shaped text is removed (removeEmailAddresses) and the line trimmed. Cutting it is the caller's job.
+ */
+export function plainLineWithoutEmails(text: string): string {
+  const joined = text
+    .replace(/[\p{Cf}\p{Cs}]/gu, "")
+    .replace(/[\t\n\v\f\r\u2028\u2029]/gu, " ")
+    .replace(/\p{Cc}/gu, "")
+    .replace(/\s+/gu, " ");
+  return removeEmailAddresses(joined).replace(/\s+/gu, " ").trim();
+}
+
+/**
  * The template's files with SPEC.md replaced whole by the approved spec (decision "(2.3) Template app"), its email
  * addresses removed.
  */
@@ -117,12 +133,17 @@ export function commitRequest(message: string, tree: string, parents: readonly s
 export const ADMIN_PERMISSIONS = { administration: "write" } as const;
 /** Rights of a token limited to one repository: its files and history only. */
 export const CONTENTS_PERMISSIONS = { contents: "write" } as const;
+/** Ticket 3.7: what reading `main` needs (the launcher's change builds), nothing it could write with. */
+export const CONTENTS_READ_PERMISSIONS = { contents: "read" } as const;
 
-/** True when the token grants `right: write` and nothing else but `metadata: read` (GitHub adds it to every token). */
-function grantsOnly(token: InstallationToken, right: string): boolean {
+/**
+ * True when the token grants `right` at exactly `level` (write unless said) and nothing else but `metadata: read`
+ * (GitHub adds it to every token).
+ */
+function grantsOnly(token: InstallationToken, right: string, level: "read" | "write" = "write"): boolean {
   return (
-    token.permissions[right] === "write" &&
-    Object.entries(token.permissions).every(([key, value]) => (key === right && value === "write") || (key === "metadata" && value === "read"))
+    token.permissions[right] === level &&
+    Object.entries(token.permissions).every(([key, value]) => (key === right && value === level) || (key === "metadata" && value === "read"))
   );
 }
 
@@ -140,20 +161,22 @@ async function adminToken(deps: GitHubDeps, jwt: string, installationId: number)
 }
 
 /**
- * A token for exactly one repository with contents write: GitHub's answer must say `selected`, list only that
- * repository and grant only `contents: write` (plus `metadata: read`, which GitHub adds to every token).
+ * A token for exactly one repository with contents write (or, `level` "read", contents read): GitHub's answer must say
+ * `selected`, list only that repository and grant only `contents` at that level (plus `metadata: read`, which GitHub
+ * adds to every token).
  */
-async function repositoryToken(deps: GitHubDeps, jwt: string, installationId: number, name: string): Promise<InstallationToken> {
-  const token = await mintInstallationToken(deps, jwt, installationId, { repositories: [name], permissions: { ...CONTENTS_PERMISSIONS } });
+async function repositoryToken(deps: GitHubDeps, jwt: string, installationId: number, name: string, level: "read" | "write" = "write"): Promise<InstallationToken> {
+  const permissions = level === "write" ? { ...CONTENTS_PERMISSIONS } : { ...CONTENTS_READ_PERMISSIONS };
+  const token = await mintInstallationToken(deps, jwt, installationId, { repositories: [name], permissions });
   const fullName = `${APPS_GITHUB_OWNER}/${name}`.toLowerCase();
   const repositories = token.repositories ?? [];
   if (
     token.repositorySelection !== "selected" ||
     repositories.length !== 1 ||
     repositories[0]?.toLowerCase() !== fullName ||
-    !grantsOnly(token, "contents")
+    !grantsOnly(token, "contents", level)
   ) {
-    throw new GitHubProblem("GitHub's token reaches more than the one repository with contents write, so it was not used.");
+    throw new GitHubProblem(`GitHub's token reaches more than the one repository with contents ${level}, so it was not used.`);
   }
   return token;
 }
@@ -354,7 +377,8 @@ export async function prepareRepository(
 
 /**
  * Ticket 3.7: where a change build starts. The repository must already exist with a `main` (a change follows a live
- * build): reads `main`'s commit with a one-repository token (contents write, checked like the builder's), retried on
+ * build): reads `main`'s commit with a one-repository read-only token (`contents: read` and `metadata: read`, checked
+ * like the builder's; access review of 3.7 try 1), retried on
  * GitHub's brief 404 or 409, and checks the id against GIT_ID_PATTERN. Nothing is written: the change build edits the
  * repository's current files, never the template.
  */
@@ -362,7 +386,7 @@ export async function readRepositoryMain(credentials: AppCredentials, nickname: 
   const name = repositoryNameFor(nickname);
   const jwt = appJwt(credentials, deps.now());
   const installation = await findInstallation(deps, jwt);
-  const { token } = await repositoryToken(deps, jwt, installation.id, name);
+  const { token } = await repositoryToken(deps, jwt, installation.id, name, "read");
   const answer = await withRetry(deps, () => githubCall(deps, "get-branch", "GET", `/repos/${APPS_GITHUB_OWNER}/${name}/git/ref/heads/${APPS_DEFAULT_BRANCH}`, token));
   if (answer.status === 404 || answer.status === 409) throw new GitHubProblem(`The app's repository has no ${APPS_DEFAULT_BRANCH} branch to change.`, answer.status);
   return gitId(record(expectStatus(answer, "get-branch", 200).object).sha, "get-branch");
