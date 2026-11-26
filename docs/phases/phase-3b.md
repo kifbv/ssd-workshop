@@ -1,12 +1,14 @@
-# Phase 3b: Photos in apps, more storage, clearer refusals
+# Phase 3b: Photos, voice recordings and AI in apps, more storage, clearer refusals
 
 Spec sections: 4 (Guardrails, item 1: what an app is), 5 (Security: "each app's stored data is limited to
 1 MB"), 10 (confirmation: "limited to 1 MB"). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus).
 Status: questions answered 2026-11-26, all as suggested (see `docs/decisions.md`); ready for approval.
 
 Goal: a participant can build an app that takes photos with the phone (or picks them from the
-phone) and keeps them, for example a gallery of their own drawings sorted by tags, and every app gets
-much more room for its data. On the way, the AI explains refusals better: it does not hold an idea
+phone) or records voice messages, and keeps them ("media"), for example a gallery of their own
+drawings sorted by tags or a voice-message board sorted by topic, and every app gets much more room
+for its data. Apps may also use a few fixed AI tasks (suggest tags, read fields from a photo, sort a
+text, and with question 8, transcribe a recording). On the way, the AI explains refusals better: it does not hold an idea
 on a guess, it turns "send emails" ideas into something buildable, it tells the truth about where
 data is kept, and it answers in the participant's language.
 
@@ -31,13 +33,13 @@ How photos work after this phase:
 flowchart LR
   cam[Phone camera<br/>or photo library] --> app[Participant's app<br/>in the browser]
   app -->|workshop-data.js:<br/>shrink, re-encode JPEG,<br/>drop location data| api[PUT /api/apps/nick/photos/id]
-  api -->|checks: live app, JPEG,<br/>size, room, daily budget| s3[(S3 bucket<br/>ssd-workshop-app-photos)]
+  api -->|checks: live app, JPEG,<br/>size, room, daily budget| s3[(S3 bucket<br/>ssd-workshop-app-media)]
   app -->|stores the photo's address<br/>with its tags| data[(Data API<br/>DynamoDB)]
-  viewer[Anyone with<br/>the app's link] -->|img src| cf[CloudFront<br/>/app-photos/*] --> s3
+  viewer[Anyone with<br/>the app's link] -->|img src| cf[CloudFront<br/>/app-media/*] --> s3
 ```
 
 Photos go to S3, not DynamoDB: a DynamoDB item holds at most 400 KB. They are served from the
-workshop's own address (`/app-photos/...`), so the apps' sandbox CSP (`img-src 'self'`) already
+workshop's own address (`/app-media/...`), so the apps' sandbox CSP (`img-src 'self'`) already
 allows them and no new host is opened.
 
 ## Spec delta (needs Franck's yes, question 1)
@@ -94,32 +96,38 @@ Acceptance criteria (each starts as FAIL):
 - WHEN an app has written 50 MB in one UTC day THEN the next write is refused with the daily-budget message (unit test).
 - WHEN `npm run synth` runs THEN nothing in the infrastructure changes but the data function's code (synth test unchanged).
 
-### 3.18 Photo store and photo API
+### 3.18 Media store and media API (photos and voice recordings)
 
-A new bucket `ssd-workshop-app-photos` (private, served through CloudFront at `/app-photos/*` with
-an Origin Access Control) and routes `PUT` and `DELETE /api/apps/{nickname}/photos/{id}`. A `PUT`
-takes JPEG bytes (at most 4 MB, the API's request limit allows about 4.4 MB after base64), checks the
-app is live, the bytes really are a JPEG, the app's room (500 MB, 2,000 photos) and its daily upload
-budget (500 MB), removes any EXIF/APP1 segment (location data) and stores the photo under a random
-id; it answers the photo's address. `npm run participant -- reset` deletes the app's photos too.
+A new bucket `ssd-workshop-app-media` (private, served through CloudFront at `/app-media/*` with
+an Origin Access Control) and routes `PUT` and `DELETE /api/apps/{nickname}/media/{id}`. A `PUT`
+takes a photo as JPEG bytes, or a voice recording as the phone browser records it (WebM/Opus,
+Ogg/Opus or MP4/AAC, at most 5 minutes), each (at most 4 MB, the API's request limit allows about 4.4 MB after base64), checks the
+app is live, the bytes really are one of those formats (by their first bytes, not the declared type), the app's room (500 MB, 2,000 files, photos and recordings together) and its daily upload
+budget (500 MB), removes any EXIF/APP1 segment (location data) from photos, and stores the file under a random
+id; it answers the file's address. `npm run participant -- reset` deletes the app's media too.
 
 Depends on: 3.17 (shared limits module). Areas: infra, api, platform CLI.
 
 Acceptance criteria (each starts as FAIL):
 
-- WHEN a live app sends a 3 MB JPEG THEN it is stored and the answer holds an address under `https://workshop.rankly.games/app-photos/<nickname>/` that serves the same bytes (unit test with a fake bucket; live smoke).
-- WHEN the bytes are not a JPEG (a PNG, an HTML page, a script) THEN the API answers 415 and stores nothing (unit test).
+- WHEN a live app sends a 3 MB JPEG THEN it is stored and the answer holds an address under `https://workshop.rankly.games/app-media/<nickname>/` that serves the same bytes (unit test with a fake bucket; live smoke).
+- WHEN a live app sends a 2 MB WebM/Opus or MP4/AAC recording THEN it is stored and served back with `content-type` `audio/webm` or `audio/mp4` (unit test; live smoke).
+- WHEN the bytes are none of the accepted formats (a PNG, an HTML page, a script, a video) THEN the API answers 415 and stores nothing (unit test).
 - WHEN a JPEG carries EXIF with GPS data THEN the stored file has no EXIF segment and still decodes (unit test on a fixture photo).
 - WHEN the photo is over 4 MB, or the app would pass 500 MB or 2,000 photos, or its daily upload budget is spent THEN the API answers with the matching message and stores nothing (unit tests).
 - WHEN the nickname has no live app THEN `PUT` and `DELETE` answer 404 without touching the bucket (unit test).
-- WHEN anyone requests a photo address THEN CloudFront answers with `content-type: image/jpeg`, `x-content-type-options: nosniff` and a long cache time, and the bucket itself refuses direct reads (synth test; live check).
-- WHEN `npm run participant -- reset <nickname> --yes` runs THEN the app's photos are deleted with its data, and without `--yes` it only counts them (unit test).
-- WHEN `npm run synth` runs THEN the bucket is tagged `project=ssd-workshop`, blocks public access, enforces TLS, and only the photo function's role (with the boundary) may write it (synth test).
+- WHEN anyone requests a media address THEN CloudFront answers with the stored `content-type`, `x-content-type-options: nosniff` and a long cache time, and the bucket itself refuses direct reads (synth test; live check).
+- WHEN `npm run participant -- reset <nickname> --yes` runs THEN the app's media are deleted with its data, and without `--yes` it only counts them (unit test).
+- WHEN `npm run synth` runs THEN the bucket is tagged `project=ssd-workshop`, blocks public access, enforces TLS, and only the media function's role (with the boundary) may write it (synth test).
 
-### 3.19 Photos in the app template
+### 3.19 Photos and voice recordings in the app template
 
 `workshop-data.js` gets `savePhoto(file)` (shrinks the photo to at most 2,560 px on its long side,
-re-encodes it as JPEG, uploads it, returns its address) and `deletePhoto(address)`. `AGENTS.md`
+re-encodes it as JPEG, uploads it, returns its address), `recordVoice()` (records with the
+microphone through `MediaRecorder`, stops at 5 minutes, uploads, returns the address) and
+`deleteMedia(address)`. Recordings play with a plain `<audio controls>`. Microphone access from the
+apps' sandbox (opaque origin) is not proved yet: this ticket proves it in Chromium and on an iPhone,
+and falls back to `<input type="file" accept="audio/*" capture>` (the phone's own recorder) where it is refused. `AGENTS.md`
 gains a rule for photo apps: an `<input type="file" accept="image/*" capture="environment">` button,
 thumbnails with `loading="lazy"`, the photo's address kept in the data API with its other fields.
 The builder eval gets a photo-gallery case.
@@ -131,9 +139,10 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the template test picks a 12-megapixel JPEG in Chromium under the sandbox CSP THEN `savePhoto` uploads a file of at most 2,560 px on its long side and returns an address the page then shows (Playwright, fake API).
 - WHEN the picked file is a PNG or HEIC the browser can decode THEN it is uploaded as a JPEG (Playwright).
 - WHEN the upload is refused THEN the API's message is shown to the visitor (Playwright).
-- WHEN `npm run eval -- build` runs the photo-gallery case THEN the build passes its checks and the app shows a photo button and a tag filter (live eval).
+- WHEN `recordVoice()` runs in Chromium with a fake microphone under the sandbox CSP THEN a recording is uploaded and plays back from its address (Playwright); WHEN Franck records on an iPhone (Safari) THEN it works directly or through the fallback (live check, `infra/README.md`).
+- WHEN `npm run eval -- build` runs the photo-gallery case THEN the build passes its checks and the app shows a photo button and a tag filter (live eval); the same for a voice-message case with a record button and topics.
 
-### 3.20 The AI knows apps can keep photos
+### 3.20 The AI knows apps can keep photos and recordings
 
 `readiness-v3`, `clarify-v6` and `spec-v3` say what the template can now do: take or pick photos and
 keep them (up to 500 MB per app, visible to anyone with the link), and the new data limit. Clarify
@@ -149,14 +158,14 @@ Acceptance criteria (each starts as FAIL):
 - WHEN Clarify discusses a photo idea THEN it mentions once that anyone with the link can see the photos and suggests not photographing people or confidential papers (live eval case).
 - WHEN the prompts change THEN their versions change and all existing prompt evals still pass.
 
-### 3.21 AI tasks for apps: API, budgets and switch (proposed 2026-11-26, needs Franck's yes)
+### 3.21 AI tasks for apps: API, budgets and switch (approved 2026-11-26)
 
 A route `POST /api/apps/{nickname}/ai` runs one of three fixed tasks on Claude Haiku 4.5 (EU
 profile): `tag-photo` (a photo of this app and a list of tags, or none to let the AI suggest up to
 5), `read-photo` (a photo of this app and up to 12 named fields typed text, number, date or money)
 and `sort-text` (up to 2,000 characters and up to 20 categories). Never a free prompt. The answer is
 strict JSON holding only what was asked, checked against the request. Each call's cost counts
-against the app's daily AI budget ($0.50) and the workshop's daily total for apps ($5); the admin
+against the app's daily AI budget ($1) and the workshop's daily total for apps ($10); the admin
 page gets a switch "Apps may use AI", off by default, and the global Stop also stops it. App AI
 spend is kept apart from the participant's $5.
 
@@ -165,12 +174,13 @@ Depends on: 3.18. Areas: infra, api, web (admin switch).
 Acceptance criteria (each starts as FAIL):
 
 - WHEN the switch is off, or the global Stop is on THEN the route answers 503 with "AI is switched off for apps right now" and makes no Bedrock call (unit test).
-- WHEN the photo address is not under `/app-photos/<this nickname>/` THEN the route answers 400 and makes no Bedrock call (unit test).
+- WHEN the photo address is not under `/app-media/<this nickname>/` THEN the route answers 400 and makes no Bedrock call (unit test).
 - WHEN the request names a task other than the three, or carries a prompt, or too many fields, tags or characters THEN it answers 400 (unit test).
 - WHEN the model answers with fields or tags not asked for, or not valid JSON THEN only the asked ones are kept, each cut to 200 characters, and an unusable answer is 502 "The AI could not read this" (unit test).
-- WHEN the app's $0.50 or the workshop's $5 for the UTC day is spent THEN the route answers 429 with the matching message and makes no Bedrock call (unit test).
+- WHEN the app's $1 or the workshop's $10 for the UTC day is spent THEN the route answers 429 with the matching message and makes no Bedrock call (unit test).
 - WHEN `read-photo` runs on a test receipt photo THEN shop, date and total come back right (live eval).
-- WHEN `npm run synth` runs THEN the AI function's role may invoke only the Haiku 4.5 EU profile and read only `ssd-workshop-app-photos` (synth test).
+- WHEN question 8 is yes and `transcribe` runs on a recording of this app THEN it answers its text through Amazon Transcribe (batch job on the stored file, language detected, at most 5 minutes), its cost ($0.024 a minute) counts against the same budgets, and `sort-text` can then give its topics (unit test with a fake Transcribe; live eval on a French and an English recording).
+- WHEN `npm run synth` runs THEN the AI function's role may invoke only the Haiku 4.5 EU profile and read only `ssd-workshop-app-media` (synth test).
 
 ### 3.22 AI tasks in the app template
 
@@ -190,8 +200,8 @@ Acceptance criteria (each starts as FAIL):
 ### 3.23 The AI guide knows the AI tasks
 
 `clarify`, `spec` and `readiness` prompts say apps may suggest tags for photos, read fields from a
-photo (receipts, labels, business cards excluded: other people's contact details) and sort text into
-categories, and nothing else with AI: no chat, no writing texts, no free questions.
+photo (receipts, labels, business cards excluded: other people's contact details), sort text into
+categories and (question 8) turn a voice recording into text, and nothing else with AI: no chat, no writing texts, no free questions.
 
 Depends on: 3.20, 3.22. Areas: api (prompts), eval.
 
@@ -205,11 +215,12 @@ Acceptance criteria (each starts as FAIL):
 
 1. Approve the spec delta above (10 MB data, 500 MB of photos per app, photos stripped of location data). Suggested: yes.
 2. Limits: 4 MB per photo after shrinking (2,560 px long side), 500 MB and 2,000 photos per app, 500 MB uploaded per app per day; data 10 MB per app, 350 KB per value, 500 keys, 50 MB written per day. Suggested: yes. Normal cost: 30 apps full is 15 GB, about $0.40 a month in S3.
-3. Abuse cost (Stop-and-ask 3). Uploads are capped by the daily budget (30 apps x 500 MB a day is at most ~$11 a month of extra S3 storage after a month of attack). Downloads are not: CloudFront serves cached photos with no throttle, and a 1 MB photo fetched in a loop costs about $0.085 per 1,000 fetches, so a sustained download flood could cost far more than $50 a month (the same exposure the site's files have today, but 50 to 100 times more bytes per request). Suggested: extend the existing WAF per-address rate rule (3.13) to `/app-photos/*` (no new service, ~$0.60 per million requests) and keep the $20 Budgets alert and Cost Anomaly email; accept the remaining risk of a distributed flood.
+3. Abuse cost (Stop-and-ask 3). Uploads are capped by the daily budget (30 apps x 500 MB a day is at most ~$11 a month of extra S3 storage after a month of attack). Downloads are not: CloudFront serves cached photos with no throttle, and a 1 MB photo fetched in a loop costs about $0.085 per 1,000 fetches, so a sustained download flood could cost far more than $50 a month (the same exposure the site's files have today, but 50 to 100 times more bytes per request). Suggested: extend the existing WAF per-address rate rule (3.13) to `/app-media/*` (no new service, ~$0.60 per million requests) and keep the $20 Budgets alert and Cost Anomaly email; accept the remaining risk of a distributed flood.
 4. Photo content is not checked by any AI (text is, by the guardrail). Someone could put an offensive or private photo on a public app. Suggested: accept for the workshop; facilitators can wipe an app with `npm run participant -- reset`; Clarify warns about people and confidential papers (3.20).
 5. Replies in the participant's language (3.16): the AI-written texts (decline sentence, readiness reasons, all chat) follow the participant's language; the page's fixed buttons and messages stay English. Suggested: yes.
 6. Keep photos after the workshop? Suggested: they follow the apps (phase 5 removal workflow deletes them with the app); no automatic expiry now.
-7. (Added 2026-11-26, open) AI tasks for apps, 3.21 to 3.23: spec delta ADDED section 4 item 1 "An app may use three AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories), never a free prompt"; CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps $0.50 per app per day and $5 a day for all apps, admin switch off by default (worst case about $5 per day it is on). Suggested: yes.
+7. (Added 2026-11-26, open) AI tasks for apps, 3.21 to 3.23: spec delta ADDED section 4 item 1 "An app may use three AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories), never a free prompt"; CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps $0.50 per app per day and $5 a day for all apps, admin switch off by default. **Answered 2026-11-26: yes, with caps doubled ($1 per app per day, $10 a day for all apps; worst case about $10 per day the switch is on), and photos widened to media (voice recordings too).**
+8. (Added 2026-11-26, open; Stop-and-ask 3, new paid service) Amazon Transcribe for a `transcribe` AI task, so voice messages can be tagged by topic (Claude on Bedrock takes no audio). About $0.024 a minute in eu-central-1, counted inside the $10 daily cap, so it adds no new worst case. Audio goes to Transcribe in eu-central-1; AWS does not use it for training when the account opts out of AI service improvement (an organisation-level opt-out policy, Franck's account setting). Suggested: yes; without it, voice messages get topics picked by hand.
 
 ## Blocked
 
