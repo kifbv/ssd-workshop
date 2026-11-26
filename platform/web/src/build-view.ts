@@ -38,6 +38,9 @@ export interface Build {
   paused?: true;
   /** Ticket 3.5: the server could not read whether it is paused (keep the line as it shows). */
   pausedUnknown?: true;
+  /** Ticket 3.8 (from 3.6): a change build, with its number (1 for the participant's first change). */
+  kind?: "change";
+  changeNumber?: number;
 }
 
 /** The row of stages on the page: the builder's steps, then live. */
@@ -102,8 +105,18 @@ export function parseBuild(body: unknown): Build | undefined {
     ...(typeof b["ahead"] === "number" && Number.isInteger(b["ahead"]) && b["ahead"] >= 0 ? { ahead: b["ahead"] } : {}),
     ...(b["paused"] === true ? { paused: true as const } : {}),
     ...(b["pausedUnknown"] === true ? { pausedUnknown: true as const } : {}),
+    ...(b["kind"] === "change" ? { kind: "change" as const } : {}),
+    ...(b["kind"] === "change" && typeof b["changeNumber"] === "number" && Number.isInteger(b["changeNumber"]) && b["changeNumber"] >= 1
+      ? { changeNumber: b["changeNumber"] }
+      : {}),
   };
 }
+
+/**
+ * Ticket 3.8: where the page shows a build that is no longer running: step 4 once it is live, and also after a failed
+ * change build (the app before it is still live, decision 3.6); a failed first build stays on step 3 with its reasons.
+ */
+export const showsStepFour = (build: Build): boolean => build.status === "live" || (build.status === "failed" && build.kind === "change");
 
 /**
  * `GET /api/build`: a build; `missing` (404, no build yet: the page keeps asking); signed out; or a message for

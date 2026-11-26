@@ -16,7 +16,7 @@ import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
 import { BUILD_TEXTS } from "./src/build-view.js";
-import { PHASE_3_TEXTS } from "../api/workshop/texts.js";
+import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS } from "../api/workshop/texts.js";
 
 const jsQR = jsQRModule.default;
 
@@ -85,6 +85,8 @@ afterEach(async () => {
 interface Call {
   method: string;
   path: string;
+  /** The query string ("?version=3"), or "". */
+  search: string;
   contentType: string | undefined;
   body: unknown;
 }
@@ -97,9 +99,10 @@ async function mockApi(handlers: Record<string, Handler>): Promise<Call[]> {
   const calls: Call[] = [];
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const url = new URL(request.url());
+    const path = url.pathname;
     const raw = request.postData();
-    const call: Call = { method: request.method(), path, contentType: request.headers()["content-type"], body: raw ? JSON.parse(raw) : null };
+    const call: Call = { method: request.method(), path, search: url.search, contentType: request.headers()["content-type"], body: raw ? JSON.parse(raw) : null };
     calls.push(call);
     const handler = handlers[`${call.method} ${path}`];
     const reply = handler ? handler(call) : { status: 404, body: { message: "Not found." } };
@@ -355,7 +358,7 @@ describe("sign-in screens (ticket 1.6)", () => {
     const api = fakeApi();
     await mockApi(api);
     // Already signed in, no nickname yet: the page goes straight to the nickname screen.
-    api["POST /api/sign-in/verify"]?.({ method: "POST", path: "", contentType: "", body: { code: "123456" } });
+    api["POST /api/sign-in/verify"]?.({ method: "POST", path: "", search: "", contentType: "", body: { code: "123456" } });
     await page.goto(origin);
     await expect.poll(() => screen("nickname").isVisible()).toBe(true);
     await page.getByRole("textbox", { name: "Nickname" }).fill("Taken");
@@ -842,7 +845,7 @@ function fakeSpecApi(step = "spec", specs: string[] = [SPEC_1]) {
     }
   };
   const conversationBody = () => {
-    const body = must(base.handlers["GET /api/conversation"])({ method: "GET", path: "", contentType: undefined, body: null }).body as Record<string, unknown>;
+    const body = must(base.handlers["GET /api/conversation"])({ method: "GET", path: "", search: "", contentType: undefined, body: null }).body as Record<string, unknown>;
     return {
       ...body,
       step: base.state.step,
@@ -1169,6 +1172,8 @@ describe("step 2: Spec and approval (ticket 1.9)", () => {
 });
 
 // Ticket 2.10: step 3 (Build) and the start of step 4 (Live) against a mocked GET /api/build.
+/** Ticket 3.8: the three suggested changes the AI wrote (3.6). */
+const SUGGESTIONS = ["Add a weekly chart of my distances", "Let me delete a run I added by mistake", "Show my longest run at the top"];
 const SHA_1 = "1111111111111111111111111111111111111111";
 const SHA_2 = "2222222222222222222222222222222222222222";
 const REPOSITORY_URL = "https://github.com/ssd-workshop-apps/ssd-ada-l";
@@ -1182,6 +1187,11 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
   const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false };
   const handlers: Record<string, Handler> = {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
+    // Ticket 3.8: step 4 reads the change conversation: none yet, no change used, the three suggestions written.
+    "GET /api/conversation": () => ({
+      status: 200,
+      body: { step: "building", state: "open", messages: [], changeRequestsUsed: 0, changeRequestsPerPerson: 5, suggestions: SUGGESTIONS },
+    }),
     "GET /api/build": () => {
       state.polls++;
       if (state.answer !== undefined) return state.answer;
@@ -1454,15 +1464,10 @@ async function expectLiveScreen(): Promise<void> {
   expect(await repository.getAttribute("rel")).toBe("noopener noreferrer");
   const qr = page.getByRole("img", { name: `QR code for ${APP_URL}` });
   expect(await qr.isVisible()).toBe(true);
-  expect(await page.locator("#live-next").textContent()).toBe("Next: you will be able to ask for changes to your app, and the AI builds a new version.");
-  // Behind the scenes leads with its diagram, the text under it.
-  expect(await page.locator("#live-behind-flow li").allTextContents()).toEqual([
-    "GitHub repository",
-    "Deployer: checks, then publishes",
-    "Amazon S3 and CloudFront",
-    "Your address",
-  ]);
-  expect(await page.locator("#live-behind > :nth-child(2)").getAttribute("id")).toBe("live-behind-flow");
+  // Ticket 3.8: "Next: you will be able to ask for changes" made way for the change requests, and Behind the scenes
+  // leads with the change loop diagram (Mermaid), the text under it.
+  expect(await page.locator("#live-next").count()).toBe(0);
+  expect(await page.locator("#live-behind > :nth-child(2)").getAttribute("id")).toBe("live-diagram");
   expect(await page.locator("#live-behind > p.help").isVisible()).toBe(true);
   // 375 px: the QR code is a square inside the screen, big enough to scan.
   const box = await qr.boundingBox();
@@ -1524,6 +1529,417 @@ describe("step 4: Live (ticket 2.11)", () => {
     expect(await page.locator("#live-qr-code svg").count()).toBe(0);
     expect(await page.locator("#live-repository").isHidden()).toBe(true);
     expect(await page.locator("#screen-live a[href]").count()).toBe(0);
+    await expectNoSideScroll();
+  }, 30_000);
+});
+
+// Ticket 3.8: step 4's change requests against a mocked API: the count, the suggestions, the box, the spec update with
+// its two buttons, the change build on step 3 and back, and the refusals.
+const CHANGE_REPLY = "Here is the update to your spec. Press Build this change when you are happy with it.";
+const WHAT_CHANGES = ["Adds a weekly chart of the distance you ran each week.", "The Home screen shows the chart above the list of runs."];
+const READY_REPLY = "Your change is ready to build. The build is starting now: the AI changes your app to match the new spec.";
+const DECLINE_REPLY = "That is outside what this workshop can build. Try a change to your app's screens or data.";
+
+/**
+ * A stand-in for step 4: the live build (b-1), the change conversation, changes used out of 5, the suggestions, the
+ * proposed version with its "What changes" list, and the two change routes. A message stays pending until the test
+ * answers it: `propose` (a spec update), `ready` (Build this change passed: a change build is queued and counted).
+ */
+function fakeStepFour(used = 1) {
+  const build = fakeBuildApi("live", LIVE_FEED);
+  const convo = fakeConversation([], "building");
+  const step4 = {
+    used,
+    cap: 5,
+    suggestions: [...SUGGESTIONS] as string[] | undefined,
+    proposed: undefined as number | undefined,
+    whatChanges: [...WHAT_CHANGES],
+    nextVersion: 3,
+    kind: undefined as "change" | undefined,
+    changeNumber: undefined as number | undefined,
+    buildAnswer: undefined as Reply | undefined,
+  };
+  const lastMessage = () => must(convo.state.messages.at(-1));
+  const handlers: Record<string, Handler> = {
+    ...build.handlers,
+    "GET /api/build": (call) => {
+      const reply = must(build.handlers["GET /api/build"])(call);
+      if (reply.status !== 200 || step4.kind === undefined) return reply;
+      return { ...reply, body: { ...(reply.body as object), kind: "change", ...(step4.changeNumber === undefined ? {} : { changeNumber: step4.changeNumber }) } };
+    },
+    "GET /api/conversation": (call) => {
+      const body = must(convo.handlers["GET /api/conversation"])(call).body as Record<string, unknown>;
+      return {
+        status: 200,
+        body: {
+          ...body,
+          step: "building",
+          changeRequestsUsed: step4.used,
+          changeRequestsPerPerson: step4.cap,
+          ...(step4.suggestions === undefined ? {} : { suggestions: step4.suggestions }),
+          ...(step4.proposed === undefined ? {} : { proposedSpecVersion: step4.proposed }),
+        },
+      };
+    },
+    "GET /api/conversation/spec": (call) => {
+      const version = Number(new URLSearchParams(call.search).get("version"));
+      if (step4.proposed === undefined || version !== step4.proposed) return { status: 404, body: { message: "Not found." } };
+      return { status: 200, body: { version, text: SPEC_2, createdAt: "x", approved: false, whatChanges: step4.whatChanges } };
+    },
+    "POST /api/conversation/messages": (call) => {
+      if (step4.used >= step4.cap) return { status: 409, body: { reason: "no-changes-left", message: "You've used your 5 changes." } };
+      if (build.state.status !== "live" && build.state.status !== "failed") {
+        return { status: 409, body: { reason: "build-running", message: PHASE_3_TEXTS.changeWhileBuilding } };
+      }
+      const reply = must(convo.handlers["POST /api/conversation/messages"])(call);
+      if (reply.status === 202) lastMessage().step = "building";
+      return reply;
+    },
+    "POST /api/conversation/change/build": (call) => {
+      if (step4.buildAnswer !== undefined) return step4.buildAnswer;
+      const version = (call.body as { version: number }).version;
+      if (version !== step4.proposed) return { status: 404, body: { message: "Not found." } };
+      const id = `m${convo.state.nextId++}`;
+      convo.state.messages.push({ id, author: "participant", text: "Please build this change.", status: "pending", step: "building" });
+      convo.state.pendingId = id;
+      return { status: 202, body: { id, version } };
+    },
+    "POST /api/conversation/change/discard": (call) => {
+      const version = (call.body as { version: number }).version;
+      if (version !== step4.proposed) return { status: 404, body: { message: "Not found." } };
+      step4.proposed = undefined;
+      return { status: 200, body: { version, discarded: true } };
+    },
+  };
+  const propose = (reply = CHANGE_REPLY) => {
+    convo.answer(reply);
+    lastMessage().step = "building";
+    step4.proposed = step4.nextVersion++;
+  };
+  const ready = () => {
+    convo.answer(READY_REPLY);
+    lastMessage().step = "building";
+    step4.proposed = undefined;
+    step4.used++;
+    step4.kind = "change";
+    step4.changeNumber = step4.used;
+    build.state.status = "queued";
+    build.state.feed = [];
+  };
+  return { build, convo, step4, handlers, propose, ready };
+}
+
+const liveBubbles = () => page.locator("#live-chat .bubble").allTextContents();
+const suggestionButtons = () => page.locator("#suggestions-list button").allTextContents();
+const sends = (calls: Call[]) => calls.filter((c) => c.method === "POST" && c.path === "/api/conversation/messages");
+
+/** Opens step 4 at once (the build is live) with the page clock paused, and waits for the change conversation. */
+async function openStepFour(): Promise<void> {
+  await page.clock.install({ time: new Date("2026-11-25T10:00:00.000Z") });
+  await page.clock.pauseAt(new Date("2026-11-25T10:00:01.000Z"));
+  await page.goto(origin);
+  await expect.poll(() => screen("live").isVisible()).toBe(true);
+  await expect.poll(() => page.locator("#changes-left").textContent()).toMatch(/^Changes left: \d of 5$/);
+  await settle();
+}
+
+describe("step 4: change requests (ticket 3.8)", () => {
+  it("criterion 1: WHEN the app is live with changes left THEN step 4 shows the count, three suggestions and the text box, the change loop diagram first in Behind the scenes, at 375 px", async () => {
+    const api = fakeStepFour(1);
+    api.convo.state.budgetLeft = 3.2;
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expectLiveScreen();
+    await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+    expect(await page.locator("#changes-left").isVisible()).toBe(true);
+    await expect.poll(suggestionButtons).toEqual(SUGGESTIONS);
+    expect(await page.locator("#suggestions").isVisible()).toBe(true);
+    expect(await page.locator("#suggestions-intro").textContent()).toBe(PHASE_3_TEXTS.suggestionsIntro);
+    expect(await page.getByRole("textbox", { name: "Describe a change" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Send" }).isVisible()).toBe(true);
+    expect(await page.locator("#changes-used").isVisible()).toBe(false);
+    expect(await page.locator("#proposal").isVisible()).toBe(false);
+    expect(await page.locator("#live-failed").isVisible()).toBe(false);
+    expect(await page.locator("#live-chat-budget").textContent()).toBe("AI budget left: $3.20");
+    // The address, QR code and repository link stay above the change requests.
+    const qr = await page.getByRole("img", { name: `QR code for ${APP_URL}` }).boundingBox();
+    const count = await page.locator("#changes-left").boundingBox();
+    expect(must(qr ?? undefined).y).toBeLessThan(must(count ?? undefined).y);
+    // Behind the scenes: the change loop drawn by Mermaid as a picture inside the card, its text under it.
+    const img = page.locator("#live-diagram-img");
+    await expect.poll(() => img.isVisible(), { timeout: 15_000 }).toBe(true);
+    const box = must((await img.boundingBox()) ?? undefined);
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(PHONE.width);
+    expect(await img.getAttribute("alt")).toContain("change loop");
+    expect(await page.locator("#live-diagram-text").textContent()).toContain("Build this change");
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("criterion 2: WHEN a suggestion is tapped THEN its text fills the box and nothing is sent until Send", async () => {
+    const api = fakeStepFour(1);
+    const calls = await mockApi(api.handlers);
+    await openStepFour();
+    await page.getByRole("button", { name: must(SUGGESTIONS[1]) }).click();
+    expect(await page.locator("#live-chat-input").inputValue()).toBe(SUGGESTIONS[1]);
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe("live-chat-input");
+    await page.getByRole("button", { name: must(SUGGESTIONS[2]) }).click();
+    expect(await page.locator("#live-chat-input").inputValue()).toBe(SUGGESTIONS[2]);
+    await settle();
+    expect(sends(calls)).toEqual([]);
+    expect(await liveBubbles()).toEqual([]);
+
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => sends(calls).length).toBe(1);
+    expect(sends(calls)[0]?.body).toEqual({ text: SUGGESTIONS[2] });
+    await expect.poll(liveBubbles).toEqual([SUGGESTIONS[2]]);
+    expect(await page.locator("#live-typing").isVisible()).toBe(true);
+    expect(await page.locator("#live-typing-text").textContent()).toBe(PHASE_3_TEXTS.writingChange);
+    expect(await page.locator("#live-chat-input").inputValue()).toBe("");
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("criteria 3 and 4: WHEN a spec update comes back THEN its What changes list and both buttons show, Build this change moves to the build feed, and WHEN that build is live THEN step 4 returns with the count one lower", async () => {
+    const api = fakeStepFour(1);
+    const calls = await mockApi(api.handlers);
+    await openStepFour();
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+
+    await page.getByRole("textbox", { name: "Describe a change" }).fill("Add a weekly chart of my distances");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => api.convo.state.pendingId).toBe("m1");
+    await settle();
+    api.propose();
+    await pollAfter(2000);
+    // Criterion 3: the spec update, its list and both buttons; the ideas step aside while it is open.
+    const proposal = page.locator("#proposal");
+    await expect.poll(() => proposal.isVisible()).toBe(true);
+    expect(await page.locator("#proposal-heading").textContent()).toBe("Spec update");
+    expect(await page.locator("#proposal-changes-heading").textContent()).toBe("What changes");
+    expect(await page.locator("#proposal-changes li").allTextContents()).toEqual(WHAT_CHANGES);
+    expect(await page.getByRole("button", { name: "Build this change" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Not this one" }).isVisible()).toBe(true);
+    expect(await page.locator("#proposal-hint").textContent()).toBe(PHASE_3_TEXTS.proposalHint);
+    expect(await page.locator("#suggestions").isVisible()).toBe(false);
+    expect(await liveBubbles()).toEqual(["Add a weekly chart of my distances", CHANGE_REPLY]);
+    expect(calls.some((c) => c.path === "/api/conversation/spec" && c.search === "?version=3")).toBe(true);
+    // The whole spec is there under a fold, as text.
+    await page.locator("#proposal-spec summary").click();
+    expect(await page.locator("#proposal-spec-body").textContent()).toContain("Longest run: your longest run so far.");
+    await expectNoSideScroll();
+
+    // Build this change: the readiness check runs (the page says so), then the change build's feed on step 3.
+    await page.getByRole("button", { name: "Build this change" }).click();
+    await expect.poll(() => calls.filter((c) => c.path === "/api/conversation/change/build").map((c) => c.body)).toEqual([{ version: 3 }]);
+    await expect.poll(() => page.locator("#live-typing-text").textContent()).toBe(PHASE_3_TEXTS.checkingChange);
+    expect(await page.locator("#live-typing").isVisible()).toBe(true);
+    expect(await page.locator("#build-change-button").isDisabled()).toBe(true);
+    expect(await page.locator("#live-chat-send").isDisabled()).toBe(true);
+    api.ready();
+    await pollAfter(2000);
+    await expect.poll(() => screen("build").isVisible()).toBe(true);
+    expect(await screen("live").isVisible()).toBe(false);
+    expect(await page.locator("#build-change").textContent()).toBe(changeBuildingText(2));
+    expect(await page.locator("#build-intro").isVisible()).toBe(false);
+    expect(await page.locator("#build-behind-text").textContent()).toBe(PHASE_3_TEXTS.changeBuildBehind);
+    expect(await page.locator("#build-now").textContent()).toBe(BUILD_TEXTS.now.queued);
+    await expectNoSideScroll();
+
+    // The change build runs, its feed shows, then it is live: step 4 again with the count one lower.
+    api.build.state.status = "building";
+    api.build.state.feed = [stepEvent("preparing"), stepEvent("writing"), fileEvent("app.js")];
+    await buildPollAfter(2000);
+    await expect.poll(feedOnPage).toEqual(["Wroteapp.js"]);
+    expect(await page.locator("#build-stages li[aria-current=step]").textContent()).toBe("Writing");
+    api.build.state.status = "live";
+    api.build.state.feed = LIVE_FEED;
+    await buildPollAfter(2000);
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
+    expect(await page.getByRole("link", { name: APP_URL }).getAttribute("href")).toBe(APP_URL);
+    expect(await page.locator("#proposal").isVisible()).toBe(false);
+    expect(await suggestionButtons()).toEqual(SUGGESTIONS);
+    expect(await page.locator("#suggestions").isVisible()).toBe(true);
+    expect(await liveBubbles()).toEqual(["Add a weekly chart of my distances", CHANGE_REPLY, "Please build this change.", READY_REPLY]);
+    expect(await page.locator("#live-failed").isVisible()).toBe(false);
+    await expectNoSideScroll();
+    // Live: no more build polls.
+    const polls = api.build.state.polls;
+    await page.clock.runFor(20_000);
+    await settle();
+    expect(api.build.state.polls).toBe(polls);
+  }, 30_000);
+
+  it("WHEN the participant presses Not this one THEN the proposal is put aside, the ideas come back and the count stays", async () => {
+    const api = fakeStepFour(2);
+    api.step4.proposed = 4;
+    const calls = await mockApi(api.handlers);
+    await openStepFour();
+    await expect.poll(() => page.locator("#proposal").isVisible()).toBe(true);
+    expect(await page.locator("#proposal-version").textContent()).toBe("Version 4, not built yet");
+    expect(await page.locator("#suggestions").isVisible()).toBe(false);
+    await page.getByRole("button", { name: "Not this one" }).click();
+    await expect.poll(() => page.locator("#proposal").isVisible()).toBe(false);
+    expect(calls.filter((c) => c.path === "/api/conversation/change/discard").map((c) => c.body)).toEqual([{ version: 4 }]);
+    expect(calls.some((c) => c.path === "/api/conversation/change/build")).toBe(false);
+    await expect.poll(() => page.locator("#suggestions").isVisible()).toBe(true);
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN Build this change answers 404 (no longer the open proposal) THEN the page says so and shows where the changes stand", async () => {
+    const api = fakeStepFour(1);
+    api.step4.proposed = 3;
+    await mockApi(api.handlers);
+    await openStepFour();
+    await expect.poll(() => page.locator("#proposal").isVisible()).toBe(true);
+    api.step4.proposed = undefined; // put aside in another tab
+    await page.getByRole("button", { name: "Build this change" }).click();
+    await expect.poll(() => page.locator("#message-live").textContent()).toBe(PHASE_3_TEXTS.proposalGone);
+    await expect.poll(() => page.locator("#proposal").isVisible()).toBe(false);
+    expect(await page.locator("#suggestions").isVisible()).toBe(true);
+  }, 30_000);
+
+  it("WHEN Build this change answers 409 build-running THEN the page shows the API's words and follows the running build on step 3", async () => {
+    const api = fakeStepFour(1);
+    api.step4.proposed = 3;
+    api.step4.buildAnswer = { status: 409, body: { reason: "build-running", message: PHASE_3_TEXTS.changeWhileBuilding } };
+    await mockApi(api.handlers);
+    await openStepFour();
+    await expect.poll(() => page.locator("#proposal").isVisible()).toBe(true);
+    api.build.state.status = "building";
+    api.step4.kind = "change";
+    api.step4.changeNumber = 1;
+    await page.getByRole("button", { name: "Build this change" }).click();
+    await expect.poll(() => screen("build").isVisible()).toBe(true);
+    expect(await page.locator("#build-change").textContent()).toBe(changeBuildingText(1));
+  }, 30_000);
+
+  it("WHEN the guardrail declines or flags a change THEN step 4 answers as step 1 does, and the count does not change", async () => {
+    const api = fakeStepFour(1);
+    await mockApi(api.handlers);
+    await openStepFour();
+    await page.getByRole("textbox", { name: "Describe a change" }).fill("Make it mine bitcoin");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => api.convo.state.pendingId).toBe("m1");
+    await settle();
+    api.convo.answer(DECLINE_REPLY, false, "declined");
+    must(api.convo.state.messages.at(-1)).step = "building";
+    await pollAfter(2000);
+    await expect.poll(liveBubbles).toEqual(["Make it mine bitcoin", DECLINE_REPLY]);
+    expect(await page.locator("#live-chat .bubble").first().getAttribute("data-status")).toBe("declined");
+    expect(await page.locator("#proposal").isVisible()).toBe(false);
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+
+    // Flagged: the message waits for a facilitator; Send stays off meanwhile (10 s polls).
+    await page.getByRole("textbox", { name: "Describe a change" }).fill("Add the names of my colleagues");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => api.convo.state.pendingId).toBe("m2");
+    await settle();
+    api.convo.flag();
+    await pollAfter(2000);
+    await expect.poll(() => page.locator("#live-waiting-notice").isVisible()).toBe(true);
+    expect(await page.locator("#live-typing").isVisible()).toBe(false);
+    expect(await page.locator("#live-chat-send").isDisabled()).toBe(true);
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN all 5 changes are used THEN step 4 says \"You've used your 5 changes.\" with no box, no ideas and no proposal; a send refused with no-changes-left shows the same", async () => {
+    const api = fakeStepFour(5);
+    await mockApi(api.handlers);
+    await openStepFour();
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 0 of 5");
+    expect(await page.locator("#changes-used").textContent()).toBe("You've used your 5 changes.");
+    expect(await page.locator("#changes-used").isVisible()).toBe(true);
+    expect(await page.locator("#live-chat-form").isVisible()).toBe(false);
+    expect(await page.locator("#suggestions").isVisible()).toBe(false);
+    expect(await page.locator("#proposal").isVisible()).toBe(false);
+    // The app itself stays: its address and QR code.
+    expect(await page.getByRole("link", { name: APP_URL }).isVisible()).toBe(true);
+    await expectNoSideScroll();
+
+    // A page that still had the box (the fifth change built from another tab): the 409 says so, then the box goes.
+    await page.reload();
+    api.step4.used = 4;
+    await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 1 of 5");
+    api.step4.used = 5;
+    await page.getByRole("textbox", { name: "Describe a change" }).fill("One more change");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#message-live").textContent()).toBe("You've used your 5 changes.");
+    await expect.poll(() => page.locator("#live-chat-form").isVisible()).toBe(false);
+    expect(await page.locator("#changes-used").isVisible()).toBe(true);
+  }, 30_000);
+
+  it("WHEN a change build fails THEN the page shows the failure and its reasons as text on step 4 with the live app, and the count stays as it was", async () => {
+    const api = fakeStepFour(2);
+    api.step4.kind = "change";
+    api.step4.changeNumber = 2;
+    api.build.state.status = "building";
+    api.build.state.feed = [stepEvent("preparing"), stepEvent("writing")];
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => page.locator("#build-change").textContent()).toBe(changeBuildingText(2));
+    api.build.state.status = "failed";
+    api.build.state.failureReasons = ["app.js, line 3: <b>an outside address</b>"];
+    await buildPollAfter(2000);
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    expect(await page.locator("#live-failed").isVisible()).toBe(true);
+    expect(await page.locator("#live-failed-text").textContent()).toBe(changeBuildFailedText(2));
+    expect(await page.locator("#live-failed-reasons li").allTextContents()).toEqual(["app.js, line 3: <b>an outside address</b>"]);
+    expect(await page.locator("#live-failed b").count()).toBe(0);
+    expect(await page.getByRole("link", { name: APP_URL }).getAttribute("href")).toBe(APP_URL);
+    await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
+    expect(await page.locator("#live-chat-form").isVisible()).toBe(true);
+    await expectNoSideScroll();
+    // A reload lands on step 4 with the failure still shown (the build is still the failed change).
+    await page.reload();
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#live-failed").isVisible()).toBe(true);
+  }, 30_000);
+
+  it("WHEN the suggestions are not written yet THEN step 4 reads the conversation again every 5 s until they are there", async () => {
+    const api = fakeStepFour(0);
+    api.step4.suggestions = undefined;
+    const calls = await mockApi(api.handlers);
+    await openStepFour();
+    expect(await page.locator("#suggestions").isVisible()).toBe(false);
+    const reads = () => calls.filter((c) => c.method === "GET" && c.path === "/api/conversation").length;
+    const before = reads();
+    const answered = page.waitForResponse((r) => r.url().endsWith("/api/conversation"));
+    await page.clock.runFor(5000);
+    await answered;
+    await settle();
+    expect(reads()).toBe(before + 1);
+    api.step4.suggestions = [...SUGGESTIONS];
+    const again = page.waitForResponse((r) => r.url().endsWith("/api/conversation"));
+    await page.clock.runFor(5000);
+    await again;
+    await expect.poll(suggestionButtons).toEqual(SUGGESTIONS);
+    expect(await page.locator("#suggestions").isVisible()).toBe(true);
+    const after = reads();
+    await page.clock.runFor(30_000);
+    await settle();
+    expect(reads()).toBe(after);
+  }, 30_000);
+
+  it("criterion 5: WHEN the page is 375 px wide THEN nothing scrolls sideways, with long suggestions, a long What changes list and the workshop paused", async () => {
+    const long = "x".repeat(120);
+    const api = fakeStepFour(1);
+    api.step4.suggestions = [`Add ${long}`, "Short one", `A very long idea ${"with many words ".repeat(8)}`];
+    api.step4.whatChanges = [`Adds ${long}`, "Moves the chart", "Renames Home to Today", "Keeps the data", "One more line about the change"];
+    api.step4.proposed = 3;
+    api.convo.state.paused = true;
+    api.convo.state.messages.push({ id: "m1", author: "participant", text: `Please ${long}`, status: "done", step: "building" }, { id: "m1-r", author: "assistant", text: CHANGE_REPLY, step: "building" });
+    await mockApi(api.handlers);
+    await openStepFour();
+    await expect.poll(() => page.locator("#proposal").isVisible()).toBe(true);
+    expect(await page.locator("#workshop-paused").isVisible()).toBe(true);
+    expect(await page.locator("#proposal-changes li").count()).toBe(5);
+    await page.locator("#proposal-spec summary").click();
+    await expectNoSideScroll();
+    await page.getByRole("button", { name: "Not this one" }).click();
+    await expect.poll(() => page.locator("#suggestions").isVisible()).toBe(true);
     await expectNoSideScroll();
   }, 30_000);
 });

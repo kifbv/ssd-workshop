@@ -163,7 +163,9 @@
       <!-- Step 3, Build (ticket 2.10): the build's stages, then what the AI wrote, read and saved, as it happens. -->
       <section id="screen-build" class="card" data-screen aria-labelledby="build-heading" hidden>
         <h2 id="build-heading" tabindex="-1">Step 3: Build</h2>
-        <p>Hi <strong id="build-nickname"></strong>. The AI is turning your spec into your app. This page follows the build as it happens; it takes a few minutes.</p>
+        <p id="build-intro">Hi <strong id="build-nickname"></strong>. The AI is turning your spec into your app. This page follows the build as it happens; it takes a few minutes.</p>
+        <!-- Ticket 3.8: during a change build, this line replaces the first build's introduction. -->
+        <p id="build-change" class="notice" hidden></p>
 
         <ol id="build-stages" class="stages" aria-label="Build stages">
           <li data-stage="preparing" data-state="todo">Preparing</li>
@@ -187,7 +189,7 @@
             <li data-part="deployer">Deployer</li>
             <li data-part="app">Your app online</li>
           </ol>
-          <p class="help">Your spec passed the readiness check, so the build launcher created your public GitHub repository and started a builder: a container on AWS. In it, Claude, the coding agent running on Amazon Bedrock, writes your app's files from the workshop's template. It can only work on files in its own folder and read public web pages; it holds no AWS keys. The builder checks the files and saves them to your repository in a few commits. Then the deployer checks them again and publishes exactly what GitHub holds on the workshop's site. This page asks for news every 2 seconds.</p>
+          <p id="build-behind-text" class="help">Your spec passed the readiness check, so the build launcher created your public GitHub repository and started a builder: a container on AWS. In it, Claude, the coding agent running on Amazon Bedrock, writes your app's files from the workshop's template. It can only work on files in its own folder and read public web pages; it holds no AWS keys. The builder checks the files and saves them to your repository in a few commits. Then the deployer checks them again and publishes exactly what GitHub holds on the workshop's site. This page asks for news every 2 seconds.</p>
         </aside>
 
         <h3 id="build-feed-heading">What the AI did</h3>
@@ -196,29 +198,72 @@
         <p id="message-build" class="message" role="status" aria-live="polite"></p>
       </section>
 
-      <!-- Step 4, Live (tickets 2.10 and 2.11): the address, a QR code drawn in the page, the repository and how the app got there. -->
+      <!-- Step 4, Live (tickets 2.10 and 2.11): the address, a QR code drawn in the page, the repository and how the app got there.
+           Ticket 3.8: the change requests: changes left, suggested changes, the box, the spec update and its two buttons. -->
       <section id="screen-live" class="card" data-screen aria-labelledby="live-heading" hidden>
         <h2 id="live-heading" tabindex="-1">Step 4: Live</h2>
         <p class="live-title"><strong>Your app is live</strong></p>
+        <div id="live-failed" class="notice live-failed" role="status" hidden>
+          <p id="live-failed-text"></p>
+          <ul id="live-failed-reasons" class="reasons" aria-label="What went wrong"></ul>
+        </div>
         <p id="live-address" hidden>Open it at <a id="live-link" rel="noopener noreferrer" target="_blank"></a></p>
         <figure id="live-qr" class="qr" hidden>
           <div id="live-qr-code" class="qr-code"></div>
           <figcaption>Scan it with your phone's camera to open your app there.</figcaption>
         </figure>
         <p id="live-repository" hidden>Your app's code is public on GitHub: <a id="live-repository-link" rel="noopener noreferrer" target="_blank"></a></p>
-        <p id="live-next" class="notice">Next: you will be able to ask for changes to your app, and the AI builds a new version.</p>
+
+        <h3 id="changes-heading">Ask for a change</h3>
+        <p id="changes-left" class="changes-left" hidden></p>
+        <p id="changes-used" class="notice" role="status" hidden></p>
+        <p id="changes-intro" class="help">Describe in a sentence what your app should do differently. The AI updates your spec and shows what changes; nothing is built until you press Build this change.</p>
+
+        <div id="suggestions" class="suggestions" hidden>
+          <p id="suggestions-intro" class="help"></p>
+          <ul id="suggestions-list" class="suggestions-list" aria-labelledby="suggestions-intro"></ul>
+        </div>
+
+        <ol id="live-chat" class="chat" aria-label="Conversation about your changes" aria-live="polite"></ol>
+        <p id="live-typing" class="typing" role="status" hidden><span class="dots" aria-hidden="true"><span></span><span></span><span></span></span> <span id="live-typing-text">The AI is writing…</span></p>
+        <p id="live-waiting-notice" class="notice" role="status" hidden>Your message is waiting for your facilitator. You can write again once they have looked at it.</p>
+
+        <section id="proposal" class="proposal" aria-labelledby="proposal-heading" tabindex="-1" hidden>
+          <h3 id="proposal-heading">Spec update</h3>
+          <p id="proposal-version" class="spec-version"></p>
+          <h4 id="proposal-changes-heading">What changes</h4>
+          <ul id="proposal-changes" aria-labelledby="proposal-changes-heading"></ul>
+          <details id="proposal-spec">
+            <summary>Read the whole updated spec</summary>
+            <div id="proposal-spec-body" class="proposal-spec"></div>
+          </details>
+          <div class="proposal-buttons">
+            <button id="build-change-button" type="button" class="primary" data-busy-label="Starting…">Build this change</button>
+            <button id="discard-change-button" type="button" class="secondary" data-busy-label="Putting it aside…">Not this one</button>
+          </div>
+          <p id="proposal-hint" class="help"></p>
+        </section>
+
+        <form id="live-chat-form" method="post" novalidate>
+          <label for="live-chat-input">Describe a change</label>
+          <textarea id="live-chat-input" name="text" rows="3" maxlength="2000" required></textarea>
+          <button id="live-chat-send" type="submit" data-busy-label="Sending…">Send</button>
+        </form>
+        <p id="message-live" class="message" role="status" aria-live="polite"></p>
+        <p id="live-chat-budget" class="help" hidden></p>
 
         <aside id="live-behind" class="behind" aria-labelledby="live-behind-heading">
           <h3 id="live-behind-heading">Behind the scenes</h3>
-          <ol id="live-behind-flow" class="flow">
-            <li data-part="github">GitHub repository</li>
-            <li data-part="deployer">Deployer: checks, then publishes</li>
-            <li data-part="storage">Amazon S3 and CloudFront</li>
-            <li data-part="address" data-current="true">Your address</li>
-          </ol>
-          <p class="help">Your app's files are in your public GitHub repository. The deployer downloaded exactly what GitHub holds, checked it once more against the workshop's rules and copied it to the workshop's storage on Amazon S3. Amazon CloudFront serves it at your address, on a laptop or a phone alike; the QR code holds the same address. Your app runs in a sandbox: it never sees anyone's sign-in, and it keeps its data through the workshop's data API.</p>
+          <figure id="live-diagram" class="diagram">
+            <p id="live-diagram-status" class="help" role="status"></p>
+            <img id="live-diagram-img" alt="" hidden />
+            <details>
+              <summary>Diagram as text</summary>
+              <pre id="live-diagram-text"></pre>
+            </details>
+          </figure>
+          <p class="help">Each change goes round this loop. A safety check reads your request first; then Claude, the AI model on Amazon Bedrock, writes the next version of your spec and a short "What changes" list. When you press Build this change, the readiness check runs and your build joins the queue. The coding agent starts from your app's files on GitHub and changes only what the list says, the builder saves them in one commit, and the deployer checks them and publishes them at the same address and QR code. A change counts once its build is queued; a declined request or Not this one does not count.</p>
         </aside>
-        <p id="message-live" class="message" role="status" aria-live="polite"></p>
       </section>
     </main>
   </body>
