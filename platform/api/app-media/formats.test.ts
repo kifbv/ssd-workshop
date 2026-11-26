@@ -303,7 +303,7 @@ describe("try 3: hostile files stay within time and memory", () => {
     ["segments", "jpeg"],
     ["webm", "webm"],
     ["mp4", "mp4"],
-  ])("4 MB of tiny parts (%s): checked, measured and stripped in under 2 s with under 100 MB more memory", (which, kind) => {
+  ])("4 MB of tiny parts (%s): checked, measured and stripped in under 5 s with under 100 MB more memory", (which, kind) => {
     const run = spawnSync(process.execPath, ["--max-old-space-size=32", "--import", "tsx", probe, which], { encoding: "utf8", timeout: 30_000 });
     expect(run.status, run.stderr).toBe(0);
     const result = JSON.parse(run.stdout) as { kind: string; bytes: number; ms: number; peakGrowthMb: number; inputBytes: number; seconds?: number };
