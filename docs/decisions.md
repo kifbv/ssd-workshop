@@ -12,6 +12,21 @@ Choices made while building that the specification left open. Newest phase first
 - **Spec deltas:** a change to signed-off behaviour is recorded here as ADDED, CHANGED or REMOVED,
   with the date and the pull request.
 
+## Phase 3b: photos in apps, more storage, clearer refusals
+
+Franck's answers to the brief's questions (2026-11-26, `docs/phases/phase-3b.md`, PR #65): all as suggested.
+
+- **Photos and storage (spec delta, approved by Franck 2026-11-26):** CHANGED section 5 Security: "Each app's stored data is limited to 1 MB ..." becomes "Each app may store up to 10 MB of data and 500 MB of photos and voice recordings. Both are visible to anyone with the app's URL (apps have no logins), which participants are told." CHANGED the section 10 confirmation to match. ADDED section 4 item 1: an app may take photos with the phone's camera or pick them from the phone and keep them in the workshop's photo store; photos are shrunk and stripped of location data before they are kept.
+- **Limits:** 4 MB per photo (after shrinking to 2,560 px), 500 MB and 2,000 photos per app, 500 MB uploaded per app per day; data 10 MB per app, 350 KB per value, 500 keys, 50 MB written per day.
+- **Abuse cost (Stop-and-ask 3, accepted):** the 3.13 per-address WAF rate rule is extended to `/app-media/*`; the $20 Budgets alert and Cost Anomaly email stay; the remaining risk of a distributed download flood is accepted.
+- **Photo content not checked by AI (accepted):** facilitators wipe an app with `npm run participant -- reset`; Clarify warns participants not to photograph people or confidential papers.
+- **Language:** AI-written texts (decline sentence, readiness reasons, chat) follow the participant's language; the page's fixed buttons and messages stay English.
+- **AI tasks for apps (spec delta, approved by Franck 2026-11-26, question 7):** ADDED section 4 item 1: "An app may use the AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories, and with question 8 transcribe a recording), never a free prompt." CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps doubled from the suggestion ("these little apps will be used only briefly"): $1 per app per day, $10 a day for all apps, admin switch "Apps may use AI" off by default; app AI spend is kept apart from the participant's $5.
+- **Media, not only photos (Franck, 2026-11-26):** the store takes voice recordings too (WebM/Opus, Ogg/Opus, MP4/AAC, at most 5 minutes), in the same 500 MB and 2,000 files per app; bucket `ssd-workshop-app-media`, served at `/app-media/*`. Video stays out (size).
+- **Amazon Transcribe (new paid service, approved by Franck 2026-11-26, question 8):** a `transcribe` AI task turns an app's voice recording into text (then `sort-text` gives topics); about $0.024 a minute in eu-central-1, counted inside the $10 daily cap for all apps. Needs an access-stack change Franck applies.
+- **Microphone check on both platforms (Franck, 2026-11-26):** ticket 3.19's live check covers an iPhone (Safari) and an Android phone (Chrome).
+- **Retention:** photos follow their app (the phase 5 removal workflow deletes them); no automatic expiry before that.
+
 ## Phase 3: iterate and supervise
 
 Franck's answers to the brief's questions (2026-11-25, `docs/phases/phase-3.md`, PR #49): all as suggested except the load test.
