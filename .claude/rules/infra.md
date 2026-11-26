@@ -195,11 +195,13 @@ paths:
   `UpdateItem`, `DeleteItem` or `ConditionCheckItem`, with its own `LeadingKeys`/`Attributes` conditions.
   Under a `dynamodb:Attributes` list, return only `UPDATED_NEW`/`UPDATED_OLD`/`NONE` (`ALL_NEW` could
   return attributes outside it; enforce it with `StringEqualsIfExists` `dynamodb:ReturnValues`
-  [`ATTRIBUTE_LIMITED_RETURN_VALUES`], ticket 2.5), and list `pk`/`sk` plus every name an expression uses, conditions included.
+  [`ATTRIBUTE_LIMITED_RETURN_VALUES`], ticket 2.5), and list `pk`/`sk` plus every name an expression uses, conditions included: also on a `ConditionCheckItem` whose
+  expression names only `pk` (ticket 3.24 try 3: `["pk"]` alone would refuse the whole transaction), and on projected
+  read lists, for consistency.
 - A custom CloudFront policy (the pages' `ssd-workshop-pages-v1` response headers policy, ticket 1.6) can be created but
   never updated: a change to any of its settings must bump `PAGES_HEADERS_POLICY_VERSION`, which changes the name
   and the logical id (a new name alone is an in-place update), or the deploy fails on `UpdateResponseHeadersPolicy`.
-  The same holds for the apps' policy (`APPS_HEADERS_POLICY_VERSION`, v2 since ticket 2.14's CSP change); the old
+  The same holds for the apps' policy (`APPS_HEADERS_POLICY_VERSION`, v2 since ticket 2.14's CSP change, v3 since 3.24's `allow-popups-to-escape-sandbox`); the old
   version stays retained for Franck to delete.
 - The site stack builds the pages (`buildWeb`, esbuild) at synth time into `cdk.out/ssd-workshop-web` and uploads that
   folder, not `platform/web`: a new static file must be added to `STATIC_FILES` in `platform/web/build.ts`.
@@ -314,3 +316,5 @@ paths:
   `ecs:cluster` = the cluster's ARN, and it must also be in the boundary (`AccountWideServiceCalls`, ticket 3.14). Watching
   tasks for something IAM cannot pin (RunTask's subnets, risk 1) goes in the launcher's minute check, the only role
   allowed to describe and stop build tasks (`WatchBuildsLauncherOnly`); an EventBridge rule on ECS events is refused.
+- A `beforeAll` that synthesizes the CDK app needs an explicit timeout (`120_000`): CI runners are slower than vitest's
+  default 10 s (`HookTimeoutError` in the Deploy run on main, `infra/lib/app.test.ts`).

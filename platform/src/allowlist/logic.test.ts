@@ -59,6 +59,8 @@ describe("formatRemoveReport (ticket 3.1)", () => {
       expect(formatRemoveReport(result)).toMatch(/this address/i);
       expect(formatRemoveReport(result)).not.toContain("@");
     }
+    expect(formatRemoveReport("removed", 1)).toContain("ended 1 sign-in to save in apps.");
+    expect(formatRemoveReport("removed", 3)).toContain("ended 3 sign-ins to save in apps.");
   });
 });
 

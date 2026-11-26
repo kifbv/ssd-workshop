@@ -2,6 +2,9 @@
 // in-memory app data store and the in-memory GitHub. Test names start with the criterion they prove (AC1 to AC5).
 import { describe, expect, it } from "vitest";
 import { FakeAppDataStore } from "../../api/app-data/fakes.js";
+import { handleAppDataRequest } from "../../api/app-data/data.js";
+import { FakeAppTokenStore } from "../../api/app-token/fakes.js";
+import { hashAppToken } from "../../api/app-token/token.js";
 import { FakeConversationTable } from "../../api/conversation/fakes.js";
 import { parseGitHubSecret, type GitHubDeps } from "../../api/github/app.js";
 import { FAKE_TOKEN_PREFIX, FakeGitHub, TEST_SECRET_TEXT } from "../../api/github/fakes.js";
@@ -48,6 +51,7 @@ class FakeParticipantResetStore extends FakeResetStore implements ParticipantRes
       "deleteAppData",
       "hasLiveMarker",
       "deleteLiveMarker",
+      "revokeAppTokens",
     ] as const) {
       const original = (this[method] as (...args: unknown[]) => Promise<unknown>).bind(this);
       (this as Record<string, unknown>)[method] = async (...args: unknown[]) => {
@@ -77,6 +81,11 @@ class FakeParticipantResetStore extends FakeResetStore implements ParticipantRes
   }
   async deleteLiveMarker(nickname: string) {
     return this.apps.live.delete(nickname.toLowerCase());
+  }
+  /** Ticket 3.24: the participants' app write tokens. */
+  readonly tokens = new FakeAppTokenStore();
+  async revokeAppTokens(participantId: string) {
+    return this.tokens.revokeAppTokens(participantId);
   }
 }
 
@@ -118,6 +127,15 @@ function setup(options: { step?: Step; buildStatus?: BuildStatus } = {}) {
     github.addRepository(`ssd-${lower}`);
   }
   const store = new FakeParticipantResetStore(table, apps);
+  // Ticket 3.24: Ada holds two app write tokens (her own app and Bob's), Bob one.
+  for (const [id, hash, app] of [
+    [ADA_ID, "a1".repeat(32), "ada"],
+    [ADA_ID, "a2".repeat(32), "bob"],
+    [BOB_ID, "b1".repeat(32), "ada"],
+  ] as const) {
+    store.tokens.tokens.set(hash, { app, nickname: id === ADA_ID ? "Ada" : "Bob", expiresAt: NOW_S + 3600 });
+    store.tokens.lists.set(id, new Map([...(store.tokens.lists.get(id) ?? []), [hash, NOW_S + 3600]]));
+  }
   const out: string[] = [];
   const err: string[] = [];
   let githubOpened = 0;
@@ -161,6 +179,8 @@ function snapshot(s: Setup): string {
     values: plain(s.apps.values),
     appUsage: plain(s.apps.usage),
     repositories: [...s.github.repositories.keys()],
+    appTokens: plain(s.store.tokens.tokens),
+    appTokenLists: plain(s.store.tokens.lists),
   });
 }
 
@@ -176,6 +196,9 @@ function expectAdaReset(s: Setup, kept: { allow: string; nicknames: string; sess
   expect(s.apps.usage.has("ada")).toBe(false);
   expect(s.apps.live.has("ada")).toBe(false);
   expect(s.github.repositories.has("ssd-ada")).toBe(false);
+  // Ticket 3.24 criterion 4 (reset): Ada's app write tokens are gone, for every app.
+  expect(s.store.tokens.lists.has(ADA_ID)).toBe(false);
+  expect([...s.store.tokens.tokens.values()].filter((t) => t.nickname === "Ada")).toEqual([]);
   expect(JSON.stringify([...s.table.allow])).toBe(kept.allow);
   expect(JSON.stringify([...s.table.nicknames])).toBe(kept.nicknames);
   expect(JSON.stringify([...s.table.sessions])).toBe(kept.sessions);
@@ -200,6 +223,8 @@ function expectBobUntouched(s: Setup) {
   expect(s.apps.live.has("bob")).toBe(true);
   expect(s.apps.values.has("bob/scores")).toBe(true);
   expect(s.github.repositories.has("ssd-bob")).toBe(true);
+  expect(s.store.tokens.lists.get(BOB_ID)?.size).toBe(1);
+  expect(s.store.tokens.tokens.has("b1".repeat(32))).toBe(true);
 }
 
 /** AC5: nothing printed holds an email address, a participant id, a token or a message or spec text. */
@@ -247,7 +272,7 @@ describe("AC1: reset without --yes", () => {
     expect(s.out).toEqual([
       "Ada is at step 3 (Build), with 2 messages and replies and 2 spec versions.",
       "App: 2 stored values and the app's data totals, live marker present, repository ssd-workshop-apps/ssd-ada exists.",
-      "Nothing changed. Run again with --yes to delete all of this and send Ada back to step 1 (Clarify).",
+      "Nothing changed. Run again with --yes to delete all of this and send Ada back to step 1 (Clarify), and to end Ada's sign-ins to save in apps.",
       "Kept: allow-list entry, nickname, sessions, AI usage totals and build records.",
     ]);
     expect(s.err).toEqual([]);
@@ -282,6 +307,7 @@ describe("AC2: reset --yes at any step", () => {
       expect(s.err).toEqual([]);
       expect(s.out).toEqual([
         "Reset Ada: deleted 2 messages and replies and 2 spec versions; back at step 1 (Clarify).",
+        "Ended 2 sign-ins to save in apps (app write tokens).",
         "Deleted 2 stored values and the app's data totals; deleted the live marker.",
         "Repository ssd-workshop-apps/ssd-ada deleted.",
         "Kept: allow-list entry, nickname, sessions, AI usage totals and build records.",
@@ -309,8 +335,35 @@ describe("AC2: reset --yes at any step", () => {
     expect(s.apps.live.has("ada")).toBe(false);
     expect(s.apps.usage.has("ada")).toBe(false);
     expect(s.github.repositories.has("ssd-ada")).toBe(false);
-    expect(s.out[0]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
+    expect(s.out[0]).toBe("Ended 2 sign-ins to save in apps (app write tokens).");
+    expect(s.out[1]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
     expectBobUntouched(s);
+  });
+});
+
+describe("ticket 3.24: reset ends the participant's app write tokens", () => {
+  it("WHEN `participant reset --yes` ran THEN a PUT with the reset participant's token answers 401, while another participant's token still saves", async () => {
+    const s = setup();
+    // Real tokens made through the token store, as POST /api/app-tokens makes them: Ada's for Bob's app, Bob's for his own.
+    const adaToken = Buffer.alloc(32, 1).toString("base64url");
+    const bobToken = Buffer.alloc(32, 2).toString("base64url");
+    await s.store.tokens.createAppToken(ADA_ID, "5".repeat(64), hashAppToken(adaToken), { app: "bob", nickname: "Ada", expiresAt: NOW_S + 3600 }, NOW_S);
+    await s.store.tokens.createAppToken(BOB_ID, "6".repeat(64), hashAppToken(bobToken), { app: "bob", nickname: "Bob", expiresAt: NOW_S + 3600 }, NOW_S);
+    const put = (token: string) =>
+      handleAppDataRequest(
+        {
+          routeKey: "PUT /api/apps/{nickname}/data/{key}",
+          pathParameters: { nickname: "bob", key: "board" },
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: '"hello"',
+        },
+        { store: s.apps, tokens: s.store.tokens, now: () => NOW, log: () => undefined, pause: async () => {} },
+      );
+    expect((await put(adaToken)).statusCode).toBe(204);
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    const refused = await put(adaToken);
+    expect(refused.statusCode).toBe(401);
+    expect((await put(bobToken)).statusCode).toBe(204);
   });
 });
 
@@ -412,14 +465,15 @@ describe("AC4: retries", () => {
     s.out.length = 0;
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
     expect(snapshot(s)).toBe(after);
-    expect(s.out.slice(0, 3)).toEqual([
+    expect(s.out.slice(0, 4)).toEqual([
       "Reset Ada: deleted 0 messages and replies and 0 spec versions; back at step 1 (Clarify).",
+      "Ended 0 sign-ins to save in apps (app write tokens).",
       "Deleted no app data; the live marker was already gone.",
       "Repository ssd-workshop-apps/ssd-ada was already gone.",
     ]);
   });
 
-  for (const stop of ["restart", "deleteItems", "deleteLiveMarker", "listAppData", "listAppData after the pause", "deleteAppData"] as const) {
+  for (const stop of ["restart", "deleteItems", "revokeAppTokens", "deleteLiveMarker", "listAppData", "listAppData after the pause", "deleteAppData"] as const) {
     it(`AC4 WHEN a first run stopped at ${stop} THEN a second run finishes without error`, async () => {
       const s = setup();
       const kept = keptOf(s);
@@ -484,7 +538,7 @@ describe("AC2: data written while the reset runs", () => {
     expect(s.apps.values.has("ada/late")).toBe(false);
     expectAdaReset(s, kept);
     expectBobUntouched(s);
-    expect(s.out[1]).toBe("Deleted 3 stored values and the app's data totals; deleted the live marker.");
+    expect(s.out[2]).toBe("Deleted 3 stored values and the app's data totals; deleted the live marker.");
   });
 
   it("AC2 WHEN nothing is written meanwhile THEN the second pass finds nothing and deletes nothing more", async () => {

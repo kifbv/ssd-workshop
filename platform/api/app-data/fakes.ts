@@ -10,6 +10,7 @@
 // It does not reproduce DynamoDB's `TransactionConflict` (two transactions on the same item at the same
 // moment cancel each other even when both conditions hold): only condition failures, which data.ts
 // handles the same way (read again, pause, try again).
+import { FakeAppTokenStore } from "../app-token/fakes.js";
 import {
   DAILY_WRITE_BUDGET_BYTES,
   MAX_APP_DATA_BYTES,
@@ -18,6 +19,7 @@ import {
   type AppUsage,
   type DeleteResult,
   type PutResult,
+  type StoredValue,
   type WriteCharge,
 } from "./data.js";
 
@@ -26,8 +28,10 @@ type Totals = Pick<AppUsage, "bytes" | "keys">;
 export class FakeAppDataStore implements AppDataStore {
   /** Lower-cased nicknames of live apps. */
   readonly live = new Set<string>();
-  /** Values by `<lower-cased nickname>/<key>`. */
-  readonly values = new Map<string, { json: string; bytes: number }>();
+  /** Values by `<lower-cased nickname>/<key>`, with their writer and time (ticket 3.24). */
+  readonly values = new Map<string, { json: string; bytes: number; updatedBy?: string; updatedAt?: string }>();
+  /** Ticket 3.24: the app write tokens the data API reads (`deps.tokens`). */
+  readonly tokens = new FakeAppTokenStore();
   /** Totals by lower-cased nickname. */
   readonly usage = new Map<string, Totals>();
   /** The daily write count (`writeDay`, `writtenBytes` of the totals item) by lower-cased nickname. */
@@ -53,10 +57,13 @@ export class FakeAppDataStore implements AppDataStore {
     return this.live.has(nickname.toLowerCase());
   }
 
-  async getValue(nickname: string, key: string): Promise<string | undefined> {
+  async getValue(nickname: string, key: string): Promise<StoredValue | undefined> {
     this.check();
     this.reads.push("value");
-    return this.values.get(FakeAppDataStore.id(nickname, key))?.json;
+    const stored = this.values.get(FakeAppDataStore.id(nickname, key));
+    if (stored === undefined) return undefined;
+    const { json, updatedBy, updatedAt } = stored;
+    return { json, ...(updatedBy === undefined ? {} : { updatedBy }), ...(updatedAt === undefined ? {} : { updatedAt }) };
   }
 
   /** The `sizes` map: each stored value's bytes by key. */
@@ -94,7 +101,7 @@ export class FakeAppDataStore implements AppDataStore {
   }
 
   /** Like the transaction's one condition, on the totals item: the key's size, the limits and the budget. */
-  async putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, _nowIso: string, charge: WriteCharge): Promise<PutResult> {
+  async putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, nowIso: string, charge: WriteCharge, updatedBy: string): Promise<PutResult> {
     this.check();
     this.beforeWrite?.();
     const id = FakeAppDataStore.id(nickname, key);
@@ -104,7 +111,7 @@ export class FakeAppDataStore implements AppDataStore {
     const next = { bytes: usage.bytes - (previousBytes ?? 0) + bytes, keys: usage.keys + (previousBytes === undefined ? 1 : 0) };
     const written = this.charged(nickname, charge);
     if (next.bytes > MAX_APP_DATA_BYTES || next.keys > MAX_KEYS || written === undefined) return "conflict";
-    this.values.set(id, { json, bytes });
+    this.values.set(id, { json, bytes, updatedBy, updatedAt: nowIso });
     this.usage.set(nickname.toLowerCase(), next);
     this.written.set(nickname.toLowerCase(), written);
     return "saved";

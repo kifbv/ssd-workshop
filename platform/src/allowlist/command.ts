@@ -78,10 +78,13 @@ export async function runAllowlist(args: readonly string[], deps: CommandDeps): 
     if (parsed.command === "remove") {
       const store = deps.createStore();
       // Without --yes the command only looks; with it, the delete itself says whether there was an entry.
-      const result = parsed.confirmed
-        ? (await store.remove(parsed.email)) ? "removed" : "absent"
-        : (await store.exists(parsed.email)) ? "found" : "absent";
-      deps.out(formatRemoveReport(result));
+      // With --yes the person's app write tokens are ended too (ticket 3.24); only their number is printed.
+      if (parsed.confirmed) {
+        const { removed, revokedTokens } = await store.remove(parsed.email);
+        deps.out(formatRemoveReport(removed ? "removed" : "absent", revokedTokens));
+      } else {
+        deps.out(formatRemoveReport((await store.exists(parsed.email)) ? "found" : "absent"));
+      }
       return 0;
     }
     return await importFile(parsed.file, deps);

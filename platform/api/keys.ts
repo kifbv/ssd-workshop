@@ -140,6 +140,19 @@ export const appDataKey = (nickname: string, key: string): ItemKey => ({
 export const appDataUsageKey = (nickname: string): ItemKey => ({ pk: appDataPk(nickname), sk: "DATA_USAGE" });
 
 /**
+ * An app write token (ticket 3.24), by the SHA-256 (hex) of the token: `APPTOKEN#<hash>` / `TOKEN`. Its own partition
+ * prefix: IAM's `APP#*` and `APPDATA#*` never match `APPTOKEN#...` (the character after `APP` is `T`), and `APPTOKEN#*`
+ * never matches `TOKENS#...`.
+ */
+export const appTokenKey = (tokenHash: string): ItemKey => {
+  if (!/^[0-9a-f]{64}$/.test(tokenHash)) throw new Error("token hash is not 64 hex digits");
+  return { pk: `APPTOKEN#${tokenHash}`, sk: "TOKEN" };
+};
+
+/** One participant's app write tokens (ticket 3.24): a map hash -> expiry, so sign-out and a reset can delete them all. */
+export const appTokenListKey = (participantId: string): ItemKey => ({ pk: `TOKENS#${checkId("participant id", participantId)}`, sk: "TOKENS" });
+
+/**
  * The workshop's settings (ticket 3.2): one item, `SETTINGS` / `SETTINGS`, holding the admin's caps and the global
  * Stop. Its own partition, so only a role granted `SETTINGS` (the admin function's) may write it.
  */

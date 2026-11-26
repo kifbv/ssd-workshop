@@ -2,6 +2,8 @@
 // routes (ticket 1.5), shared by their tests (not bundled: no handler imports it). It follows the
 // same conditions as the DynamoDB adapters: an atomic wrong-try count, versioned code deletes, a link only when none exists,
 // and the nickname claim and profile update as one all-or-nothing step.
+import { FakeAppTokenStore } from "./app-token/fakes.js";
+import type { CreateTokenResult, StoredAppToken } from "./app-token/token.js";
 import type { ClaimResult, ParticipantStore } from "./participant/participant.js";
 import { randomBytes } from "node:crypto";
 import { hashToken, sealAllowRef, type ParticipantRecord, type StoredSession } from "./session/session.js";
@@ -24,6 +26,9 @@ export class FakeTable implements VerifyStore, ParticipantStore {
   readonly sessions = new Map<string, StoredSession & { createdAt: string }>();
   /** Nickname claims by lower-cased nickname. */
   readonly nicknames = new Map<string, { nickname: string; participantId: string }>();
+  /** Ticket 3.24: lower-cased nicknames of live apps, and the app write tokens (the data API's tests read them too). */
+  readonly liveApps = new Set<string>();
+  readonly appTokens = new FakeAppTokenStore((sessionTokenHash) => this.sessions.has(sessionTokenHash));
   failOn: Method | undefined;
   failure: Error = new Error("boom");
   /** Runs once before the next getCode returns (simulates another writer in between). */
@@ -126,6 +131,21 @@ export class FakeTable implements VerifyStore, ParticipantStore {
     const p = this.profiles.get(participantId);
     if (p === undefined) return undefined;
     return { id: p.id, role: p.role, group: p.group, step: p.step, ...(p.nickname === undefined ? {} : { nickname: p.nickname }) };
+  }
+
+  async isAppLive(nickname: string): Promise<boolean> {
+    this.maybeFail("isAppLive");
+    return this.liveApps.has(nickname.toLowerCase());
+  }
+
+  async createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
+    this.maybeFail("createAppToken");
+    return this.appTokens.createAppToken(participantId, sessionTokenHash, tokenHash, token, nowSeconds);
+  }
+
+  async revokeAppTokens(participantId: string): Promise<number> {
+    this.maybeFail("revokeAppTokens");
+    return this.appTokens.revokeAppTokens(participantId);
   }
 
   async claimNickname(participantId: string, nickname: string, nowIso: string): Promise<ClaimResult> {

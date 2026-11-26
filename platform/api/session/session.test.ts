@@ -91,6 +91,8 @@ describe("requireSession (ticket 1.5 criterion 5)", () => {
       participant: { id: "p-1", role: "facilitator", group: "blue", step: "clarify", nickname: "Ada" },
       role: "facilitator",
       tokenHash: hashToken(TOKEN),
+      // Ticket 3.24: the session's end (app write tokens never outlive it).
+      expiresAt: NOW_S + 60,
     });
   });
 

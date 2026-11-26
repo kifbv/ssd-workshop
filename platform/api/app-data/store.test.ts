@@ -104,17 +104,23 @@ describe("DynamoAppDataStore", () => {
     });
   });
 
-  it("reads a value's text with an eventually consistent read (half the cost of a consistent one)", async () => {
-    const { client, sent } = stubClient([{ Item: { value: { S: '{"a":1}' } } }, {}]);
+  it("reads a value's text, writer and time with an eventually consistent read (half the cost of a consistent one)", async () => {
+    const { client, sent } = stubClient([
+      { Item: { value: { S: '{"a":1}' }, updatedBy: { S: "Bob" }, updatedAt: { S: NOW_ISO } } },
+      { Item: { value: { S: "2" } } },
+      {},
+    ]);
     const store = new DynamoAppDataStore(client, TABLE);
-    await expect(store.getValue("Ada-42", "score")).resolves.toBe('{"a":1}');
+    await expect(store.getValue("Ada-42", "score")).resolves.toStrictEqual({ json: '{"a":1}', updatedBy: "Bob", updatedAt: NOW_ISO });
+    // A value from before ticket 3.24 has no writer.
+    await expect(store.getValue("Ada-42", "score")).resolves.toStrictEqual({ json: "2" });
     await expect(store.getValue("Ada-42", "score")).resolves.toBeUndefined();
     expect(sent[0]?.input).toEqual({
       TableName: TABLE,
       Key: { pk: { S: "APPDATA#ada-42" }, sk: { S: "DATA#score" } },
       ConsistentRead: false,
-      ProjectionExpression: "#a",
-      ExpressionAttributeNames: { "#a": "value" },
+      ProjectionExpression: "#value, #updatedBy, #updatedAt",
+      ExpressionAttributeNames: { "#value": "value", "#updatedBy": "updatedBy", "#updatedAt": "updatedAt" },
     });
   });
 
@@ -150,7 +156,7 @@ describe("DynamoAppDataStore", () => {
 
   it("creates the totals item with the first value of an app, only while it does not exist yet", async () => {
     const { client, sent } = stubClient([{}]);
-    await expect(new DynamoAppDataStore(client, TABLE).putValue("Ada-42", "score", "42", 2, undefined, false, NOW_ISO, NEW_DAY)).resolves.toBe("saved");
+    await expect(new DynamoAppDataStore(client, TABLE).putValue("Ada-42", "score", "42", 2, undefined, false, NOW_ISO, NEW_DAY, "Bob")).resolves.toBe("saved");
     expect(sent[0]).toBeInstanceOf(TransactWriteItemsCommand);
     expect(sent[0]?.input).toEqual({
       TransactItems: [
@@ -165,6 +171,7 @@ describe("DynamoAppDataStore", () => {
               value: { S: "42" },
               bytes: { N: "2" },
               updatedAt: { S: NOW_ISO },
+              updatedBy: { S: "Bob" },
             },
           },
         },
@@ -202,7 +209,7 @@ describe("DynamoAppDataStore", () => {
 
   it("adds a new key only while the totals item has no size for it, and within the limits and today's budget", async () => {
     const { client, sent } = stubClient([{}]);
-    await expect(new DynamoAppDataStore(client, TABLE).putValue("Ada-42", "high-score", "42", 2, undefined, true, NOW_ISO, SAME_DAY)).resolves.toBe("saved");
+    await expect(new DynamoAppDataStore(client, TABLE).putValue("Ada-42", "high-score", "42", 2, undefined, true, NOW_ISO, SAME_DAY, "Bob")).resolves.toBe("saved");
     const [put, usage] = items(sent[0]);
     expect(put?.Put?.ConditionExpression).toBeUndefined();
     expect(usage?.Update).toEqual({
@@ -242,7 +249,7 @@ describe("DynamoAppDataStore", () => {
   it("replaces a value only while the totals item still holds the size it read, moving the totals by the difference (no new key)", async () => {
     const { client, sent } = stubClient([{}, {}]);
     const store = new DynamoAppDataStore(client, TABLE);
-    await store.putValue("Ada-42", "score", '"abcdefgh"', 10, 300, true, NOW_ISO, SAME_DAY);
+    await store.putValue("Ada-42", "score", '"abcdefgh"', 10, 300, true, NOW_ISO, SAME_DAY, "Bob");
     const [put, usage] = items(sent[0]);
     expect(put?.Put?.ConditionExpression).toBeUndefined();
     expect(usage?.Update?.ConditionExpression).toBe(
@@ -257,13 +264,13 @@ describe("DynamoAppDataStore", () => {
       ":keysLimit": { N: String(MAX_KEYS) },
     });
     namesUsed(sent[0]);
-    await store.putValue("Ada-42", "score", "1", 1, 0, true, NOW_ISO, SAME_DAY);
+    await store.putValue("Ada-42", "score", "1", 1, 0, true, NOW_ISO, SAME_DAY, "Bob");
     expect(items(sent[1])[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":previous": { N: "0" } });
   });
 
   it("on the first write of a day, starts the count only while the stored day is older (ISO dates compare as text): never resets a later day", async () => {
     const { client, sent } = stubClient([{}]);
-    await new DynamoAppDataStore(client, TABLE).putValue("Ada-42", "score", "42", 2, 7, true, NOW_ISO, NEW_DAY);
+    await new DynamoAppDataStore(client, TABLE).putValue("Ada-42", "score", "42", 2, 7, true, NOW_ISO, NEW_DAY, "Bob");
     const usage = items(sent[0])[1]?.Update;
     expect(usage?.UpdateExpression).toBe(
       "SET #type = :type, #bytes = #bytes + :bytesDelta, #keys = #keys + :keysDelta, #updatedAt = :now, #sizes.#k = :size, #writeDay = :today, #writtenBytes = :cost",
@@ -287,11 +294,11 @@ describe("DynamoAppDataStore", () => {
       Object.assign(new Error("x"), { name: "InternalServerError" }),
     ]);
     const store = new DynamoAppDataStore(client, TABLE);
-    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY)).resolves.toBe("conflict");
-    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY)).resolves.toBe("conflict");
-    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY)).resolves.toBe("conflict");
-    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY)).rejects.toThrow("cancelled");
-    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY)).rejects.toThrow("x");
+    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY, "Bob")).resolves.toBe("conflict");
+    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY, "Bob")).resolves.toBe("conflict");
+    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY, "Bob")).resolves.toBe("conflict");
+    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY, "Bob")).rejects.toThrow("cancelled");
+    await expect(store.putValue("ada", "k", "1", 1, undefined, true, NOW_ISO, SAME_DAY, "Bob")).rejects.toThrow("x");
   });
 
   it("deletes a value only while the totals item still holds the size it read, taking it off the totals in one transaction", async () => {
@@ -338,8 +345,8 @@ describe("DynamoAppDataStore", () => {
   it("never reads or tests the value item on a write: a write reads only the totals item (a value of 350 KB costs nothing to refuse)", async () => {
     const { client, sent } = stubClient([{}, {}, {}, {}]);
     const store = new DynamoAppDataStore(client, TABLE);
-    await store.putValue("Ada-42", "k", "1", 1, undefined, false, NOW_ISO, NEW_DAY);
-    await store.putValue("Ada-42", "k", "1", 1, 5, true, NOW_ISO, SAME_DAY);
+    await store.putValue("Ada-42", "k", "1", 1, undefined, false, NOW_ISO, NEW_DAY, "Bob");
+    await store.putValue("Ada-42", "k", "1", 1, 5, true, NOW_ISO, SAME_DAY, "Bob");
     await store.deleteValue("Ada-42", "k", 1, NOW_ISO, SAME_DAY);
     await store.deleteValue("Ada-42", "k", 1, NOW_ISO, NEW_DAY);
     for (const command of sent) {
@@ -358,7 +365,7 @@ describe("DynamoAppDataStore", () => {
     const nickname = "N".repeat(20); // the longest nickname (1.5 rules)
     const key = "k".repeat(64); // the longest key
     const json = JSON.stringify("x".repeat(MAX_VALUE_BYTES - 2));
-    await new DynamoAppDataStore(client, TABLE).putValue(nickname, key, json, MAX_VALUE_BYTES, undefined, false, NOW_ISO, NEW_DAY);
+    await new DynamoAppDataStore(client, TABLE).putValue(nickname, key, json, MAX_VALUE_BYTES, undefined, false, NOW_ISO, NEW_DAY, "W".repeat(20));
     const [value, usage] = items(sent[0]);
     // The value item: 350 KB of value plus its overhead, which VALUE_ITEM_OVERHEAD_BYTES bounds.
     const valueItem = value?.Put?.Item ?? {};
@@ -390,9 +397,9 @@ describe("DynamoAppDataStore", () => {
     const { client, sent } = stubClient([{}, {}, {}, {}, {}, {}, {}, {}]);
     const store = new DynamoAppDataStore(client, TABLE);
     for (const charge of [SAME_DAY, NEW_DAY]) {
-      await store.putValue("Ada-42", "my-key_1", "1", 1, undefined, false, NOW_ISO, charge);
-      await store.putValue("Ada-42", "my-key_1", "1", 1, undefined, true, NOW_ISO, charge);
-      await store.putValue("Ada-42", "my-key_1", "1", 1, 5, true, NOW_ISO, charge);
+      await store.putValue("Ada-42", "my-key_1", "1", 1, undefined, false, NOW_ISO, charge, "Bob");
+      await store.putValue("Ada-42", "my-key_1", "1", 1, undefined, true, NOW_ISO, charge, "Bob");
+      await store.putValue("Ada-42", "my-key_1", "1", 1, 5, true, NOW_ISO, charge, "Bob");
       await store.deleteValue("Ada-42", "my-key_1", 1, NOW_ISO, charge);
     }
     for (const name of ["writeDay", "writtenBytes", "sizes"]) expect(APP_DATA_WRITE_ATTRIBUTES).toContain(name);

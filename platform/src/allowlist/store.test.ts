@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { DynamoAllowListStore, type DynamoSender } from "./store.js";
 
 type Sent = UpdateItemCommand | ScanCommand | GetItemCommand | DeleteItemCommand;
+// The token store's calls (ticket 3.24) go through the same client.
 type Answer = UpdateItemCommandOutput | ScanCommandOutput | GetItemCommandOutput | DeleteItemCommandOutput | Error;
 
 /** A stand-in for DynamoDBClient: records each command and answers from a list (an Error is thrown). */
@@ -101,7 +102,7 @@ describe("DynamoAllowListStore.exists and remove (ticket 3.1)", () => {
   it("criterion 1: deletes only the EMAIL#/ALLOW item, conditional on it existing, and returns no old values", async () => {
     const { client, sent } = stubClient([meta, meta]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
-    await expect(store.remove("jane@example.com")).resolves.toBe(true);
+    await expect(store.remove("jane@example.com")).resolves.toEqual({ removed: true, revokedTokens: 0 });
     expect(sent).toHaveLength(2);
     expect((sent[1] as DeleteItemCommand).input).toEqual({
       TableName: "ssd-workshop-data",
@@ -114,7 +115,7 @@ describe("DynamoAllowListStore.exists and remove (ticket 3.1)", () => {
     const missing = new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} });
     const { client } = stubClient([meta, missing, meta, Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
-    await expect(store.remove("jane@example.com")).resolves.toBe(false);
+    await expect(store.remove("jane@example.com")).resolves.toEqual({ removed: false, revokedTokens: 0 });
     await expect(store.remove("jane@example.com")).rejects.toThrow("denied");
   });
 });
@@ -161,15 +162,43 @@ describe("the linked profile follows the allow-list (ticket 3.10)", () => {
   });
 
   it("WHEN a linked entry is removed THEN the profile's role becomes `removed` (off the dashboard); its group is kept", async () => {
-    const { client, sent } = stubClient([linked, meta, meta]);
+    // The token list read finds no list: nothing to revoke.
+    const { client, sent } = stubClient([linked, meta, meta, meta]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
-    await expect(store.remove("jane@example.com")).resolves.toBe(true);
+    await expect(store.remove("jane@example.com")).resolves.toEqual({ removed: true, revokedTokens: 0 });
     expect((sent[1] as UpdateItemCommand).input).toMatchObject({
       Key: PROFILE,
       UpdateExpression: "SET #role = :role",
       ExpressionAttributeValues: { ":role": { S: "removed" } },
     });
-    expect((sent[2] as DeleteItemCommand).input.Key).toEqual(KEY);
+    expect((sent[2] as GetItemCommand).input.Key).toEqual({ pk: { S: "TOKENS#p-1" }, sk: { S: "TOKENS" } });
+    expect((sent[3] as DeleteItemCommand).input.Key).toEqual(KEY);
+  });
+
+  it("ticket 3.24: WHEN a linked entry is removed THEN the participant's app write tokens are deleted and their list emptied, before the entry goes", async () => {
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    const list = { ...meta, Item: { tokens: { M: { [hashA]: { N: "1" }, [hashB]: { N: "2" } } }, version: { N: "3" } } };
+    const { client, sent } = stubClient([linked, meta, list, meta, meta, meta, meta]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).resolves.toEqual({ removed: true, revokedTokens: 2 });
+    const keys = sent.map((c) => `${c.constructor.name} ${(c.input as { Key?: { pk?: { S?: string } } }).Key?.pk?.S ?? ""}`);
+    expect(keys).toEqual([
+      "GetItemCommand EMAIL#jane@example.com",
+      "UpdateItemCommand PARTICIPANT#p-1",
+      "GetItemCommand TOKENS#p-1",
+      `DeleteItemCommand APPTOKEN#${hashA}`,
+      `DeleteItemCommand APPTOKEN#${hashB}`,
+      "UpdateItemCommand TOKENS#p-1",
+      "DeleteItemCommand EMAIL#jane@example.com",
+    ]);
+  });
+
+  it("ticket 3.24: WHEN revoking the tokens fails THEN the entry stays, so running remove again finishes the job", async () => {
+    const { client, sent } = stubClient([linked, meta, Object.assign(new Error("throttled"), { name: "ThrottlingException" })]);
+    const store = new DynamoAllowListStore(client, "ssd-workshop-data");
+    await expect(store.remove("jane@example.com")).rejects.toThrow("throttled");
+    expect(sent.map((command) => command.constructor.name)).not.toContain("DeleteItemCommand");
   });
 
   it("WHEN the profile update fails THEN the entry stays, so running remove again finishes the job", async () => {
@@ -184,7 +213,7 @@ describe("the linked profile follows the allow-list (ticket 3.10)", () => {
     const missing = new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} });
     const { client, sent } = stubClient([meta, missing]);
     const store = new DynamoAllowListStore(client, "ssd-workshop-data");
-    await expect(store.remove("jane@example.com")).resolves.toBe(false);
+    await expect(store.remove("jane@example.com")).resolves.toEqual({ removed: false, revokedTokens: 0 });
     expect(sent).toHaveLength(2);
   });
 });

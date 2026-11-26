@@ -9,7 +9,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v2` (v1 retained until Franck deletes it, ticket 2.14) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v3` (v1 and v2 retained until Franck deletes them, tickets 2.14 and 3.24) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-alerts` | us-east-1 | ticket 3.13: Cost Anomaly Detection, monitor `ssd-workshop-cost` on the cost allocation tag `project=ssd-workshop` and daily email subscription `ssd-workshop-cost-alerts` to the address in SSM `/ssd-workshop/alert-email`; see "Safety nets (ticket 3.13)" | inline template (`LegacyStackSynthesizer`) |
@@ -486,6 +486,100 @@ curl -sS -w '\n%{http_code}\n' -X PUT -H 'content-type: application/json' --data
 curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$U"
 # expect: 204
 ```
+
+## Check after the sign-in-to-save deploy (ticket 3.24)
+
+```mermaid
+sequenceDiagram
+  participant V as Phone (signed in to the workshop)
+  participant W as /app-sign-in/?app=nick
+  participant P as ssd-workshop-api-participant
+  participant A as /apps/nick/ (sandboxed)
+  participant D as ssd-workshop-api-app-data
+  V->>W: open (or "Sign in to the workshop" first)
+  W->>P: POST /api/app-tokens {"app":"nick"} (session cookie)
+  P-->>W: {token, app, nickname, expiresAt} (stored as APPTOKEN#sha256)
+  W->>A: location.replace(/apps/nick/#wt=token)
+  A->>D: PUT/DELETE with Authorization: Bearer token
+  D-->>A: 204, or 401 "Sign in to the workshop to save in this app."
+```
+
+Deploy order: until ticket 3.25 ships the new `workshop-data.js` (and `npm run apps -- refresh` republishes the live
+apps), every save from an app already live answers 401; reads keep working. Merge 3.24 and 3.25 together, or 3.25 right
+after. Since this ticket the 3.17 check above needs a token too (`-H "authorization: Bearer $T"` on its `PUT` and
+`DELETE`).
+
+No credentials needed for 1 to 3; a live app's nickname `<nick>`, a key no app uses (`sign-in-check`):
+
+1. Writes need a token, reads do not:
+
+   ```sh
+   U=https://workshop.rankly.games/api/apps/<nick>/data/sign-in-check
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' --data '1' "$U"
+   # expect: 401 {"message":"Sign in to the workshop to save in this app."}
+   curl -sS -w '\n%{http_code}\n' -X DELETE -H 'origin: null' -H "authorization: Bearer $(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')" "$U"
+   # expect: 401 (an unknown token)
+   curl -sS -w '\n%{http_code}\n' -H 'origin: null' "$U"
+   # expect: 200 null (or the stored value)
+   ```
+
+2. The preflight allows `authorization`, never credentials, from the function and from CloudFront's new
+   `ssd-workshop-app-data-v2` policy (v1 is retained; Franck may delete it after the deploy):
+
+   ```sh
+   curl -sS -D - -o /dev/null -X OPTIONS -H 'origin: null' -H 'access-control-request-method: PUT' \
+     -H 'access-control-request-headers: authorization,content-type' "$U" | grep -i '^access-control-'
+   # expect: access-control-allow-headers: content-type, accept, authorization; allow-origin *; no allow-credentials
+   ```
+
+3. The hand-off page: `https://workshop.rankly.games/app-sign-in?app=nobody-here` redirects to `/app-sign-in/?app=...`
+   and, signed in, Continue says "This app is not live." and stays; `?app=../x` says it at once.
+
+On a phone signed in to the workshop (with a nickname):
+
+4. Open `https://workshop.rankly.games/app-sign-in?app=<nick>`: "Save in <nick>'s app as <your nickname>?". Press
+   Continue: the address becomes `/apps/<nick>/#wt=...` (until 3.25 the app does not read it). Copy the token from the
+   address bar into `T` on a computer (it is yours; do not paste it anywhere else), then:
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' \
+     -H "authorization: Bearer $T" --data '"hello"' "$U"
+   # expect: 204
+   curl -sS -H 'origin: null' "$U?info=1"
+   # expect: {"value":"hello","updatedBy":"<your nickname>","updatedAt":"<now>"}
+   curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' \
+     -H "authorization: Bearer $T" --data '1' https://workshop.rankly.games/api/apps/<another live nick>/data/sign-in-check
+   # expect: 401 (another app)
+   ```
+
+5. Sign out on the phone (Sign out on the workshop page), then repeat the first `PUT` of step 4: 401. Delete the key
+   with a new token, or leave it (it holds "hello").
+6. Logs: `ssd-workshop-api-participant` has `"route":"app-token","outcome":"token"` and `"route":"sign-out"` lines,
+   `ssd-workshop-api-app-data` `"outcome":"unauthorized","status":401` lines and, on step 4's accepted `PUT`,
+   `"writer":"<your nickname>"`; no line holds the token, its hash, an email or the app's nickname. An
+   `AccessDeniedException` in either means an IAM right is missing (`APPTOKEN#*`, `TOKENS#*` with `version`, `APP#*`
+   `liveAt`, `ConditionCheckItem` on `SESSION#*` (`pk`, `sk`) and on `PARTICIPANT#*` (`pk`, `sk`, `role`); every list
+   names `pk` and `sk`). A `"route":"sign-out","outcome":"signed-out-revoke-failed"` line means the revocation after the
+   session's delete failed three times: run `npm run participant -- reset <nick> --yes` for that person (the line names
+   no one: match it by time with the person who reported signing out).
+7. `npm run participant -- reset <test nick> --yes` prints "Ended N sign-ins to save in apps (app write tokens)."; a
+   token that participant held answers 401 afterwards. `npm run -s allowlist -- remove <test address> --yes` (a test
+   person, re-imported afterwards) prints "... and ended N sign-ins to save in apps. ..."; their token answers 401, and
+   a new token request from their still-open session answers 401 too (the create's profile check, try 3).
+8. The tab an app opens escapes the sandbox (CloudFront's new `ssd-workshop-apps-v3` policy; v2 is retained, Franck may
+   delete it after the deploy). First:
+
+   ```sh
+   curl -sS -D - -o /dev/null https://workshop.rankly.games/apps/<nick>/ | grep -i '^content-security-policy'
+   # expect: sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox; default-src 'self'; ...
+   ```
+
+   Then on an iPhone (Safari) and on an Android phone (Chrome), each signed in to the workshop: open a live app whose
+   page has a link or button that opens `/app-sign-in/?app=<nick>` in a new tab (`target="_blank"` or `window.open`;
+   after 3.25 the template's "Sign in to save"; before it, a test app with such a link). The new tab must show
+   "Save in <nick>'s app as <your nickname>?" (not "Sign in to the workshop first" and not "We couldn't reach the
+   workshop"), and Continue must land on the app with `#wt=` in the address. A wrong answer means the tab is still
+   sandboxed on that browser: stop and report.
 
 ## Check after the apps deploy (ticket 2.5)
 

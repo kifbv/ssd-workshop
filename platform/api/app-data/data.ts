@@ -1,15 +1,19 @@
 // The data API for participants' apps (ticket 2.4): `GET`, `PUT` and `DELETE
-// /api/apps/{nickname}/data/{key}`, JSON values that anyone with the app's address may read and write
-// (the spec: apps have no sign-in). Apps run sandboxed (opaque origin), so every answer carries
-// `Access-Control-Allow-Origin: *`, and `OPTIONS` answers the preflight a JSON `PUT` causes. The
-// client is templates/basic/workshop-data.js; the contract is in docs/decisions.md ("(2.3) Data API
-// contract for 2.4").
+// /api/apps/{nickname}/data/{key}`, JSON values that anyone with the app's address may read. Since ticket 3.24 a
+// write (`PUT`, `DELETE`) needs an app write token for this app (`Authorization: Bearer <token>`, ../app-token/),
+// which only a participant signed in to the workshop can get, and each value records its writer's nickname
+// (`updatedBy`; `GET ...?info=1` answers `{value, updatedBy, updatedAt}`). Apps run sandboxed (opaque origin), so
+// every answer carries `Access-Control-Allow-Origin: *` (never with credentials), and `OPTIONS` answers the preflight
+// a JSON `PUT` or an `Authorization` header causes. The client is templates/basic/workshop-data.js; the contract is in
+// docs/decisions.md ("(2.3) Data API contract for 2.4", "(3.24) ...").
 //
 // Never reads the request's cookies (or a cookie header) and never sets one: the platform's session
-// means nothing here. Never logs a nickname, a key or a value: only method, outcome, status and size.
+// means nothing here. Never logs a nickname, a key, a value or a token: only method, outcome, status and size.
 import { isJsonContentType, UNSUPPORTED_MEDIA_TYPE_MESSAGE, type HttpRequest, type HttpResponse } from "../http.js";
+import { checkAppWrite, type AppTokenReader } from "../app-token/token.js";
 import { checkNickname } from "../participant/participant.js";
 import { errorName } from "../sign-in/code-request.js";
+import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 
 export const APP_DATA_PATH = "/api/apps/{nickname}/data/{key}";
 export const APP_DATA_METHODS = ["GET", "PUT", "DELETE", "OPTIONS"] as const;
@@ -65,7 +69,8 @@ export const CORS_HEADERS = { "access-control-allow-origin": "*" } as const;
 export const PREFLIGHT_HEADERS = {
   ...CORS_HEADERS,
   "access-control-allow-methods": "GET, PUT, DELETE",
-  "access-control-allow-headers": "content-type, accept",
+  // Ticket 3.24: writes carry `Authorization: Bearer <token>` (a header, never a cookie: no credentials mode).
+  "access-control-allow-headers": "content-type, accept, authorization",
   "access-control-max-age": "600",
   "cache-control": "no-store",
 } as const;
@@ -75,6 +80,8 @@ const EMPTY_ANSWER_HEADERS = { "cache-control": "no-store", ...CORS_HEADERS } as
 /** The plain reasons apps show their visitors (workshop-data.js shows `message`). */
 export const APP_DATA_MESSAGES = {
   notFound: "Not found.",
+  /** Ticket 3.24: a write without a valid token for this app (none, unknown, revoked, expired or another app's). */
+  signInToSave: APP_SIGN_IN_TEXTS.signInToSave,
   badKey: "A key has 1 to 64 letters, digits, dashes or underscores.",
   badJson: "Send the value as JSON.",
   tooDeep: "This value is nested too deeply: lists and objects can go at most 100 levels deep.",
@@ -116,21 +123,28 @@ export interface WriteCharge {
 export type PutResult = "saved" | "conflict";
 export type DeleteResult = "deleted" | "conflict";
 
+/** A stored value: its canonical JSON text, and (ticket 3.24) who wrote it and when (missing on older values). */
+export interface StoredValue {
+  json: string;
+  updatedBy?: string;
+  updatedAt?: string;
+}
+
 /** What the data API needs from the table. Nicknames are matched lower-cased. */
 export interface AppDataStore {
   /** True once the deployer (ticket 2.5) has marked the app live. */
   isLive(nickname: string): Promise<boolean>;
-  /** The stored canonical JSON text, or undefined (an eventually consistent read: GET only). */
-  getValue(nickname: string, key: string): Promise<string | undefined>;
+  /** The stored value with its writer and time, or undefined (an eventually consistent read: GET only). */
+  getValue(nickname: string, key: string): Promise<StoredValue | undefined>;
   /** The totals item: all a write reads (a write never reads the value item, which bills by its size). */
   getUsage(nickname: string): Promise<AppUsage>;
   /**
    * In one all-or-nothing step: stores the value and moves the totals by the change, only while the
    * key's size in the totals item is still `previousBytes` (undefined: none stored), the totals item
    * exists as read (`created`), the totals stay within 10 MB and 500 keys, and the day's writes stay
-   * within the budget (`charge`).
+   * within the budget (`charge`). The value item records `updatedBy` (the writer's nickname, ticket 3.24).
    */
-  putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, nowIso: string, charge: WriteCharge): Promise<PutResult>;
+  putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, nowIso: string, charge: WriteCharge, updatedBy: string): Promise<PutResult>;
   /** Like putValue: removes the value and takes it off the totals, only while its size is still `previousBytes`. */
   deleteValue(nickname: string, key: string, previousBytes: number, nowIso: string, charge: WriteCharge): Promise<DeleteResult>;
 }
@@ -141,6 +155,8 @@ export type AppDataOutcome =
   | "deleted"
   | "preflight"
   | "not-found"
+  /** Ticket 3.24: a write without a valid token for this app. */
+  | "unauthorized"
   | "bad-key"
   | "bad-json"
   | "too-deep"
@@ -152,12 +168,18 @@ export type AppDataOutcome =
   | "write-budget"
   | "failed";
 
-/** The only things ever logged: no nickname, no key, no value, no header. */
+/**
+ * The only things ever logged: no app nickname, no key, no value, no header, no token or its hash, no email. Ticket 3.24
+ * try 2: a `PUT` or `DELETE` whose token passed the check also logs the writer's nickname (a public name, shown on
+ * the value with `?info=1` anyway), so every write and delete can be traced to a participant.
+ */
 export interface AppDataLogEntry {
   event: "app-data";
   method: AppDataMethod | "other";
   outcome: AppDataOutcome;
   status: number;
+  /** The writer's nickname (`PUT`/`DELETE` with a valid token only, whatever the outcome after that). */
+  writer?: string;
   /** The value's size (reads and writes that got that far). */
   bytes?: number;
   /** The error's name (failures only). */
@@ -166,6 +188,8 @@ export interface AppDataLogEntry {
 
 export interface AppDataDeps {
   store: AppDataStore;
+  /** Ticket 3.24: the app write tokens (only read). */
+  tokens: AppTokenReader;
   now: () => Date;
   log: (entry: AppDataLogEntry) => void;
   /** Waits before another try after a lost race (`pauseBeforeRetry` in the function; tests pass no wait). */
@@ -299,7 +323,7 @@ function readValue(request: HttpRequest): ReadValue {
   return { ok: true, json: canonical, bytes };
 }
 
-async function putValue(request: HttpRequest, nickname: string, key: string, deps: AppDataDeps): Promise<Answer> {
+async function putValue(request: HttpRequest, nickname: string, key: string, writer: string, deps: AppDataDeps): Promise<Answer> {
   if (!isJsonContentType(request)) return refuse(415, "unsupported-media-type", UNSUPPORTED_MEDIA_TYPE_MESSAGE);
   const value = readValue(request);
   if (!value.ok) return value.answer;
@@ -316,7 +340,7 @@ async function putValue(request: HttpRequest, nickname: string, key: string, dep
     const now = deps.now();
     const charge = chargeFor(usage, writeCost(value.bytes, previous, usage.sizes, key), now);
     if (charge === undefined) return { ...overBudget(), bytes: value.bytes };
-    const result = await deps.store.putValue(nickname, key, value.json, value.bytes, previous, usage.created, now.toISOString(), charge);
+    const result = await deps.store.putValue(nickname, key, value.json, value.bytes, previous, usage.created, now.toISOString(), charge, writer);
     if (result === "saved") return { outcome: "saved", response: empty(), bytes: value.bytes };
     // Someone wrote in between (or a limit was reached since): read again (a real limit is then reported).
   }
@@ -340,7 +364,7 @@ async function deleteValue(nickname: string, key: string, deps: AppDataDeps): Pr
   return refuse(409, "conflict", APP_DATA_MESSAGES.conflict);
 }
 
-async function route(request: HttpRequest, method: AppDataMethod | "other", deps: AppDataDeps): Promise<Answer> {
+async function route(request: HttpRequest, method: AppDataMethod | "other", deps: AppDataDeps, seen: { writer?: string }): Promise<Answer> {
   if (method === "other") return notFound();
   // The preflight carries no data and reads nothing: the same answer for every address.
   if (method === "OPTIONS") return { outcome: "preflight", response: { statusCode: 204, headers: { ...PREFLIGHT_HEADERS } } };
@@ -350,29 +374,36 @@ async function route(request: HttpRequest, method: AppDataMethod | "other", deps
   if (typeof nickname !== "string" || checkNickname(nickname) !== "ok") return notFound();
   if (!(await deps.store.isLive(nickname))) return notFound();
   if (typeof key !== "string" || !DATA_KEY_PATTERN.test(key)) return refuse(400, "bad-key", APP_DATA_MESSAGES.badKey);
-  switch (method) {
-    case "GET": {
-      const stored = await deps.store.getValue(nickname, key);
-      // A missing key is `null`, never 404 (404 means the app is not live).
-      const body = stored ?? "null";
-      return { outcome: "read", response: json(200, body), bytes: Buffer.byteLength(body, "utf8") };
-    }
-    case "PUT":
-      return putValue(request, nickname, key, deps);
-    case "DELETE":
-      return deleteValue(nickname, key, deps);
+  if (method === "GET") {
+    const stored = await deps.store.getValue(nickname, key);
+    // A missing key is `null`, never 404 (404 means the app is not live).
+    const value = stored?.json ?? "null";
+    // Ticket 3.24: `?info=1` adds who wrote the value and when (null when unknown); the plain answer is unchanged.
+    const body =
+      request.queryStringParameters?.["info"] === "1"
+        ? `{"value":${value},"updatedBy":${JSON.stringify(stored?.updatedBy ?? null)},"updatedAt":${JSON.stringify(stored?.updatedAt ?? null)}}`
+        : value;
+    return { outcome: "read", response: json(200, body), bytes: Buffer.byteLength(value, "utf8") };
   }
+  // Ticket 3.24: every write needs a valid token for this app, checked before the body is read.
+  const write = await checkAppWrite(request, nickname, deps.tokens, deps.now());
+  if (!write.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.signInToSave);
+  seen.writer = write.writer;
+  return method === "PUT" ? putValue(request, nickname, key, write.writer, deps) : deleteValue(nickname, key, deps);
 }
 
 /** Answers one request; table failures give a 500 with a plain message (logged by error name only). */
 export async function handleAppDataRequest(request: HttpRequest, deps: AppDataDeps): Promise<HttpResponse> {
   const method = methodOf(request);
+  // Ticket 3.24 try 2: the writer, once the token check has named one (also on a failure after it).
+  const seen: { writer?: string } = {};
+  const writer = () => (seen.writer === undefined ? {} : { writer: seen.writer });
   try {
-    const { outcome, response, bytes } = await route(request, method, deps);
-    deps.log({ event: "app-data", method, outcome, status: response.statusCode, ...(bytes === undefined ? {} : { bytes }) });
+    const { outcome, response, bytes } = await route(request, method, deps, seen);
+    deps.log({ event: "app-data", method, outcome, status: response.statusCode, ...writer(), ...(bytes === undefined ? {} : { bytes }) });
     return response;
   } catch (error) {
-    deps.log({ event: "app-data", method, outcome: "failed", status: 500, error: errorName(error) });
+    deps.log({ event: "app-data", method, outcome: "failed", status: 500, ...writer(), error: errorName(error) });
     return json(500, JSON.stringify({ message: APP_DATA_MESSAGES.failed }));
   }
 }

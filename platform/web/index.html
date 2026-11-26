@@ -36,6 +36,8 @@
 
       <section id="screen-email" class="card" data-screen aria-labelledby="email-heading" hidden>
         <h2 id="email-heading" tabindex="-1">Sign in</h2>
+        <!-- Ticket 3.24: shown when this sign-in was opened from an app's "Sign in to save" (/?app=<nickname>). -->
+        <p id="app-sign-in-note" class="notice" hidden></p>
         <p>Enter the email address your facilitator has on the workshop list. We'll send you a sign-in code.</p>
         <form id="email-form" method="post" novalidate>
           <label for="email-input">Email address</label>

@@ -2356,14 +2356,17 @@ describe("ticket 3.5: the paused line on idle signed-in screens (status poll eve
 });
 
 describe("built site", () => {
-  it("holds only the page, its stylesheet, its two scripts, the 404 page and the facilitator dashboard (ticket 3.11), and no page has an inline script, style or handler", () => {
-    expect(readdirSync(dir).sort()).toEqual(["404.html", "app.js", "diagram.js", "facilitator", "index.html", "style.css"]);
+  it("holds only the page, its stylesheet, its two scripts, the 404 page, the facilitator dashboard (ticket 3.11) and the hand-off page (ticket 3.24), and no page has an inline script, style or handler", () => {
+    expect(readdirSync(dir).sort()).toEqual(["404.html", "app-sign-in", "app.js", "diagram.js", "facilitator", "index.html", "style.css"]);
     expect(readdirSync(join(dir, "facilitator")).sort()).toEqual(["dashboard.js", "index.html"]);
+    expect(readdirSync(join(dir, "app-sign-in")).sort()).toEqual(["app-sign-in.js", "index.html"]);
     const html = readFileSync(join(dir, "index.html"), "utf8");
     expect(html).toContain('<script src="app.js" defer></script>');
     const dashboard = readFileSync(join(dir, "facilitator", "index.html"), "utf8");
     expect(dashboard).toContain('<script src="/facilitator/dashboard.js" defer></script>');
-    for (const page of [html, dashboard]) {
+    const handOff = readFileSync(join(dir, "app-sign-in", "index.html"), "utf8");
+    expect(handOff).toContain('<script src="/app-sign-in/app-sign-in.js" defer></script>');
+    for (const page of [html, dashboard, handOff]) {
       expect(page).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/);
       expect(page).not.toMatch(/<style/);
       expect(page).not.toMatch(/\son[a-z]+=/i);

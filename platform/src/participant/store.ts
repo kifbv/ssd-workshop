@@ -12,7 +12,10 @@ import {
   type QueryCommandOutput,
   type TransactWriteItemsCommand,
   type TransactWriteItemsCommandOutput,
+  type UpdateItemCommand,
+  type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
+import { DynamoAppTokenStore } from "../../api/app-token/store.js";
 import { appDataUsageKey, appLiveKey } from "../../api/keys.js";
 import { DynamoResetStore, type ResetSender, type ResetStore } from "../conversation/store.js";
 
@@ -25,6 +28,8 @@ export interface ParticipantResetStore extends ResetStore {
   hasLiveMarker(nickname: string): Promise<boolean>;
   /** Deletes the live marker; true when this call deleted it, false when it was already gone. */
   deleteLiveMarker(nickname: string): Promise<boolean>;
+  /** Ticket 3.24: deletes every app write token of the participant and their list; returns how many were listed. */
+  revokeAppTokens(participantId: string): Promise<number>;
 }
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -34,6 +39,7 @@ export interface ParticipantResetSender extends ResetSender {
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
   send(command: BatchWriteItemCommand): Promise<BatchWriteItemCommandOutput>;
   send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
+  send(command: UpdateItemCommand): Promise<UpdateItemCommandOutput>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -45,6 +51,10 @@ export class DynamoParticipantResetStore extends DynamoResetStore implements Par
     sleep?: (ms: number) => Promise<void>,
   ) {
     super(client, table, sleep);
+  }
+
+  revokeAppTokens(participantId: string): Promise<number> {
+    return new DynamoAppTokenStore(this.client, this.table).revokeAppTokens(participantId);
   }
 
   async listAppData(nickname: string): Promise<string[]> {
