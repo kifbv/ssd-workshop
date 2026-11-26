@@ -35,6 +35,8 @@ export const STACK_NAMES = {
   api: `${PREFIX}-api`,
   builds: `${PREFIX}-builds`,
   apps: `${PREFIX}-apps`,
+  /** Ticket 3.13: Cost Anomaly Detection (us-east-1, Cost Explorer's home), on its own so its alert address stays apart. */
+  alerts: `${PREFIX}-alerts`,
 } as const;
 
 /**
@@ -717,3 +719,41 @@ export const SLOT_RELEASE_CHECK_ATTRIBUTES = ["pk", "sk", "status"] as const;
  * `BUILD_QUEUE` with `dynamodb:Select` `COUNT` only, naming only these.
  */
 export const QUEUE_COUNT_ATTRIBUTES = ["pk", "sk", "lastSeenAt"] as const;
+
+/**
+ * Ticket 3.13: the AWS WAF web ACL on the distribution (scope CLOUDFRONT, so it lives in us-east-1 with the edge
+ * stack). One rule: per address (IP), at most WAF_API_RATE_LIMIT requests to `/api/*` in WAF_RATE_WINDOW_SECONDS;
+ * above it the address gets 429 (WAF_BLOCK_STATUS) on `/api/*` until its count falls back under the limit. Pages and apps are not counted.
+ * The limit is sized for a whole workshop room behind one venue address (NAT), see docs/decisions.md "(3.13) Rate
+ * limit": about 45 people polling every 2 s (150 requests per 5 minutes each) plus their apps' data calls and the
+ * facilitators' dashboards is at most ~9,400 requests per 5 minutes.
+ */
+export const WEB_ACL_NAME = `${PREFIX}-edge`;
+export const WAF_API_RATE_RULE_NAME = `${PREFIX}-api-rate`;
+/** The rule counts requests whose path starts with this (CloudFront's `/api/*` behaviours, `/api/apps/*` included). */
+export const WAF_API_PATH_PREFIX = "/api/";
+export const WAF_API_RATE_LIMIT = 15_000;
+export const WAF_RATE_WINDOW_SECONDS = 300;
+/**
+ * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
+ * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would
+ * look like a missing page. The pages and `workshop-data.js` already treat 429 as "too many requests".
+ */
+export const WAF_BLOCK_STATUS = 429;
+export const WAF_BLOCK_BODY_KEY = "too-many-requests";
+export const WAF_BLOCK_BODY = '{"message":"Too Many Requests"}';
+
+/**
+ * Ticket 3.13: Cost Anomaly Detection on the workshop's cost allocation tag (`project` = `ssd-workshop`, which Franck
+ * activates once in Billing), with a daily email to Franck's alert address for anomalies of COST_ANOMALY_THRESHOLD_USD
+ * or more. The address is never in the repository: Franck stores it once in the SSM parameter ALERT_EMAIL_PARAMETER
+ * (us-east-1, String) and CloudFormation reads it at deploy time (a dynamic reference pinned to
+ * ALERT_EMAIL_PARAMETER_VERSION; a new address is a new parameter version and a bump here).
+ */
+export const COST_MONITOR_NAME = `${PREFIX}-cost`;
+export const COST_SUBSCRIPTION_NAME = `${PREFIX}-cost-alerts`;
+export const ALERT_EMAIL_PARAMETER = `/${PREFIX}/alert-email`;
+export const ALERT_EMAIL_PARAMETER_VERSION = 1;
+/** Email subscribers take only DAILY or WEEKLY (IMMEDIATE needs an SNS topic, whose email subscriptions the deploy rights deny). */
+export const COST_ANOMALY_FREQUENCY = "DAILY";
+export const COST_ANOMALY_THRESHOLD_USD = 10;
