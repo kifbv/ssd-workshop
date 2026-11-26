@@ -49,7 +49,7 @@ function setup() {
     randomBytes: (n) => Buffer.alloc(n, ++counter),
     log: (e) => logs.push(e),
   };
-  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), now: () => clock, log: () => undefined, sleep: async () => undefined };
+  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), held: queue, now: () => clock, log: () => undefined, sleep: async () => undefined };
   const advance = (seconds: number) => {
     clock = new Date(clock.getTime() + seconds * 1000);
   };

@@ -3,6 +3,7 @@
 // DynamoLaunchRecords' and DynamoBuildsStore's conditions; the builder's tasks; a dead-letter queue. Ticket 3.4: the
 // build slots (counter and holders) and the waiting line, with the same conditions as the real transactions.
 import type { BuildStatus } from "../types.js";
+import type { WorkshopSettings } from "../workshop/settings.js";
 import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
 
 export interface FakeBuild {
@@ -36,6 +37,9 @@ export class FakeBuildTable implements LaunchRecords {
   readonly failOnce = new Set<string>();
   /** Ticket 3.4: `buildsAtOnce` as the SETTINGS item gives it. */
   buildsAtOnce = 15;
+  /** Ticket 3.5: the global Stop, and the last Resume's time, as the SETTINGS item gives them. */
+  stopped = false;
+  resumedAt: string | undefined;
   /**
    * The slot counter (`COUNT`; `running` undefined: missing, as before the first check) and the holders (build ids).
    * Starts as the first check leaves it (0 running).
@@ -68,8 +72,15 @@ export class FakeBuildTable implements LaunchRecords {
     return build && { nickname: build.nickname, participantId: build.participantId, status: build.status, ...(build.queueKey === undefined ? {} : { queueKey: build.queueKey }) };
   }
 
-  async readBuildsAtOnce(): Promise<number> {
-    return this.buildsAtOnce;
+  async readSettings(): Promise<WorkshopSettings> {
+    this.maybeFail("readSettings");
+    return {
+      aiBudgetUsd: 5,
+      changeRequestsPerPerson: 5,
+      buildsAtOnce: this.buildsAtOnce,
+      stopped: this.stopped,
+      ...(this.resumedAt === undefined ? {} : { resumedAt: this.resumedAt }),
+    };
   }
 
   async enqueue(buildId: string, queueKey: string): Promise<boolean> {
@@ -227,6 +238,22 @@ export class FakeBuildTable implements LaunchRecords {
     const build = this.builds.get(buildId);
     if (!build || build.status !== "building" || build.taskArn !== taskArn || build.pushedCommit === undefined) return false;
     this.fail(build, reasons, nowIso);
+    return true;
+  }
+
+  /** As DynamoLaunchRecords.requeueStopped: back to queued from the beginning, then the slot release. */
+  async requeueStopped(buildId: string, taskArn: string, queueKey: string, nowIso: string): Promise<boolean> {
+    this.maybeFail("requeueStopped");
+    const build = this.builds.get(buildId);
+    if (!build || build.status !== "building" || build.taskArn !== taskArn || build.pushedCommit !== undefined) return false;
+    build.status = "queued";
+    build.queueKey = queueKey;
+    build.updatedAt = nowIso;
+    delete build.attemptId;
+    delete build.launchedAt;
+    delete build.taskArn;
+    delete build.feed;
+    await this.releaseSlot(buildId);
     return true;
   }
 

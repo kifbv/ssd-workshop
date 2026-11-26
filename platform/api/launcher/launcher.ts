@@ -43,6 +43,19 @@
  * SLOT_REPAIR_FORCE_AFTER repairs were refused), fails builds waiting in the line longer than QUEUE_WAIT_MAX_MS, and
  * removes waiting entries of builds no longer waiting there.
  *
+ * Global Stop (ticket 3.5, the admin's switch in `SETTINGS`): a launch still places its build in the waiting line, then
+ * waits (outcome `paused`, its message comes back like a waiting one) without claiming a slot. The check, while Stop is
+ * on, stops every running build that has not handed its commit over: one conditional write puts the build back to
+ * `queued` from the beginning (no launch, task or feed; its place in the line is its claim's time, so it starts again
+ * before builds queued after it) and frees its slot, then the task gets StopTask. Its watch entry stays: it marks a build
+ * with no launch message (the access boundary lets only the AI worker and the scheduler send to the launch queue), so
+ * after Resume the check launches it itself (`relaunch`, processLaunch with this launcher's deps) as long as time is left,
+ * oldest place first; one that must wait for a slot keeps its entry for the next minute. A build that already pushed its
+ * commit (handed over) or is `deploying` finishes: no AI runs there. The builder's writes are bound to the removed attempt
+ * id, so the stopped task can no longer write, and the check never fails a build that is `queued`. While Stop is on, the
+ * queued time limit is not applied, and afterwards a build's wait counts from its place or from the last Resume,
+ * whichever is later.
+ *
  * Logs: one JSON line per launch or check, with an outcome, counts and an error name; never a token, nickname, build id,
  * repository name or error message.
  */
@@ -51,6 +64,7 @@ import { GitHubProblem, type AppCredentials, type GitHubDeps } from "../github/a
 import { builderToken, prepareRepository, type RepositoryFile } from "../github/repository.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN, newQueueKey } from "../keys.js";
+import type { WorkshopSettings } from "../workshop/settings.js";
 import {
   ACCOUNT,
   BUILD_TASK_MAX_MS,
@@ -110,8 +124,11 @@ export interface LaunchRecords {
   readConversation(participantId: string): Promise<{ buildId?: string; approvedSpecVersion?: number }>;
   /** The text of the spec version, only when that version exists and was approved. */
   readApprovedSpec(participantId: string, version: number): Promise<string | undefined>;
-  /** Ticket 3.4: builds at once (the `SETTINGS` item through settingsFromItem: 15 when unset). */
-  readBuildsAtOnce(): Promise<number>;
+  /**
+   * The workshop settings (the `SETTINGS` item through settingsFromItem): builds at once (ticket 3.4; 15 when unset), the
+   * global Stop and the last Resume's time (ticket 3.5).
+   */
+  readSettings(): Promise<WorkshopSettings>;
   /** Gives a queued build without a place its `queueKey`; false when it is no longer queued or already has one. */
   enqueue(buildId: string, queueKey: string): Promise<boolean>;
   /** Writes (or rewrites) the build's waiting entry, seen now. */
@@ -164,6 +181,12 @@ export interface LaunchRecords {
    * the task stopped and no deploy message moved it to `deploying` within HANDED_OVER_GRACE_MS.
    */
   failHandedOver(buildId: string, taskArn: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
+  /**
+   * Ticket 3.5 (global Stop): puts a build still `building` with this task and no pushed commit back to `queued` from the
+   * beginning (place `queueKey`; its attempt, launch time, task and feed removed), then frees its slot (a failed release
+   * is left to the check). False when the build was not in that state (nothing written).
+   */
+  requeueStopped(buildId: string, taskArn: string, queueKey: string, nowIso: string): Promise<boolean>;
   /** Marks failed a build still `queued`. */
   failQueued(buildId: string, reasons: readonly string[], nowIso: string): Promise<boolean>;
   /** Marks failed a build of this app still waiting for the deploy of this pushed commit (`building` or `deploying`). */
@@ -226,7 +249,8 @@ export function ecsRefusal(error: unknown): string | undefined {
   return message.slice(0, 300);
 }
 
-export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "failed" | "waiting";
+/** `paused` (ticket 3.5): the global Stop is on; the build waits, as `waiting`, without asking for a slot. */
+export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "failed" | "waiting" | "paused";
 
 export interface LauncherLogEntry {
   event: "launcher" | "build-check";
@@ -242,6 +266,9 @@ export interface LauncherLogEntry {
   repaired?: boolean;
   forced?: boolean;
   unqueued?: number;
+  /** Check (ticket 3.5): running builds put back in the queue by the global Stop, and such builds launched again. */
+  requeued?: number;
+  relaunched?: number;
   durationMs: number;
 }
 
@@ -265,6 +292,11 @@ export interface CheckDeps {
   tasks: BuildTasks;
   launchDeadLetters: DeadLetters;
   deployDeadLetters: DeadLetters;
+  /**
+   * Ticket 3.5: launches a build the global Stop put back in the queue (processLaunch of this body with the launcher's
+   * deps), or answers undefined, launching nothing, when the check has too little time left for a launch.
+   */
+  relaunch: (body: string) => Promise<LaunchOutcome | undefined>;
   now: () => Date;
   log: (entry: LauncherLogEntry) => void;
 }
@@ -355,7 +387,8 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
       return "ignored";
     }
     // Ticket 3.4: the build's place in the waiting line, then a slot only when no earlier waiting build needs it.
-    const cap = await deps.records.readBuildsAtOnce();
+    const settings = await deps.records.readSettings();
+    const cap = settings.buildsAtOnce;
     let queueKey = build.queueKey;
     if (queueKey === undefined) {
       queueKey = newQueueKey(deps.now().toISOString(), buildId);
@@ -366,6 +399,11 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
       }
     }
     await deps.records.touchQueueEntry(queueKey, buildId, deps.now().toISOString());
+    // Ticket 3.5: while the global Stop is on, the build keeps its place and waits; no slot, no task.
+    if (settings.stopped) {
+      log("paused");
+      return "paused";
+    }
     const since = new Date(deps.now().getTime() - QUEUE_SEEN_MS).toISOString();
     const [slots, ahead] = await Promise.all([deps.records.readSlots(), deps.records.countAhead(queueKey, since)]);
     // A missing or negative counter reads as full (the claim would refuse it too) until the check repairs it.
@@ -453,7 +491,25 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
   let repaired = false;
   let forced = false;
   let unqueued = 0;
+  let requeued = 0;
+  let relaunched = 0;
   try {
+    const settings = await deps.records.readSettings();
+    /**
+     * Ticket 3.5: builds the global Stop put back in the queue (watch entry kept, build `queued`). Each keeps its place in
+     * the waiting line seen (so builds queued after it wait for it), and is launched at the end of the check once Stop is
+     * off.
+     */
+    const toRelaunch: { buildId: string; taskArn: string; queueKey: string }[] = [];
+    const keepQueued = async (entry: LaunchEntry, taskArn: string, build: LaunchBuild): Promise<void> => {
+      if (build.queueKey === undefined) {
+        // Not placed by the Stop's write (no other writer leaves a `queued` build with a watch entry): just unwatch it.
+        await deps.records.removeLaunch(entry.buildId, taskArn);
+        return;
+      }
+      await deps.records.touchQueueEntry(build.queueKey, entry.buildId, nowIso());
+      toRelaunch.push({ buildId: entry.buildId, taskArn, queueKey: build.queueKey });
+    };
     const launches: LaunchEntry[] = [];
     for (const entry of await deps.records.listLaunches()) {
       if (entry.taskArn === undefined || BUILD_TASK_ARN.test(entry.taskArn)) launches.push(entry);
@@ -463,6 +519,7 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
     const states = withTask.length === 0 ? new Map<string, TaskState>() : await deps.tasks.describe(withTask.map((entry) => entry.taskArn));
     for (const entry of launches) {
       if (entry.taskArn === undefined) {
+        // A claim whose task is not recorded yet: while Stop is on, the next check (once it has its task) stops it.
         if (started - Date.parse(entry.claimedAt) < LAUNCH_UNSTARTED_MS) continue;
         if (await deps.records.failUnstarted(entry.buildId, [UNSTARTED_REASON], nowIso())) failed += 1;
         else await deps.records.removeLaunch(entry.buildId, undefined);
@@ -492,7 +549,22 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
           if (stoppedAt !== undefined && started - stoppedAt < HANDED_OVER_GRACE_MS) continue;
           if (await deps.records.failHandedOver(entry.buildId, entry.taskArn, [DEPLOY_DEAD_REASON], nowIso())) failed += 1;
         }
+        // Ticket 3.5: put back in the queue by the global Stop; launched by the check after Resume.
+        if (build?.status === "queued") {
+          await keepQueued(entry, entry.taskArn, build);
+          continue;
+        }
         await deps.records.removeLaunch(entry.buildId, entry.taskArn);
+      } else if (settings.stopped) {
+        // Ticket 3.5: the global Stop. Back to `queued` first (the task's own writes are refused from then on), then the
+        // task is stopped; the check launches the build again after Resume. A build that handed its commit over finishes.
+        const moved = await deps.records.requeueStopped(entry.buildId, entry.taskArn, newQueueKey(entry.claimedAt, entry.buildId), nowIso());
+        const build = await deps.records.readBuild(entry.buildId);
+        if (build?.status !== "queued") continue;
+        await deps.tasks.stop(entry.taskArn);
+        stopped += 1;
+        await keepQueued(entry, entry.taskArn, build);
+        if (moved) requeued += 1;
       } else if (state.createdAt !== undefined && started - state.createdAt.getTime() > BUILD_TASK_MAX_MS) {
         // Marked failed by the next check, once ECS reports it stopped.
         await deps.tasks.stop(entry.taskArn);
@@ -534,16 +606,32 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
     }
     // The waiting line keeps only builds still waiting at that place (a retry gives a build a new place); a build waiting
     // there longer than QUEUE_WAIT_MAX_MS (its place's time) is failed, so a launch that keeps failing before its claim
-    // ends in hours, not after the launch queue's 1,000 deliveries.
+    // ends in hours, not after the launch queue's 1,000 deliveries. Ticket 3.5: not while the global Stop is on, and the
+    // wait counts from the last Resume when that is later than the place.
+    const resumedAt = settings.resumedAt === undefined ? Number.NaN : Date.parse(settings.resumedAt);
     for (const entry of await deps.records.listQueueEntries()) {
       const build = await deps.records.readBuild(entry.buildId);
       if (build?.status === "queued" && build.queueKey === entry.queueKey) {
+        if (settings.stopped) continue;
         const placedAt = Date.parse(entry.queueKey.slice(0, entry.queueKey.indexOf("#")));
-        if (!(started - placedAt > QUEUE_WAIT_MAX_MS)) continue;
+        const waitingSince = Number.isFinite(resumedAt) && resumedAt > placedAt ? resumedAt : placedAt;
+        if (!(started - waitingSince > QUEUE_WAIT_MAX_MS)) continue;
         if (await deps.records.failQueued(entry.buildId, [QUEUE_TIMEOUT_REASON], nowIso())) failed += 1;
       }
       await deps.records.removeQueueEntry(entry.queueKey);
       unqueued += 1;
+    }
+    // Ticket 3.5: after Resume, the builds the Stop put back in the queue start again, oldest place first, after the slots
+    // above were freed. A launch that must wait (no slot, or Stop pressed again) leaves the later ones for the next minute,
+    // as does too little time left; any other outcome means the build left `queued`, so its old watch entry goes (a new
+    // claim's entry has no task yet and is kept by the condition).
+    if (!settings.stopped) {
+      for (const item of toRelaunch.sort((a, b) => (a.queueKey < b.queueKey ? -1 : a.queueKey > b.queueKey ? 1 : 0))) {
+        const outcome = await deps.relaunch(JSON.stringify({ buildId: item.buildId }));
+        if (outcome === undefined || outcome === "waiting" || outcome === "paused") break;
+        if (outcome === "started") relaunched += 1;
+        await deps.records.removeLaunch(item.buildId, item.taskArn);
+      }
     }
   } catch (error) {
     deps.log({
@@ -558,10 +646,12 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
       repaired,
       forced,
       unqueued,
+      requeued,
+      relaunched,
       durationMs: Math.max(0, deps.now().getTime() - started),
     });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
     throw new Error("check failed");
   }
-  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, durationMs: Math.max(0, deps.now().getTime() - started) });
+  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, requeued, relaunched, durationMs: Math.max(0, deps.now().getTime() - started) });
 }

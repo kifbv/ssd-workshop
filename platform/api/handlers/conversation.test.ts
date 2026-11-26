@@ -44,7 +44,7 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
     const model = new FakeModel();
     let clock = NOW;
     const api = createHandler({ sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, 9), log: logEntry });
-    const worker = createWorker({ store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), now: () => clock, log: workerLogEntry });
+    const worker = createWorker({ store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), held: queue, now: () => clock, log: workerLogEntry });
     const send = (text: string): HttpRequest => ({
       routeKey: "POST /api/conversation/messages",
       cookies: [`${SESSION_COOKIE}=${TOKEN}`],
@@ -82,6 +82,7 @@ describe("conversation and AI worker logs (ticket 1.7)", () => {
       model,
       modelId: MODEL_ID,
       builds: new FakeBuildQueue(),
+      held: queue,
       now: () => clock,
       log: workerLogEntry,
     });

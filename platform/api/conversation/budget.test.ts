@@ -51,7 +51,7 @@ function setup(step: "clarify" | "spec" = "clarify") {
   const workerLogs: WorkerLogEntry[] = [];
   const logs: ConversationLogEntry[] = [];
   const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
-  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
+  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, held: queue, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
   const delivered: string[] = [];
   const drain = async () => {
     const outcomes = [];

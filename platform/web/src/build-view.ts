@@ -34,6 +34,10 @@ export interface Build {
   failureReasons?: string[];
   /** Ticket 3.4: while queued, how many builds wait ahead of it (once the launcher has placed it). */
   ahead?: number;
+  /** Ticket 3.5: the workshop is paused (the admin's global Stop). */
+  paused?: true;
+  /** Ticket 3.5: the server could not read whether it is paused (keep the line as it shows). */
+  pausedUnknown?: true;
 }
 
 /** The row of stages on the page: the builder's steps, then live. */
@@ -96,6 +100,8 @@ export function parseBuild(body: unknown): Build | undefined {
     ...(text(b["appUrl"]) && APP_URL.test(b["appUrl"]) ? { appUrl: b["appUrl"] } : {}),
     ...(reasons === undefined ? {} : { failureReasons: reasons }),
     ...(typeof b["ahead"] === "number" && Number.isInteger(b["ahead"]) && b["ahead"] >= 0 ? { ahead: b["ahead"] } : {}),
+    ...(b["paused"] === true ? { paused: true as const } : {}),
+    ...(b["pausedUnknown"] === true ? { pausedUnknown: true as const } : {}),
   };
 }
 

@@ -9,6 +9,7 @@ import {
   sendResult,
   specOffered,
   stageOf,
+  statusResult,
   writeSpecResult,
   type ChatMessage,
 } from "./chat.js";
@@ -28,6 +29,37 @@ describe("AI budget left (ticket 3.3)", () => {
     expect(budgetLeftText(3.2)).toBe("AI budget left: $3.20");
     expect(budgetLeftText(0)).toBe("AI budget left: $0.00");
     expect(budgetLeftText(4.99)).toBe("AI budget left: $4.99");
+  });
+});
+
+describe("the workshop paused by the global Stop (ticket 3.5)", () => {
+  it("reads paused only as true, on the conversation and on a pending poll", () => {
+    const base = { step: "clarify", state: "open", messages: [] };
+    expect(parseConversation({ ...base, paused: true })).toEqual({ ...base, paused: true });
+    for (const bad of [false, "true", 1, null]) expect(parseConversation({ ...base, paused: bad })).toEqual(base);
+    expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: true } })).toEqual({ kind: "pending", paused: true });
+    expect(pollResult({ status: 200, body: { id: "m", status: "pending", paused: "yes" } })).toEqual({ kind: "pending" });
+  });
+
+  it("keeps paused on every poll status (flagged and answered too), and reads pausedUnknown only as true", () => {
+    expect(pollResult({ status: 200, body: { id: "m", status: "flagged", paused: true } })).toEqual({ kind: "flagged", paused: true });
+    expect(pollResult({ status: 200, body: { id: "m", status: "flagged" } })).toEqual({ kind: "flagged" });
+    expect(pollResult({ status: 200, body: { id: "m", status: "done", reply: "Hi", paused: true } })).toEqual({ kind: "answered", status: "done", reply: "Hi", paused: true });
+    for (const status of ["pending", "flagged"]) {
+      expect(pollResult({ status: 200, body: { id: "m", status, pausedUnknown: true } })).toEqual({ kind: status, pausedUnknown: true });
+      expect(pollResult({ status: 200, body: { id: "m", status, pausedUnknown: "true" } })).toEqual({ kind: status });
+    }
+    const base = { step: "clarify", state: "open", messages: [] };
+    expect(parseConversation({ ...base, pausedUnknown: true })).toEqual({ ...base, pausedUnknown: true });
+    for (const bad of [false, "true", 1]) expect(parseConversation({ ...base, pausedUnknown: bad })).toEqual(base);
+  });
+
+  it("reads GET /api/status: paused only as true, off on any other 200 body, and nothing to change on any other answer", () => {
+    expect(statusResult({ status: 200, body: { paused: true } })).toBe(true);
+    for (const body of [{}, { paused: false }, { paused: "true" }]) expect(statusResult({ status: 200, body })).toBe(false);
+    for (const answer of [{ status: 200, body: null }, { status: 200, body: [true] }, { status: 401, body: {} }, { status: 500, body: { paused: true } }, { status: 0, body: null }]) {
+      expect(statusResult(answer)).toBeUndefined();
+    }
   });
 });
 

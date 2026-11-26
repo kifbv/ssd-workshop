@@ -110,6 +110,11 @@ describe("stages, lines and the behind-the-scenes part", () => {
   it("ticket 3.4: a queued build says how many builds are ahead of it; a bad count is dropped", () => {
     expect(parseBuild({ buildId: "b-1", status: "queued", ahead: 3 })).toEqual({ buildId: "b-1", status: "queued", feed: [], ahead: 3 });
     for (const ahead of [-1, 1.5, "3", null]) expect(parseBuild({ buildId: "b-1", status: "queued", ahead })).not.toHaveProperty("ahead");
+    // Ticket 3.5: the global Stop.
+    expect(parseBuild({ buildId: "b-1", status: "queued", paused: true })).toEqual({ buildId: "b-1", status: "queued", feed: [], paused: true });
+    for (const paused of [false, "true", 1]) expect(parseBuild({ buildId: "b-1", status: "queued", paused })).not.toHaveProperty("paused");
+    expect(parseBuild({ buildId: "b-1", status: "queued", pausedUnknown: true })).toEqual({ buildId: "b-1", status: "queued", feed: [], pausedUnknown: true });
+    for (const pausedUnknown of [false, "true", 1]) expect(parseBuild({ buildId: "b-1", status: "queued", pausedUnknown })).not.toHaveProperty("pausedUnknown");
     expect(nowText(build({ status: "queued", ahead: 3 }))).toBe("Your build is in the queue: 3 builds ahead of you.");
     expect(nowText(build({ status: "queued", ahead: 1 }))).toBe("Your build is in the queue: 1 build ahead of you.");
     expect(nowText(build({ status: "queued", ahead: 0 }))).toBe("Your build is next in the queue.");

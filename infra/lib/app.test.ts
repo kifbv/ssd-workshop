@@ -903,6 +903,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/sign-out",
       "GET /api/admin/settings",
       "PUT /api/admin/settings",
+      "POST /api/admin/stop",
+      "POST /api/admin/resume",
       "POST /api/conversation/messages",
       "GET /api/conversation/messages/{id}",
       "GET /api/conversation",
@@ -910,6 +912,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
       "GET /api/build",
+      "GET /api/status",
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
@@ -1489,8 +1492,8 @@ describe("api stack: admin function (ticket 3.2)", () => {
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("routes GET and PUT /api/admin/settings to it, invoked only by this API", () => {
-    expect([...ADMIN_ROUTE_KEYS]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings"]);
+  it("routes GET and PUT /api/admin/settings and (ticket 3.5) POST /api/admin/stop and /api/admin/resume to it, invoked only by this API", () => {
+    expect([...ADMIN_ROUTE_KEYS]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings", "POST /api/admin/stop", "POST /api/admin/resume"]);
     for (const routeKey of ADMIN_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
         IntegrationType: "AWS_PROXY",
@@ -1521,7 +1524,7 @@ describe("api stack: admin function (ticket 3.2)", () => {
         Condition: {
           "ForAllValues:StringEquals": {
             "dynamodb:LeadingKeys": ["SETTINGS"],
-            "dynamodb:Attributes": ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt", "stopped", "stoppedAt", "resumedAt"],
           },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
         },
@@ -1548,7 +1551,7 @@ function settingsReadStatement(tableArn: unknown) {
     Condition: {
       "ForAllValues:StringEquals": {
         "dynamodb:LeadingKeys": ["SETTINGS"],
-        "dynamodb:Attributes": ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"],
+        "dynamodb:Attributes": ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
       },
       StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
     },
@@ -1584,7 +1587,7 @@ function slotReleaseExpected(tableArn: unknown) {
 
 describe("SETTINGS readers (ticket 3.3)", () => {
   it("WHEN the synthesized stack is inspected THEN the AI worker and the conversation function read SETTINGS only projected to the listed attributes, and the participant function not at all", () => {
-    expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"]);
+    expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"]);
     for (const name of [AI_WORKER_FUNCTION_NAME, CONVERSATION_FUNCTION_NAME]) {
       const reads = apiFunction(name).statements().filter((st) => JSON.stringify(st).includes('"SETTINGS"'));
       expect(reads, name).toEqual([settingsReadStatement(apiFunction(name).tableArn())]);
@@ -1616,7 +1619,8 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
     const admin = apiFunction(ADMIN_FUNCTION_NAME).roleEntry()?.[0];
     expect(admin).toBeDefined();
     expect(writers).toEqual([{ roles: JSON.stringify([{ Ref: admin }]), actions: ["dynamodb:UpdateItem"], attributes: [...SETTINGS_UPDATE_ATTRIBUTES] }]);
-    expect(SETTINGS_UPDATE_ATTRIBUTES).not.toContain("stopped");
+    // Ticket 3.5: the global Stop is written by the admin function only (its Stop and Resume routes).
+    expect([...SETTINGS_UPDATE_ATTRIBUTES]).toEqual(["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt", "stopped", "stoppedAt", "resumedAt"]);
   });
 
   it("counts a partition pattern that matches SETTINGS, wildcards included, as reaching it", () => {
@@ -1858,6 +1862,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "GET /api/conversation/spec",
       "POST /api/conversation/spec/approve",
       "GET /api/build",
+      "GET /api/status",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -1935,7 +1940,7 @@ describe("api stack: AI worker (ticket 1.7)", () => {
     expect(f.permissions()).toEqual([]);
   });
 
-  it("allows only its logs, reads and updates of listed attributes in participants, new builds of listed attributes, the one model, sending to the launch queue and consuming its queue", () => {
+  it("allows only its logs, reads and updates of listed attributes in participants, new builds of listed attributes, the one model, sending to the launch queue and (ticket 3.5) to its own queue, and consuming its queue", () => {
     const queueArn = { "Fn::GetAtt": [ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1], "Arn"] };
     expect(f.statements()).toEqual([
       { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
@@ -1974,6 +1979,8 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         ],
       },
       { Effect: "Allow", Action: "sqs:SendMessage", Resource: `arn:aws:sqs:${REGION}:${ACCOUNT}:ssd-workshop-builds.fifo` },
+      // Ticket 3.5: a job held by the global Stop goes back on its own queue.
+      { Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn },
       {
         Effect: "Allow",
         Action: ["sqs:ReceiveMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
@@ -2491,6 +2498,8 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(LAUNCHES_PARTITION).not.toMatch(/^(BUILD|PARTICIPANT)#/);
     // Ticket 3.4: the build's own update attributes include the waiting place it sets at first sight.
     expect([...LAUNCHER_BUILD_UPDATE_ATTRIBUTES]).toContain("queueKey");
+    // Ticket 3.5: and the feed, which a build put back in the queue by the global Stop loses.
+    expect([...LAUNCHER_BUILD_UPDATE_ATTRIBUTES]).toContain("feed");
   });
 
   it("ticket 3.4: only the launcher writes the waiting line; only the launcher and the deployer write the slots, the deployer only to free one (try 2: never the builder task)", () => {

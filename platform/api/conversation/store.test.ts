@@ -279,7 +279,7 @@ describe("DynamoConversationStore", () => {
     ]);
     expect(inputs.every((i) => i.ConsistentRead === true && i.TableName === TABLE)).toBe(true);
     expect(inputs.map((i) => Object.values(i.ExpressionAttributeNames ?? {}))).toEqual([
-      ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"],
+      ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
       ["extraBudget"],
       ["costUsd"],
     ]);
@@ -705,6 +705,46 @@ describe("SqsMessageQueue", () => {
     const queue = new SqsMessageQueue({ send: async (c: SendMessageCommand) => (sent.push(c), { $metadata: {} }) }, AI_QUEUE_URL);
     await queue.send({ participantId: "p-1", messageId: ID });
     expect(sent[0]?.input).toEqual({ QueueUrl: AI_QUEUE_URL, MessageBody: JSON.stringify({ participantId: "p-1", messageId: ID }) });
+  });
+
+  it("puts a held job back on the queue with a delay (ticket 3.5)", async () => {
+    const sent: SendMessageCommand[] = [];
+    const queue = new SqsMessageQueue({ send: async (c: SendMessageCommand) => (sent.push(c), { $metadata: {} }) }, AI_QUEUE_URL);
+    await queue.sendLater({ participantId: "p-1", messageId: ID }, 30);
+    expect(sent[0]?.input).toEqual({ QueueUrl: AI_QUEUE_URL, MessageBody: JSON.stringify({ participantId: "p-1", messageId: ID }), DelaySeconds: 30 });
+  });
+});
+
+describe("global Stop in the conversation store (ticket 3.5)", () => {
+  it("holds a message: its pendingSince and the conversation's to now, only while it is pending and in flight, naming only the AI worker's attributes", async () => {
+    const { client, sent } = stubClient([{}, cancelled(["ConditionalCheckFailed", "None"]), new Error("down")]);
+    const store = new DynamoConversationStore(client, TABLE);
+    expect(await store.holdMessage("p-1", ID, 1_800_000_000)).toBe(true);
+    const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
+    expect(items.map((i) => i.Update?.Key)).toEqual([
+      { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "CONVERSATION" } },
+      { pk: { S: "PARTICIPANT#p-1" }, sk: { S: `MSG#${ID}` } },
+    ]);
+    expect(items[0]?.Update).toMatchObject({
+      UpdateExpression: "SET #pendingSince = :pendingSince",
+      ConditionExpression: "#pendingId = :messageId AND #state = :open",
+      ExpressionAttributeValues: { ":pendingSince": { N: "1800000000" }, ":messageId": { S: ID }, ":open": { S: "open" } },
+    });
+    expect(items[1]?.Update).toMatchObject({
+      UpdateExpression: "SET #pendingSince = :pendingSince",
+      ConditionExpression: "#status = :pending",
+      ExpressionAttributeValues: { ":pendingSince": { N: "1800000000" }, ":pending": { S: "pending" } },
+    });
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    // No longer pending or in flight: nothing written, false; a table error is thrown.
+    expect(await store.holdMessage("p-1", ID, 1)).toBe(false);
+    await expect(store.holdMessage("p-1", ID, 1)).rejects.toThrow("down");
+  });
+
+  it("reads the settings projected to SETTINGS_READ_ATTRIBUTES", async () => {
+    const { client, sent } = stubClient([{ Item: { stopped: { BOOL: true } } }]);
+    expect(await new DynamoConversationStore(client, TABLE).getSettings()).toEqual({ ...DEFAULT_SETTINGS, stopped: true });
+    for (const name of Object.values((sent[0] as GetItemCommand).input.ExpressionAttributeNames ?? {})) expect(SETTINGS_READ_ATTRIBUTES, name).toContain(name);
   });
 });
 

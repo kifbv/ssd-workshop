@@ -7,7 +7,10 @@
 // `POST /api/conversation/spec/approve` (Approve spec), and Write my spec now also asks the AI worker
 // for the first version. Ticket 2.7: Approve spec also stores the readiness request for the AI worker (see
 // ./readiness.ts), and `GET /api/build` returns the caller's own build. Ticket 3.3: `GET /api/conversation` also
-// answers `budgetLeft`, the caller's AI budget left in dollars (the AI worker enforces the budget). Every route starts with the
+// answers `budgetLeft`, the caller's AI budget left in dollars (the AI worker enforces the budget). Ticket 3.5: while the
+// admin's global Stop is on, the three reads the page repeats (`GET /api/conversation`, the message poll and
+// `GET /api/build`) also answer `paused: true`, and `GET /api/status` answers only that (every signed-in screen asks it
+// every 30 s), so every participant page shows the paused banner. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -45,7 +48,8 @@ export const STEP_ROUTE = "POST /api/conversation/step";
 export const SPEC_ROUTE = "GET /api/conversation/spec";
 export const APPROVE_ROUTE = "POST /api/conversation/spec/approve";
 export const BUILD_ROUTE = "GET /api/build";
-export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE, BUILD_ROUTE] as const;
+export const STATUS_ROUTE = "GET /api/status";
+export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE, BUILD_ROUTE, STATUS_ROUTE] as const;
 
 /** A message holds 1 to 2000 characters (Unicode code points) after trimming. */
 export const MAX_MESSAGE_CHARS = 2000;
@@ -66,7 +70,7 @@ export const MESSAGES = {
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -176,7 +180,25 @@ async function poll(request: HttpRequest, participant: ParticipantRecord, deps: 
   } else if (status === "done" || status === "declined" || status === "failed") {
     reply = (await deps.store.getReplyText(participant.id, id)) ?? (status === "failed" ? FAILURE_REPLY : undefined);
   }
-  return { outcome: "ok", response: jsonResponse(200, { id, status, ...(reply === undefined ? {} : { reply }) }) };
+  const paused = await pausedFlag(deps);
+  return {
+    outcome: "ok",
+    response: jsonResponse(200, { id, status, ...(reply === undefined ? {} : { reply }), ...paused.flag }),
+    ...(paused.error === undefined ? {} : { error: paused.error }),
+  };
+}
+
+/**
+ * Ticket 3.5: `{ paused: true }` while the global Stop is on, else nothing. A failed settings read answers
+ * `{ pausedUnknown: true }` instead (the page keeps the line as it shows it; the answer is still 200) and is logged by
+ * name only.
+ */
+async function pausedFlag(deps: ConversationDeps): Promise<{ flag: { paused?: true; pausedUnknown?: true }; error?: string }> {
+  try {
+    return { flag: (await deps.store.getSettings()).stopped ? { paused: true } : {} };
+  } catch (error) {
+    return { flag: { pausedUnknown: true }, error: errorName(error) };
+  }
 }
 
 /** One message of the conversation as the page shows it (ticket 1.8). */
@@ -264,7 +286,12 @@ async function history(participant: ParticipantRecord, deps: ConversationDeps): 
   const nowSeconds = Math.floor(deps.now().getTime() / 1000);
   // Ticket 3.3: the caller's own budget left, in dollars (whole cents, never below 0); never their spend or anyone else's.
   const shaped = shapeHistory(participant.step, items, conversation, nowSeconds);
-  const body = budget === undefined ? { ...shaped } : { ...shaped, budgetLeft: budgetOf(budget).leftUsd };
+  // Ticket 3.5: the global Stop, from the same settings read as the budget.
+  // A failed read answers `pausedUnknown: true`, so the page keeps the paused line as it shows it.
+  const body =
+    budget === undefined
+      ? { ...shaped, pausedUnknown: true }
+      : { ...shaped, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
   return { outcome: "ok", response: jsonResponse(200, body), ...(budgetError === undefined ? {} : { error: budgetError }) };
 }
 
@@ -386,6 +413,8 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       return undefined;
     });
   }
+  const paused = await pausedFlag(deps);
+  const error = aheadError ?? paused.error;
   return {
     outcome: "ok",
     response: jsonResponse(200, {
@@ -395,9 +424,20 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       ...(nickname === undefined ? {} : { repositoryUrl: appRepositoryUrl(nickname), appUrl: appAddress(nickname) }),
       ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
       ...(ahead === undefined ? {} : { ahead }),
+      ...paused.flag,
     }),
-    ...(aheadError === undefined ? {} : { error: aheadError }),
+    ...(error === undefined ? {} : { error }),
   };
+}
+
+/**
+ * Ticket 3.5: `GET /api/status`, the workshop's state for any signed-in person (`{ paused: true }` while the global
+ * Stop is on, else `{}`): one small `SETTINGS` read, which every signed-in screen repeats every 30 s so an idle page
+ * shows and clears the paused banner. A failed read is a 500 (the page keeps what it showed), not a false "running".
+ */
+async function workshopStatus(deps: ConversationDeps): Promise<Result> {
+  const settings = await deps.store.getSettings();
+  return { outcome: "ok", response: jsonResponse(200, settings.stopped ? { paused: true } : {}) };
 }
 
 function routeOf(request: HttpRequest): ConversationRoute {
@@ -408,6 +448,7 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === SPEC_ROUTE) return "spec";
   if (request.routeKey === APPROVE_ROUTE) return "approve";
   if (request.routeKey === BUILD_ROUTE) return "build";
+  if (request.routeKey === STATUS_ROUTE) return "status";
   return "unknown";
 }
 
@@ -426,6 +467,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "spec") result = await spec(request, session.participant, deps);
     else if (route === "approve") result = await approve(request, session.participant, deps);
     else if (route === "build") result = await build(session.participant, deps);
+    else if (route === "status") result = await workshopStatus(deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

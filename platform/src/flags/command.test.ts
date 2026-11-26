@@ -25,7 +25,7 @@ async function setupFlagged() {
   const model = new FakeModel();
   let clock = NOW;
   const api: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, 5), log: () => undefined };
-  const workerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), now: () => clock, log: () => undefined };
+  const workerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), held: queue, now: () => clock, log: () => undefined };
   const send = (text: string, t = TOKEN): HttpRequest => ({
     routeKey: SEND_ROUTE,
     cookies: [`${SESSION_COOKIE}=${t}`],

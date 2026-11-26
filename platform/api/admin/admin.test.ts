@@ -4,7 +4,17 @@ import type { HttpRequest } from "../http.js";
 import { SESSION_COOKIE } from "../session/session.js";
 import type { Role } from "../types.js";
 import { FakeSettingsTable } from "../workshop/fakes.js";
-import { ADMIN_ROUTES, BAD_SETTINGS_MESSAGE, handleAdminRequest, SETTINGS_GET_ROUTE, SETTINGS_PUT_ROUTE, type AdminDeps, type AdminLogEntry } from "./admin.js";
+import {
+  ADMIN_ROUTES,
+  BAD_SETTINGS_MESSAGE,
+  handleAdminRequest,
+  RESUME_ROUTE,
+  SETTINGS_GET_ROUTE,
+  SETTINGS_PUT_ROUTE,
+  STOP_ROUTE,
+  type AdminDeps,
+  type AdminLogEntry,
+} from "./admin.js";
 
 const NOW = new Date("2026-11-25T10:00:00.000Z");
 const NOW_S = NOW.getTime() / 1000;
@@ -35,8 +45,8 @@ const put = (body: unknown, role?: Role, contentType = "application/json"): Http
 const json = (body: string | undefined): unknown => JSON.parse(body ?? "");
 
 describe("admin settings routes (ticket 3.2)", () => {
-  it("serves exactly GET and PUT /api/admin/settings", () => {
-    expect([...ADMIN_ROUTES]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings"]);
+  it("serves exactly GET and PUT /api/admin/settings, and (ticket 3.5) POST /api/admin/stop and /api/admin/resume", () => {
+    expect([...ADMIN_ROUTES]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings", "POST /api/admin/stop", "POST /api/admin/resume"]);
   });
 
   it("WHEN no SETTINGS item exists THEN the admin reads the defaults $5, 5 and 15 with Stop off", async () => {
@@ -156,5 +166,61 @@ describe("admin settings routes (ticket 3.2)", () => {
     expect(res.statusCode).toBe(500);
     expect(json(res.body)).toEqual({ message: "Something went wrong. Please try again in a moment." });
     expect(logs).toEqual([{ event: "admin", route: "settings-get", outcome: "failed", error: "ProvisionedThroughputExceededException" }]);
+  });
+});
+
+const post = (routeKey: string, role?: Role, contentType = "application/json"): HttpRequest => ({
+  routeKey,
+  headers: { "content-type": contentType },
+  body: "{}",
+  ...(role ? { cookies: cookie(role) } : {}),
+});
+
+describe("global Stop and Resume (ticket 3.5)", () => {
+  it("WHEN the admin presses Stop THEN Stop is on (with its time) and the caps stay; WHEN Resume THEN it is off again", async () => {
+    const { deps, settings, logs } = setup();
+    settings.item = { aiBudgetUsd: { N: "8" } };
+    const stopped = await handleAdminRequest(post(STOP_ROUTE, "admin"), deps);
+    expect(stopped.statusCode).toBe(200);
+    expect(json(stopped.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: true });
+    expect(settings.item).toMatchObject({ stopped: { BOOL: true }, stoppedAt: { S: NOW.toISOString() }, aiBudgetUsd: { N: "8" } });
+    // Pressed twice: still on, no harm.
+    expect((await handleAdminRequest(post(STOP_ROUTE, "admin"), deps)).statusCode).toBe(200);
+    const resumed = await handleAdminRequest(post(RESUME_ROUTE, "admin"), deps);
+    expect(resumed.statusCode).toBe(200);
+    expect(json(resumed.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false });
+    expect(settings.item).toMatchObject({ stopped: { BOOL: false }, resumedAt: { S: NOW.toISOString() } });
+    expect(logs.map((l) => [l.route, l.outcome])).toEqual([
+      ["stop", "stopped"],
+      ["stop", "stopped"],
+      ["resume", "resumed"],
+    ]);
+    // Caps saved while stopped keep Stop on.
+    await handleAdminRequest(post(STOP_ROUTE, "admin"), deps);
+    expect(json((await handleAdminRequest(put(VALID, "admin"), deps)).body)).toEqual({ ...VALID, stopped: true });
+  });
+
+  it("criterion 5: WHEN a non-admin calls Stop or Resume THEN the answer is 404 and nothing changes", async () => {
+    for (const role of ["participant", "facilitator"] as const) {
+      const { deps, settings, logs } = setup();
+      for (const request of [post(STOP_ROUTE, role), post(RESUME_ROUTE, role), post(STOP_ROUTE, role, "text/plain")]) {
+        const res = await handleAdminRequest(request, deps);
+        expect(res.statusCode, role).toBe(404);
+        expect(json(res.body)).toEqual({ message: "Not found." });
+      }
+      expect(settings.writes, role).toBe(0);
+      expect(settings.item).toBeUndefined();
+      expect(logs.every((l) => l.outcome === "not-found")).toBe(true);
+    }
+  });
+
+  it("answers 401 without a session, 415 to the admin without JSON, and 500 when the table fails", async () => {
+    const { deps, settings, logs } = setup();
+    for (const route of [STOP_ROUTE, RESUME_ROUTE]) expect((await handleAdminRequest(post(route), deps)).statusCode).toBe(401);
+    expect((await handleAdminRequest(post(STOP_ROUTE, "admin", "text/plain"), deps)).statusCode).toBe(415);
+    expect(settings.writes).toBe(0);
+    settings.failure = Object.assign(new Error("secret detail"), { name: "InternalServerError" });
+    expect((await handleAdminRequest(post(RESUME_ROUTE, "admin"), deps)).statusCode).toBe(500);
+    expect(logs.at(-1)).toEqual({ event: "admin", route: "resume", outcome: "failed", error: "InternalServerError" });
   });
 });

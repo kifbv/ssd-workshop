@@ -16,6 +16,7 @@ import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
 import { BUILD_TEXTS } from "./src/build-view.js";
+import { PHASE_3_TEXTS } from "../api/workshop/texts.js";
 
 const jsQR = jsQRModule.default;
 
@@ -399,7 +400,9 @@ const ME = { id: "p-1", nickname: "ada-l", role: "participant", group: "g1" };
  * a sent message stays pending until `answer()` (or `flag()`) is called. Polls are counted per id.
  */
 function fakeConversation(start: MockMessage[] = [], step = "clarify") {
-  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined };
+  const state = { step, messages: [...start], pendingId: undefined as string | undefined, waiting: false, polls: 0, nextId: 1, budgetLeft: undefined as number | undefined, paused: false, pausedUnknown: false };
+  /** Ticket 3.5: the Stop's flags as the API sends them; `pausedUnknown` stands for a failed settings read. */
+  const pausedBody = () => (state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true } : {});
   const answer = (reply: string, offersSpec = false, status = "done") => {
     const id = state.pendingId ?? "";
     const message = state.messages.find((m) => m.id === id);
@@ -423,6 +426,7 @@ function fakeConversation(start: MockMessage[] = [], step = "clarify") {
         messages: state.messages,
         ...(state.pendingId ? { pendingId: state.pendingId } : {}),
         ...(state.budgetLeft === undefined ? {} : { budgetLeft: state.budgetLeft }),
+        ...pausedBody(),
       },
     }),
     "POST /api/conversation/messages": (call) => {
@@ -444,7 +448,8 @@ function fakeConversation(start: MockMessage[] = [], step = "clarify") {
     state.polls++;
     const message = state.messages.find((m) => m.id === id);
     const reply = state.messages.find((m) => m.id === `${id}-r`);
-    return { status: 200, body: { id, status: message?.status ?? "pending", ...(reply ? { reply: reply.text } : {}) } };
+    const status = message?.status ?? "pending";
+    return { status: 200, body: { id, status, ...(reply ? { reply: reply.text } : {}), ...pausedBody() } };
   };
   for (let n = 1; n <= 9; n++) handlers[pollPath(`m${n}`)] = pollHandler(`m${n}`);
   return { state, handlers, answer, flag };
@@ -555,6 +560,104 @@ describe("step 1: Clarify (ticket 1.8)", () => {
     expect(await page.locator("#typing").isVisible()).toBe(false);
     expect(await page.locator("#chat-send").isDisabled()).toBe(false);
     await expectNoSideScroll();
+  }, 30_000);
+
+  it("ticket 3.5 criterion 4: WHEN Stop is on THEN step 1 shows the paused line, also while a message waits; WHEN Resume THEN it goes, at 375 px", async () => {
+    const api = fakeConversation();
+    api.state.paused = true;
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    expect(await banner.getAttribute("role")).toBe("status");
+    await expectNoSideScroll();
+
+    // A message sent meanwhile stays pending (the worker holds it); each poll says the workshop is paused.
+    await page.getByRole("textbox", { name: "Your message" }).fill("A plant watering reminder.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    await expect.poll(() => api.state.polls, { timeout: 6000 }).toBeGreaterThan(0);
+    expect(await banner.isVisible()).toBe(true);
+    await expectNoSideScroll();
+
+    // Resume: the next poll no longer says paused, and the line goes; the held message is then answered.
+    api.state.paused = false;
+    const polls = api.state.polls;
+    await expect.poll(() => api.state.polls, { timeout: 6000 }).toBeGreaterThan(polls);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    api.answer(QUESTIONS);
+    await expect.poll(bubbles, { timeout: 6000 }).toEqual(["A plant watering reminder.", QUESTIONS]);
+    expect(await banner.isVisible()).toBe(false);
+  }, 30_000);
+
+  it("ticket 3.5 criterion 4: WHEN a flagged message waits for a facilitator while Stop is on THEN the paused line stays across 10 s polls; WHEN Resume THEN it goes, at 375 px", async () => {
+    const api = fakeConversation();
+    api.state.paused = true;
+    await mockApi(api.handlers);
+    await page.clock.install();
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await pauseClock();
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    await page.getByRole("textbox", { name: "Your message" }).fill("An app that tells me which medicine to take.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    api.flag();
+    await pollAfter(2000);
+    expect(await page.locator("#waiting-notice").isVisible()).toBe(true);
+    expect(await banner.isVisible()).toBe(true);
+    for (let n = 0; n < 3; n++) {
+      const polls = api.state.polls;
+      await pollAfter(10_000);
+      expect(api.state.polls).toBe(polls + 1);
+      expect(await banner.isVisible()).toBe(true);
+    }
+    await expectNoSideScroll();
+    api.state.paused = false;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(false);
+    expect(await page.locator("#waiting-notice").isVisible()).toBe(true);
+  }, 30_000);
+
+  it("ticket 3.5: WHEN the server could not read the settings (pausedUnknown) THEN the poll and the conversation keep the paused line as shown; WHEN a read works THEN it follows it", async () => {
+    const api = fakeConversation();
+    api.state.paused = true;
+    await mockApi(api.handlers);
+    await page.clock.install();
+    await page.goto(origin);
+    await expect.poll(() => screen("step").isVisible()).toBe(true);
+    await pauseClock();
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    await page.getByRole("textbox", { name: "Your message" }).fill("A plant watering reminder.");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect.poll(() => page.locator("#typing").isVisible()).toBe(true);
+    // The settings read fails: pending polls and the flagged ones keep the line.
+    api.state.pausedUnknown = true;
+    await pollAfter(2000);
+    await pollAfter(2000);
+    expect(await banner.isVisible()).toBe(true);
+    api.flag();
+    await pollAfter(2000);
+    await pollAfter(10_000);
+    expect(await page.locator("#waiting-notice").isVisible()).toBe(true);
+    expect(await banner.isVisible()).toBe(true);
+    // The read works again and still says paused: the line stays.
+    api.state.pausedUnknown = false;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(true);
+    // The read works again and says running: the line goes.
+    api.state.paused = false;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(false);
+    // pausedUnknown never shows the line by itself.
+    api.state.paused = true;
+    api.state.pausedUnknown = true;
+    await pollAfter(10_000);
+    expect(await banner.isVisible()).toBe(false);
   }, 30_000);
 
   it("WHEN the page is reloaded THEN the conversation so far is shown again, and a pending message is polled again (criterion 4)", async () => {
@@ -1076,7 +1179,7 @@ const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-
 
 /** A participant at step building and their build, which the test moves on; every GET /api/build is counted. */
 function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html")]) {
-  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined };
+  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false };
   const handlers: Record<string, Handler> = {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
     "GET /api/build": () => {
@@ -1092,6 +1195,7 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
           appUrl: APP_URL,
           ...(state.failureReasons === undefined ? {} : { failureReasons: state.failureReasons }),
           ...(state.ahead === undefined ? {} : { ahead: state.ahead }),
+          ...(state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true } : {}),
         },
       };
     },
@@ -1144,6 +1248,32 @@ describe("step 3: Build (ticket 2.10)", () => {
     await buildPollAfter(2000);
     await expect.poll(() => page.locator("#build-now").textContent()).not.toContain("queue");
     await expectNoSideScroll();
+  }, 30_000);
+
+  it("ticket 3.5 criterion 4: WHEN Stop is on THEN step 3 shows the paused line over the queued build; WHEN Resume THEN it goes, at 375 px", async () => {
+    const api = fakeBuildApi("queued", []);
+    api.state.ahead = 0;
+    api.state.paused = true;
+    await mockApi(api.handlers);
+    await openPaused();
+    await expect.poll(() => api.state.polls).toBe(1);
+    await settle();
+    const banner = page.locator("#workshop-paused");
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    await expectNoSideScroll();
+    await buildPollAfter(2000);
+    expect(await banner.isVisible()).toBe(true);
+    // A build read whose settings read failed (pausedUnknown) keeps the line as shown.
+    api.state.pausedUnknown = true;
+    await buildPollAfter(2000);
+    await buildPollAfter(2000);
+    expect(await banner.isVisible()).toBe(true);
+    api.state.pausedUnknown = false;
+    api.state.paused = false;
+    await buildPollAfter(2000);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    expect(await page.locator("#build-now").textContent()).toBe("Your build is next in the queue.");
   }, 30_000);
 
   it("WHEN a build is running THEN the page shows its stages, files and commits, and polls every 2 seconds (criteria 1, 4 and 5)", async () => {
@@ -1395,6 +1525,122 @@ describe("step 4: Live (ticket 2.11)", () => {
     expect(await page.locator("#live-repository").isHidden()).toBe(true);
     expect(await page.locator("#screen-live a[href]").count()).toBe(0);
     await expectNoSideScroll();
+  }, 30_000);
+});
+
+/** Ticket 3.5: `GET /api/status` as the API answers it, counted; `paused` is the admin's switch. */
+function fakeStatus() {
+  const state = { paused: false, polls: 0 };
+  const handler: Handler = () => {
+    state.polls++;
+    return { status: 200, body: state.paused ? { paused: true } : {} };
+  };
+  return { state, handler };
+}
+
+/** Like pollAfter, for the status poll: moves page time by `ms`, which must fire one GET /api/status, and lets the page handle it. */
+async function statusPollAfter(ms: number): Promise<void> {
+  const answered = page.waitForResponse((r) => r.url().endsWith("/api/status"));
+  await page.clock.runFor(ms);
+  await answered;
+  await settle();
+}
+
+/** Opens the page with its clock paused from the start (any screen), so only the test moves page time. */
+async function openWithPausedClock(): Promise<void> {
+  await page.clock.install({ time: new Date("2026-11-25T10:00:00.000Z") });
+  await page.clock.pauseAt(new Date("2026-11-25T10:00:01.000Z"));
+  await page.goto(origin);
+}
+
+/** Makes the page believe its tab was hidden or shown again (Chromium keeps a test page visible). */
+async function setTabHidden(hidden: boolean): Promise<void> {
+  await page.evaluate((h) => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+}
+
+describe("ticket 3.5: the paused line on idle signed-in screens (status poll every 30 s)", () => {
+  it("WHEN Stop is pressed while step 4 sits idle THEN the paused line shows within 30 s; WHEN Resume THEN it goes within 30 s, at 375 px", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    const status = fakeStatus();
+    api.handlers["GET /api/status"] = status.handler;
+    await mockApi(api.handlers);
+    await openWithPausedClock();
+    await expectLiveScreen();
+    await settle();
+    const builds = api.state.polls;
+    const banner = page.locator("#workshop-paused");
+    expect(await banner.isVisible()).toBe(false);
+
+    // Stop: nothing is asked before 30 s, then one status read shows the line.
+    status.state.paused = true;
+    await page.clock.runFor(29_000);
+    await settle();
+    expect(status.state.polls).toBe(0);
+    await statusPollAfter(1000);
+    expect(status.state.polls).toBe(1);
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    expect(await banner.getAttribute("role")).toBe("status");
+    await expectNoSideScroll();
+    await statusPollAfter(30_000);
+    expect(await banner.isVisible()).toBe(true);
+
+    // Resume: the next status read clears it; step 4 itself asks nothing else.
+    status.state.paused = false;
+    await statusPollAfter(30_000);
+    expect(status.state.polls).toBe(3);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    expect(api.state.polls).toBe(builds);
+    await expectLiveScreen();
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN Stop is pressed while the nickname screen is open THEN the paused line shows within 30 s and goes on Resume; a hidden tab and signing out stop the poll, at 375 px", async () => {
+    const status = fakeStatus();
+    const calls = await mockApi({
+      "GET /api/me": () => ({ status: 200, body: { id: "p-1", nickname: null, role: "participant", group: "g1", step: "nickname" } }),
+      "GET /api/status": status.handler,
+      "POST /api/sign-out": () => ({ status: 200, body: { message: "You're signed out." } }),
+    });
+    await openWithPausedClock();
+    await expect.poll(() => screen("nickname").isVisible()).toBe(true);
+    await settle();
+    const banner = page.locator("#workshop-paused");
+    expect(await banner.isVisible()).toBe(false);
+
+    status.state.paused = true;
+    await statusPollAfter(30_000);
+    await expect.poll(() => banner.isVisible()).toBe(true);
+    expect(await banner.textContent()).toBe(PHASE_3_TEXTS.workshopPaused);
+    await expectNoSideScroll();
+    status.state.paused = false;
+    await statusPollAfter(30_000);
+    await expect.poll(() => banner.isVisible()).toBe(false);
+    expect(status.state.polls).toBe(2);
+
+    // A hidden tab asks nothing; shown again, it asks within 30 s.
+    await setTabHidden(true);
+    await page.clock.runFor(90_000);
+    await settle();
+    expect(status.state.polls).toBe(2);
+    status.state.paused = true;
+    await setTabHidden(false);
+    await statusPollAfter(30_000);
+    expect(status.state.polls).toBe(3);
+    await expect.poll(() => banner.isVisible()).toBe(true);
+
+    // Signing out hides the line and stops the poll.
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+    expect(await banner.isVisible()).toBe(false);
+    const after = calls.length;
+    await page.clock.runFor(90_000);
+    await settle();
+    expect(calls.length).toBe(after);
+    expect(status.state.polls).toBe(3);
   }, 30_000);
 });
 

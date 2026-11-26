@@ -40,7 +40,7 @@ function setup() {
     now: clock,
     log: () => undefined,
   };
-  const check = { records: table, tasks, launchDeadLetters: { receive: async () => [], remove: async () => undefined }, deployDeadLetters: { receive: async () => [], remove: async () => undefined }, now: clock, log: () => undefined };
+  const check = { records: table, tasks, launchDeadLetters: { receive: async () => [], remove: async () => undefined }, deployDeadLetters: { receive: async () => [], remove: async () => undefined }, relaunch: async () => undefined, now: clock, log: () => undefined };
   return { table, tasks, queue, out, err, deps, github, launcher, check, connected: () => connected };
 }
 

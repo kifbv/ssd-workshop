@@ -222,3 +222,8 @@ paths:
   visibility and returns it in `batchItemFailures` (`reportBatchItemFailures` on the source), never throws, and its
   queue's `maxReceiveCount` and retention must cover the wait. A new DynamoDB item kind in a transaction needs every
   writer's stub answers and IAM statements updated (`ConditionCheckItem` is its own action).
+- A pause that can outlast a queue's retries (ticket 3.5, the global Stop): an SQS worker that must hold a job sends it
+  again to its own queue with `DelaySeconds` and consumes the delivery (never a thrown error or a visibility change, which
+  count towards `maxReceiveCount`), and refreshes whatever a "stale" rule reads (`pendingSince`) in the same step. Check
+  who may send to a queue in the access boundary before designing a re-send: only the AI worker and the scheduler may send
+  to `ssd-workshop-builds*` (`BuildsFromTheirSendersOnly`), so the launcher's check launches stopped builds itself.

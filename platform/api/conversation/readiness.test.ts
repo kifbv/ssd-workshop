@@ -71,7 +71,7 @@ function setup() {
   const logs: ConversationLogEntry[] = [];
   const workerLogs: WorkerLogEntry[] = [];
   const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
-  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
+  const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, held: queue, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
   const advance = (seconds: number) => {
     clock = new Date(clock.getTime() + seconds * 1000);
   };

@@ -7,7 +7,7 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { parseGitHubSecret } from "../github/app.js";
 import { readTemplateFolder } from "../github/template-files.js";
 import { DynamoLaunchRecords, EcsBuildTasks, SqsDeadLetters, SqsLaunchVisibility } from "../launcher/aws.js";
-import { processLaunch, runCheck, type LaunchOutcome, type LauncherLogEntry } from "../launcher/launcher.js";
+import { processLaunch, runCheck, type LaunchOutcome, type LauncherDeps, type LauncherLogEntry } from "../launcher/launcher.js";
 import {
   BUILD_CHECK_QUEUE_NAME,
   BUILD_DLQ_URL,
@@ -36,7 +36,10 @@ import {
  * Ticket 3.4: a build that must wait for a slot (outcome `waiting`) stays `queued`; its message is made visible again
  * after LAUNCH_WAIT_SECONDS and reported as a batch item failure (the launch queue's event source reports batch item
  * failures), so SQS delivers it again then. The message group is the participant's, so a waiting message holds back
- * only that participant's own later launch messages, never another participant's.
+ * only that participant's own later launch messages, never another participant's. Ticket 3.5: a build held by the
+ * global Stop (outcome `paused`) waits the same way. A running build the Stop put back in the queue has no launch message
+ * (the access boundary lets only the AI worker and the scheduler send to the launch queue): after Resume the check
+ * launches it itself, with the same deps as a launch, while at least RELAUNCH_MIN_LEFT_MS of the invocation is left.
  */
 
 export interface LauncherRecord {
@@ -60,11 +63,12 @@ export interface LaunchVisibility {
 }
 
 /**
- * The answer for one launch record: nothing to deliver again, unless the build waits for a slot. Then its message
+ * The answer for one launch record: nothing to deliver again, unless the build waits for a slot (or, ticket 3.5, for the
+ * end of the global Stop). Then its message
  * comes back after LAUNCH_WAIT_SECONDS (if setting that fails, after the queue's own visibility timeout).
  */
 export async function answerLaunch(record: LauncherRecord, outcome: LaunchOutcome, visibility: LaunchVisibility): Promise<LauncherResult> {
-  if (outcome !== "waiting" || record.messageId === undefined) return { batchItemFailures: [] };
+  if ((outcome !== "waiting" && outcome !== "paused") || record.messageId === undefined) return { batchItemFailures: [] };
   if (record.receiptHandle !== undefined) await visibility.comeBackAfter(record.receiptHandle, LAUNCH_WAIT_SECONDS).catch(() => undefined);
   return { batchItemFailures: [{ itemIdentifier: record.messageId }] };
 }
@@ -76,9 +80,29 @@ export interface LauncherContext {
 /** GitHub calls stop this long before the Lambda's own timeout, so the build's failure is still written. */
 export const LAUNCH_RESERVE_MS = 20_000;
 
+/**
+ * Ticket 3.5: the check starts a launch of a build the global Stop put back in the queue only with this much of the
+ * invocation left (a launch's GitHub steps and RunTask, plus LAUNCH_RESERVE_MS); the others wait for the next minute.
+ */
+export const RELAUNCH_MIN_LEFT_MS = 60_000;
+
+/** A deadline LAUNCH_RESERVE_MS before the Lambda's own timeout (none without a context). */
+function deadlineOf(context: LauncherContext | undefined): { signal: AbortSignal; clear: () => void } {
+  const left = context?.getRemainingTimeInMillis();
+  const deadline = new AbortController();
+  const timer = typeof left === "number" && Number.isFinite(left) ? setTimeout(() => deadline.abort(), Math.max(0, left - LAUNCH_RESERVE_MS)) : undefined;
+  return { signal: deadline.signal, clear: () => clearTimeout(timer) };
+}
+
 const log = (entry: LauncherLogEntry): void => {
   console.log(JSON.stringify(entry));
 };
+
+/** Ticket 3.5: true when the invocation has at least `ms` left (always, without a context, as in tests). */
+export function hasTimeFor(context: LauncherContext | undefined, ms: number): boolean {
+  const left = context?.getRemainingTimeInMillis();
+  return typeof left !== "number" || !Number.isFinite(left) || left >= ms;
+}
 
 /** Which queue a record came from: the queue name is the ARN's last part. */
 export function sourceOf(eventSourceArn: string | undefined): "launch" | "check" | "other" {
@@ -120,44 +144,48 @@ export async function handler(event: LauncherEvent, context?: LauncherContext): 
   const visibility = new SqsLaunchVisibility(sqs, BUILD_QUEUE_URL);
   const now = () => new Date();
   const result: LauncherResult = { batchItemFailures: [] };
+  const launchDeps = (signal: AbortSignal): LauncherDeps => ({
+    records: launchRecords,
+    tasks,
+    credentials: async () => {
+      const secret = await secrets.send(new GetSecretValueCommand({ SecretId: GITHUB_SECRET_NAME }), { abortSignal: signal });
+      return parseGitHubSecret(secret.SecretString);
+    },
+    github: { fetch: (url, init) => fetch(url, init), now, log: (entry) => console.log(JSON.stringify(entry)), signal },
+    templateFiles: () => readTemplateFolder(join(process.env.LAMBDA_TASK_ROOT ?? ".", "template")),
+    now,
+    log,
+    // RunTask is cut off at the reserve too, so the failure write always fits (ticket 2.9 try 2).
+    signal,
+  });
 
   for (const [index, record] of records.entries()) {
     const source = sources[index];
     if (source === "check") {
-      await runCheck({
-        records: launchRecords,
-        tasks,
-        launchDeadLetters: new SqsDeadLetters(sqs, BUILD_DLQ_URL),
-        deployDeadLetters: new SqsDeadLetters(sqs, DEPLOY_DLQ_URL),
-        now,
-        log,
-      });
+      const deadline = deadlineOf(context);
+      try {
+        await runCheck({
+          records: launchRecords,
+          tasks,
+          launchDeadLetters: new SqsDeadLetters(sqs, BUILD_DLQ_URL),
+          deployDeadLetters: new SqsDeadLetters(sqs, DEPLOY_DLQ_URL),
+          relaunch: async (body) => (hasTimeFor(context, RELAUNCH_MIN_LEFT_MS) ? processLaunch(body, launchDeps(deadline.signal)) : undefined),
+          now,
+          log,
+        });
+      } finally {
+        deadline.clear();
+      }
       // One check per invocation is enough.
       return result;
     }
     if (source !== "launch") continue;
-    const left = context?.getRemainingTimeInMillis();
-    const deadline = new AbortController();
-    const timer =
-      typeof left === "number" && Number.isFinite(left) ? setTimeout(() => deadline.abort(), Math.max(0, left - LAUNCH_RESERVE_MS)) : undefined;
+    const deadline = deadlineOf(context);
     try {
-      const outcome = await processLaunch(record.body, {
-        records: launchRecords,
-        tasks,
-        credentials: async () => {
-          const secret = await secrets.send(new GetSecretValueCommand({ SecretId: GITHUB_SECRET_NAME }), { abortSignal: deadline.signal });
-          return parseGitHubSecret(secret.SecretString);
-        },
-        github: { fetch: (url, init) => fetch(url, init), now, log: (entry) => console.log(JSON.stringify(entry)), signal: deadline.signal },
-        templateFiles: () => readTemplateFolder(join(process.env.LAMBDA_TASK_ROOT ?? ".", "template")),
-        now,
-        log,
-        // RunTask is cut off at the reserve too, so the failure write always fits (ticket 2.9 try 2).
-        signal: deadline.signal,
-      });
+      const outcome = await processLaunch(record.body, launchDeps(deadline.signal));
       result.batchItemFailures.push(...(await answerLaunch(record, outcome, visibility)).batchItemFailures);
     } finally {
-      clearTimeout(timer);
+      deadline.clear();
     }
   }
   return result;

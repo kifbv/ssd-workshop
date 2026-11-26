@@ -95,10 +95,12 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/sign-out", method: HttpMethod.POST },
 ] as const;
 
-/** The admin routes (ticket 3.2), served by their own function: the only role that may write `SETTINGS`. */
+/** The admin routes (ticket 3.2; Stop and Resume from 3.5), served by their own function: the only role that may write `SETTINGS`. */
 export const ADMIN_ROUTES = [
   { path: "/api/admin/settings", method: HttpMethod.GET },
   { path: "/api/admin/settings", method: HttpMethod.PUT },
+  { path: "/api/admin/stop", method: HttpMethod.POST },
+  { path: "/api/admin/resume", method: HttpMethod.POST },
 ] as const;
 
 /** The protected conversation routes (ticket 1.7; history and step from 1.8; spec and approve from 1.9), served by one function. */
@@ -111,6 +113,8 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/spec/approve", method: HttpMethod.POST },
   // Ticket 2.7: the caller's own build (the step 3 page polls it from ticket 2.10).
   { path: "/api/build", method: HttpMethod.GET },
+  // Ticket 3.5: the workshop's state (paused or not), asked every 30 s by every signed-in screen (one SETTINGS read).
+  { path: "/api/status", method: HttpMethod.GET },
 ] as const;
 
 /**
@@ -488,6 +492,9 @@ export class ApiStack extends Stack {
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["bedrock:InvokeModel"], resources: [...BEDROCK_INVOKE_RESOURCES] }),
     );
     worker.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [BUILD_QUEUE_ARN] }));
+    // Ticket 3.5: a job held by the global Stop goes back on the worker's own queue (with a delay), so the message stays
+    // answerable after Resume without growing the queue's receive count.
+    worker.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [aiQueue.queueArn] }));
     // One job per invocation, at most AI_WORKER_MAX_CONCURRENCY at once; the source grants the role the
     // consume rights on this queue only.
     worker.addEventSource(new SqsEventSource(aiQueue, { batchSize: 1, maxConcurrency: AI_WORKER_MAX_CONCURRENCY }));

@@ -17,6 +17,13 @@
 // over it, the call is not made: the message ends `failed` with the budget text (they send again once a facilitator
 // added budget), and a readiness request goes back to step 2 like a failed check, with no build. A build already
 // queued (a redelivered readiness job only re-sends its id) or running is never stopped.
+//
+// Ticket 3.5: while the admin's global Stop is on (read with the budget, at the start of each job), no AI call is made:
+// the message stays pending, its `pendingSince` moves to now (so a long Stop never makes it stale) and the job goes back
+// on the worker's own queue to come back after STOP_HOLD_SECONDS, as a new message (so the queue's receive count, which
+// sends a crashing job to the dead-letter queue, does not grow). After Resume, the next delivery answers it as usual. A
+// job already past that read finishes. A redelivered readiness job that only re-sends its build id calls no AI and is
+// not held (the launcher holds the build).
 import { errorName } from "../sign-in/code-request.js";
 import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
 import { answerMessage } from "./answer.js";
@@ -28,12 +35,14 @@ import {
   buildIdFor,
   FAILURE_REPLY,
   isStale,
+  STOP_HOLD_SECONDS,
   textHash,
   type AiJob,
   type BuildQueue,
   type ConversationStore,
   type Finish,
   type GuardrailRecord,
+  type HeldJobs,
   type ReadinessFinish,
   type StoredMessage,
 } from "./state.js";
@@ -53,7 +62,9 @@ export type WorkerOutcome =
   | "not-ready"
   | "resent"
   /** Ticket 3.3: the AI budget is used; the (next) AI call was not made and no build was queued. */
-  | "over-budget";
+  | "over-budget"
+  /** Ticket 3.5: the global Stop is on; no AI call, the message stays pending and the job comes back later. */
+  | "held";
 
 /** The only things ever logged: outcome, verdict and an error name (no text, prompt, reply or id). */
 export interface WorkerLogEntry {
@@ -68,6 +79,8 @@ export interface WorkerDeps {
   model: ModelClient;
   /** The launch queue (ticket 2.7). */
   builds: BuildQueue;
+  /** Ticket 3.5: the worker's own queue, for jobs held by the global Stop. */
+  held: HeldJobs;
   modelId: string;
   now: () => Date;
   log: (entry: WorkerLogEntry) => void;
@@ -135,8 +148,14 @@ async function run(
   let guardrail: GuardrailRecord | undefined;
   let finishing = false;
   try {
+    const facts = await deps.store.getBudgetFacts(participantId);
+    // Ticket 3.5: no AI call while the global Stop is on; a failed hold is thrown (SQS delivers the job again).
+    if (facts.settings.stopped) {
+      finishing = true;
+      return await hold(job, deps);
+    }
     // Ticket 3.3: no AI call once the budget is used (also for an approved flag or Write my spec's request).
-    const budget = budgetOf(await deps.store.getBudgetFacts(participantId));
+    const budget = budgetOf(facts);
     if (budget.reached) {
       finishing = true;
       const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY });
@@ -195,6 +214,17 @@ async function run(
   }
 }
 
+/**
+ * Ticket 3.5: keeps a pending message waiting while the global Stop is on: its time in flight moves to now, then the job
+ * goes back on the queue for STOP_HOLD_SECONDS. A message no longer pending or in flight is skipped (nothing sent).
+ */
+async function hold(job: AiJob, deps: WorkerDeps): Promise<Omit<WorkerLogEntry, "event">> {
+  const nowSeconds = Math.floor(deps.now().getTime() / 1000);
+  if (!(await deps.store.holdMessage(job.participantId, job.messageId, nowSeconds))) return { outcome: "skipped" };
+  await deps.held.sendLater(job, STOP_HOLD_SECONDS);
+  return { outcome: "held" };
+}
+
 /** The readiness request (ticket 2.7): the platform's own text, at the step only Approve spec stores messages at. */
 export function isReadinessRequest(message: Pick<StoredMessage, "step" | "text">): boolean {
   return message.step === "approved" && message.text === READINESS_REQUEST;
@@ -250,8 +280,14 @@ async function runReadiness(
   let finishing = false;
   let usage: ReturnType<typeof usageOf> | undefined;
   try {
+    const facts = await deps.store.getBudgetFacts(participantId);
+    // Ticket 3.5: no readiness check while the global Stop is on (held as any message).
+    if (facts.settings.stopped) {
+      finishing = true;
+      return await hold(job, deps);
+    }
     // Ticket 3.3: no readiness check (and so no build) once the budget is used.
-    const budget = budgetOf(await deps.store.getBudgetFacts(participantId));
+    const budget = budgetOf(facts);
     if (budget.reached) {
       finishing = true;
       const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY, version });

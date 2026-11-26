@@ -23,6 +23,7 @@ import {
 import {
   CHAT_TEXTS,
   POLL_INTERVAL_MS,
+  STATUS_POLL_INTERVAL_MS,
   WAITING_POLL_INTERVAL_MS,
   budgetLeftText,
   canWriteSpec,
@@ -31,6 +32,7 @@ import {
   sendResult,
   specOffered,
   stageOf,
+  statusResult,
   writeSpecResult,
   type ChatMessage,
 } from "./chat.js";
@@ -39,6 +41,7 @@ import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
 import { qrModules, qrSvgPath } from "./qr.js";
 import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, stageStates, type Build } from "./build-view.js";
+import { PHASE_3_TEXTS } from "../../api/workshop/texts.js";
 
 type ScreenName = Screen | "loading";
 
@@ -93,7 +96,64 @@ function show(name: ScreenName, focusId?: string): void {
     section.hidden = section.id !== `screen-${name}`;
   }
   byId("account").hidden = !SIGNED_IN_SCREENS.includes(name);
+  renderPaused();
+  syncStatusPolling();
   if (focusId) byId(focusId).focus();
+}
+
+/** Ticket 3.5: the workshop is paused (the admin's global Stop), as the last status, conversation, poll or build read said. */
+let workshopPaused = false;
+
+/** Shows the paused line above the signed-in screens while the last read said so; the next read without it clears it. */
+function setPaused(paused: boolean): void {
+  workshopPaused = paused;
+  renderPaused();
+}
+
+/**
+ * Sets the paused line from a conversation, poll or build answer: `paused: true` shows it, `pausedUnknown: true` (the
+ * server could not read the settings) keeps it as it is, and neither clears it.
+ */
+function setPausedFrom(answer: { paused?: true; pausedUnknown?: true }): void {
+  if (answer.pausedUnknown === true) return;
+  setPaused(answer.paused === true);
+}
+
+function renderPaused(): void {
+  const banner = byId("workshop-paused");
+  banner.textContent = PHASE_3_TEXTS.workshopPaused;
+  banner.hidden = !(workshopPaused && SIGNED_IN_SCREENS.includes(current));
+}
+
+/**
+ * Ticket 3.5: every signed-in screen asks `GET /api/status` every 30 s, so an idle page (the nickname screen, step 1 or
+ * 2 with nothing in flight, step 4) also shows and clears the paused line. It runs only while a signed-in screen shows
+ * and the tab is visible: leaving those screens (signing out) or hiding the tab stops it; showing the tab starts it again.
+ */
+let statusActive = false;
+let statusRound = 0;
+let statusTimer: number | undefined;
+
+function syncStatusPolling(): void {
+  const wanted = SIGNED_IN_SCREENS.includes(current) && document.visibilityState !== "hidden";
+  if (wanted === statusActive) return;
+  statusActive = wanted;
+  statusRound++;
+  if (statusTimer !== undefined) window.clearTimeout(statusTimer);
+  statusTimer = undefined;
+  if (wanted) scheduleStatus(statusRound);
+}
+
+function scheduleStatus(round: number): void {
+  statusTimer = window.setTimeout(() => void statusOnce(round), STATUS_POLL_INTERVAL_MS);
+}
+
+async function statusOnce(round: number): Promise<void> {
+  statusTimer = undefined;
+  const paused = statusResult(await call("GET", "/api/status"));
+  if (round !== statusRound) return;
+  if (paused !== undefined) setPaused(paused);
+  scheduleStatus(round);
 }
 
 /** Disables a button while its request runs and shows its waiting label. */
@@ -283,6 +343,7 @@ async function pollOnce(id: string, round: number, schedule: () => void): Promis
   pollTimer = undefined;
   const result = pollResult(await call("GET", `/api/conversation/messages/${encodeURIComponent(id)}`));
   if (round !== pollRound || waiting === null) return;
+  if (result.kind === "pending" || result.kind === "flagged" || result.kind === "answered") setPausedFrom(result);
   if (result.kind === "pending" || result.kind === "flagged") {
     waiting.mode = result.kind;
     setStatus(id, result.kind);
@@ -332,6 +393,7 @@ async function loadConversation(): Promise<void> {
     return;
   }
   const { conversation } = result;
+  setPausedFrom(conversation);
   if (conversation.step !== "clarify" && conversation.step !== "spec" && conversation.step !== "approved" && conversation.step !== "building") {
     await goToOwnStep(view.screen);
     return;
@@ -515,6 +577,7 @@ async function pollBuild(round: number): Promise<void> {
   if (result.kind === "show") say("build", result.message, result.tone);
   else clearMessage("build");
   if (result.kind === "build") {
+    setPausedFrom(result.build);
     renderBuild(result.build);
     if (result.build.status === "live") {
       showLive(result.build);
@@ -830,6 +893,7 @@ function wire(): void {
 }
 
 wire();
+document.addEventListener("visibilitychange", syncStatusPolling);
 show("loading");
 // A returning person with a valid session goes straight to their step.
 void goToOwnStep("email");

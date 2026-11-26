@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import type { BuildItem, BuildStatus, ConversationState, GuardrailVerdict, MessageStatus, Step, TokenUsage } from "../types.js";
 import type { BudgetFacts } from "../workshop/budget.js";
+import type { WorkshopSettings } from "../workshop/settings.js";
 import type { Exchange } from "./answer.js";
 
 /**
@@ -208,6 +209,14 @@ export interface ConversationStore {
    * fields (`extraBudget`) and their spend so far (`costUsd` of their `USAGE` item; none yet reads as 0).
    */
   getBudgetFacts(participantId: string): Promise<BudgetFacts>;
+  /** Ticket 3.5: the workshop settings (consistent read), for the global Stop's `paused` on the page's reads. */
+  getSettings(): Promise<WorkshopSettings>;
+  /**
+   * Ticket 3.5: while the global Stop is on, the AI worker holds a pending message instead of answering it: its
+   * `pendingSince` and the conversation's are set to now (so a long Stop never makes it stale), in one transaction,
+   * only while it is still pending and the conversation's message in flight. False when not (nothing written).
+   */
+  holdMessage(participantId: string, messageId: string, nowSeconds: number): Promise<boolean>;
 }
 
 /** What the AI worker reads of a profile for the readiness check (ticket 2.7). */
@@ -264,6 +273,17 @@ export interface MessageQueue {
 export interface AiJob {
   participantId: string;
   messageId: string;
+}
+
+/**
+ * Ticket 3.5: how long a job held by the global Stop waits before the AI worker sees it again. Resume is answered within
+ * about this long; while Stop stays on, each held job costs one short worker run per this many seconds.
+ */
+export const STOP_HOLD_SECONDS = 30;
+
+/** Ticket 3.5: the AI worker's own queue, for a job held by the global Stop (a new message, delivered after a delay). */
+export interface HeldJobs {
+  sendLater(job: AiJob, delaySeconds: number): Promise<void>;
 }
 
 /** The queue message body as a job, or undefined when it is not one. */

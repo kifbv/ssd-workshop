@@ -13,10 +13,16 @@ export interface WorkshopSettings {
   buildsAtOnce: number;
   /** The admin's global Stop (ticket 3.5): AI calls and builds wait while it is on. */
   stopped: boolean;
+  /**
+   * Ticket 3.5: ISO 8601, when the admin last pressed Resume (absent before the first Resume). The launcher's check counts
+   * a queued build's wait from its place in the line or from this time, whichever is later, so a Stop never makes
+   * waiting builds run into the queued time limit.
+   */
+  resumedAt?: string;
 }
 
 /** The three caps the admin changes with `PUT /api/admin/settings` (Stop has its own routes, ticket 3.5). */
-export type WorkshopCaps = Omit<WorkshopSettings, "stopped">;
+export type WorkshopCaps = Omit<WorkshopSettings, "stopped" | "resumedAt">;
 
 /** What every reader gets when the item, or one of its values, is missing: $5, 5 changes, 15 builds, Stop off. */
 export const DEFAULT_SETTINGS: Readonly<WorkshopSettings> = Object.freeze({
@@ -73,11 +79,15 @@ export function settingsFromItem(item: Record<string, AttributeValue> | undefine
     const value = raw === undefined ? undefined : Number(raw);
     return inRange(name, value) ? value : DEFAULT_SETTINGS[name];
   };
+  // Ticket 3.5: a time that does not read as one is left out (a malformed value never delays or fails a build).
+  const resumedRaw = item?.["resumedAt"]?.S;
+  const resumedAt = resumedRaw !== undefined && Number.isFinite(Date.parse(resumedRaw)) ? resumedRaw : undefined;
   return {
     aiBudgetUsd: cap("aiBudgetUsd"),
     changeRequestsPerPerson: cap("changeRequestsPerPerson"),
     buildsAtOnce: cap("buildsAtOnce"),
     stopped: item?.["stopped"]?.BOOL === true,
+    ...(resumedAt === undefined ? {} : { resumedAt }),
   };
 }
 

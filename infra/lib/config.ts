@@ -203,22 +203,38 @@ export const PARTICIPANT_NICK_PUT_ATTRIBUTES = ["pk", "sk", "type", "nickname", 
 /** The profile attribute names the participant function may update in `PARTICIPANT#*` (`stepSince` with the step, ticket 3.2). */
 export const PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES = ["pk", "sk", "nickname", "step", "stepSince"] as const;
 
-/** Lambda function, role and log group of the admin routes (ticket 3.2: `GET` and `PUT /api/admin/settings`). */
+/**
+ * Lambda function, role and log group of the admin routes (ticket 3.2: `GET` and `PUT /api/admin/settings`; ticket 3.5:
+ * `POST /api/admin/stop` and `POST /api/admin/resume`).
+ */
 export const ADMIN_FUNCTION_NAME = `${PREFIX}-api-admin`;
 /** Partition key of the one workshop settings item (platform/api/keys.ts SETTINGS_PK). */
 export const SETTINGS_PARTITION = "SETTINGS";
 /**
  * The attribute names the admin function may update in the `SETTINGS` partition (UpdateItem only; ticket 3.2): the
- * three caps. No other role may write `SETTINGS` (synth test). Ticket 3.5 adds `stopped` for the global Stop.
+ * three caps. No other role may write `SETTINGS` (synth test). Ticket 3.5: the global Stop (`stopped`) and when it was last
+ * pressed (`stoppedAt`) and released (`resumedAt`).
  */
-export const SETTINGS_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt"] as const;
+export const SETTINGS_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "aiBudgetUsd",
+  "changeRequestsPerPerson",
+  "buildsAtOnce",
+  "updatedAt",
+  "stopped",
+  "stoppedAt",
+  "resumedAt",
+] as const;
 
 /**
  * The attribute names the AI worker and the conversation function may read from the `SETTINGS` item (GetItem with a
- * projection, `dynamodb:Select` `SPECIFIC_ATTRIBUTES`; ticket 3.3 reads the budget, ticket 3.5 will read `stopped`).
- * `readSettings` in platform/api/workshop/store.ts projects exactly these (tested).
+ * projection, `dynamodb:Select` `SPECIFIC_ATTRIBUTES`; ticket 3.3 reads the budget, ticket 3.5 `stopped` and, for the
+ * launcher's queued time limit, `resumedAt`). `readSettings` in platform/api/workshop/store.ts projects exactly these
+ * (tested).
  */
-export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped"] as const;
+export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"] as const;
 
 /** Lambda function, role and log group of the data API for apps (ticket 2.4). */
 export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
@@ -462,8 +478,25 @@ export const LAUNCHER_READ_ATTRIBUTES = ["pk", "sk", "nickname", "participantId"
  * `queued` to `building` under a new launch (`attemptId`, ticket 2.9 try 2), the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only
  * compared (IAM counts condition names). Ticket 3.4: `queueKey`, the build's place in the waiting line (set when the
  * launcher first sees it, removed by the claim); also ConditionCheckItem, for the slot release (SLOT_RELEASE_CHECK_ATTRIBUTES).
+ * Ticket 3.5: `feed`, removed (with the attempt, launch time and task) when the global Stop puts a running build back in
+ * the queue, so it starts again from the beginning.
  */
-export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "status", "nickname", "participantId", "pushedCommit", "attemptId", "taskArn", "launchedAt", "updatedAt", "failureReasons", "finishedAt", "queueKey"] as const;
+export const LAUNCHER_BUILD_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "status",
+  "nickname",
+  "participantId",
+  "pushedCommit",
+  "attemptId",
+  "taskArn",
+  "launchedAt",
+  "updatedAt",
+  "failureReasons",
+  "finishedAt",
+  "queueKey",
+  "feed",
+] as const;
 /** The watch list's attribute names (`LAUNCHES` partition: PutItem, UpdateItem, DeleteItem, Query). */
 export const LAUNCHER_LAUNCH_ATTRIBUTES = ["pk", "sk", "type", "buildId", "taskArn", "claimedAt"] as const;
 /** The watch list's partition key (platform/api/keys.ts LAUNCHES_PK). */
