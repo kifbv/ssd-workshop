@@ -468,6 +468,25 @@ Each app may also write 50 MB per UTC day (ticket 3.17; was 5 MB), counted as Dy
 `PUT` and `DELETE` answer 429 "This app has saved a lot of data today. Saving starts again tomorrow." until
 midnight UTC.
 
+## Check after the bigger app data deploy (ticket 3.17)
+
+No credentials needed (the data API has no sign-in). On a live app's nickname `<nick>` and a key no app
+uses (`limit-check`): a value of about 300 KB round-trips unchanged, one over 350 KB is refused, then the key is removed.
+
+```sh
+python3 -c 'import json, sys; sys.stdout.write(json.dumps("a" * 300000))' > /tmp/v300.json
+python3 -c 'import json, sys; sys.stdout.write(json.dumps("a" * 360000))' > /tmp/v360.json
+U=https://workshop.rankly.games/api/apps/<nick>/data/limit-check
+curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'content-type: application/json' --data-binary @/tmp/v300.json "$U"
+# expect: 204
+curl -sS "$U" | cmp - /tmp/v300.json && echo same
+# expect: same
+curl -sS -w '\n%{http_code}\n' -X PUT -H 'content-type: application/json' --data-binary @/tmp/v360.json "$U"
+# expect: 413 with "This value is too big: a value can hold at most 350 KB."
+curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$U"
+# expect: 204
+```
+
 ## Check after the apps deploy (ticket 2.5)
 
 ```mermaid
