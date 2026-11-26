@@ -281,3 +281,7 @@ paths:
   root (`/style.css`). A page that polls keeps its cards by a stable key and updates them in place, so an open panel or
   a busy button survives the next read. In Playwright, an aborted request (`route.abort()`) logs
   "Failed to load resource: net::ERR_FAILED", which the console check must expect.
+- Confirmations on pages are in-page steps, never `window.confirm`/`alert` (ticket 3.12; `facilitator.test.ts` counts any
+  dialog as a violation). A switch whose answer may be lost after it applied (Stop/Resume) re-reads the state on any
+  answer but a good 200 before showing it. A form polled beside live data fills its fields once (first read, each
+  save), never from the poll, or the poll erases what is being typed.

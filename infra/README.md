@@ -792,6 +792,33 @@ Run by Franck on a phone, signed in as a facilitator, with a test participant si
 7. Switch to another app on the phone for a minute and back: in the browser's network view on a laptop (or the
    facilitator function's CloudWatch log lines for `"route":"list"`), no list read happens while the tab is hidden.
 
+## Check after the admin controls deploy (ticket 3.12)
+
+```mermaid
+flowchart LR
+  admin[Admin's phone<br/>workshop.rankly.games/facilitator/] -->|GET, PUT /api/admin/settings| fn[ssd-workshop-api-admin]
+  admin -->|POST /api/admin/stop, /resume| fn
+  fn -->|caps and stopped| table[(SETTINGS item)]
+  table -.->|read by| workers[AI worker, launcher]
+```
+
+Run by Franck on a phone, signed in as the admin, with a facilitator and a test participant signed in on other devices.
+Do it outside a session with real participants: Stop holds everyone's messages and builds.
+
+1. The admin opens the dashboard: "Workshop controls (admin)" shows "Workshop running.", the red "Stop the workshop"
+   button and the three caps ($5.00, 5, 15 unless changed). The facilitator's dashboard shows none of it. Nothing
+   scrolls sideways on the phone.
+2. Change "Builds at once" to 99 and press Save: the API's sentence shows under Save and "Enter a whole number from 1 to
+   30." beside the field; nothing is saved. Set it to 14 and Save: "Saved. ...". Reload: the field shows 14. In
+   CloudWatch Logs `ssd-workshop-api-admin` has `"route":"settings-put","outcome":"invalid-request"` then `"saved"`.
+   Set it back to 15.
+3. Press "Stop the workshop": the page asks in place (no browser pop-up). Cancel: nothing changes. Press it again and
+   "Yes, stop everything": the box turns red with "Workshop paused: ..." and a "Resume the workshop" button; within
+   5 seconds the facilitator's dashboard shows the stopped banner and the participant's page shows "The workshop is
+   paused for a moment." within 30 seconds. A message the participant sends stays pending.
+4. Press "Resume the workshop": "Workshop running." and the Stop button again; the participant's pending message gets
+   its answer and the paused line goes.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

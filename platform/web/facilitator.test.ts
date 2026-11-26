@@ -11,7 +11,7 @@ import { extname, join, normalize } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
-import { DASHBOARD_TEXTS, PHASE_3_TEXTS, otherGroupFlagsText } from "../api/workshop/texts.js";
+import { ADMIN_TEXTS, DASHBOARD_TEXTS, PHASE_3_TEXTS, capErrorText, otherGroupFlagsText } from "../api/workshop/texts.js";
 import { buildWeb } from "./build.js";
 
 const PHONE = { width: 375, height: 667 };
@@ -19,6 +19,8 @@ const LAPTOP = { width: 1280, height: 800 };
 const TYPES: Record<string, string> = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript" };
 /** Where the ticket's screenshots go when asked (`DASHBOARD_SCREENSHOTS=<folder> npx vitest run ...`); CI takes none. */
 const SHOTS = process.env["DASHBOARD_SCREENSHOTS"];
+/** Ticket 3.12's screenshot of the admin section, when asked (`ADMIN_SCREENSHOTS=<folder>`); CI takes none. */
+const ADMIN_SHOTS = process.env["ADMIN_SCREENSHOTS"];
 const LIST = "/api/facilitator/participants";
 
 let dir: string;
@@ -65,6 +67,11 @@ async function openContext(viewport = PHONE, deviceScaleFactor = 1): Promise<voi
     if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of")) violations.push(message.text());
   });
   page.on("pageerror", (error) => violations.push(error.message));
+  // No browser dialog (alert, confirm, prompt) on this page: confirmations are in-page (ticket 3.12).
+  page.on("dialog", (dialog) => {
+    violations.push(`dialog: ${dialog.type()}`);
+    void dialog.dismiss();
+  });
 }
 
 beforeEach(async () => {
@@ -82,6 +89,7 @@ interface Call {
   path: string;
   search: string;
   contentType: string | undefined;
+  body: string | null;
 }
 type Reply = { status: number; body?: unknown };
 type Handler = (call: Call) => Reply;
@@ -92,7 +100,7 @@ async function mockApi(handlers: Record<string, Handler>): Promise<Call[]> {
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const call: Call = { method: request.method(), path: url.pathname, search: url.search, contentType: request.headers()["content-type"] };
+    const call: Call = { method: request.method(), path: url.pathname, search: url.search, contentType: request.headers()["content-type"], body: request.postData() };
     calls.push(call);
     const handler = handlers[`${call.method} ${call.path}`];
     const reply = handler ? handler(call) : { status: 404, body: { message: "Not found." } };
@@ -569,5 +577,264 @@ describe("dashboard screenshots (ticket 3.11)", () => {
       await page.screenshot({ path: join(target, name), fullPage: true });
       await expectNoSideScroll(viewport.width);
     }
+  }, 30_000);
+});
+
+const SETTINGS = "/api/admin/settings";
+
+/**
+ * The admin routes (tickets 3.2 and 3.5) beside the facilitator API: the caps with the API's ranges, Stop and Resume.
+ * `failSwitch` makes the next Stop or Resume answer 500, after applying it ("applied") or not ("lost").
+ */
+function fakeAdminApi() {
+  const api = fakeFacilitatorApi(room(), { role: "admin", group: "staff" });
+  const caps = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15 };
+  const admin = { caps, failSwitch: undefined as "applied" | "lost" | undefined, settingsReads: 0 };
+  const body = () => ({ status: 200, body: { ...admin.caps, stopped: api.state.stopped } });
+  const ranges = { aiBudgetUsd: [0, 50, false], changeRequestsPerPerson: [0, 20, true], buildsAtOnce: [1, 30, true] } as const;
+  const switchTo = (stopped: boolean): Reply => {
+    const failing = admin.failSwitch;
+    admin.failSwitch = undefined;
+    if (failing !== "lost") api.state.stopped = stopped;
+    return failing === undefined ? body() : { status: 500, body: { message: "Something went wrong. Please try again." } };
+  };
+  Object.assign(api.handlers, {
+    [`GET ${SETTINGS}`]: () => {
+      admin.settingsReads++;
+      return body();
+    },
+    [`PUT ${SETTINGS}`]: (call: Call) => {
+      const sent = JSON.parse(call.body ?? "{}") as Record<string, unknown>;
+      const invalid = (Object.keys(ranges) as (keyof typeof ranges)[]).filter((name) => {
+        const [min, max, whole] = ranges[name];
+        const value = sent[name];
+        return typeof value !== "number" || value < min || value > max || (whole && !Number.isInteger(value));
+      });
+      if (invalid.length > 0) {
+        return { status: 400, body: { message: "Send aiBudgetUsd (0 to 50 dollars), changeRequestsPerPerson (0 to 20) and buildsAtOnce (1 to 30), as numbers.", invalid } };
+      }
+      admin.caps = { aiBudgetUsd: Math.round((sent["aiBudgetUsd"] as number) * 100) / 100, changeRequestsPerPerson: sent["changeRequestsPerPerson"] as number, buildsAtOnce: sent["buildsAtOnce"] as number };
+      return body();
+    },
+    "POST /api/admin/stop": () => switchTo(true),
+    "POST /api/admin/resume": () => switchTo(false),
+  } satisfies Record<string, Handler>);
+  return { ...api, admin };
+}
+
+async function expectAdmin(): Promise<void> {
+  await expect.poll(() => page.locator("#admin").isVisible()).toBe(true);
+}
+
+const adminCalls = (calls: Call[]) => calls.filter((c) => c.path.startsWith("/api/admin/"));
+
+describe("admin controls on the dashboard (ticket 3.12)", () => {
+  it("criterion 1: WHEN the admin opens the dashboard THEN the caps and the Stop button are shown", async () => {
+    await mockApi(fakeAdminApi().handlers);
+    await openDashboard();
+    await expectDashboard();
+    await expectAdmin();
+    expect(await page.locator("#cap-aiBudgetUsd").inputValue()).toBe("5.00");
+    expect(await page.locator("#cap-changeRequestsPerPerson").inputValue()).toBe("5");
+    expect(await page.locator("#cap-buildsAtOnce").inputValue()).toBe("15");
+    expect(await page.getByLabel("AI budget per person ($)").isVisible()).toBe(true);
+    expect(await page.getByLabel("Change requests per person").isVisible()).toBe(true);
+    expect(await page.getByLabel("Builds at once").isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Save" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Stop the workshop" }).isVisible()).toBe(true);
+    expect(await page.locator("#workshop-state").textContent()).toBe(ADMIN_TEXTS.workshopRunning);
+    expect(await page.locator("#resume-button").isVisible()).toBe(false);
+    await expectNoSideScroll();
+  });
+
+  it("criterion 1: WHEN a facilitator opens the dashboard THEN the caps and the Stop button are not shown (and the admin routes are never called)", async () => {
+    const api = fakeAdminApi();
+    api.state.viewer = { role: "facilitator", group: "g1" };
+    const calls = await mockApi(api.handlers);
+    await openDashboard();
+    await expectDashboard();
+    await listAfter(5_000);
+    expect(await page.locator("#admin").isVisible()).toBe(false);
+    expect(await page.locator("#stop-button").isVisible()).toBe(false);
+    expect(await page.locator("#caps-form").isVisible()).toBe(false);
+    expect(adminCalls(calls)).toEqual([]);
+  });
+
+  it("keeps the section hidden when the API refuses the settings (404), whatever the list says: the API decides, not the page", async () => {
+    const api = fakeAdminApi();
+    api.handlers[`GET ${SETTINGS}`] = () => ({ status: 404, body: { message: "Not found." } });
+    const calls = await mockApi(api.handlers);
+    await openDashboard();
+    await expectDashboard();
+    await expect.poll(() => adminCalls(calls).length).toBe(1);
+    await listAfter(5_000);
+    await listAfter(5_000);
+    expect(await page.locator("#admin").isVisible()).toBe(false);
+    // Asked once: a 404 is the API's answer, not a failure to retry.
+    expect(adminCalls(calls).length).toBe(1);
+  });
+
+  it("criterion 2: WHEN the admin saves new caps THEN PUT /api/admin/settings is called with them", async () => {
+    const api = fakeAdminApi();
+    const calls = await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    await page.getByLabel("AI budget per person ($)").fill("7.5");
+    await page.getByLabel("Change requests per person").fill("3");
+    await page.getByLabel("Builds at once").fill("10");
+    // A list read meanwhile does not overwrite what the admin typed.
+    await listAfter(5_000);
+    expect(await page.locator("#cap-aiBudgetUsd").inputValue()).toBe("7.5");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => page.locator("#message-caps").textContent()).toBe(ADMIN_TEXTS.saved);
+    const puts = calls.filter((c) => c.method === "PUT" && c.path === SETTINGS);
+    expect(puts.length).toBe(1);
+    expect(puts[0]?.contentType).toBe("application/json");
+    expect(JSON.parse(puts[0]?.body ?? "")).toEqual({ aiBudgetUsd: 7.5, changeRequestsPerPerson: 3, buildsAtOnce: 10 });
+    expect(api.admin.caps).toEqual({ aiBudgetUsd: 7.5, changeRequestsPerPerson: 3, buildsAtOnce: 10 });
+    // The fields show the caps as the API read them back.
+    expect(await page.locator("#cap-aiBudgetUsd").inputValue()).toBe("7.50");
+    expect(await page.locator("#message-caps").getAttribute("data-tone")).toBe("info");
+  });
+
+  it("shows the API's validation errors (400) next to the fields it names, and stores nothing", async () => {
+    const api = fakeAdminApi();
+    const calls = await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    await page.getByLabel("AI budget per person ($)").fill("99");
+    await page.getByLabel("Builds at once").fill("");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => page.locator("#message-caps").getAttribute("data-tone")).toBe("error");
+    expect(await page.locator("#message-caps").textContent()).toContain("Send aiBudgetUsd (0 to 50 dollars)");
+    const put = calls.find((c) => c.method === "PUT");
+    expect(JSON.parse(put?.body ?? "")).toEqual({ aiBudgetUsd: 99, changeRequestsPerPerson: 5, buildsAtOnce: null });
+    expect(await page.locator("#cap-aiBudgetUsd-error").textContent()).toBe(capErrorText("aiBudgetUsd"));
+    expect(await page.locator("#cap-buildsAtOnce-error").textContent()).toBe(capErrorText("buildsAtOnce"));
+    expect(await page.locator("#cap-changeRequestsPerPerson-error").isVisible()).toBe(false);
+    expect(await page.locator("#cap-aiBudgetUsd").getAttribute("aria-invalid")).toBe("true");
+    expect(await page.locator("#cap-changeRequestsPerPerson").getAttribute("aria-invalid")).toBeNull();
+    expect(api.admin.caps).toEqual({ aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15 });
+    await expectNoSideScroll();
+    // Fixed and saved again: the errors go.
+    await page.getByLabel("AI budget per person ($)").fill("20");
+    await page.getByLabel("Builds at once").fill("12");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => page.locator("#message-caps").textContent()).toBe(ADMIN_TEXTS.saved);
+    expect(await page.locator("#cap-aiBudgetUsd-error").isVisible()).toBe(false);
+    expect(await page.locator("#cap-aiBudgetUsd").getAttribute("aria-invalid")).toBeNull();
+  });
+
+  it("criterion 3: WHEN Stop is pressed and confirmed THEN the page shows \"Workshop paused\" and a Resume button", async () => {
+    const api = fakeAdminApi();
+    const calls = await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    // Pressing Stop only asks (in the page, no browser dialog); Cancel leaves everything as it was.
+    await page.getByRole("button", { name: "Stop the workshop" }).click();
+    expect(await page.locator("#stop-question").textContent()).toBe(ADMIN_TEXTS.stopQuestion);
+    expect(calls.filter((c) => c.path === "/api/admin/stop")).toEqual([]);
+    await page.getByRole("button", { name: "Cancel" }).click();
+    expect(await page.locator("#stop-confirm").isVisible()).toBe(false);
+    expect(await page.getByRole("button", { name: "Stop the workshop" }).isVisible()).toBe(true);
+    expect(calls.filter((c) => c.path === "/api/admin/stop")).toEqual([]);
+    // Stop, then confirm.
+    await page.getByRole("button", { name: "Stop the workshop" }).click();
+    await page.getByRole("button", { name: "Yes, stop everything" }).click();
+    await expect.poll(() => page.locator("#workshop-state").textContent()).toBe(ADMIN_TEXTS.workshopPaused);
+    expect(ADMIN_TEXTS.workshopPaused).toMatch(/^Workshop paused/);
+    expect(await page.getByText("Workshop paused").isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Resume the workshop" }).isVisible()).toBe(true);
+    expect(await page.locator("#stop-button").isVisible()).toBe(false);
+    expect(await page.locator("#dashboard-stopped").isVisible()).toBe(true);
+    const stops = calls.filter((c) => c.path === "/api/admin/stop");
+    expect(stops.length).toBe(1);
+    expect(stops[0]?.method).toBe("POST");
+    expect(stops[0]?.contentType).toBe("application/json");
+    await expectNoSideScroll();
+    // The state survives the next list read, and Resume (no confirmation) turns it back.
+    await listAfter(5_000);
+    expect(await page.locator("#resume-button").isVisible()).toBe(true);
+    await page.getByRole("button", { name: "Resume the workshop" }).click();
+    await expect.poll(() => page.locator("#workshop-state").textContent()).toBe(ADMIN_TEXTS.workshopRunning);
+    expect(await page.getByRole("button", { name: "Stop the workshop" }).isVisible()).toBe(true);
+    expect(await page.locator("#resume-button").isVisible()).toBe(false);
+    expect(await page.locator("#dashboard-stopped").isVisible()).toBe(false);
+    expect(calls.filter((c) => c.path === "/api/admin/resume").length).toBe(1);
+  });
+
+  it("follows a Stop pressed elsewhere: the state comes with each list read", async () => {
+    const api = fakeAdminApi();
+    await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    api.state.stopped = true;
+    await listAfter(5_000);
+    expect(await page.locator("#workshop-state").textContent()).toBe(ADMIN_TEXTS.workshopPaused);
+    expect(await page.locator("#resume-button").isVisible()).toBe(true);
+  });
+
+  for (const failing of ["applied", "lost"] as const) {
+    it(`reads the settings again after a 500 from Stop (switch ${failing}) and shows the true state`, async () => {
+      const api = fakeAdminApi();
+      const calls = await mockApi(api.handlers);
+      await openDashboard();
+      await expectAdmin();
+      const readsBefore = api.admin.settingsReads;
+      api.admin.failSwitch = failing;
+      await page.getByRole("button", { name: "Stop the workshop" }).click();
+      await page.getByRole("button", { name: "Yes, stop everything" }).click();
+      await expect.poll(() => page.locator("#message-stop").textContent()).toBe(ADMIN_TEXTS.switchFailed);
+      expect(api.admin.settingsReads).toBe(readsBefore + 1);
+      const last = calls.filter((c) => c.path.startsWith("/api/admin/")).slice(-2);
+      expect(last.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /api/admin/stop", `GET ${SETTINGS}`]);
+      const stopped = failing === "applied";
+      expect(await page.locator("#workshop-state").textContent()).toBe(stopped ? ADMIN_TEXTS.workshopPaused : ADMIN_TEXTS.workshopRunning);
+      expect(await page.locator("#resume-button").isVisible()).toBe(stopped);
+      expect(await page.locator("#stop-button").isVisible()).toBe(!stopped);
+      expect(await page.locator("#stop-confirm").isVisible()).toBe(false);
+    });
+  }
+
+  it("reads the settings again after a 500 from Resume too", async () => {
+    const api = fakeAdminApi();
+    api.state.stopped = true;
+    await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    expect(await page.locator("#resume-button").isVisible()).toBe(true);
+    api.admin.failSwitch = "applied";
+    await page.getByRole("button", { name: "Resume the workshop" }).click();
+    await expect.poll(() => page.locator("#message-stop").textContent()).toBe(ADMIN_TEXTS.switchFailed);
+    expect(await page.locator("#workshop-state").textContent()).toBe(ADMIN_TEXTS.workshopRunning);
+    expect(await page.locator("#stop-button").isVisible()).toBe(true);
+  });
+
+  it("says so plainly when Stop fails and the settings cannot be read again either", async () => {
+    const api = fakeAdminApi();
+    await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    api.handlers["POST /api/admin/stop"] = () => ({ status: 500, body: { message: "Something went wrong. Please try again." } });
+    api.handlers[`GET ${SETTINGS}`] = () => ({ status: 500, body: { message: "Something went wrong. Please try again." } });
+    await page.getByRole("button", { name: "Stop the workshop" }).click();
+    await page.getByRole("button", { name: "Yes, stop everything" }).click();
+    await expect.poll(() => page.locator("#message-stop").textContent()).toBe(ADMIN_TEXTS.switchUnknown);
+    expect(await page.locator("#message-stop").getAttribute("data-tone")).toBe("error");
+  });
+});
+
+describe("admin screenshot (ticket 3.12)", () => {
+  it.skipIf(ADMIN_SHOTS === undefined || ADMIN_SHOTS === "")("takes the 375 px screenshot of the admin section", async () => {
+    const target = ADMIN_SHOTS as string;
+    mkdirSync(target, { recursive: true });
+    await context.close();
+    await openContext(PHONE, 2);
+    await mockApi(fakeAdminApi().handlers);
+    await openDashboard();
+    await expectAdmin();
+    await settle();
+    await page.locator("#admin").screenshot({ path: join(target, "admin-375.png") });
+    await expectNoSideScroll();
   }, 30_000);
 });

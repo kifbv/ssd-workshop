@@ -25,8 +25,22 @@ import {
   type ParticipantList,
   type Row,
 } from "./dashboard-view.js";
+import {
+  CAP_FIELDS,
+  RESUME_PATH,
+  SETTINGS_PATH,
+  STOP_PATH,
+  capsBody,
+  fieldValue,
+  saveResult,
+  settingsResult,
+  stateText,
+  switchResult,
+  type AdminSettings,
+  type CapField,
+} from "./admin-view.js";
 import type { ApiAnswer } from "./flow.js";
-import { DASHBOARD_TEXTS, otherGroupFlagsText } from "../../api/workshop/texts.js";
+import { ADMIN_TEXTS, DASHBOARD_TEXTS, capErrorText, otherGroupFlagsText } from "../../api/workshop/texts.js";
 
 /** Button labels (the web code's own; messages for people come from platform/api/workshop/texts.ts). */
 const LABELS = {
@@ -58,12 +72,12 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: stri
   return made;
 }
 
-/** Same-origin JSON call; status 0 when there is no answer at all. Every POST sends a JSON content type (else 415). */
-async function call(method: "GET" | "POST", path: string): Promise<ApiAnswer> {
+/** Same-origin JSON call; status 0 when there is no answer at all. Every write sends a JSON content type (else 415). */
+async function call(method: "GET" | "POST" | "PUT", path: string, body: unknown = {}): Promise<ApiAnswer> {
   const init: RequestInit = { method, credentials: "same-origin", cache: "no-store" };
-  if (method === "POST") {
+  if (method !== "GET") {
     init.headers = { "content-type": "application/json" };
-    init.body = "{}";
+    init.body = JSON.stringify(body);
   }
   try {
     const response = await fetch(path, init);
@@ -137,8 +151,11 @@ function stopForGood(): void {
 
 async function pollOnce(mine: number): Promise<void> {
   timer = undefined;
+  const switchesBefore = switches;
   const result = listResult(await call("GET", "/api/facilitator/participants"));
   if (mine !== round) return;
+  // A list read that started before a Stop or Resume answered may hold the old state: the admin's answer wins.
+  if (result.kind === "list" && switchesBefore !== switches && knownStopped !== undefined) result.list.stopped = knownStopped;
   if (result.kind === "signed-out") return goToSignIn();
   if (result.kind === "not-facilitator") {
     stopForGood();
@@ -162,6 +179,7 @@ function showDenied(message: string): void {
   byId("dashboard").hidden = true;
   byId("rows").replaceChildren();
   byId("flag-list").replaceChildren();
+  hideAdmin("denied");
   byId("dashboard-denied-text").textContent = message;
   byId("dashboard-denied").hidden = false;
 }
@@ -270,9 +288,8 @@ function render(): void {
   if (current === undefined) return;
   byId("dashboard-loading").hidden = true;
   byId("dashboard").hidden = false;
-  const stopped = byId("dashboard-stopped");
-  stopped.textContent = DASHBOARD_TEXTS.workshopStopped;
-  stopped.hidden = !current.stopped;
+  renderStoppedBanner(current.stopped);
+  renderAdmin(current);
   renderFilter(current);
   const chosen = filter ?? EVERYONE;
   const rows = shownRows(current.participants, chosen);
@@ -448,6 +465,167 @@ async function toggleConversation(card: Card): Promise<void> {
   card.view.setAttribute("aria-expanded", "true");
   card.view.textContent = LABELS.hide;
 }
+
+// ---- The admin's controls (ticket 3.12): the caps and the global Stop. ----
+//
+// Shown only when the list says the viewer is the admin AND `GET /api/admin/settings` answers 200: the API decides
+// (it answers 404 to anyone else), never the page. The caps' fields are filled once, from that read and from each save,
+// so a list read never overwrites what the admin is typing; the Stop state follows every list read.
+
+type AdminState = "unknown" | "loading" | "shown" | "denied";
+let adminState: AdminState = "unknown";
+/** The Stop state the admin routes last gave (undefined before the first read). */
+let knownStopped: boolean | undefined;
+/** Counts Stop and Resume presses that got an answer, so an older list read cannot undo the state they showed. */
+let switches = 0;
+let switching = false;
+
+function renderStoppedBanner(stopped: boolean): void {
+  const banner = byId("dashboard-stopped");
+  banner.textContent = DASHBOARD_TEXTS.workshopStopped;
+  banner.hidden = !stopped;
+}
+
+function hideAdmin(state: AdminState): void {
+  adminState = state;
+  byId("admin").hidden = true;
+}
+
+function renderAdmin(current: ParticipantList): void {
+  if (current.viewer.role !== "admin") {
+    if (adminState !== "unknown") hideAdmin("unknown");
+    return;
+  }
+  if (adminState === "unknown") void loadAdmin();
+  else if (adminState === "shown" && !switching) showStopped(current.stopped);
+}
+
+async function loadAdmin(): Promise<void> {
+  adminState = "loading";
+  const result = settingsResult(await call("GET", SETTINGS_PATH));
+  if (adminState !== "loading") return;
+  if (result.kind === "signed-out") return goToSignIn();
+  if (result.kind === "not-admin") return hideAdmin("denied");
+  if (result.kind === "error") {
+    // Not shown yet: the next list read (5 s) tries again.
+    adminState = "unknown";
+    return;
+  }
+  fillCaps(result.settings);
+  showStopped(result.settings.stopped);
+  adminState = "shown";
+  byId("admin").hidden = false;
+}
+
+const capInput = (name: CapField): HTMLInputElement => byId<HTMLInputElement>(`cap-${name}`);
+
+function fillCaps(settings: AdminSettings): void {
+  for (const name of CAP_FIELDS) capInput(name).value = fieldValue(name, settings);
+}
+
+function markInvalid(invalid: readonly CapField[]): void {
+  for (const name of CAP_FIELDS) {
+    const bad = invalid.includes(name);
+    const error = byId(`cap-${name}-error`);
+    error.textContent = bad ? capErrorText(name) : "";
+    error.hidden = !bad;
+    if (bad) capInput(name).setAttribute("aria-invalid", "true");
+    else capInput(name).removeAttribute("aria-invalid");
+  }
+}
+
+async function saveCaps(): Promise<void> {
+  const save = byId<HTMLButtonElement>("caps-save");
+  if (isBusy(save)) return;
+  byId("message-caps").textContent = "";
+  const values = Object.fromEntries(CAP_FIELDS.map((name) => [name, capInput(name).value])) as Record<CapField, string>;
+  const result = saveResult(await whileBusy(save, () => call("PUT", SETTINGS_PATH, capsBody(values))));
+  if (result.kind === "signed-out") return goToSignIn();
+  if (result.kind === "not-admin") return hideAdmin("denied");
+  if (result.kind === "invalid") {
+    markInvalid(result.invalid);
+    say("message-caps", result.message, "error");
+    capInput(result.invalid[0] ?? "aiBudgetUsd").focus();
+    return;
+  }
+  markInvalid([]);
+  if (result.kind === "error") return say("message-caps", result.message, "error");
+  fillCaps(result.settings);
+  showStopped(result.settings.stopped);
+  say("message-caps", result.message, "info");
+}
+
+/** Shows the Stop state: Stop (or its confirmation) while running, Resume while stopped; the banner follows. */
+function showStopped(stopped: boolean): void {
+  knownStopped = stopped;
+  const box = byId("admin-stop-box");
+  box.dataset["stopped"] = String(stopped);
+  byId("workshop-state").textContent = stateText(stopped);
+  const confirming = !byId("stop-confirm").hidden;
+  byId<HTMLButtonElement>("stop-button").hidden = stopped || confirming;
+  if (stopped) byId("stop-confirm").hidden = true;
+  byId<HTMLButtonElement>("resume-button").hidden = !stopped;
+  if (list !== undefined) list.stopped = stopped;
+  renderStoppedBanner(stopped);
+}
+
+function askToStop(): void {
+  byId("message-stop").textContent = "";
+  byId("stop-question").textContent = ADMIN_TEXTS.stopQuestion;
+  byId("stop-button").hidden = true;
+  byId("stop-confirm").hidden = false;
+  byId("stop-yes").focus();
+}
+
+function cancelStop(): void {
+  byId("stop-confirm").hidden = true;
+  byId("stop-button").hidden = false;
+  byId("stop-button").focus();
+}
+
+/** Stop (after its confirmation) or Resume. After any answer but a good one, the settings are read again (3.5). */
+async function switchWorkshop(which: "stop" | "resume", pressed: HTMLButtonElement): Promise<void> {
+  if (switching) return;
+  switching = true;
+  byId("message-stop").textContent = "";
+  const cancel = byId<HTMLButtonElement>("stop-cancel");
+  cancel.disabled = true;
+  try {
+    const result = switchResult(await whileBusy(pressed, () => call("POST", which === "stop" ? STOP_PATH : RESUME_PATH)));
+    if (result.kind === "signed-out") return goToSignIn();
+    if (result.kind === "not-admin") return hideAdmin("denied");
+    byId("stop-confirm").hidden = true;
+    if (result.kind === "switched") {
+      switches++;
+      showStopped(result.settings.stopped);
+      byId(result.settings.stopped ? "resume-button" : "stop-button").focus();
+      return;
+    }
+    const reread = settingsResult(await call("GET", SETTINGS_PATH));
+    if (reread.kind === "signed-out") return goToSignIn();
+    if (reread.kind === "not-admin") return hideAdmin("denied");
+    if (reread.kind === "settings") {
+      switches++;
+      showStopped(reread.settings.stopped);
+      say("message-stop", ADMIN_TEXTS.switchFailed, "error");
+    } else {
+      showStopped(knownStopped ?? false);
+      say("message-stop", ADMIN_TEXTS.switchUnknown, "error");
+    }
+  } finally {
+    cancel.disabled = false;
+    switching = false;
+  }
+}
+
+byId("stop-button").addEventListener("click", askToStop);
+byId("stop-cancel").addEventListener("click", cancelStop);
+byId<HTMLButtonElement>("stop-yes").addEventListener("click", () => void switchWorkshop("stop", byId<HTMLButtonElement>("stop-yes")));
+byId<HTMLButtonElement>("resume-button").addEventListener("click", () => void switchWorkshop("resume", byId<HTMLButtonElement>("resume-button")));
+byId<HTMLFormElement>("caps-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveCaps();
+});
 
 // ---- Start ----
 

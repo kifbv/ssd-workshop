@@ -31,6 +31,46 @@
         <h2 id="dashboard-heading">Facilitator dashboard</h2>
         <p id="dashboard-stopped" class="paused-banner" role="status" hidden></p>
 
+        <!-- Ticket 3.12: the admin only (shown when GET /api/admin/settings answers 200): the caps, and the global Stop. -->
+        <section id="admin" class="admin" aria-labelledby="admin-heading" hidden>
+          <h3 id="admin-heading">Workshop controls (admin)</h3>
+
+          <div id="admin-stop-box" class="admin-stop">
+            <p id="workshop-state" class="workshop-state" role="status" aria-live="polite"></p>
+            <button id="stop-button" class="stop" type="button">Stop the workshop</button>
+            <div id="stop-confirm" class="stop-confirm" hidden>
+              <p id="stop-question"></p>
+              <div class="flag-buttons">
+                <button id="stop-yes" class="stop" type="button">Yes, stop everything</button>
+                <button id="stop-cancel" class="secondary" type="button">Cancel</button>
+              </div>
+            </div>
+            <button id="resume-button" class="resume" type="button" hidden>Resume the workshop</button>
+            <p id="message-stop" class="message" role="status" aria-live="polite"></p>
+          </div>
+
+          <form id="caps-form" class="caps" novalidate>
+            <h4>Caps</h4>
+            <div class="cap">
+              <label for="cap-aiBudgetUsd">AI budget per person ($)</label>
+              <input id="cap-aiBudgetUsd" name="aiBudgetUsd" type="text" inputmode="decimal" autocomplete="off" aria-describedby="cap-aiBudgetUsd-error" />
+              <p id="cap-aiBudgetUsd-error" class="field-error" hidden></p>
+            </div>
+            <div class="cap">
+              <label for="cap-changeRequestsPerPerson">Change requests per person</label>
+              <input id="cap-changeRequestsPerPerson" name="changeRequestsPerPerson" type="text" inputmode="numeric" autocomplete="off" aria-describedby="cap-changeRequestsPerPerson-error" />
+              <p id="cap-changeRequestsPerPerson-error" class="field-error" hidden></p>
+            </div>
+            <div class="cap">
+              <label for="cap-buildsAtOnce">Builds at once</label>
+              <input id="cap-buildsAtOnce" name="buildsAtOnce" type="text" inputmode="numeric" autocomplete="off" aria-describedby="cap-buildsAtOnce-error" />
+              <p id="cap-buildsAtOnce-error" class="field-error" hidden></p>
+            </div>
+            <button id="caps-save" type="submit">Save</button>
+            <p id="message-caps" class="message" role="status" aria-live="polite"></p>
+          </form>
+        </section>
+
         <div class="dashboard-filter">
           <label for="group-filter">Group</label>
           <select id="group-filter"></select>

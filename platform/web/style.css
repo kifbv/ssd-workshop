@@ -796,3 +796,93 @@ body.dashboard main {
 .log-text {
   white-space: pre-wrap;
 }
+
+/* The admin's controls on the dashboard (ticket 3.12): a large Stop with an in-page confirmation, then the caps. */
+.admin {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+.admin h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.admin-stop,
+.caps {
+  min-width: 0;
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--card);
+}
+.caps h4 {
+  margin: 0 0 0.75rem;
+}
+.workshop-state {
+  margin: 0 0 0.75rem;
+  font-weight: 600;
+}
+.admin-stop[data-stopped="true"] {
+  border: 2px solid var(--alert);
+  border-left-width: 6px;
+  background: var(--alert-bg);
+}
+.admin-stop[data-stopped="true"] .workshop-state {
+  color: var(--alert);
+}
+button.stop,
+button.resume {
+  display: block;
+  width: 100%;
+  padding: 1rem;
+  border: 0;
+  border-radius: 0.75rem;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+button.stop {
+  background: var(--alert);
+  color: var(--alert-bg);
+}
+button.resume {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.stop-confirm p {
+  margin: 0 0 0.75rem;
+  font-weight: 600;
+}
+.stop-confirm .flag-buttons button.stop {
+  display: inline-block;
+  width: auto;
+  padding: 0.6rem 0.9rem;
+  font-size: 1rem;
+}
+.stop-confirm .secondary {
+  border: 2px solid var(--accent);
+  background: none;
+  color: var(--accent);
+}
+.admin-stop .message {
+  margin: 0.75rem 0 0;
+}
+.cap {
+  margin: 0 0 0.75rem;
+}
+.cap input {
+  margin-top: 0.25rem;
+}
+.cap input[aria-invalid="true"] {
+  border: 2px solid var(--error);
+}
+.field-error {
+  margin: 0.25rem 0 0;
+  color: var(--error);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.caps .message {
+  margin: 0.75rem 0 0;
+}

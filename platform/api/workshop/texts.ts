@@ -1,6 +1,7 @@
 // Every participant-facing text of phase 3 (ticket 3.2), in one place so the API, the workers and the pages say the
 // same thing (wording from docs/phases/phase-3.md). Plain text only: pages set it with `textContent`. No text here
 // names an amount spent, another participant or an email address.
+import { CAP_RANGES } from "./settings.js";
 
 export const PHASE_3_TEXTS = {
   /** Ticket 3.3: spend at or over the budget plus extra budget; no AI call is made. */
@@ -141,4 +142,30 @@ export function otherGroupFlagsText(count: number): string {
   return count === 1
     ? "1 flagged message in another group: choose Everyone to see it."
     : `${count} flagged messages in other groups: choose Everyone to see them.`;
+}
+
+/**
+ * Ticket 3.12: the admin section of the dashboard (the three caps and the global Stop). Field labels and button texts
+ * stay in the web code; these are the lines the admin reads.
+ */
+export const ADMIN_TEXTS = {
+  /** The state line while the global Stop is on (criterion 3 reads "Workshop paused"). */
+  workshopPaused: "Workshop paused: AI messages and builds wait until you press Resume.",
+  workshopRunning: "Workshop running.",
+  stopQuestion:
+    "Stop the whole workshop? Every participant's AI messages and builds wait until you press Resume. Builds that are running start again after Resume.",
+  saved: "Saved. The new caps apply from the next message or build.",
+  invalid: "Some caps are not allowed. Fix the fields marked below, then press Save again.",
+  readFailed: "The settings could not be read just now. They are read again in 5 seconds.",
+  saveFailed: "The caps could not be saved just now. Please try again in a moment.",
+  offline: "We couldn't reach the workshop. Check your connection and try again.",
+  switchFailed: "That did not work, or its answer was lost. The state below was read again: check it before trying again.",
+  switchUnknown: "That did not work, and the state could not be read again. Reload the page to see whether the workshop is paused.",
+} as const;
+
+/** Ticket 3.12: the error beside one cap's field, from the API's own ranges (decision "(3.2) PUT rules"). */
+export function capErrorText(name: keyof typeof CAP_RANGES): string {
+  const range = CAP_RANGES[name];
+  if (name === "aiBudgetUsd") return `Enter an amount from $${range.min} to $${range.max}.`;
+  return `Enter a whole number from ${range.min} to ${range.max}.`;
 }
