@@ -65,6 +65,9 @@ paths:
   secret from the app: Chromium's `performance.getEntriesByType("navigation")[0].name` keeps the address the page opened
   with, fragment and token included, after `replaceState` (tested; decision "(3.25) Residual"). Only a separate origin
   or frame for the data client would.
+- `workshop-data.js` builds every address absolute from the page's server read at its start (3.25 access review): a
+  relative address given to a captured `fetch` or `window.open` still resolves against the page's CURRENT base URL,
+  which app code can change with a `<base>` element. Test any new request the client makes with that `<base>` test.
 - In Playwright, a document served through `page.route` cannot load files from a real loopback server (Chromium's
   private network check, "Permission was denied for this request to access the `loopback` address space"): route every
   file of such a page, or serve the page from the server and route only one script.

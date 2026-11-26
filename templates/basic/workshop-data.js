@@ -27,6 +27,9 @@
   const startSearch = location.search;
   const startHash = location.hash;
   const startState = history.state;
+  // Every address this file uses is absolute, built from the page's own server as it was at the start: a <base> element
+  // added later by app code changes how relative addresses resolve, and must not send a save (or the sign-in) elsewhere.
+  const startServer = location.protocol + "//" + location.host;
 
   const KEY = /^[A-Za-z0-9_-]+$/;
   const PASS = /^[A-Za-z0-9_-]{43}$/;
@@ -37,7 +40,7 @@
   // The app lives at /apps/<nickname>/; its data at /api/apps/<nickname>/data/<key> on the same server.
   const appMatch = /^\/apps\/([^/]+)\//.exec(startPath);
   const app = appMatch ? appMatch[1] : null;
-  const signInAddress = app === null ? null : "/app-sign-in/?app=" + encodeURIComponent(app);
+  const signInAddress = app === null ? null : startServer + "/app-sign-in/?app=" + encodeURIComponent(app);
 
   // What the workshop's sign-in hands over in the address (#wt=<token>): kept in memory only, never stored or shown.
   let pass = null;
@@ -56,7 +59,7 @@
     if (typeof key !== "string" || !KEY.test(key)) {
       throw new Error("A key may only hold letters, digits, dashes and underscores.");
     }
-    return "/api/apps/" + name + "/data/" + key;
+    return startServer + "/api/apps/" + name + "/data/" + key;
   }
 
   // Reads the hand-off from the address once and removes it at once, keeping any other part after the #.
@@ -191,7 +194,7 @@
   async function confirmNickname() {
     if (pass === null || app === null) return;
     try {
-      const response = await nativeFetch("/api/apps/" + app + "/data/whoami?whoami=1", requestOptions("GET", true));
+      const response = await nativeFetch(startServer + "/api/apps/" + app + "/data/whoami?whoami=1", requestOptions("GET", true));
       if (!response.ok) return;
       const body = await response.json();
       if (body && typeof body.nickname === "string" && NICKNAME.test(body.nickname) && pass !== null) nickname = body.nickname;

