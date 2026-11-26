@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNT as INFRA_ACCOUNT,
   AI_QUEUE_NAME as INFRA_QUEUE_NAME,
+  AI_WORKER_BUILD_CHECK_ATTRIBUTES,
   AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
   AI_WORKER_UPDATE_ATTRIBUTES,
   BUILD_QUEUE_NAME as INFRA_BUILD_QUEUE_NAME,
@@ -21,7 +22,8 @@ import { DEFAULT_MODEL_ID } from "../../src/smoke/logic.js";
 import { BedrockModel, usageOf } from "./model.js";
 import { SqsBuildQueue, SqsMessageQueue } from "./queue.js";
 import { READINESS_REQUEST } from "./readiness.js";
-import { buildIdFor, FAILURE_REPLY, STALE_PENDING_SECONDS, type Finish, type ReadinessFinish } from "./state.js";
+import { CHANGE_BUILD_REQUEST } from "./change.js";
+import { buildIdFor, FAILURE_REPLY, STALE_PENDING_SECONDS, type ChangeBuildFinish, type Finish, type ReadinessFinish } from "./state.js";
 import { DynamoConversationStore, type ConversationSender } from "./store.js";
 
 type Sent = GetItemCommand | QueryCommand | TransactWriteItemsCommand;
@@ -280,7 +282,8 @@ describe("DynamoConversationStore", () => {
     expect(inputs.every((i) => i.ConsistentRead === true && i.TableName === TABLE)).toBe(true);
     expect(inputs.map((i) => Object.values(i.ExpressionAttributeNames ?? {}))).toEqual([
       ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
-      ["extraBudget"],
+      // Ticket 3.6: also the change requests used (compared with the cap before a change is taken or built).
+      ["extraBudget", "changeRequestsUsed"],
       ["costUsd"],
     ]);
     for (const name of Object.values(inputs[0]?.ExpressionAttributeNames ?? {})) expect(SETTINGS_READ_ATTRIBUTES, name).toContain(name);
@@ -600,7 +603,8 @@ describe("DynamoConversationStore", () => {
     ]);
     const store = new DynamoConversationStore(client, TABLE);
     await expect(store.getParticipantInfo("p-1")).resolves.toEqual({ step: "approved", nickname: "Ada" });
-    await expect(store.getBuild("b-1")).resolves.toEqual({ buildId: "b-1", participantId: "p-1", status: "failed", feed: [], failureReasons: ["a", "b"] });
+    // Ticket 3.6: a build without a kind (every build from before 3.6) reads as a first build.
+    await expect(store.getBuild("b-1")).resolves.toEqual({ buildId: "b-1", participantId: "p-1", status: "failed", kind: "first", feed: [], failureReasons: ["a", "b"] });
     await expect(store.getBuild("b-1")).resolves.toBeUndefined();
     await expect(store.getBuild("b-1")).resolves.toBeUndefined();
     // A malformed id is not even read.
@@ -642,6 +646,7 @@ describe("DynamoConversationStore", () => {
       buildId: "b-1",
       participantId: "p-1",
       status: "building",
+      kind: "first",
       nickname: "Ada-Runner",
       feed: [
         { kind: "step", step: "preparing", at: at.S },
@@ -651,8 +656,19 @@ describe("DynamoConversationStore", () => {
       ],
     });
     const input = (sent[0] as GetItemCommand).input;
-    expect(input.ProjectionExpression).toBe("#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed, #queueKey");
-    expect(Object.keys(input.ExpressionAttributeNames ?? {}).sort()).toEqual(["#buildId", "#failureReasons", "#feed", "#nickname", "#participantId", "#queueKey", "#status", "#type"]);
+    expect(input.ProjectionExpression).toBe("#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed, #queueKey, #kind, #changeNumber");
+    expect(Object.keys(input.ExpressionAttributeNames ?? {}).sort()).toEqual([
+      "#buildId",
+      "#changeNumber",
+      "#failureReasons",
+      "#feed",
+      "#kind",
+      "#nickname",
+      "#participantId",
+      "#queueKey",
+      "#status",
+      "#type",
+    ]);
   });
 
   it("ticket 3.4: reads a queued build's place and counts the entries ahead of it with a COUNT-only Query of BUILD_QUEUE (QUEUE_COUNT_ATTRIBUTES)", async () => {
@@ -777,5 +793,222 @@ describe("BedrockModel", () => {
     });
     expect(sent[0]?.options).toEqual({ abortSignal: signal });
     expect(() => new BedrockModel(client, "anthropic.claude-sonnet-4-6")).toThrow(/eu\.anthropic/);
+  });
+});
+
+describe("change requests in the conversation store (ticket 3.6)", () => {
+  const items = (command: Sent | undefined): TransactWriteItem[] => (command?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
+  /** The names a transaction's ConditionCheck items name (each defined and used, both ways). */
+  function checkNames(command: Sent | undefined): string[] {
+    return items(command).flatMap((i) => {
+      if (i.ConditionCheck === undefined) return [];
+      const text = i.ConditionCheck.ConditionExpression ?? "";
+      const used = new Set(text.match(/[#:][A-Za-z_]+/g) ?? []);
+      const defined = new Set([...Object.keys(i.ConditionCheck.ExpressionAttributeNames ?? {}), ...Object.keys(i.ConditionCheck.ExpressionAttributeValues ?? {})]);
+      expect([...used].sort(), text).toEqual([...defined].sort());
+      return ["pk", "sk", ...Object.values(i.ConditionCheck.ExpressionAttributeNames ?? {})];
+    });
+  }
+  const answer = { prompt: CHANGE_BUILD_REQUEST, modelId: MODEL_ID, promptVersion: "readiness-v2", historyCount: 0, usage: usage(900, 60) };
+  const ready = (used: number): ChangeBuildFinish => ({
+    kind: "ready",
+    reply: "ok",
+    version: 2,
+    previousBuildId: "b-0",
+    answer,
+    build: { buildId: "b-1", nickname: "Ada", changeNumber: used + 1 },
+    used,
+    cap: 5,
+  });
+
+  it("takes a change request only while the conversation's build is the one it follows (no approval condition), inside the conversation function's list", async () => {
+    const message = { id: ID, step: "building" as const, text: "Add a chart", createdAt: NOW_ISO, nowSeconds: 5000 };
+    const { client, sent } = stubClient([{}, cancelled(["ConditionalCheckFailed", "None"]), { Item: { state: { S: "open" }, approvedSpecVersion: { N: "1" }, buildId: { S: "b-1" } } }]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.createMessage("p-1", message, "b-0")).resolves.toBe("created");
+    expect(items(sent[0])[0]?.Update).toMatchObject({
+      ConditionExpression: "#buildId = :afterBuild AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+      ExpressionAttributeValues: { ":afterBuild": { S: "b-0" } },
+    });
+    expect(items(sent[0])[1]?.Update?.ExpressionAttributeValues?.[":request"]).toBeUndefined();
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    // The build moved on meanwhile: busy (never "approved", which means steps 1 and 2 are closed).
+    await expect(store.createMessage("p-1", message, "b-0")).resolves.toBe("busy");
+  });
+
+  it("stores a change answer's version with its list and makes it the proposal, inside the worker's list", async () => {
+    const { client, sent } = stubClient([{}]);
+    const finish: Finish = { ...DONE, spec: { version: 2, text: "# A", whatChanges: ["Adds a chart"] } };
+    await new DynamoConversationStore(client, TABLE).finish("p-1", ID, finish, "pending", NOW_ISO);
+    const spec = items(sent[0]).find((i) => i.Update?.Key?.["sk"]?.S === "SPEC#0002")?.Update;
+    expect(spec?.ExpressionAttributeValues?.[":whatChanges"]).toEqual({ L: [{ S: "Adds a chart" }] });
+    const conversation = items(sent[0]).find((i) => i.Update?.Key?.["sk"]?.S === "CONVERSATION")?.Update;
+    expect(conversation?.ExpressionAttributeValues).toMatchObject({ ":latestSpecVersion": { N: "2" }, ":proposedSpecVersion": { N: "2" } });
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    // A step 2 version (no list) is not a proposal.
+    const plain = stubClient([{}]);
+    await new DynamoConversationStore(plain.client, TABLE).finish("p-1", ID, { ...DONE, spec: { version: 2, text: "# A" } }, "pending", NOW_ISO);
+    expect(JSON.stringify(items(plain.sent[0]))).not.toContain("proposedSpecVersion");
+    expect(JSON.stringify(items(plain.sent[0]))).not.toContain("whatChanges");
+    // The limit reply (no AI call).
+    const limit = stubClient([{}]);
+    await new DynamoConversationStore(limit.client, TABLE).finish("p-1", ID, { kind: "over-limit", reply: "You've used your 5 changes." }, "pending", NOW_ISO);
+    expect(items(limit.sent[0])[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":kind": { S: "limit" } });
+    expect(items(limit.sent[0])[0]?.Update?.ExpressionAttributeValues).toMatchObject({ ":status": { S: "failed" } });
+  });
+
+  it("Build this change: the request (marked change-build) in flight and the version approved, only for this proposal after this build, inside the conversation function's list", async () => {
+    const message = { id: ID, step: "building" as const, text: CHANGE_BUILD_REQUEST, createdAt: NOW_ISO, nowSeconds: 5000, request: "change-build" as const };
+    const { client, sent } = stubClient([{}]);
+    await expect(new DynamoConversationStore(client, TABLE).requestChangeBuild("p-1", 2, "b-0", message)).resolves.toBe("created");
+    const list = items(sent[0]);
+    expect(list.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual(["CONVERSATION", "SPEC#0002", `MSG#${ID}`]);
+    expect(list[0]?.Update).toMatchObject({
+      ConditionExpression:
+        "#proposedSpecVersion = :version AND #buildId = :buildId AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+      ExpressionAttributeValues: { ":version": { N: "2" }, ":buildId": { S: "b-0" }, ":pendingId": { S: ID } },
+    });
+    expect(list[1]?.Update).toMatchObject({ UpdateExpression: "SET #approvedAt = :approvedAt", ConditionExpression: "attribute_exists(#pk)" });
+    expect(list[2]?.Update?.ExpressionAttributeValues).toMatchObject({ ":request": { S: "change-build" }, ":text": { S: CHANGE_BUILD_REQUEST }, ":step": { S: "building" } });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    const conv = (fields: Record<string, unknown>) => ({ Item: { state: { S: "open" }, buildId: { S: "b-0" }, ...fields } });
+    for (const [read, expected] of [
+      [conv({}), "stale"],
+      [conv({ proposedSpecVersion: { N: "3" } }), "stale"],
+      [conv({ proposedSpecVersion: { N: "2" }, buildId: { S: "b-9" } }), "stale"],
+      [conv({ proposedSpecVersion: { N: "2" }, pendingId: { S: "x" } }), "busy"],
+      [conv({ proposedSpecVersion: { N: "2" }, state: { S: "waiting" } }), "waiting"],
+    ] as const) {
+      const stub = stubClient([cancelled(["ConditionalCheckFailed", "None", "None"]), read]);
+      await expect(new DynamoConversationStore(stub.client, TABLE).requestChangeBuild("p-1", 2, "b-0", message), expected).resolves.toBe(expected);
+    }
+  });
+
+  it("Not this one removes the proposal only, while nothing is in flight, inside the conversation function's list", async () => {
+    const { client, sent } = stubClient([{}, cancelled(["ConditionalCheckFailed"]), { Item: { state: { S: "open" }, proposedSpecVersion: { N: "2" }, pendingId: { S: ID } } }]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.discardChange("p-1", 2, 5000, NOW_ISO)).resolves.toBe("discarded");
+    expect(items(sent[0])).toHaveLength(1);
+    expect(items(sent[0])[0]?.Update).toMatchObject({
+      Key: { sk: { S: "CONVERSATION" } },
+      UpdateExpression: "SET #updatedAt = :updatedAt REMOVE #proposedSpecVersion",
+      ConditionExpression: "#proposedSpecVersion = :version AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+    });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    await expect(store.discardChange("p-1", 2, 5000, NOW_ISO)).resolves.toBe("busy");
+  });
+
+  it("queues a change build in one transaction: the count from exactly the value read and below the cap, the previous build live or failed, the build of kind change, inside the worker's lists", async () => {
+    const { client, sent } = stubClient([{}, {}]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.finishChangeBuild("p-1", ID, ready(2), NOW_ISO)).resolves.toBe(true);
+    const list = items(sent[0]);
+    expect(list.map((i) => (i.ConditionCheck === undefined ? i.Update?.Key?.["sk"]?.S : `check ${i.ConditionCheck.Key?.["pk"]?.S}`))).toEqual([
+      `MSG#${ID}`,
+      `MSG#${ID}-r`,
+      "CONVERSATION",
+      "PROFILE",
+      "check BUILD#b-0",
+      "BUILD",
+      "USAGE",
+    ]);
+    expect(list[2]?.Update).toMatchObject({
+      UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt, #buildId = :buildId, #approvedSpecVersion = :approvedSpecVersion REMOVE #pendingId, #pendingSince, #proposedSpecVersion",
+      ConditionExpression: "#pendingId = :messageId AND #proposedSpecVersion = :version AND #buildId = :previousBuildId",
+      ExpressionAttributeValues: { ":buildId": { S: "b-1" }, ":previousBuildId": { S: "b-0" }, ":approvedSpecVersion": { N: "2" } },
+    });
+    expect(list[3]?.Update).toMatchObject({
+      UpdateExpression: "SET #changeRequestsUsed = :changeRequestsUsed",
+      ConditionExpression: "#step = :building AND #changeRequestsUsed = :used AND #changeRequestsUsed < :cap",
+      ExpressionAttributeValues: { ":changeRequestsUsed": { N: "3" }, ":used": { N: "2" }, ":cap": { N: "5" }, ":building": { S: "building" } },
+    });
+    expect(list[4]?.ConditionCheck).toMatchObject({ ConditionExpression: "#status IN (:live, :failed)", Key: { pk: { S: "BUILD#b-0" }, sk: { S: "BUILD" } } });
+    expect(list[5]?.Update).toMatchObject({
+      ConditionExpression: "attribute_not_exists(#pk)",
+      ExpressionAttributeValues: { ":kind": { S: "change" }, ":changeNumber": { N: "3" }, ":specVersion": { N: "2" }, ":status": { S: "queued" } },
+    });
+    // Each item inside the role's lists: participant items in the worker's, the build in its build list, the check in its check list.
+    for (const item of list) {
+      if (item.Update === undefined) continue;
+      const names = ["pk", "sk", ...Object.values(item.Update.ExpressionAttributeNames ?? {})];
+      const allowed: readonly string[] = (item.Update.Key?.["pk"]?.S ?? "").startsWith("BUILD#") ? AI_WORKER_BUILD_UPDATE_ATTRIBUTES : AI_WORKER_UPDATE_ATTRIBUTES;
+      for (const name of names) expect(allowed, name).toContain(name);
+    }
+    namesUsed(sent[0]);
+    for (const name of checkNames(sent[0])) expect(AI_WORKER_BUILD_CHECK_ATTRIBUTES, name).toContain(name);
+    // The first change: the count may be absent.
+    await store.finishChangeBuild("p-1", ID, ready(0), NOW_ISO);
+    expect(items(sent[1])[3]?.Update?.ConditionExpression).toBe(
+      "#step = :building AND (attribute_not_exists(#changeRequestsUsed) OR (#changeRequestsUsed = :used AND #changeRequestsUsed < :cap))",
+    );
+    namesUsed(sent[1]);
+  });
+
+  it("ends a change build request that is not built without the count, the build or the check, keeping the proposal", async () => {
+    const { client, sent } = stubClient([{}, {}, cancelled(["None", "None", "None", "ConditionalCheckFailed"])]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await store.finishChangeBuild("p-1", ID, { kind: "not-ready", reply: "no", version: 2, previousBuildId: "b-0", answer }, NOW_ISO);
+    const list = items(sent[0]);
+    expect(list.map((i) => i.Update?.Key?.["sk"]?.S)).toEqual([`MSG#${ID}`, `MSG#${ID}-r`, "CONVERSATION", "USAGE"]);
+    expect(list[2]?.Update).toMatchObject({
+      UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt REMOVE #pendingId, #pendingSince",
+      ConditionExpression: "#pendingId = :messageId AND #proposedSpecVersion = :version AND #buildId = :previousBuildId",
+    });
+    for (const name of namesUsed(sent[0])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    await store.finishChangeBuild("p-1", ID, { kind: "over-limit", reply: "You've used your 5 changes.", version: 2, previousBuildId: "b-0" }, NOW_ISO);
+    expect(items(sent[1])[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":kind": { S: "limit" } });
+    expect(items(sent[1])).toHaveLength(3);
+    namesUsed(sent[1]);
+    // A lost race (the count moved, the previous build runs again) writes nothing.
+    await expect(store.finishChangeBuild("p-1", ID, ready(1), NOW_ISO)).resolves.toBe(false);
+  });
+
+  it("notes the suggestions ask and stores the suggestions once, inside each role's list; reads them back with the proposal", async () => {
+    const { client, sent } = stubClient([{}, cancelled(["ConditionalCheckFailed"]), {}, {}]);
+    const store = new DynamoConversationStore(client, TABLE);
+    await expect(store.markSuggestionsRequested("p-1", NOW_ISO, "2026-11-23T09:50:05.000Z")).resolves.toBe(true);
+    expect(items(sent[0])[0]?.Update).toMatchObject({
+      UpdateExpression: "SET #suggestionsRequestedAt = :suggestionsRequestedAt",
+      ConditionExpression:
+        "attribute_exists(#pk) AND attribute_not_exists(#suggestions) AND (attribute_not_exists(#suggestionsRequestedAt) OR #suggestionsRequestedAt < :askedBefore)",
+    });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    await expect(store.markSuggestionsRequested("p-1", NOW_ISO, "x")).resolves.toBe(false);
+    await expect(store.storeSuggestions("p-1", ["a b c", "d e f", "g h i"], usage(900, 60), NOW_ISO)).resolves.toBe(true);
+    expect(items(sent[2])[0]?.Update).toMatchObject({
+      UpdateExpression: "SET #suggestions = :suggestions",
+      ConditionExpression: "attribute_exists(#pk) AND attribute_not_exists(#suggestions)",
+      ExpressionAttributeValues: { ":suggestions": { L: [{ S: "a b c" }, { S: "d e f" }, { S: "g h i" }] } },
+    });
+    expect(items(sent[2])[1]?.Update?.Key?.["sk"]?.S).toBe("USAGE");
+    for (const name of namesUsed(sent[2])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
+    // Only the worker counts changes; the conversation function never writes the count, a list or a version.
+    for (const name of ["changeRequestsUsed", "whatChanges", "specVersion"]) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).not.toContain(name);
+    const read = stubClient([
+      {
+        Item: {
+          state: { S: "open" },
+          proposedSpecVersion: { N: "2" },
+          suggestions: { L: [{ S: "a" }, { N: "1" }, { S: "b" }] },
+          suggestionsRequestedAt: { S: NOW_ISO },
+        },
+      },
+      { Item: { sk: { S: "SPEC#0002" }, specVersion: { N: "2" }, text: { S: "# A" }, createdAt: { S: NOW_ISO }, whatChanges: { L: [{ S: "Adds a chart" }] } } },
+    ]);
+    const reader = new DynamoConversationStore(read.client, TABLE);
+    await expect(reader.getConversation("p-1")).resolves.toEqual({ state: "open", proposedSpecVersion: 2, suggestions: ["a", "b"], suggestionsRequestedAt: NOW_ISO });
+    await expect(reader.getSpec("p-1", 2)).resolves.toEqual({ version: 2, text: "# A", createdAt: NOW_ISO, approved: false, whatChanges: ["Adds a chart"] });
+    expect((read.sent[1]?.input as GetItemCommand["input"]).ProjectionExpression).toContain("#whatChanges");
+  });
+
+  it("asks the worker for suggestions with the participant id only", async () => {
+    const sent: SendMessageCommand[] = [];
+    const queue = new SqsMessageQueue({ send: async (command: SendMessageCommand) => (sent.push(command), { $metadata: {} }) }, AI_QUEUE_URL);
+    await queue.sendSuggestions("p-1");
+    await queue.sendSuggestions("p-1", 30);
+    expect(sent.map((c) => c.input)).toEqual([
+      { QueueUrl: AI_QUEUE_URL, MessageBody: '{"participantId":"p-1","suggestions":true}' },
+      { QueueUrl: AI_QUEUE_URL, MessageBody: '{"participantId":"p-1","suggestions":true}', DelaySeconds: 30 },
+    ]);
   });
 });

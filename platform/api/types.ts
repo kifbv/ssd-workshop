@@ -215,13 +215,20 @@ export interface ParticipantMessageItem extends Keyed {
   guardrailInputTokens?: number;
   guardrailOutputTokens?: number;
   guardrailCostUsd?: number;
+  /**
+   * Ticket 3.6: `change-build` on the request Build this change stores (text CHANGE_BUILD_REQUEST, step `building`),
+   * written only by that route: the AI worker runs the readiness check and queues a change build for it. A participant's
+   * own message never has it.
+   */
+  request?: "change-build";
 }
 
 /**
  * How a reply came about: an AI answer, a decline, the neutral failure text, or (ticket 3.3) the budget text when the
- * participant's AI budget was used and no AI call was made.
+ * participant's AI budget was used and no AI call was made, or (ticket 3.6, `limit`) "You've used your 5 changes." when
+ * every change request was used and no AI call was made.
  */
-export type ReplyKind = "answer" | "decline" | "failure" | "budget";
+export type ReplyKind = "answer" | "decline" | "failure" | "budget" | "limit";
 
 /**
  * The assistant's reply to one participant message (ticket 1.7), at `MSG#<message id>-r`, so it
@@ -285,6 +292,16 @@ export interface ConversationItem extends Keyed {
    * step `building`: `GET /api/build` reads it to find the caller's own build.
    */
   buildId?: string;
+  /**
+   * Ticket 3.6: the spec version a change answer proposed and the participant has not yet built or put aside (Build this
+   * change, Not this one). Written by the AI worker with the version; removed when its change build is queued or by Not
+   * this one. From the first build on, `approvedSpecVersion` is the version last built (the live one, or the one building).
+   */
+  proposedSpecVersion?: number;
+  /** Ticket 3.6: three suggested changes (each under 80 characters), written once by the AI worker after the app went live. */
+  suggestions?: string[];
+  /** Ticket 3.6: when the suggestions were last asked for (ISO 8601), so a page load asks again only after a while. */
+  suggestionsRequestedAt?: string;
   /** ISO 8601. */
   updatedAt: string;
 }
@@ -303,8 +320,10 @@ export interface SpecItem extends Keyed {
   messageId: string;
   /** ISO 8601. */
   createdAt: string;
-  /** ISO 8601: set when the participant approved this version. */
+  /** ISO 8601: set when the participant approved this version (from ticket 3.6 also: pressed Build this change on it). */
   approvedAt?: string;
+  /** Ticket 3.6: a version a change answer proposed carries its "What changes" list (1 to 5 short lines). */
+  whatChanges?: string[];
 }
 
 /** Running totals of a participant's AI use (ticket 1.7; the $5 cap is phase 3). */
@@ -418,6 +437,15 @@ export interface BuildItem extends Keyed {
   taskArn?: string;
   /** ISO 8601: when the launcher claimed the build (ticket 2.9). */
   launchedAt?: string;
+  /**
+   * Ticket 3.6: `first` (the build from the approved spec; also when absent, every build from before 3.6) or `change` (a
+   * change request's build, which ticket 3.7's builder makes by editing the existing app). A retry keeps it.
+   */
+  kind?: "first" | "change";
+  /** Ticket 3.6, change builds: which change this is (1 for the first change), for the commit message "Change 2: ...". */
+  changeNumber?: number;
+  /** Ticket 3.6, change builds: the spec version the build makes (the conversation's `approvedSpecVersion` names it too). */
+  specVersion?: number;
 }
 
 /**

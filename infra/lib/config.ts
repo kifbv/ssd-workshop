@@ -307,6 +307,10 @@ export const CONVERSATION_FUNCTION_NAME = `${PREFIX}-api-conversation`;
  * require it, so this role cannot make one). Ticket 2.7: `buildId`, only compared (asking for the readiness check
  * again needs no build yet); `GET /api/build` answers only a build whose own `participantId` is the caller.
  * Ticket 3.2: `stepSince`, set with every step change.
+ * Ticket 3.6: Build this change stores its request marked `request` and approves the proposed version (`approvedAt`,
+ * conditional on `proposedSpecVersion` and `buildId`); Not this one removes `proposedSpecVersion`; a read of a live app
+ * notes `suggestionsRequestedAt` (its condition names `suggestions`, which IAM cannot tell from a write: only the AI
+ * worker's code writes the list). Never `changeRequestsUsed`, `whatChanges` or `specVersion`.
  */
 export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "pk",
@@ -328,6 +332,10 @@ export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "approvedAt",
   "buildId",
   "stepSince",
+  "proposedSpecVersion",
+  "request",
+  "suggestions",
+  "suggestionsRequestedAt",
 ] as const;
 /** Lambda function, role and log group of the AI worker (ticket 1.7). */
 export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
@@ -343,6 +351,10 @@ export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
  * approve again); every such write is conditional on the step being `approved` and that version being approved
  * with the readiness message in flight. Still never `approvedAt`, `role`, `group`, `nickname`, `id` or
  * `approvedTextHash`. Ticket 3.2: `stepSince`, set with the step.
+ * Ticket 3.6: a change answer's version with its `whatChanges` list and the conversation's `proposedSpecVersion`; the
+ * change build's outcome sets `approvedSpecVersion` and `buildId`, removes `proposedSpecVersion` and counts the change
+ * (`changeRequestsUsed`, the only role that may write it, conditional on its exact previous value and the cap, in the
+ * transaction that creates the change build); the suggested changes (`suggestions`, once).
  */
 export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",
@@ -380,13 +392,36 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "buildId",
   "approvedSpecVersion",
   "stepSince",
+  "whatChanges",
+  "proposedSpecVersion",
+  "changeRequestsUsed",
+  "suggestions",
 ] as const;
 /**
  * The attribute names the AI worker may name in `BUILD#*` (UpdateItem only; ticket 2.7): a new build record, created
  * only if absent (`attribute_not_exists(pk)`), queued. Never `deployedCommit`, `failureReasons`, `finishedAt` (the
  * deployer's) or `pushedCommit` (the builder's, ticket 2.8).
  */
-export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt"] as const;
+export const AI_WORKER_BUILD_UPDATE_ATTRIBUTES = [
+  "pk",
+  "sk",
+  "type",
+  "buildId",
+  "nickname",
+  "participantId",
+  "status",
+  "createdAt",
+  "updatedAt",
+  // Ticket 3.6: a change build's kind, number and spec version (absent kind = first, so first builds are unchanged).
+  "kind",
+  "changeNumber",
+  "specVersion",
+] as const;
+/**
+ * Ticket 3.6: what the AI worker's ConditionCheckItem in `BUILD#*` may name: the build a change follows must be `live` or
+ * `failed` (nothing of the participant's running) in the transaction that queues the change build.
+ */
+export const AI_WORKER_BUILD_CHECK_ATTRIBUTES = ["pk", "sk", "status"] as const;
 /**
  * The attribute names the builder (ticket 2.8, its task role from ticket 2.9) may name in `BUILD#*`, split by call for
  * 2.9's `dynamodb:Attributes` conditions (tested against the requests in platform/builder/aws.test.ts):

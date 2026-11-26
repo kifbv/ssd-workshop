@@ -10,7 +10,10 @@
 // answers `budgetLeft`, the caller's AI budget left in dollars (the AI worker enforces the budget). Ticket 3.5: while the
 // admin's global Stop is on, the three reads the page repeats (`GET /api/conversation`, the message poll and
 // `GET /api/build`) also answer `paused: true`, and `GET /api/status` answers only that (every signed-in screen asks it
-// every 30 s), so every participant page shows the paused banner. Every route starts with the
+// every 30 s), so every participant page shows the paused banner. Ticket 3.6: at step 4 (step `building` with the app live)
+// a sent message is a change request; `POST /api/conversation/change/build` (Build this change) and
+// `POST /api/conversation/change/discard` (Not this one) act on the proposed version, and once the app is live the reads
+// ask the AI worker (once) for three suggested changes. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -28,6 +31,9 @@ import { requireSession, type ParticipantRecord, type SessionReader } from "../s
 import { errorName } from "../sign-in/code-request.js";
 import type { ConversationState, MessageStatus, Step } from "../types.js";
 import { budgetOf } from "../workshop/budget.js";
+import { changesUsedText, PHASE_3_TEXTS } from "../workshop/texts.js";
+import type { BudgetFacts } from "../workshop/budget.js";
+import { CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY } from "./change.js";
 import { MAX_SPEC_VERSION } from "../keys.js";
 import { READINESS_FAILURE_REPLY, READINESS_REQUEST } from "./readiness.js";
 import { WRITE_SPEC_REQUEST } from "./spec.js";
@@ -38,7 +44,9 @@ import {
   type ConversationStore,
   type ListedItem,
   type MessageQueue,
+  type StoredBuild,
   type StoredConversation,
+  type SuggestionsQueue,
 } from "./state.js";
 
 export const SEND_ROUTE = "POST /api/conversation/messages";
@@ -49,7 +57,24 @@ export const SPEC_ROUTE = "GET /api/conversation/spec";
 export const APPROVE_ROUTE = "POST /api/conversation/spec/approve";
 export const BUILD_ROUTE = "GET /api/build";
 export const STATUS_ROUTE = "GET /api/status";
-export const CONVERSATION_ROUTES = [SEND_ROUTE, POLL_ROUTE, HISTORY_ROUTE, STEP_ROUTE, SPEC_ROUTE, APPROVE_ROUTE, BUILD_ROUTE, STATUS_ROUTE] as const;
+/** Ticket 3.6: Build this change and Not this one, on the caller's proposed spec version. */
+export const CHANGE_BUILD_ROUTE = "POST /api/conversation/change/build";
+export const CHANGE_DISCARD_ROUTE = "POST /api/conversation/change/discard";
+export const CONVERSATION_ROUTES = [
+  SEND_ROUTE,
+  POLL_ROUTE,
+  HISTORY_ROUTE,
+  STEP_ROUTE,
+  SPEC_ROUTE,
+  APPROVE_ROUTE,
+  BUILD_ROUTE,
+  STATUS_ROUTE,
+  CHANGE_BUILD_ROUTE,
+  CHANGE_DISCARD_ROUTE,
+] as const;
+
+/** Ticket 3.6: a page load asks for the suggested changes again only this long after the last ask (none stored yet). */
+export const SUGGESTIONS_RETRY_MS = 10 * 60 * 1000;
 
 /** A message holds 1 to 2000 characters (Unicode code points) after trimming. */
 export const MAX_MESSAGE_CHARS = 2000;
@@ -68,9 +93,12 @@ export const MESSAGES = {
   "invalid-approve": "Send a JSON body with the version of the spec you approve.",
   "no-spec": "There is no spec to approve yet.",
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
+  "invalid-change": "Send a JSON body with the version of the proposed change.",
+  "build-running": PHASE_3_TEXTS.changeWhileBuilding,
+  "not-live": PHASE_3_TEXTS.changeBeforeLive,
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "change-build" | "change-discard" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -87,6 +115,10 @@ export type ConversationOutcome =
   | "approved"
   | "no-spec"
   | "stale"
+  | "build-running"
+  | "not-live"
+  | "no-changes-left"
+  | "discarded"
   | "failed";
 
 /** The only things ever logged: route, outcome and an error name (no text, id, token or reply). */
@@ -100,7 +132,8 @@ export interface ConversationLogEntry {
 export interface ConversationDeps {
   sessions: SessionReader;
   store: ConversationStore;
-  queue: MessageQueue;
+  /** The AI worker's queue (ticket 3.6: also the suggestions job). */
+  queue: MessageQueue & SuggestionsQueue;
   now: () => Date;
   randomBytes: (size: number) => Buffer;
   log: (entry: ConversationLogEntry) => void;
@@ -123,7 +156,7 @@ interface Result {
 }
 
 const refused = (reason: keyof typeof MESSAGES, status: number): Result => {
-  const invalid = reason === "invalid" || reason === "invalid-step" || reason === "invalid-approve";
+  const invalid = reason === "invalid" || reason === "invalid-step" || reason === "invalid-approve" || reason === "invalid-change";
   return {
     outcome: invalid ? "invalid-request" : reason,
     response: jsonResponse(status, { message: MESSAGES[reason], ...(invalid ? {} : { reason }) }),
@@ -135,11 +168,41 @@ async function send(request: HttpRequest, participant: ParticipantRecord, deps: 
   const text = readMessageText(request);
   if (text === undefined) return refused("invalid", 400);
   if (participant.nickname === undefined || participant.step === "nickname") return refused("no-nickname", 409);
-  // Ticket 1.9: once the spec is approved, nothing changes it until phase 2's build flow takes over.
-  if (participant.step === "approved" || participant.step === "building") return refused("approved", 409);
+  // Ticket 1.9: once the spec is approved, nothing changes it until the build is live.
+  if (participant.step === "approved") return refused("approved", 409);
+  if (participant.step === "building") {
+    // Ticket 3.6: step 4, a change request: only while the app is live, nothing of theirs is building, and changes are left.
+    const gate = await changeGate(participant.id, await deps.store.getConversation(participant.id), deps);
+    if ("refusal" in gate) return gate.refusal;
+    const created = await createAndQueue(participant.id, "building", text, deps, gate.buildId);
+    if (created.result !== "created") return refused(created.result === "approved" ? "busy" : created.result, 409);
+    return { outcome: "accepted", response: jsonResponse(202, { id: created.id }) };
+  }
   const created = await createAndQueue(participant.id, participant.step, text, deps);
   if (created.result !== "created") return refused(created.result, 409);
   return { outcome: "accepted", response: jsonResponse(202, { id: created.id }) };
+}
+
+/**
+ * Ticket 3.6: whether a change may be asked for (or built) now: the conversation's build is the caller's and live, or a
+ * change build that failed (the app before it is still live); none of theirs is queued or running; and fewer changes
+ * were built than the cap. Answers the build the change follows, or the refusal.
+ */
+async function changeGate(
+  participantId: string,
+  conversation: StoredConversation | undefined,
+  deps: ConversationDeps,
+): Promise<{ buildId: string; build: StoredBuild; facts: BudgetFacts } | { refusal: Result }> {
+  const build = conversation?.buildId === undefined ? undefined : await deps.store.getBuild(conversation.buildId);
+  if (build === undefined || build.participantId !== participantId) return { refusal: refused("not-live", 409) };
+  if (build.status === "queued" || build.status === "building" || build.status === "deploying") return { refusal: refused("build-running", 409) };
+  if (build.status === "failed" && build.kind !== "change") return { refusal: refused("not-live", 409) };
+  const facts = await deps.store.getBudgetFacts(participantId);
+  const cap = facts.settings.changeRequestsPerPerson;
+  if (facts.limits.changeRequestsUsed >= cap) {
+    return { refusal: { outcome: "no-changes-left", response: jsonResponse(409, { message: changesUsedText(cap), reason: "no-changes-left" }) } };
+  }
+  return { buildId: build.buildId, build, facts };
 }
 
 /** Stores a pending message and hands it to the AI worker; a queue failure ends it as failed at once. */
@@ -148,11 +211,12 @@ async function createAndQueue(
   step: Step,
   text: string,
   deps: ConversationDeps,
+  afterBuild?: string,
 ): Promise<{ result: "created"; id: string } | { result: "busy" | "waiting" | "approved" }> {
   const now = deps.now();
   const id = newMessageId(now, deps.randomBytes);
   const nowSeconds = Math.floor(now.getTime() / 1000);
-  const created = await deps.store.createMessage(participantId, { id, step, text, createdAt: now.toISOString(), nowSeconds });
+  const created = await deps.store.createMessage(participantId, { id, step, text, createdAt: now.toISOString(), nowSeconds }, afterBuild);
   if (created !== "created") return { result: created };
   try {
     await deps.queue.send({ participantId, messageId: id });
@@ -226,6 +290,8 @@ export interface History {
   /** The newest spec version, and the approved one (ticket 1.9). */
   latestSpecVersion?: number;
   approvedSpecVersion?: number;
+  /** Ticket 3.6: the proposed change's version, waiting for Build this change or Not this one. */
+  proposedSpecVersion?: number;
 }
 
 /**
@@ -263,6 +329,7 @@ export function shapeHistory(step: Step, items: readonly ListedItem[], conversat
     ...(pendingId === undefined ? {} : { pendingId }),
     ...(conversation?.latestSpecVersion === undefined ? {} : { latestSpecVersion: conversation.latestSpecVersion }),
     ...(conversation?.approvedSpecVersion === undefined ? {} : { approvedSpecVersion: conversation.approvedSpecVersion }),
+    ...(conversation?.proposedSpecVersion === undefined ? {} : { proposedSpecVersion: conversation.proposedSpecVersion }),
   };
 }
 
@@ -288,11 +355,49 @@ async function history(participant: ParticipantRecord, deps: ConversationDeps): 
   const shaped = shapeHistory(participant.step, items, conversation, nowSeconds);
   // Ticket 3.5: the global Stop, from the same settings read as the budget.
   // A failed read answers `pausedUnknown: true`, so the page keeps the paused line as it shows it.
+  // Ticket 3.6: at step 4, the changes used and the cap (the page shows "Changes left: 3 of 5") and the suggested changes;
+  // once the app is live and none are stored, the AI worker is asked for them (at most every SUGGESTIONS_RETRY_MS).
+  let step4: { changeRequestsUsed?: number; changeRequestsPerPerson?: number; suggestions?: string[] } = {};
+  let suggestionsError: string | undefined;
+  if (participant.step === "building") {
+    step4 = {
+      ...(budget === undefined ? {} : { changeRequestsUsed: budget.limits.changeRequestsUsed, changeRequestsPerPerson: budget.settings.changeRequestsPerPerson }),
+      ...(conversation?.suggestions === undefined ? {} : { suggestions: conversation.suggestions }),
+    };
+    suggestionsError = await askForSuggestionsWhenLive(participant.id, conversation, undefined, deps);
+  }
   const body =
     budget === undefined
-      ? { ...shaped, pausedUnknown: true }
-      : { ...shaped, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
-  return { outcome: "ok", response: jsonResponse(200, body), ...(budgetError === undefined ? {} : { error: budgetError }) };
+      ? { ...shaped, ...step4, pausedUnknown: true }
+      : { ...shaped, ...step4, budgetLeft: budgetOf(budget).leftUsd, ...(budget.settings.stopped ? { paused: true } : {}) };
+  const error = budgetError ?? suggestionsError;
+  return { outcome: "ok", response: jsonResponse(200, body), ...(error === undefined ? {} : { error }) };
+}
+
+/**
+ * Ticket 3.6: once the caller's app is live and no suggestions are stored, asks the AI worker for them, at most once per
+ * SUGGESTIONS_RETRY_MS (a conditional write of the time asked, then the job). Never fails the read it is part of: an
+ * error is answered by name, for the log.
+ */
+async function askForSuggestionsWhenLive(
+  participantId: string,
+  conversation: StoredConversation | undefined,
+  knownBuild: StoredBuild | undefined,
+  deps: ConversationDeps,
+): Promise<string | undefined> {
+  if (conversation?.buildId === undefined || conversation.suggestions !== undefined) return undefined;
+  try {
+    const now = deps.now();
+    const askedBefore = new Date(now.getTime() - SUGGESTIONS_RETRY_MS).toISOString();
+    if (conversation.suggestionsRequestedAt !== undefined && !(conversation.suggestionsRequestedAt < askedBefore)) return undefined;
+    const build = knownBuild ?? (await deps.store.getBuild(conversation.buildId));
+    if (build?.status !== "live" || build.participantId !== participantId) return undefined;
+    if (!(await deps.store.markSuggestionsRequested(participantId, now.toISOString(), askedBefore))) return undefined;
+    await deps.queue.sendSuggestions(participantId);
+    return undefined;
+  } catch (error) {
+    return errorName(error);
+  }
 }
 
 /**
@@ -340,7 +445,17 @@ async function spec(request: HttpRequest, participant: ParticipantRecord, deps: 
   // Ticket 2.7: a version whose readiness check failed was approved once (`approvedAt` stays) but is no longer
   // the approved one: it shows as approved only while the conversation still holds that approval.
   const approved = found.approved && (await deps.store.getConversation(participant.id))?.approvedSpecVersion === found.version;
-  return { outcome: "ok", response: jsonResponse(200, { version: found.version, text: found.text, createdAt: found.createdAt, approved }) };
+  return {
+    outcome: "ok",
+    response: jsonResponse(200, {
+      version: found.version,
+      text: found.text,
+      createdAt: found.createdAt,
+      approved,
+      // Ticket 3.6: a proposed change's version carries its "What changes" list.
+      ...(found.whatChanges === undefined ? {} : { whatChanges: found.whatChanges }),
+    }),
+  };
 }
 
 /**
@@ -394,10 +509,13 @@ async function queueReadiness(participantId: string, messageId: string, version:
  */
 async function build(participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
   const notFound: Result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
-  const buildId = (await deps.store.getConversation(participant.id))?.buildId;
+  const conversation = await deps.store.getConversation(participant.id);
+  const buildId = conversation?.buildId;
   if (buildId === undefined) return notFound;
   const found = await deps.store.getBuild(buildId);
   if (found === undefined || found.participantId !== participant.id) return notFound;
+  // Ticket 3.6: the app is live: ask for the suggested changes (once).
+  const suggestionsError = found.status === "live" ? await askForSuggestionsWhenLive(participant.id, conversation, found, deps) : undefined;
   // Ticket 2.10: the feed so far and the links the page shows (commits under the repository, the app's address).
   // Never the participant id: the answer holds only the build's own facts.
   const nickname = found.nickname !== undefined && NICKNAME_PATTERN.test(found.nickname) ? found.nickname : undefined;
@@ -414,7 +532,7 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
     });
   }
   const paused = await pausedFlag(deps);
-  const error = aheadError ?? paused.error;
+  const error = aheadError ?? paused.error ?? suggestionsError;
   return {
     outcome: "ok",
     response: jsonResponse(200, {
@@ -424,10 +542,74 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       ...(nickname === undefined ? {} : { repositoryUrl: appRepositoryUrl(nickname), appUrl: appAddress(nickname) }),
       ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
       ...(ahead === undefined ? {} : { ahead }),
+      // Ticket 3.6: a change build says so, with its number.
+      ...(found.kind === "change" ? { kind: "change", ...(found.changeNumber === undefined ? {} : { changeNumber: found.changeNumber }) } : {}),
       ...paused.flag,
     }),
     ...(error === undefined ? {} : { error }),
   };
+}
+
+/** Ticket 3.6: the version a change route names (a whole number from 1), or undefined. */
+function readChangeVersion(request: HttpRequest): number | undefined {
+  const version = readJsonObject(request)?.["version"];
+  return typeof version === "number" && Number.isInteger(version) && version >= 1 && version <= MAX_SPEC_VERSION ? version : undefined;
+}
+
+/**
+ * Ticket 3.6, Build this change: for the caller's own proposed version only (any other version, or none proposed: 404),
+ * while the app is live, nothing of theirs is building and changes are left; stores the request for the AI worker (which
+ * runs the readiness check and queues the change build) as the message in flight, and answers its id for polling.
+ */
+async function buildChange(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  const version = readChangeVersion(request);
+  if (version === undefined) return refused("invalid-change", 400);
+  const notFound: Result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
+  if (participant.step !== "building") return notFound;
+  const conversation = await deps.store.getConversation(participant.id);
+  if (conversation?.proposedSpecVersion !== version) return notFound;
+  const gate = await changeGate(participant.id, conversation, deps);
+  if ("refusal" in gate) return gate.refusal;
+  const now = deps.now();
+  const message = {
+    id: newMessageId(now, deps.randomBytes),
+    step: "building" as const,
+    text: CHANGE_BUILD_REQUEST,
+    createdAt: now.toISOString(),
+    nowSeconds: Math.floor(now.getTime() / 1000),
+    request: "change-build" as const,
+  };
+  const result = await deps.store.requestChangeBuild(participant.id, version, gate.buildId, message);
+  if (result === "stale") return notFound;
+  if (result !== "created") return refused(result, 409);
+  try {
+    await deps.queue.send({ participantId: participant.id, messageId: message.id });
+  } catch (error) {
+    // Nothing will answer it: end it at once (the proposal stays), so the participant can press again.
+    await deps.store.finishChangeBuild(
+      participant.id,
+      message.id,
+      { kind: "failed", reply: CHANGE_FAILURE_REPLY, version, previousBuildId: gate.buildId },
+      now.toISOString(),
+    );
+    throw error;
+  }
+  return { outcome: "accepted", response: jsonResponse(202, { id: message.id, version }) };
+}
+
+/** Ticket 3.6, Not this one: puts the caller's own proposed version aside (any other version: 404); nothing counts. */
+async function discardChange(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  const version = readChangeVersion(request);
+  if (version === undefined) return refused("invalid-change", 400);
+  const notFound: Result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
+  if (participant.step !== "building") return notFound;
+  const now = deps.now();
+  const result = await deps.store.discardChange(participant.id, version, Math.floor(now.getTime() / 1000), now.toISOString());
+  if (result === "stale") return notFound;
+  if (result !== "discarded") return refused(result, 409);
+  return { outcome: "discarded", response: jsonResponse(200, { version, discarded: true }) };
 }
 
 /**
@@ -449,6 +631,8 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === APPROVE_ROUTE) return "approve";
   if (request.routeKey === BUILD_ROUTE) return "build";
   if (request.routeKey === STATUS_ROUTE) return "status";
+  if (request.routeKey === CHANGE_BUILD_ROUTE) return "change-build";
+  if (request.routeKey === CHANGE_DISCARD_ROUTE) return "change-discard";
   return "unknown";
 }
 
@@ -468,6 +652,8 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "approve") result = await approve(request, session.participant, deps);
     else if (route === "build") result = await build(session.participant, deps);
     else if (route === "status") result = await workshopStatus(deps);
+    else if (route === "change-build") result = await buildChange(request, session.participant, deps);
+    else if (route === "change-discard") result = await discardChange(request, session.participant, deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

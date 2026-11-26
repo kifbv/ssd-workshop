@@ -147,6 +147,9 @@ paths:
   redelivery finds the stored outcome and sends the same id again instead of acting twice; the consumer acts only on a
   record still in the state that expects it. A platform request that gets a different worker path (`READINESS_REQUEST`)
   is recognised by its exact text at a step where participants cannot send (`approved`), never by its text alone.
+  Where participants can send at that step (step 4's Build this change, ticket 3.6), the route that alone may store it
+  marks it with an attribute participants' messages never carry (`request: "change-build"`), and the worker requires
+  the mark and the exact text.
 - Claude Agent SDK (the builder's coding agent, ticket 2.8): `options.env` REPLACES the child's whole environment,
   so build it from an allow-list (never spread `process.env`: a GitHub token would reach the agent) and give it a
   fresh temporary `HOME`/`CLAUDE_CONFIG_DIR` plus `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION` and every model alias
@@ -227,3 +230,6 @@ paths:
   count towards `maxReceiveCount`), and refreshes whatever a "stale" rule reads (`pendingSince`) in the same step. Check
   who may send to a queue in the access boundary before designing a re-send: only the AI worker and the scheduler may send
   to `ssd-workshop-builds*` (`BuildsFromTheirSendersOnly`), so the launcher's check launches stopped builds itself.
+- A count that must only rise when work is really queued (3.6's `changeRequestsUsed`) is a SET to the value read plus
+  one, conditional on that exact value and the cap, in the same transaction that creates the work; a missing value is
+  `attribute_not_exists` OR the same check, never a bare `ADD` (a redelivery would count twice).

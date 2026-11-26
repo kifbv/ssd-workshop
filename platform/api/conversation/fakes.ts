@@ -15,6 +15,10 @@ import {
   textHash,
   type AiJob,
   type ApproveResult,
+  type ChangeBuildFinish,
+  type ChangeRequestResult,
+  type DiscardResult,
+  type SuggestionsQueue,
   type BuildJob,
   type BuildQueue,
   type ConversationStore,
@@ -62,6 +66,9 @@ export interface FakeConversation {
   latestSpecVersion?: number;
   approvedSpecVersion?: number;
   buildId?: string;
+  proposedSpecVersion?: number;
+  suggestions?: string[];
+  suggestionsRequestedAt?: string;
 }
 
 /** A build record as the readiness check writes it (ticket 2.7). */
@@ -75,6 +82,10 @@ export interface FakeBuild {
   failureReasons?: string[];
   feed?: BuildFeedEvent[];
   queueKey?: string;
+  /** Ticket 3.6: absent on first builds (as before 3.6). */
+  kind?: "first" | "change";
+  changeNumber?: number;
+  specVersion?: number;
 }
 
 export interface FakeSpec {
@@ -83,9 +94,21 @@ export interface FakeSpec {
   messageId: string;
   createdAt: string;
   approvedAt?: string;
+  whatChanges?: string[];
 }
 
 type Method = keyof ConversationStore;
+
+/** A spec version as the stores read it. */
+function specOf(spec: FakeSpec): StoredSpec {
+  return {
+    version: spec.version,
+    text: spec.text,
+    createdAt: spec.createdAt,
+    approved: spec.approvedAt !== undefined,
+    ...(spec.whatChanges === undefined ? {} : { whatChanges: [...spec.whatChanges] }),
+  };
+}
 
 /** The conversation without its message in flight. */
 function withoutInFlight(c: FakeConversation): FakeConversation {
@@ -137,24 +160,18 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     return map;
   }
 
-  async createMessage(participantId: string, message: NewMessage): Promise<CreateResult> {
+  async createMessage(participantId: string, message: NewMessage, afterBuild?: string): Promise<CreateResult> {
     this.fail("createMessage");
     const conversation = this.conversations.get(participantId);
-    if (conversation?.approvedSpecVersion !== undefined) return "approved";
+    if (afterBuild === undefined && conversation?.approvedSpecVersion !== undefined) return "approved";
+    if (afterBuild !== undefined && conversation?.buildId !== afterBuild) return conversation?.state === "waiting" ? "waiting" : "busy";
     const free =
       conversation?.pendingId === undefined ||
       (conversation.state === "open" && (conversation.pendingSince ?? 0) < message.nowSeconds - STALE_PENDING_SECONDS);
     if (!free) return conversation?.state === "waiting" ? "waiting" : "busy";
     if (this.messagesOf(participantId).has(message.id)) throw new Error("message id taken");
     this.conversations.set(participantId, { ...conversation, state: "open", pendingId: message.id, pendingSince: message.nowSeconds });
-    this.messagesOf(participantId).set(message.id, {
-      id: message.id,
-      step: message.step,
-      text: message.text,
-      status: "pending",
-      pendingSince: message.nowSeconds,
-      createdAt: message.createdAt,
-    });
+    this.storeMessage(participantId, message);
     return "created";
   }
 
@@ -171,6 +188,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       ...(m.approvedTextHash === undefined ? {} : { approvedTextHash: m.approvedTextHash }),
       ...(m.suggestion === undefined ? {} : { suggestion: m.suggestion }),
       ...(m.verdictReason === undefined ? {} : { verdictReason: m.verdictReason }),
+      ...(m.request === undefined ? {} : { request: m.request }),
     };
   }
 
@@ -189,6 +207,9 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
         ...(c.latestSpecVersion === undefined ? {} : { latestSpecVersion: c.latestSpecVersion }),
         ...(c.approvedSpecVersion === undefined ? {} : { approvedSpecVersion: c.approvedSpecVersion }),
         ...(c.buildId === undefined ? {} : { buildId: c.buildId }),
+        ...(c.proposedSpecVersion === undefined ? {} : { proposedSpecVersion: c.proposedSpecVersion }),
+        ...(c.suggestions === undefined ? {} : { suggestions: [...c.suggestions] }),
+        ...(c.suggestionsRequestedAt === undefined ? {} : { suggestionsRequestedAt: c.suggestionsRequestedAt }),
       }
     );
   }
@@ -229,7 +250,16 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
         text: outcome.reply,
         ...(outcome.kind === "done" && outcome.offersSpec === true ? { offersSpec: true } : {}),
         ...(spec === undefined ? {} : { specVersion: spec.version }),
-        kind: outcome.kind === "done" ? "answer" : outcome.kind === "declined" ? "decline" : outcome.kind === "over-budget" ? "budget" : "failure",
+        kind:
+          outcome.kind === "done"
+            ? "answer"
+            : outcome.kind === "declined"
+              ? "decline"
+              : outcome.kind === "over-budget"
+                ? "budget"
+                : outcome.kind === "over-limit"
+                  ? "limit"
+                  : "failure",
         createdAt: nowIso,
         ...(answer === undefined
           ? {}
@@ -241,8 +271,18 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
               usage: answer.usage,
             }),
       });
-      this.conversations.set(participantId, { ...withoutInFlight(conversation), state: "open", ...(spec === undefined ? {} : { latestSpecVersion: spec.version }) });
-      if (spec !== undefined) this.specs.set(participantId, [...specs, { version: spec.version, text: spec.text, messageId, createdAt: nowIso }]);
+      this.conversations.set(participantId, {
+        ...withoutInFlight(conversation),
+        state: "open",
+        ...(spec === undefined ? {} : { latestSpecVersion: spec.version }),
+        ...(spec?.whatChanges === undefined ? {} : { proposedSpecVersion: spec.version }),
+      });
+      if (spec !== undefined) {
+        this.specs.set(participantId, [
+          ...specs,
+          { version: spec.version, text: spec.text, messageId, createdAt: nowIso, ...(spec.whatChanges === undefined ? {} : { whatChanges: [...spec.whatChanges] }) },
+        ]);
+      }
     }
     for (const u of [guardrail?.usage, outcome.kind === "done" ? outcome.answer.usage : undefined]) {
       if (u !== undefined) this.add(participantId, u);
@@ -285,13 +325,13 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   async getLatestSpec(participantId: string): Promise<StoredSpec | undefined> {
     this.fail("getLatestSpec");
     const spec = this.specs.get(participantId)?.at(-1);
-    return spec && { version: spec.version, text: spec.text, createdAt: spec.createdAt, approved: spec.approvedAt !== undefined };
+    return spec && specOf(spec);
   }
 
   async getSpec(participantId: string, version: number): Promise<StoredSpec | undefined> {
     this.fail("getSpec");
     const spec = this.specs.get(participantId)?.find((v) => v.version === version);
-    return spec && { version: spec.version, text: spec.text, createdAt: spec.createdAt, approved: spec.approvedAt !== undefined };
+    return spec && specOf(spec);
   }
 
   async approveSpec(participantId: string, version: number, nowSeconds: number, nowIso: string, readiness: NewMessage): Promise<ApproveResult> {
@@ -334,6 +374,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       status: "pending",
       pendingSince: message.nowSeconds,
       createdAt: message.createdAt,
+      ...(message.request === undefined ? {} : { request: message.request }),
     });
   }
 
@@ -399,6 +440,8 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
         feed: (b.feed ?? []).map((e) => ({ ...e })),
         ...(b.failureReasons === undefined ? {} : { failureReasons: [...b.failureReasons] }),
         ...(b.queueKey === undefined ? {} : { queueKey: b.queueKey }),
+        kind: b.kind === "change" ? "change" : "first",
+        ...(b.kind === "change" && b.changeNumber !== undefined ? { changeNumber: b.changeNumber } : {}),
       }
     );
   }
@@ -416,10 +459,13 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
 
   async getBudgetFacts(participantId: string): Promise<BudgetFacts> {
     this.fail("getBudgetFacts");
-    const extraBudget = this.profiles.get(participantId)?.extraBudget;
+    const profile = this.profiles.get(participantId);
+    const item: Record<string, AttributeValue> = {};
+    if (profile?.extraBudget !== undefined) item["extraBudget"] = { N: String(profile.extraBudget) };
+    if (profile?.changeRequestsUsed !== undefined) item["changeRequestsUsed"] = { N: String(profile.changeRequestsUsed) };
     return {
       settings: settingsFromItem(this.settingsItem),
-      limits: limitsFromItem(extraBudget === undefined ? undefined : { extraBudget: { N: String(extraBudget) } }),
+      limits: limitsFromItem(item),
       spentUsd: this.usage.get(participantId)?.costUsd ?? 0,
     };
   }
@@ -436,6 +482,103 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     if (message?.status !== "pending" || conversation?.pendingId !== messageId || conversation.state !== "open") return false;
     this.messagesOf(participantId).set(messageId, { ...message, pendingSince: nowSeconds });
     this.conversations.set(participantId, { ...conversation, pendingSince: nowSeconds });
+    return true;
+  }
+
+  async requestChangeBuild(participantId: string, version: number, buildId: string, message: NewMessage): Promise<ChangeRequestResult> {
+    this.fail("requestChangeBuild");
+    const c = this.conversations.get(participantId);
+    if (c?.proposedSpecVersion !== version || c.buildId !== buildId) return "stale";
+    const free = c.pendingId === undefined || (c.state === "open" && (c.pendingSince ?? 0) < message.nowSeconds - STALE_PENDING_SECONDS);
+    if (!free) return c.state === "waiting" ? "waiting" : "busy";
+    const spec = this.specs.get(participantId)?.find((v) => v.version === version);
+    if (spec === undefined) return "stale";
+    if (this.messagesOf(participantId).has(message.id)) throw new Error("message id taken");
+    this.conversations.set(participantId, { ...c, state: "open", pendingId: message.id, pendingSince: message.nowSeconds });
+    spec.approvedAt = message.createdAt;
+    this.storeMessage(participantId, message);
+    return "created";
+  }
+
+  async discardChange(participantId: string, version: number, nowSeconds: number): Promise<DiscardResult> {
+    this.fail("discardChange");
+    const c = this.conversations.get(participantId);
+    if (c?.proposedSpecVersion !== version) return "stale";
+    const free = c.pendingId === undefined || (c.state === "open" && (c.pendingSince ?? 0) < nowSeconds - STALE_PENDING_SECONDS);
+    if (!free) return c.state === "waiting" ? "waiting" : "busy";
+    const rest = { ...c };
+    delete rest.proposedSpecVersion;
+    this.conversations.set(participantId, rest);
+    return "discarded";
+  }
+
+  async finishChangeBuild(participantId: string, messageId: string, outcome: ChangeBuildFinish, nowIso: string): Promise<boolean> {
+    this.fail("finishChangeBuild");
+    const message = this.messages.get(participantId)?.get(messageId);
+    const conversation = this.conversations.get(participantId);
+    const profile = this.profiles.get(participantId);
+    // The same conditions as the DynamoDB transaction, all or nothing.
+    if (message?.status !== "pending" || this.repliesOf(participantId).has(messageId)) return false;
+    if (conversation?.pendingId !== messageId || conversation.proposedSpecVersion !== outcome.version || conversation.buildId !== outcome.previousBuildId) return false;
+    if (outcome.kind === "ready") {
+      const used = profile?.changeRequestsUsed;
+      if (profile?.step !== "building") return false;
+      if (!((used === undefined && outcome.used === 0) || used === outcome.used) || outcome.used >= outcome.cap) return false;
+      const previous = this.builds.get(outcome.previousBuildId)?.status;
+      if (previous !== "live" && previous !== "failed") return false;
+      if (this.builds.has(outcome.build.buildId)) return false;
+    }
+    const answered = outcome.kind === "ready" || outcome.kind === "not-ready";
+    const answer = answered ? outcome.answer : undefined;
+    this.messagesOf(participantId).set(messageId, { ...message, status: answered ? "done" : "failed" });
+    const kinds = { ready: "answer", "not-ready": "answer", failed: "failure", "over-budget": "budget", "over-limit": "limit" } as const;
+    this.repliesOf(participantId).set(messageId, {
+      text: outcome.reply,
+      kind: kinds[outcome.kind],
+      createdAt: nowIso,
+      ...(answer === undefined
+        ? {}
+        : { prompt: answer.prompt, modelId: answer.modelId, promptVersion: answer.promptVersion, historyCount: answer.historyCount, usage: answer.usage }),
+    });
+    const rest = withoutInFlight(conversation);
+    if (outcome.kind === "ready" && profile !== undefined) {
+      delete rest.proposedSpecVersion;
+      this.conversations.set(participantId, { ...rest, state: "open", buildId: outcome.build.buildId, approvedSpecVersion: outcome.version });
+      this.profiles.set(participantId, { ...profile, changeRequestsUsed: outcome.used + 1 });
+      this.builds.set(outcome.build.buildId, {
+        buildId: outcome.build.buildId,
+        nickname: outcome.build.nickname,
+        participantId,
+        status: "queued",
+        kind: "change",
+        changeNumber: outcome.build.changeNumber,
+        specVersion: outcome.version,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    } else {
+      this.conversations.set(participantId, { ...rest, state: "open" });
+    }
+    const spent = answered ? outcome.answer.usage : outcome.usage;
+    if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) this.add(participantId, spent);
+    return true;
+  }
+
+  async markSuggestionsRequested(participantId: string, nowIso: string, askedBeforeIso: string): Promise<boolean> {
+    this.fail("markSuggestionsRequested");
+    const c = this.conversations.get(participantId);
+    if (c === undefined || c.suggestions !== undefined) return false;
+    if (c.suggestionsRequestedAt !== undefined && !(c.suggestionsRequestedAt < askedBeforeIso)) return false;
+    this.conversations.set(participantId, { ...c, suggestionsRequestedAt: nowIso });
+    return true;
+  }
+
+  async storeSuggestions(participantId: string, suggestions: readonly string[], usage: TokenUsage): Promise<boolean> {
+    this.fail("storeSuggestions");
+    const c = this.conversations.get(participantId);
+    if (c === undefined || c.suggestions !== undefined) return false;
+    this.conversations.set(participantId, { ...c, suggestions: [...suggestions] });
+    if (usage.inputTokens + usage.outputTokens > 0) this.add(participantId, usage);
     return true;
   }
 
@@ -479,8 +622,10 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
   }
 }
 
-export class FakeQueue implements MessageQueue, HeldJobs {
+export class FakeQueue implements MessageQueue, HeldJobs, SuggestionsQueue {
   readonly sent: AiJob[] = [];
+  /** Ticket 3.6: suggestions jobs (participant ids), with their delay when held. */
+  readonly suggestions: { participantId: string; delaySeconds?: number }[] = [];
   /** Ticket 3.5: jobs held by the global Stop, with their delay, in order. */
   readonly later: { job: AiJob; delaySeconds: number }[] = [];
   failure: Error | undefined;
@@ -493,6 +638,11 @@ export class FakeQueue implements MessageQueue, HeldJobs {
   async sendLater(job: AiJob, delaySeconds: number): Promise<void> {
     if (this.failure !== undefined) throw this.failure;
     this.later.push({ job: { ...job }, delaySeconds });
+  }
+
+  async sendSuggestions(participantId: string, delaySeconds?: number): Promise<void> {
+    if (this.failure !== undefined) throw this.failure;
+    this.suggestions.push({ participantId, ...(delaySeconds === undefined ? {} : { delaySeconds }) });
   }
 }
 

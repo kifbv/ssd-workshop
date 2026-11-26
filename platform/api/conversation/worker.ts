@@ -24,9 +24,20 @@
 // sends a crashing job to the dead-letter queue, does not grow). After Resume, the next delivery answers it as usual. A
 // job already past that read finishes. A redelivered readiness job that only re-sends its build id calls no AI and is
 // not held (the launcher holds the build).
+//
+// Ticket 3.6, change requests: a participant message at step `building` (step 4, sent once the app is live) goes
+// through the same Stop hold, budget check and guardrail, and is refused without an AI call when every change request is
+// used; on path, the change prompt writes the next spec version and its "What changes" list, stored as the proposal.
+// Build this change stores CHANGE_BUILD_REQUEST marked `change-build`: the worker runs the readiness check on the
+// proposed version and, when it passes and budget and changes are left, queues a build of kind `change` and counts the
+// change in the same transaction (a redelivery only re-sends the build id, as for the first build). A suggestions job
+// (no message) asks for three suggested changes once the app is live, under the same Stop hold and budget check.
 import { errorName } from "../sign-in/code-request.js";
 import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
+import { changesUsedText } from "../workshop/texts.js";
 import { answerMessage } from "./answer.js";
+import { answerChange, CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY, CHANGE_READY_REPLY, changeNotReadyReply } from "./change.js";
+import { suggestChanges } from "./suggestions.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, usageOf, type ModelClient } from "./model.js";
 import { checkReadiness, notReadyReply, READINESS_FAILURE_REPLY, READINESS_PROMPT_VERSION, READINESS_REQUEST, READY_REPLY } from "./readiness.js";
@@ -39,6 +50,8 @@ import {
   textHash,
   type AiJob,
   type BuildQueue,
+  type ChangeBuildFinish,
+  type SuggestionsQueue,
   type ConversationStore,
   type Finish,
   type GuardrailRecord,
@@ -64,7 +77,11 @@ export type WorkerOutcome =
   /** Ticket 3.3: the AI budget is used; the (next) AI call was not made and no build was queued. */
   | "over-budget"
   /** Ticket 3.5: the global Stop is on; no AI call, the message stays pending and the job comes back later. */
-  | "held";
+  | "held"
+  /** Ticket 3.6: every change request is used; no AI call was made and no build was queued. */
+  | "over-limit"
+  /** Ticket 3.6: the suggested changes were stored. */
+  | "suggested";
 
 /** The only things ever logged: outcome, verdict and an error name (no text, prompt, reply or id). */
 export interface WorkerLogEntry {
@@ -79,8 +96,8 @@ export interface WorkerDeps {
   model: ModelClient;
   /** The launch queue (ticket 2.7). */
   builds: BuildQueue;
-  /** Ticket 3.5: the worker's own queue, for jobs held by the global Stop. */
-  held: HeldJobs;
+  /** Ticket 3.5: the worker's own queue, for jobs held by the global Stop (ticket 3.6: suggestions jobs too). */
+  held: HeldJobs & SuggestionsQueue;
   modelId: string;
   now: () => Date;
   log: (entry: WorkerLogEntry) => void;
@@ -121,6 +138,7 @@ async function run(
   const message = await deps.store.getMessage(participantId, messageId);
   const nowSeconds = () => Math.floor(deps.now().getTime() / 1000);
   if (message !== undefined && isReadinessRequest(message)) return runReadiness(job, message, deps, signal);
+  if (message !== undefined && isChangeBuildRequest(message)) return runChangeBuild(job, message, deps, signal);
   if (message === undefined || message.status !== "pending" || isStale(message, nowSeconds())) return { outcome: "skipped" };
 
   const sleep = deps.sleep ?? realSleep;
@@ -161,6 +179,13 @@ async function run(
       const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY });
       return { outcome: applied ? "over-budget" : "skipped" };
     }
+    // Ticket 3.6: a change request (step 4) when every change is used gets the limit text, without an AI call.
+    const change = message.step === "building";
+    if (change && facts.limits.changeRequestsUsed >= facts.settings.changeRequestsPerPerson) {
+      finishing = true;
+      const applied = await finish({ kind: "over-limit", reply: changesUsedText(facts.settings.changeRequestsPerPerson) });
+      return { outcome: applied ? "over-limit" : "skipped" };
+    }
     // A facilitator approved this very text after a flag: no new check. A text changed since (by
     // anyone) has another hash and is checked again. Write my spec's own request (ticket 1.9) is the
     // platform's fixed text, so it needs no check either.
@@ -187,6 +212,7 @@ async function run(
       }
     }
     const history = await deps.store.getHistory(participantId, messageId);
+    if (change) return await runChange(job, message, history, guardrail, deps, finish, () => (finishing = true), signal);
     // Step 2 (ticket 1.9): the model sees the current spec, and an answer may carry a new version.
     const current = message.step === "spec" ? await deps.store.getLatestSpec(participantId) : undefined;
     const answer = await answerMessage(deps.model, message.step, history, message.text, signal, current?.text);
@@ -212,6 +238,41 @@ async function run(
     const applied = await finish({ kind: "failed", reply: FAILURE_REPLY, ...(guardrail === undefined ? {} : { guardrail }) });
     return { outcome: applied ? "failed" : "skipped", error: errorName(error) };
   }
+}
+
+/**
+ * Ticket 3.6: the change answer (after the guardrail and the checks above): the live spec (the version last built) and the
+ * open proposal, if any, go to the change prompt; a new version is stored with its list as the new proposal. Errors
+ * before the final write are the caller's (the neutral failure reply); `finishing` is set before it.
+ */
+async function runChange(
+  job: AiJob,
+  message: StoredMessage,
+  history: Awaited<ReturnType<WorkerDeps["store"]["getHistory"]>>,
+  guardrail: GuardrailRecord | undefined,
+  deps: WorkerDeps,
+  finish: (outcome: Finish) => Promise<boolean>,
+  markFinishing: () => void,
+  signal: AbortSignal | undefined,
+): Promise<Omit<WorkerLogEntry, "event">> {
+  const conversation = await deps.store.getConversation(job.participantId);
+  const live = conversation?.approvedSpecVersion === undefined ? undefined : await deps.store.getSpec(job.participantId, conversation.approvedSpecVersion);
+  if (live === undefined) throw Object.assign(new Error("the live spec is missing"), { name: "MissingSpec" });
+  const proposed =
+    conversation?.proposedSpecVersion === undefined ? undefined : await deps.store.getSpec(job.participantId, conversation.proposedSpecVersion);
+  const latest = await deps.store.getLatestSpec(job.participantId);
+  const answer = await answerChange(deps.model, history, message.text, live.text, proposed?.text, signal);
+  markFinishing();
+  const applied = await finish({
+    kind: "done",
+    reply: answer.text,
+    answer: { prompt: message.text, modelId: deps.modelId, promptVersion: answer.promptVersion, historyCount: answer.historyCount, usage: usageOf(answer) },
+    ...(answer.spec === undefined || answer.whatChanges === undefined
+      ? {}
+      : { spec: { version: Math.max(latest?.version ?? 0, live.version) + 1, text: answer.spec, whatChanges: answer.whatChanges } }),
+    ...(guardrail === undefined ? {} : { guardrail }),
+  });
+  return { outcome: applied ? "done" : "skipped", ...(guardrail === undefined ? {} : { verdict: guardrail.verdict }) };
 }
 
 /**
@@ -321,4 +382,160 @@ async function runReadiness(
     const applied = await finish({ kind: "failed", reply: READINESS_FAILURE_REPLY, version, ...(usage === undefined ? {} : { usage }) });
     return { outcome: applied ? "failed" : "skipped", error: errorName(error) };
   }
+}
+
+/** Ticket 3.6: Build this change's request: the platform's text at step 4 with the mark only that route writes. */
+export function isChangeBuildRequest(message: Pick<StoredMessage, "step" | "text" | "request">): boolean {
+  return message.step === "building" && message.request === "change-build" && message.text === CHANGE_BUILD_REQUEST;
+}
+
+/**
+ * Ticket 3.6: the readiness check on the proposed version and, when it passes (budget and changes left), the change build
+ * queued with the change counted, in one transaction (`finishChangeBuild`). Not ready, no verdict, over budget or no
+ * changes left: the proposal stays and nothing counts. A redelivery after the transaction only re-sends the build id.
+ */
+async function runChangeBuild(
+  job: AiJob,
+  message: StoredMessage,
+  deps: WorkerDeps,
+  signal: AbortSignal | undefined,
+): Promise<Omit<WorkerLogEntry, "event">> {
+  const { participantId, messageId } = job;
+  const buildId = buildIdFor(messageId);
+  const nowSeconds = Math.floor(deps.now().getTime() / 1000);
+  const conversation = await deps.store.getConversation(participantId);
+  if (message.status === "done") {
+    // Queued on an earlier delivery (same transaction as buildId), but the send may have failed: send it again. Nothing
+    // is counted again (the count was in that transaction).
+    if (conversation?.buildId !== buildId) return { outcome: "skipped" };
+    await deps.builds.send({ buildId, participantId });
+    return { outcome: "resent" };
+  }
+  const version = conversation?.proposedSpecVersion;
+  const previousBuildId = conversation?.buildId;
+  if (
+    message.status !== "pending" ||
+    isStale(message, nowSeconds) ||
+    version === undefined ||
+    previousBuildId === undefined ||
+    conversation?.pendingId !== messageId
+  ) {
+    return { outcome: "skipped" };
+  }
+  const profile = await deps.store.getParticipantInfo(participantId);
+  if (profile?.step !== "building" || profile.nickname === undefined) return { outcome: "skipped" };
+  const nickname = profile.nickname;
+
+  const sleep = deps.sleep ?? realSleep;
+  const finish = async (outcome: ChangeBuildFinish): Promise<boolean> => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await deps.store.finishChangeBuild(participantId, messageId, outcome, deps.now().toISOString());
+      } catch (error) {
+        if (attempt < FINISH_ATTEMPTS) {
+          await sleep(FINISH_BACKOFF_MS[attempt - 1] ?? 0);
+          continue;
+        }
+        const spent = outcome.kind === "ready" || outcome.kind === "not-ready" ? outcome.answer.usage : outcome.usage;
+        try {
+          if (spent !== undefined) await deps.store.addUsage(participantId, spent, deps.now().toISOString());
+        } catch {
+          // The original error is the one that matters.
+        }
+        throw error;
+      }
+    }
+  };
+
+  const base = { version, previousBuildId };
+  let finishing = false;
+  let usage: ReturnType<typeof usageOf> | undefined;
+  try {
+    const facts = await deps.store.getBudgetFacts(participantId);
+    if (facts.settings.stopped) {
+      finishing = true;
+      return await hold(job, deps);
+    }
+    const budget = budgetOf(facts);
+    if (budget.reached) {
+      finishing = true;
+      const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY, ...base });
+      return { outcome: applied ? "over-budget" : "skipped" };
+    }
+    const used = facts.limits.changeRequestsUsed;
+    const cap = facts.settings.changeRequestsPerPerson;
+    if (used >= cap) {
+      finishing = true;
+      const applied = await finish({ kind: "over-limit", reply: changesUsedText(cap), ...base });
+      return { outcome: applied ? "over-limit" : "skipped" };
+    }
+    const spec = await deps.store.getSpec(participantId, version);
+    if (spec === undefined) throw Object.assign(new Error("the proposed spec is missing"), { name: "MissingSpec" });
+    const check = await checkReadiness(deps.model, spec.text, signal);
+    usage = check.usage;
+    const answer = { prompt: message.text, modelId: deps.modelId, promptVersion: READINESS_PROMPT_VERSION, historyCount: 0, usage: check.usage };
+    if (check.verdict === "unreadable") throw Object.assign(new Error("unreadable readiness answer"), { name: "UnreadableVerdict" });
+    finishing = true;
+    if (check.verdict === "not-ready") {
+      const applied = await finish({ kind: "not-ready", reply: changeNotReadyReply(check.reasons), answer, ...base });
+      return { outcome: applied ? "not-ready" : "skipped" };
+    }
+    if (overBudget(budget, check.usage.costUsd)) {
+      const applied = await finish({ kind: "over-budget", reply: BUDGET_REPLY, usage: check.usage, ...base });
+      return { outcome: applied ? "over-budget" : "skipped" };
+    }
+    const applied = await finish({ kind: "ready", reply: CHANGE_READY_REPLY, answer, build: { buildId, nickname, changeNumber: used + 1 }, used, cap, ...base });
+    if (!applied) {
+      // A condition failed (the count moved, the previous build is running again, the proposal changed): nothing was
+      // written, so the tokens of the check are counted on their own.
+      await deps.store.addUsage(participantId, check.usage, deps.now().toISOString()).catch(() => undefined);
+      return { outcome: "skipped" };
+    }
+    await deps.builds.send({ buildId, participantId });
+    return { outcome: "building" };
+  } catch (error) {
+    if (finishing) throw error;
+    const applied = await finish({ kind: "failed", reply: CHANGE_FAILURE_REPLY, ...base, ...(usage === undefined ? {} : { usage }) });
+    return { outcome: applied ? "failed" : "skipped", error: errorName(error) };
+  }
+}
+
+/**
+ * Ticket 3.6: asks for the suggested changes of a live app, once: skipped when they are stored or there is no built spec;
+ * held while the global Stop is on (sent again later); no AI call once the budget is used (nothing stored, a later page
+ * load asks again). An unreadable answer stores nothing (its tokens still count).
+ */
+export async function processSuggestionsJob(participantId: string, deps: WorkerDeps, signal?: AbortSignal): Promise<WorkerOutcome> {
+  const outcome = await runSuggestions(participantId, deps, signal);
+  deps.log({ event: "ai-worker", ...outcome });
+  return outcome.outcome;
+}
+
+async function runSuggestions(participantId: string, deps: WorkerDeps, signal: AbortSignal | undefined): Promise<Omit<WorkerLogEntry, "event">> {
+  const conversation = await deps.store.getConversation(participantId);
+  if (conversation === undefined || conversation.suggestions !== undefined || conversation.approvedSpecVersion === undefined) return { outcome: "skipped" };
+  const facts = await deps.store.getBudgetFacts(participantId);
+  if (facts.settings.stopped) {
+    await deps.held.sendSuggestions(participantId, STOP_HOLD_SECONDS);
+    return { outcome: "held" };
+  }
+  if (budgetOf(facts).reached) return { outcome: "over-budget" };
+  const spec = await deps.store.getSpec(participantId, conversation.approvedSpecVersion);
+  if (spec === undefined) return { outcome: "skipped" };
+  let result;
+  try {
+    result = await suggestChanges(deps.model, spec.text, signal);
+  } catch (error) {
+    return { outcome: "failed", error: errorName(error) };
+  }
+  const nowIso = deps.now().toISOString();
+  if (result.suggestions === undefined) {
+    await deps.store.addUsage(participantId, result.usage, nowIso);
+    return { outcome: "failed", error: "UnreadableSuggestions" };
+  }
+  if (!(await deps.store.storeSuggestions(participantId, result.suggestions, result.usage, nowIso))) {
+    await deps.store.addUsage(participantId, result.usage, nowIso);
+    return { outcome: "skipped" };
+  }
+  return { outcome: "suggested" };
 }

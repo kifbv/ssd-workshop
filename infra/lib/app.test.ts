@@ -913,6 +913,8 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/spec/approve",
       "GET /api/build",
       "GET /api/status",
+      "POST /api/conversation/change/build",
+      "POST /api/conversation/change/discard",
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
@@ -1675,6 +1677,15 @@ describe("budget attributes (ticket 3.3)", () => {
     const costWriters = [...new Set(writers.filter((w) => w.attributes.includes("costUsd")).map((w) => w.role))].sort();
     expect(costWriters).toEqual([AI_WORKER_FUNCTION_NAME, BUILDER_TASK_ROLE_NAME].sort());
   });
+
+  it("WHEN the synthesized stacks are inspected THEN only the AI worker may write changeRequestsUsed (the change count) and whatChanges (ticket 3.6)", () => {
+    const writers = participantWriters();
+    for (const w of writers) expect(w.attributes, w.role).not.toContain("*");
+    const countWriters = [...new Set(writers.filter((w) => w.attributes.includes("changeRequestsUsed")).map((w) => w.role))];
+    expect(countWriters).toEqual([AI_WORKER_FUNCTION_NAME]);
+    const listWriters = [...new Set(writers.filter((w) => w.attributes.includes("whatChanges")).map((w) => w.role))];
+    expect(listWriters).toEqual([AI_WORKER_FUNCTION_NAME]);
+  });
 });
 
 describe("api stack: data API for apps (ticket 2.4)", () => {
@@ -1863,6 +1874,8 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "POST /api/conversation/spec/approve",
       "GET /api/build",
       "GET /api/status",
+      "POST /api/conversation/change/build",
+      "POST /api/conversation/change/discard",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -1910,6 +1923,8 @@ describe("api stack: conversation function (ticket 1.7)", () => {
             "dynamodb:Attributes": [
               "pk", "sk", "type", "author", "step", "text", "status", "createdAt", "pendingSince", "state", "pendingId", "updatedAt", "kind", "replyTo",
               "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId", "stepSince",
+              // Ticket 3.6.
+              "proposedSpecVersion", "request", "suggestions", "suggestionsRequestedAt",
             ],
           },
         },
@@ -1965,8 +1980,20 @@ describe("api stack: AI worker (ticket 1.7)", () => {
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt"] },
+          "ForAllValues:StringEquals": {
+            "dynamodb:Attributes": ["pk", "sk", "type", "buildId", "nickname", "participantId", "status", "createdAt", "updatedAt", "kind", "changeNumber", "specVersion"],
+          },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
+        },
+      },
+      // Ticket 3.6: the change build's check that the build it follows is live or failed (status only).
+      {
+        Effect: "Allow",
+        Action: "dynamodb:ConditionCheckItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "status"] },
         },
       },
       settingsReadStatement(f.tableArn()),

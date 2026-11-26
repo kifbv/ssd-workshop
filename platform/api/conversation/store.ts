@@ -56,6 +56,9 @@ import {
   type ReadinessRequestResult,
   type StoredBuild,
   type BuildFeedEvent,
+  type ChangeBuildFinish,
+  type ChangeRequestResult,
+  type DiscardResult,
 } from "./state.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -126,15 +129,37 @@ function versionOf(value: AttributeValue | undefined): number | undefined {
   return Number.isInteger(n) && n >= 1 ? n : undefined;
 }
 
-const SPEC_NAMES = { "#pk": "pk", "#sk": "sk", "#specVersion": "specVersion", "#text": "text", "#createdAt": "createdAt", "#approvedAt": "approvedAt" };
-const SPEC_PROJECTION = "#sk, #specVersion, #text, #createdAt, #approvedAt";
+const SPEC_NAMES = {
+  "#pk": "pk",
+  "#sk": "sk",
+  "#specVersion": "specVersion",
+  "#text": "text",
+  "#createdAt": "createdAt",
+  "#approvedAt": "approvedAt",
+  "#whatChanges": "whatChanges",
+};
+const SPEC_PROJECTION = "#sk, #specVersion, #text, #createdAt, #approvedAt, #whatChanges";
+
+/** A list of strings as stored (`L` of `S`), keeping only the strings. */
+function stringList(value: AttributeValue | undefined): string[] | undefined {
+  return value?.L?.flatMap((v) => (v.S === undefined ? [] : [v.S]));
+}
+
+const strList = (values: readonly string[]): AttributeValue => ({ L: values.map((v) => ({ S: v })) });
 
 /** A spec version from its item: only with `specVersion`, which no role but the AI worker's may write. */
 function specOf(item: Record<string, AttributeValue> | undefined): StoredSpec | undefined {
   const version = versionOf(item?.["specVersion"]);
   const text = item?.["text"]?.S;
   if (item === undefined || version === undefined || text === undefined || !(item["sk"]?.S ?? "").startsWith(SPEC_PREFIX)) return undefined;
-  return { version, text, createdAt: item["createdAt"]?.S ?? "", approved: item["approvedAt"]?.S !== undefined };
+  const whatChanges = stringList(item["whatChanges"]);
+  return {
+    version,
+    text,
+    createdAt: item["createdAt"]?.S ?? "",
+    approved: item["approvedAt"]?.S !== undefined,
+    ...(whatChanges === undefined ? {} : { whatChanges }),
+  };
 }
 
 const BUILD_STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "live", "failed"];
@@ -176,7 +201,10 @@ export function readFeed(list: readonly AttributeValue[] | undefined): BuildFeed
   return events;
 }
 
-const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure", "over-budget": "budget" } as const;
+const REPLY_KINDS = { done: "answer", declined: "decline", failed: "failure", "over-budget": "budget", "over-limit": "limit" } as const;
+
+/** Ticket 3.6: the reply kind of a change-build request's outcome. */
+const CHANGE_REPLY_KINDS = { ready: "answer", "not-ready": "answer", failed: "failure", "over-budget": "budget", "over-limit": "limit" } as const;
 
 export class DynamoConversationStore implements ConversationStore {
   constructor(
@@ -184,7 +212,14 @@ export class DynamoConversationStore implements ConversationStore {
     private readonly tableName: string,
   ) {}
 
-  async createMessage(participantId: string, message: NewMessage): Promise<CreateResult> {
+  async createMessage(participantId: string, message: NewMessage, afterBuild?: string): Promise<CreateResult> {
+    // Ticket 3.6: a change request is taken only while the conversation's build is still the one the route saw (live,
+    // or a change build that failed); before it (steps 1 and 2), only while no spec is approved.
+    const freeOf = "(attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))";
+    const guard =
+      afterBuild === undefined
+        ? { expression: `attribute_not_exists(#approvedSpecVersion) AND ${freeOf}`, names: { "#approvedSpecVersion": "approvedSpecVersion" }, values: {} }
+        : { expression: `#buildId = :afterBuild AND ${freeOf}`, names: { "#buildId": "buildId" }, values: { ":afterBuild": str(afterBuild) } };
     try {
       await this.client.send(
         new TransactWriteItemsCommand({
@@ -201,11 +236,11 @@ export class DynamoConversationStore implements ConversationStore {
               },
               {
                 // No message in flight, or only a stale pending one (a flagged one never goes stale), and
-                // no approved spec (ticket 1.9: changes are closed once it is approved).
-                expression:
-                  "attribute_not_exists(#approvedSpecVersion) AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
-                names: { "#approvedSpecVersion": "approvedSpecVersion" },
-                values: { ":open": str("open"), ":staleBefore": num(message.nowSeconds - STALE_PENDING_SECONDS) },
+                // no approved spec (ticket 1.9: changes are closed once it is approved), or (ticket 3.6) still the build
+                // the change request was sent after.
+                expression: guard.expression,
+                names: guard.names,
+                values: { ...guard.values, ":open": str("open"), ":staleBefore": num(message.nowSeconds - STALE_PENDING_SECONDS) },
               },
             ),
             setItem(
@@ -229,7 +264,7 @@ export class DynamoConversationStore implements ConversationStore {
     } catch (error) {
       if (!conditionFailed(error)) throw error;
       const conversation = await this.getConversation(participantId);
-      if (conversation?.approvedSpecVersion !== undefined) return "approved";
+      if (afterBuild === undefined && conversation?.approvedSpecVersion !== undefined) return "approved";
       return conversation?.state === "waiting" ? "waiting" : "busy";
     }
   }
@@ -249,6 +284,7 @@ export class DynamoConversationStore implements ConversationStore {
     const suggestion = item["suggestion"]?.S;
     const verdictReason = item["verdictReason"]?.S;
     const approvedTextHash = item["approvedTextHash"]?.S;
+    const request = item["request"]?.S;
     return {
       id: messageId,
       step,
@@ -258,6 +294,7 @@ export class DynamoConversationStore implements ConversationStore {
       ...(approvedTextHash === undefined ? {} : { approvedTextHash }),
       ...(suggestion === undefined ? {} : { suggestion }),
       ...(verdictReason === undefined ? {} : { verdictReason }),
+      ...(request === "change-build" ? { request } : {}),
     };
   }
 
@@ -284,12 +321,18 @@ export class DynamoConversationStore implements ConversationStore {
     const latestSpecVersion = versionOf(output.Item?.["latestSpecVersion"]);
     const approvedSpecVersion = versionOf(output.Item?.["approvedSpecVersion"]);
     const buildId = output.Item?.["buildId"]?.S;
+    const proposedSpecVersion = versionOf(output.Item?.["proposedSpecVersion"]);
+    const suggestions = stringList(output.Item?.["suggestions"]);
+    const suggestionsRequestedAt = output.Item?.["suggestionsRequestedAt"]?.S;
     return {
       state: state as ConversationState,
       ...(pendingId === undefined ? {} : { pendingId }),
       ...(latestSpecVersion === undefined ? {} : { latestSpecVersion }),
       ...(approvedSpecVersion === undefined ? {} : { approvedSpecVersion }),
       ...(buildId !== undefined && BUILD_ID_PATTERN.test(buildId) ? { buildId } : {}),
+      ...(proposedSpecVersion === undefined ? {} : { proposedSpecVersion }),
+      ...(suggestions === undefined ? {} : { suggestions }),
+      ...(suggestionsRequestedAt === undefined ? {} : { suggestionsRequestedAt }),
     };
   }
 
@@ -430,7 +473,14 @@ export class DynamoConversationStore implements ConversationStore {
         Key: keyOf(specKey(participantId, version)),
         ConsistentRead: true,
         ProjectionExpression: SPEC_PROJECTION,
-        ExpressionAttributeNames: { "#sk": "sk", "#specVersion": "specVersion", "#text": "text", "#createdAt": "createdAt", "#approvedAt": "approvedAt" },
+        ExpressionAttributeNames: {
+          "#sk": "sk",
+          "#specVersion": "specVersion",
+          "#text": "text",
+          "#createdAt": "createdAt",
+          "#approvedAt": "approvedAt",
+          "#whatChanges": "whatChanges",
+        },
       }),
     );
     const spec = specOf(output.Item);
@@ -529,6 +579,7 @@ export class DynamoConversationStore implements ConversationStore {
         status: str("pending"),
         createdAt: str(message.createdAt),
         pendingSince: num(message.nowSeconds),
+        ...(message.request === undefined ? {} : { request: str(message.request) }),
       },
       { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
     );
@@ -636,7 +687,7 @@ export class DynamoConversationStore implements ConversationStore {
         TableName: this.tableName,
         Key: keyOf(buildKey(buildId)),
         ConsistentRead: true,
-        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed, #queueKey",
+        ProjectionExpression: "#type, #buildId, #participantId, #status, #failureReasons, #nickname, #feed, #queueKey, #kind, #changeNumber",
         ExpressionAttributeNames: {
           "#type": "type",
           "#buildId": "buildId",
@@ -646,6 +697,8 @@ export class DynamoConversationStore implements ConversationStore {
           "#nickname": "nickname",
           "#feed": "feed",
           "#queueKey": "queueKey",
+          "#kind": "kind",
+          "#changeNumber": "changeNumber",
         },
       }),
     );
@@ -656,10 +709,15 @@ export class DynamoConversationStore implements ConversationStore {
     const reasons = item["failureReasons"]?.L?.flatMap((r) => (r.S === undefined ? [] : [r.S]));
     const nickname = item["nickname"]?.S;
     const queueKey = item["queueKey"]?.S;
+    const changeNumber = Number(item["changeNumber"]?.N);
+    // Ticket 3.6: a build without a kind (every build from before 3.6) is a first build.
+    const kind = item["kind"]?.S === "change" ? "change" : "first";
     return {
       buildId,
       participantId,
       status,
+      kind,
+      ...(kind === "change" && Number.isInteger(changeNumber) && changeNumber >= 1 ? { changeNumber } : {}),
       ...(nickname === undefined ? {} : { nickname }),
       feed: readFeed(item["feed"]?.L),
       ...(reasons === undefined ? {} : { failureReasons: reasons }),
@@ -705,7 +763,15 @@ export class DynamoConversationStore implements ConversationStore {
           setItem(
             this.tableName,
             specKey(participantId, spec.version),
-            { type: str("spec"), specVersion: num(spec.version), text: str(spec.text), messageId: str(messageId), createdAt: str(nowIso) },
+            {
+              type: str("spec"),
+              specVersion: num(spec.version),
+              text: str(spec.text),
+              messageId: str(messageId),
+              createdAt: str(nowIso),
+              // Ticket 3.6: a change answer's version carries its list and becomes the proposal.
+              ...(spec.whatChanges === undefined ? {} : { whatChanges: strList(spec.whatChanges) }),
+            },
             { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
           ),
         );
@@ -740,7 +806,12 @@ export class DynamoConversationStore implements ConversationStore {
         setItem(
           this.tableName,
           conversationKey(participantId),
-          { state: str("open"), updatedAt: str(nowIso), ...(spec === undefined ? {} : { latestSpecVersion: num(spec.version) }) },
+          {
+            state: str("open"),
+            updatedAt: str(nowIso),
+            ...(spec === undefined ? {} : { latestSpecVersion: num(spec.version) }),
+            ...(spec?.whatChanges === undefined ? {} : { proposedSpecVersion: num(spec.version) }),
+          },
           inFlight,
           { remove: ["pendingId", "pendingSince"] },
         ),
@@ -771,8 +842,9 @@ export class DynamoConversationStore implements ConversationStore {
           TableName: this.tableName,
           Key: keyOf(participantKey(participantId)),
           ConsistentRead: true,
-          ProjectionExpression: "#extraBudget",
-          ExpressionAttributeNames: { "#extraBudget": "extraBudget" },
+          // Ticket 3.6: also the change requests used (the send route and the worker compare them with the cap).
+          ProjectionExpression: "#extraBudget, #changeRequestsUsed",
+          ExpressionAttributeNames: { "#extraBudget": "extraBudget", "#changeRequestsUsed": "changeRequestsUsed" },
         }),
       ),
       this.client.send(
@@ -810,6 +882,214 @@ export class DynamoConversationStore implements ConversationStore {
           ],
         }),
       );
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  async requestChangeBuild(participantId: string, version: number, buildId: string, message: NewMessage): Promise<ChangeRequestResult> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(
+              this.tableName,
+              conversationKey(participantId),
+              { state: str("open"), pendingId: str(message.id), pendingSince: num(message.nowSeconds), updatedAt: str(message.createdAt) },
+              {
+                // Still this proposal after this build, and nothing in flight (or only a stale pending message).
+                expression:
+                  "#proposedSpecVersion = :version AND #buildId = :buildId AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+                names: { "#proposedSpecVersion": "proposedSpecVersion", "#buildId": "buildId" },
+                values: {
+                  ":version": num(version),
+                  ":buildId": str(buildId),
+                  ":open": str("open"),
+                  ":staleBefore": num(message.nowSeconds - STALE_PENDING_SECONDS),
+                },
+              },
+            ),
+            // Pressing Build this change approves the version (the launcher builds only an approved version).
+            setItem(this.tableName, specKey(participantId, version), { approvedAt: str(message.createdAt) }, {
+              expression: "attribute_exists(#pk)",
+              names: { "#pk": "pk" },
+            }),
+            this.newMessageItem(participantId, message),
+          ],
+        }),
+      );
+      return "created";
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      const conversation = await this.getConversation(participantId);
+      if (conversation?.proposedSpecVersion !== version || conversation.buildId !== buildId) return "stale";
+      return conversation.state === "waiting" ? "waiting" : "busy";
+    }
+  }
+
+  async discardChange(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<DiscardResult> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(
+              this.tableName,
+              conversationKey(participantId),
+              { updatedAt: str(nowIso) },
+              {
+                expression: "#proposedSpecVersion = :version AND (attribute_not_exists(#pendingId) OR (#state = :open AND #pendingSince < :staleBefore))",
+                names: { "#proposedSpecVersion": "proposedSpecVersion", "#pendingId": "pendingId", "#state": "state", "#pendingSince": "pendingSince" },
+                values: { ":version": num(version), ":open": str("open"), ":staleBefore": num(nowSeconds - STALE_PENDING_SECONDS) },
+              },
+              { remove: ["proposedSpecVersion"] },
+            ),
+          ],
+        }),
+      );
+      return "discarded";
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+      const conversation = await this.getConversation(participantId);
+      if (conversation?.proposedSpecVersion !== version) return "stale";
+      return conversation.state === "waiting" ? "waiting" : "busy";
+    }
+  }
+
+  async finishChangeBuild(participantId: string, messageId: string, outcome: ChangeBuildFinish, nowIso: string): Promise<boolean> {
+    const ready = outcome.kind === "ready";
+    const answered = outcome.kind === "ready" || outcome.kind === "not-ready";
+    const answer = answered ? outcome.answer : undefined;
+    const items: TransactWriteItem[] = [
+      setItem(this.tableName, messageKey(participantId, messageId), { status: str(answered ? "done" : "failed") }, {
+        expression: "#status = :pending",
+        values: { ":pending": str("pending") },
+      }),
+      setItem(
+        this.tableName,
+        messageKey(participantId, replyId(messageId)),
+        {
+          type: str("message"),
+          author: str("assistant"),
+          text: str(outcome.reply),
+          kind: str(CHANGE_REPLY_KINDS[outcome.kind]),
+          replyTo: str(messageId),
+          createdAt: str(nowIso),
+          ...(answer === undefined
+            ? {}
+            : {
+                prompt: str(answer.prompt),
+                modelId: str(answer.modelId),
+                promptVersion: str(answer.promptVersion),
+                historyCount: num(answer.historyCount),
+                inputTokens: num(answer.usage.inputTokens),
+                outputTokens: num(answer.usage.outputTokens),
+                costUsd: num(answer.usage.costUsd),
+              }),
+        },
+        { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+      ),
+      setItem(
+        this.tableName,
+        conversationKey(participantId),
+        {
+          state: str("open"),
+          updatedAt: str(nowIso),
+          ...(ready ? { buildId: str(outcome.build.buildId), approvedSpecVersion: num(outcome.version) } : {}),
+        },
+        {
+          expression: "#pendingId = :messageId AND #proposedSpecVersion = :version AND #buildId = :previousBuildId",
+          names: { "#pendingId": "pendingId", "#proposedSpecVersion": "proposedSpecVersion", ...(ready ? {} : { "#buildId": "buildId" }) },
+          values: { ":messageId": str(messageId), ":version": num(outcome.version), ":previousBuildId": str(outcome.previousBuildId) },
+        },
+        // Not built: the proposal stays, so the participant can ask for a fix or press Build this change again.
+        { remove: ready ? ["pendingId", "pendingSince", "proposedSpecVersion"] : ["pendingId", "pendingSince"] },
+      ),
+    ];
+    if (ready) {
+      const { used, cap } = outcome;
+      items.push(
+        // The change counts here, in the transaction that queues its build: from exactly `used` (no lost update), and
+        // only below the cap. A retry of the build (npm run builds -- retry) never writes the profile.
+        setItem(this.tableName, participantKey(participantId), { changeRequestsUsed: num(used + 1) }, {
+          expression:
+            used === 0
+              ? "#step = :building AND (attribute_not_exists(#changeRequestsUsed) OR (#changeRequestsUsed = :used AND #changeRequestsUsed < :cap))"
+              : "#step = :building AND #changeRequestsUsed = :used AND #changeRequestsUsed < :cap",
+          names: { "#step": "step" },
+          values: { ":building": str("building"), ":used": num(used), ":cap": num(cap) },
+        }),
+        // Nothing of theirs is running: the build the change follows is live (or a change build that failed).
+        {
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: keyOf(buildKey(outcome.previousBuildId)),
+            ConditionExpression: "#status IN (:live, :failed)",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: { ":live": str("live"), ":failed": str("failed") },
+          },
+        },
+        setItem(
+          this.tableName,
+          buildKey(outcome.build.buildId),
+          {
+            type: str("build"),
+            buildId: str(outcome.build.buildId),
+            nickname: str(outcome.build.nickname),
+            participantId: str(participantId),
+            status: str("queued"),
+            kind: str("change"),
+            changeNumber: num(outcome.build.changeNumber),
+            specVersion: num(outcome.version),
+            createdAt: str(nowIso),
+            updatedAt: str(nowIso),
+          },
+          { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+        ),
+      );
+    }
+    const spent = answered ? outcome.answer.usage : outcome.usage;
+    if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) items.push(this.usageItem(participantId, spent, nowIso));
+    try {
+      await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  async markSuggestionsRequested(participantId: string, nowIso: string, askedBeforeIso: string): Promise<boolean> {
+    try {
+      await this.client.send(
+        new TransactWriteItemsCommand({
+          TransactItems: [
+            setItem(this.tableName, conversationKey(participantId), { suggestionsRequestedAt: str(nowIso) }, {
+              expression: "attribute_exists(#pk) AND attribute_not_exists(#suggestions) AND (attribute_not_exists(#suggestionsRequestedAt) OR #suggestionsRequestedAt < :askedBefore)",
+              names: { "#pk": "pk", "#suggestions": "suggestions" },
+              values: { ":askedBefore": str(askedBeforeIso) },
+            }),
+          ],
+        }),
+      );
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  async storeSuggestions(participantId: string, suggestions: readonly string[], usage: TokenUsage, nowIso: string): Promise<boolean> {
+    const items: TransactWriteItem[] = [
+      setItem(this.tableName, conversationKey(participantId), { suggestions: strList(suggestions) }, {
+        expression: "attribute_exists(#pk) AND attribute_not_exists(#suggestions)",
+        names: { "#pk": "pk" },
+      }),
+    ];
+    if (usage.inputTokens + usage.outputTokens > 0) items.push(this.usageItem(participantId, usage, nowIso));
+    try {
+      await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));
       return true;
     } catch (error) {
       if (conditionFailed(error)) return false;

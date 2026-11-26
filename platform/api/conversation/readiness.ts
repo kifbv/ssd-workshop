@@ -28,11 +28,16 @@ export const READY_REPLY = "Your spec is ready to build. The build is starting n
 /** The neutral reply when the check could not be made (model error, unreadable answer, a queue failure). */
 export const READINESS_FAILURE_REPLY = "Sorry, the check of your spec did not work this time. Please press Approve spec again.";
 
+/** The check's reasons as list lines ("- reason"), shared with the change check's reply (ticket 3.6). */
+export function notReadyReasonsList(reasons: readonly string[]): string[] {
+  return reasons.map((r) => `- ${r}`);
+}
+
 /** The reply when the check fails: its reasons as a short list, and what to do next. Plain text (shown with textContent). */
 export function notReadyReply(reasons: readonly string[]): string {
   return [
     "Your spec is not ready to build yet:",
-    ...reasons.map((r) => `- ${r}`),
+    ...notReadyReasonsList(reasons),
     "Ask me to change the spec (or answer the open question), then press Approve spec again.",
   ].join("\n");
 }
