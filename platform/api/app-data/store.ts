@@ -6,7 +6,7 @@
 // DeleteItem. No call returns attributes beyond what it names (no ALL_NEW / ALL_OLD).
 //
 // Cost (try 3): DynamoDB bills a read on the whole item's size, whatever the projection, so a write
-// never reads the value item (up to 100 KB). Everything a write needs is in the small totals item
+// never reads the value item (up to 350 KB since ticket 3.17). Everything a write needs is in the small totals item
 // (`DATA_USAGE`): the totals, the daily write count (`writeDay`, `writtenBytes`) and each key's size
 // (the map `sizes`, keyed by data key), all changed in the same transaction as the value. The
 // transaction's only condition is on the totals item; the value item needs none, because every

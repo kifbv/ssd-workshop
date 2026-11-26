@@ -1,4 +1,4 @@
-# Phase 3b: Photos, voice recordings and AI in apps, more storage, clearer refusals
+# Phase 3b: Photos, voice recordings and AI in apps, more storage, sign-in to save, clearer refusals
 
 Spec sections: 4 (Guardrails, item 1: what an app is), 5 (Security: "each app's stored data is limited to
 1 MB"), 10 (confirmation: "limited to 1 MB"). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus).
@@ -212,6 +212,74 @@ Acceptance criteria (each starts as FAIL):
 - WHEN the readiness eval runs "a chatbot that answers questions about our team" THEN it stays not-ready with "outside service" (live eval).
 - WHEN Clarify discusses a gallery idea THEN it may offer automatic tag suggestions (live eval case).
 
+### 3.24 Saving in apps needs the workshop's sign-in (proposed 2026-11-26, questions 9 to 13)
+
+Franck (2026-11-26): writes need sign-in, reads stay public. Anyone can open an app and see its data,
+photos and recordings; only someone signed in to the workshop (allow-listed email and code, as today)
+can save, upload, delete or call an AI task, so a stranger who scans a QR code can look but not save,
+and most of the deliberate-attack cost goes away.
+
+The platform's session cookie cannot be used by an app: it is `SameSite=Strict`, and apps run in a
+sandbox with an opaque origin, so the browser never sends it (and Safari blocks such cookies anyway).
+So the app gets its own short-lived **app write token**, handed over through the address:
+
+```mermaid
+sequenceDiagram
+  participant V as Visitor's phone
+  participant A as App /apps/nick/ (sandboxed)
+  participant W as Workshop page /app-sign-in
+  participant API as Workshop API
+  V->>A: opens the app (reads work without sign-in)
+  A->>W: "Sign in to save" opens a new tab /app-sign-in?app=nick
+  W->>W: existing sign-in (email code) if no session yet
+  W->>V: "Save in nick's app as <your nickname>?" [Continue]
+  W->>API: create token (session cookie, app = nick)
+  API-->>W: token (12 h, this app only, stored hashed)
+  W->>A: redirect to /apps/nick/#wt=<token>
+  A->>API: PUT / DELETE / upload / AI with Authorization: Bearer <token>
+  API-->>A: 401 "Sign in to save" without a valid token
+```
+
+- The token travels only in the address's fragment (never sent to a server, never in logs; the
+  referrer policy drops it). `workshop-data.js` keeps it in memory and in the fragment so a reload
+  still works (apps may not use browser storage). It is scoped to one app and one participant,
+  expires after 12 hours, and is revoked when that participant signs out.
+- The redirect goes only to `/apps/<the same nickname>/`, so no other site can receive a token.
+- `GET` and the media addresses stay public, as the spec says today.
+- Each write records who made it (`updatedBy` = nickname, never an email) so apps can show who
+  posted (question 11).
+
+Depends on: 3.17 (the data API) and should come before 3.18 and 3.21, so media uploads and AI
+calls are built with the token from the start (question 9). Areas: api, web (the sign-in hand-off
+page), infra (route, CORS `authorization` header), platform CLI (revoke on reset).
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN a visitor without a token sends `PUT` or `DELETE` to an app's data THEN the API answers 401 "Sign in to the workshop to save in this app." and stores nothing, while `GET` still answers the value (unit test).
+- WHEN a signed-in participant presses Continue on `/app-sign-in?app=<nick>` THEN they land on `/apps/<nick>/#wt=<token>` and that token lets them write to that app only (a token for another app gets 401) (unit test; Playwright for the page).
+- WHEN `app` names no live app or is not a valid nickname THEN the page says the app is not live and redirects nowhere (unit test).
+- WHEN the token is 12 hours old, or its participant signed out, or was reset THEN writes answer 401 (unit test).
+- WHEN a write succeeds THEN the value's record holds `updatedBy` = the writer's nickname, and `GET .../data/<key>?info=1` answers `{value, updatedBy, updatedAt}` (unit test; question 11).
+- WHEN the preflight asks for `authorization` THEN it is allowed, and no answer ever carries `Access-Control-Allow-Credentials` (unit test, synth test).
+- WHEN the token appears anywhere THEN only its SHA-256 hash is stored and no log line holds it (unit test on the log entries).
+
+### 3.25 The app template handles sign-in
+
+`workshop-data.js` reads the token from the address, sends it on every write, exposes
+`whoAmI()` (the nickname, or null for a visitor) and `signInLink()`, and on a 401 shows a
+"Sign in to save" button that opens the hand-off page in a new tab. `AGENTS.md` gains a rule: every
+app works read-only for visitors, shows the sign-in button where saving happens, and may show who
+posted. Live apps built before this ticket get the new `workshop-data.js` (question 10).
+
+Depends on: 3.24. Areas: templates, deploy, eval.
+
+Acceptance criteria (each starts as FAIL):
+
+- WHEN the template opens without a token in Chromium under the sandbox CSP THEN reads work, a save shows the sign-in button, and nothing is written (Playwright, fake API).
+- WHEN it opens with `#wt=<token>` THEN saves carry `Authorization: Bearer <token>`, `whoAmI()` gives the nickname, and a reload keeps working (Playwright).
+- WHEN `npm run eval -- build` runs THEN every example app still passes its checks and shows the sign-in button to a visitor (live eval).
+- WHEN the deployer publishes any app THEN it ships the platform's current `workshop-data.js`, whatever the repository holds (unit test), and `npm run apps -- refresh` republishes every live app with it (question 10).
+
 ## Questions for Franck
 
 1. Approve the spec delta above (10 MB data, 500 MB of photos and voice recordings per app, photos stripped of location data). Suggested: yes.
@@ -222,6 +290,12 @@ Acceptance criteria (each starts as FAIL):
 6. Keep photos after the workshop? Suggested: they follow the apps (phase 5 removal workflow deletes them with the app); no automatic expiry now.
 7. (Added 2026-11-26) AI tasks for apps, 3.21 to 3.23: spec delta ADDED section 4 item 1 "An app may use three AI tasks the workshop offers (suggest tags for a photo, read named fields from a photo, sort a text into categories), never a free prompt"; CHANGED the readiness rule "AI or chat services" to "AI other than these tasks". Caps $0.50 per app per day and $5 a day for all apps, admin switch off by default. **Answered 2026-11-26: yes, with caps doubled ($1 per app per day, $10 a day for all apps; worst case about $10 per day the switch is on), and photos widened to media (voice recordings too).**
 8. (Added 2026-11-26; Stop-and-ask 3, new paid service) Amazon Transcribe for a `transcribe` AI task, so voice messages can be tagged by topic (Claude on Bedrock takes no audio). About $0.024 a minute in eu-central-1, counted inside the $10 daily cap, so it adds no new worst case. Audio goes to Transcribe in eu-central-1; AWS does not use it for training when the account opts out of AI service improvement (an organisation-level opt-out policy, Franck's account setting). Suggested: yes; without it, voice messages get topics picked by hand. **Answered 2026-11-26: yes.**
+
+9. (Added 2026-11-26, open) Order: build 3.24 and 3.25 right after 3.17, before the media and AI tickets (3.18 to 3.23), so uploads and AI calls require the token from day one and nothing is built twice. Suggested: yes.
+10. (open) Apps already live use the old `workshop-data.js`, whose saves would start failing with 401. Suggested: the deployer always ships the platform's current `workshop-data.js` (the builder may not change it anyway), plus a one-off `npm run apps -- refresh` that republishes every live app with it, run once after the deploy.
+11. (open) Who may save in an app: any signed-in workshop participant (it is a team app, colleagues post), not only its owner. And show who posted: the API records the writer's nickname on each value, and apps may display it (a nickname, never an email). Suggested: yes to both.
+12. (open) Spec delta: CHANGED section 5 Security "visible to anyone with the app's URL (apps have no logins)" becomes "visible to anyone with the app's URL; saving, uploading and AI tasks need the workshop's own sign-in (the same allow-listed email code). Apps have no logins of their own and no private per-person data." The readiness rule "login" keeps refusing apps' own accounts and "only I can see my data". Suggested: yes.
+13. (open) Token life: 12 hours (a workshop day), one app, revoked on sign-out. A token copied with the address (someone shares the app's URL from the address bar while signed in) lets the receiver save as that person in that one app until it expires; the platform's QR codes and links never hold one. Suggested: accept.
 
 ## Blocked
 

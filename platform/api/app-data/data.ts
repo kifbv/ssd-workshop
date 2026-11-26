@@ -16,12 +16,15 @@ export const APP_DATA_METHODS = ["GET", "PUT", "DELETE", "OPTIONS"] as const;
 export type AppDataMethod = (typeof APP_DATA_METHODS)[number];
 export const APP_DATA_ROUTES = APP_DATA_METHODS.map((method) => `${method} ${APP_DATA_PATH}`);
 
-/** All of an app's values together: 1 MB (UTF-8 bytes of their canonical JSON). */
-export const MAX_APP_DATA_BYTES = 1024 * 1024;
-/** One value: 100 KB (UTF-8 bytes of its canonical JSON). */
-export const MAX_VALUE_BYTES = 100 * 1024;
-/** Keys per app. */
-export const MAX_KEYS = 100;
+/** All of an app's values together: 10 MB (UTF-8 bytes of their canonical JSON; ticket 3.17, was 1 MB). */
+export const MAX_APP_DATA_BYTES = 10 * 1024 * 1024;
+/**
+ * One value: 350 KB (UTF-8 bytes of its canonical JSON; ticket 3.17, was 100 KB). DynamoDB's item limit
+ * is 400 KB, names and keys included: 350 KB plus VALUE_ITEM_OVERHEAD_BYTES leaves ~50 KB spare (store.test.ts).
+ */
+export const MAX_VALUE_BYTES = 350 * 1024;
+/** Keys per app (ticket 3.17, was 100): the totals item then holds at most ~35.4 KB of `sizes` (usageItemBytes). */
+export const MAX_KEYS = 500;
 /** Lists and objects inside each other: deeper values would overflow the stack when written out. */
 export const MAX_DEPTH = 100;
 /** 1 to 64 letters, digits, dashes or underscores (ASCII). */
@@ -36,13 +39,15 @@ export const WRITE_ATTEMPTS = 4;
 /** The pause before another try: a random whole number of milliseconds in this range. */
 export const RETRY_PAUSE_MS = { min: 20, max: 80 } as const;
 /**
- * What an app's writes may count per UTC day (its daily write budget), see writeCost: about 2,500
- * small writes, ample for a workshop app, while a loop replacing one 100 KB value stops after 50.
- * DynamoDB bills a transactional write 2 write units per KB of each item (rounded up, the larger of
- * the old and new item), which writeCost counts: ~30 live apps x 5 MB x 2 write units per KB is
- * ~0.3 M write units a day, about $0.25 ($0.7625 per million in eu-central-1, on demand), at worst.
+ * What an app's writes may count per UTC day (its daily write budget, ticket 3.17: 50 MB, was 5 MB),
+ * see writeCost: about 25,000 small writes, ample for a workshop app, while a loop replacing one 350 KB
+ * value stops after 145. DynamoDB bills a transactional write 2 write units per KB of each item
+ * (rounded up, the larger of the old and new item), which writeCost counts: 50 MB is 51,200 KB, so
+ * ~0.1 M write units, ~$0.078 per app and day ($0.7625 per million in eu-central-1, on demand), at
+ * worst; ~30 live apps: ~3.1 M write units, ~$2.34 a day, ~$70 a month if every app spent its whole
+ * budget every day.
  */
-export const DAILY_WRITE_BUDGET_BYTES = 5 * 1024 * 1024;
+export const DAILY_WRITE_BUDGET_BYTES = 50 * 1024 * 1024;
 /** DynamoDB's write unit: what a write counts towards the budget is a whole number of these per item. */
 export const MIN_WRITE_COST_BYTES = 1024;
 /** A value item's bytes beyond its value (attribute names, keys, type, size, time): an upper bound. */
@@ -51,7 +56,7 @@ export const VALUE_ITEM_OVERHEAD_BYTES = 256;
 export const USAGE_ITEM_BASE_BYTES = 256;
 /** One `sizes` entry beyond its key's length (a number of at most 6 digits and the map's overhead): an upper bound. */
 export const USAGE_ENTRY_BYTES = 8;
-/** Base64 grows a body by 4/3: a raw body longer than this cannot decode to 100 KB or less. */
+/** Base64 grows a body by 4/3: a raw body longer than this (477,868 bytes, ~467 KB) cannot decode to 350 KB or less. */
 const MAX_RAW_BASE64_BYTES = Math.ceil(MAX_VALUE_BYTES / 3) * 4;
 
 /** On every answer: any origin may read it (apps run in an opaque origin). Never with credentials. */
@@ -73,9 +78,9 @@ export const APP_DATA_MESSAGES = {
   badKey: "A key has 1 to 64 letters, digits, dashes or underscores.",
   badJson: "Send the value as JSON.",
   tooDeep: "This value is nested too deeply: lists and objects can go at most 100 levels deep.",
-  valueTooBig: "This value is too big: a value can hold at most 100 KB.",
-  appFull: "This app has no room left: an app can store at most 1 MB.",
-  tooManyKeys: "This app already has 100 keys, the most it can keep. Remove one to add another.",
+  valueTooBig: "This value is too big: a value can hold at most 350 KB.",
+  appFull: "This app has no room left: an app can store at most 10 MB.",
+  tooManyKeys: "This app already has 500 keys, the most it can keep. Remove one to add another.",
   conflict: "This value was being changed by someone else at the same moment. Please try again.",
   writeBudget: "This app has saved a lot of data today. Saving starts again tomorrow.",
   failed: "The data service had a problem. Please try again in a moment.",
@@ -122,7 +127,7 @@ export interface AppDataStore {
   /**
    * In one all-or-nothing step: stores the value and moves the totals by the change, only while the
    * key's size in the totals item is still `previousBytes` (undefined: none stored), the totals item
-   * exists as read (`created`), the totals stay within 1 MB and 100 keys, and the day's writes stay
+   * exists as read (`created`), the totals stay within 10 MB and 500 keys, and the day's writes stay
    * within the budget (`charge`).
    */
   putValue(nickname: string, key: string, json: string, bytes: number, previousBytes: number | undefined, created: boolean, nowIso: string, charge: WriteCharge): Promise<PutResult>;
@@ -186,7 +191,7 @@ const writeUnits = (bytes: number): number => Math.max(1, Math.ceil(bytes / MIN_
 
 /**
  * An upper bound of the totals item's bytes while it holds `key` (each `sizes` entry is its key's
- * length plus USAGE_ENTRY_BYTES): an app with 100 keys of 64 characters has a totals item of ~7 KB,
+ * length plus USAGE_ENTRY_BYTES): an app with 500 keys of 64 characters has a totals item of ~35.4 KB,
  * which every one of its writes rewrites.
  */
 export function usageItemBytes(sizes: ReadonlyMap<string, number>, key: string): number {
@@ -199,8 +204,8 @@ export function usageItemBytes(sizes: ReadonlyMap<string, number>, key: string):
  * What a write counts towards the daily budget: what DynamoDB bills it, in KB. Both items the
  * transaction writes count, each rounded up to whole KB and at the larger of its old and new size:
  * the value item (`max(bytes, previousBytes)` plus its overhead, at least 1 KB; a DELETE has no new
- * value, so its old one counts) and the totals item. So a small write counts 2 KB, a 100 KB one 102 KB,
- * and replacing 100 KB with 1 byte still counts the 100 KB it overwrites.
+ * value, so its old one counts) and the totals item. So a small write counts 2 KB, a 350 KB one 352 KB,
+ * and replacing 350 KB with 1 byte still counts the 350 KB it overwrites.
  */
 export function writeCost(bytes: number | undefined, previousBytes: number | undefined, sizes: ReadonlyMap<string, number>, key: string): number {
   return writeUnits(Math.max(bytes ?? 0, previousBytes ?? 0) + VALUE_ITEM_OVERHEAD_BYTES) + writeUnits(usageItemBytes(sizes, key));
@@ -271,7 +276,7 @@ export function nestingDepth(text: string, limit: number): number {
 
 type ReadValue = { ok: true; json: string; bytes: number } | { ok: false; answer: Answer };
 
-/** The body as canonical JSON text within 100 KB, refusing too large bodies before parsing them. */
+/** The body as canonical JSON text within 350 KB, refusing too large bodies before parsing them. */
 function readValue(request: HttpRequest): ReadValue {
   const body = request.body;
   if (typeof body !== "string" || body === "") return { ok: false, answer: refuse(400, "bad-json", APP_DATA_MESSAGES.badJson) };

@@ -1,7 +1,17 @@
-import { GetItemCommand, TransactWriteItemsCommand, type TransactWriteItem } from "@aws-sdk/client-dynamodb";
+import { GetItemCommand, TransactWriteItemsCommand, type AttributeValue, type TransactWriteItem } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
 import { APP_DATA_WRITE_ATTRIBUTES } from "../../../infra/lib/config.js";
-import { DAILY_WRITE_BUDGET_BYTES, MAX_APP_DATA_BYTES, MAX_KEYS, type WriteCharge } from "./data.js";
+import {
+  DAILY_WRITE_BUDGET_BYTES,
+  MAX_APP_DATA_BYTES,
+  MAX_KEYS,
+  MAX_VALUE_BYTES,
+  USAGE_ENTRY_BYTES,
+  USAGE_ITEM_BASE_BYTES,
+  usageItemBytes,
+  VALUE_ITEM_OVERHEAD_BYTES,
+  type WriteCharge,
+} from "./data.js";
 import { DynamoAppDataStore, type AppDataSender } from "./store.js";
 
 type Sent = GetItemCommand | TransactWriteItemsCommand;
@@ -58,6 +68,23 @@ function namesUsed(command: Sent | undefined): string[] {
   }
   return names;
 }
+
+/** DynamoDB's item size limit: 400 KB, attribute names and values together. */
+const DYNAMODB_ITEM_LIMIT_BYTES = 400 * 1024;
+
+/**
+ * An attribute value's size as DynamoDB counts it: a string's UTF-8 bytes; a number about one byte per
+ * two significant digits plus one; a map 3 bytes plus each entry's name, value and 1 byte.
+ */
+function attributeBytes(value: AttributeValue): number {
+  if (value.S !== undefined) return Buffer.byteLength(value.S, "utf8");
+  if (value.N !== undefined) return Math.ceil(value.N.replace(/[-.]/g, "").replace(/^0+/, "").length / 2) + 1;
+  if (value.M !== undefined) return 3 + Object.entries(value.M).reduce((sum, [name, inner]) => sum + Buffer.byteLength(name, "utf8") + attributeBytes(inner) + 1, 0);
+  throw new Error("unexpected attribute type");
+}
+
+const itemBytes = (item: Record<string, AttributeValue>): number =>
+  Object.entries(item).reduce((sum, [name, value]) => sum + Buffer.byteLength(name, "utf8") + attributeBytes(value), 0);
 
 const items = (command: Sent | undefined): TransactWriteItem[] => (command as TransactWriteItemsCommand).input.TransactItems ?? [];
 
@@ -308,7 +335,7 @@ describe("DynamoAppDataStore", () => {
     namesUsed(sent[0]);
   });
 
-  it("never reads or tests the value item on a write: a write reads only the totals item (a value of 100 KB costs nothing to refuse)", async () => {
+  it("never reads or tests the value item on a write: a write reads only the totals item (a value of 350 KB costs nothing to refuse)", async () => {
     const { client, sent } = stubClient([{}, {}, {}, {}]);
     const store = new DynamoAppDataStore(client, TABLE);
     await store.putValue("Ada-42", "k", "1", 1, undefined, false, NOW_ISO, NEW_DAY);
@@ -324,6 +351,39 @@ describe("DynamoAppDataStore", () => {
       expect(usage?.Update?.Key?.["sk"]?.S).toBe("DATA_USAGE");
       expect(usage?.Update?.ConditionExpression).toBeDefined();
     }
+  });
+
+  it("keeps the largest value item and the totals item of 500 keys of 64 characters under DynamoDB's 400 KB item limit (ticket 3.17)", async () => {
+    const { client, sent } = stubClient([{}]);
+    const nickname = "N".repeat(20); // the longest nickname (1.5 rules)
+    const key = "k".repeat(64); // the longest key
+    const json = JSON.stringify("x".repeat(MAX_VALUE_BYTES - 2));
+    await new DynamoAppDataStore(client, TABLE).putValue(nickname, key, json, MAX_VALUE_BYTES, undefined, false, NOW_ISO, NEW_DAY);
+    const [value, usage] = items(sent[0]);
+    // The value item: 350 KB of value plus its overhead, which VALUE_ITEM_OVERHEAD_BYTES bounds.
+    const valueItem = value?.Put?.Item ?? {};
+    expect(itemBytes(valueItem) - MAX_VALUE_BYTES).toBeLessThanOrEqual(VALUE_ITEM_OVERHEAD_BYTES);
+    expect(MAX_VALUE_BYTES + VALUE_ITEM_OVERHEAD_BYTES).toBeLessThanOrEqual(DYNAMODB_ITEM_LIMIT_BYTES);
+    // The totals item at its largest: 500 keys of 64 characters, each holding 350 KB in `sizes`, full totals and budget.
+    const update = usage?.Update;
+    const names = update?.ExpressionAttributeNames ?? {};
+    const values = update?.ExpressionAttributeValues ?? {};
+    const sizes = Object.fromEntries(Array.from({ length: MAX_KEYS }, (_, i) => [String(i).padStart(64, "k"), { N: String(MAX_VALUE_BYTES) }]));
+    const totalsItem: Record<string, AttributeValue> = {
+      ...(update?.Key ?? {}),
+      [names["#type"] ?? ""]: values[":type"] ?? { S: "" },
+      [names["#bytes"] ?? ""]: { N: String(MAX_APP_DATA_BYTES) },
+      [names["#keys"] ?? ""]: { N: String(MAX_KEYS) },
+      [names["#updatedAt"] ?? ""]: values[":now"] ?? { S: "" },
+      [names["#sizes"] ?? ""]: { M: sizes },
+      [names["#writeDay"] ?? ""]: values[":today"] ?? { S: "" },
+      [names["#writtenBytes"] ?? ""]: { N: String(DAILY_WRITE_BUDGET_BYTES) },
+    };
+    expect(Object.keys(totalsItem).sort()).toEqual(["bytes", "keys", "pk", "sizes", "sk", "type", "updatedAt", "writeDay", "writtenBytes"]);
+    const bound = usageItemBytes(new Map(Object.keys(sizes).map((k) => [k, MAX_VALUE_BYTES])), Object.keys(sizes)[0] ?? "");
+    expect(bound).toBe(USAGE_ITEM_BASE_BYTES + MAX_KEYS * (64 + USAGE_ENTRY_BYTES));
+    expect(itemBytes(totalsItem)).toBeLessThanOrEqual(bound);
+    expect(bound).toBeLessThanOrEqual(DYNAMODB_ITEM_LIMIT_BYTES);
   });
 
   it("writes only in APPDATA# partitions and names only the attributes the role allows (never liveAt; the data key only inside sizes)", async () => {

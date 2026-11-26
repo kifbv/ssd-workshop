@@ -359,7 +359,7 @@ export interface AppDataItem extends Keyed {
 
 /**
  * An app's data totals (ticket 2.4): the sum of its values' `bytes` and the number of keys, updated in
- * the same transaction as every value, with conditions that keep them within 1 MB and 100 keys.
+ * the same transaction as every value, with conditions that keep them within 10 MB and 500 keys (ticket 3.17).
  */
 export interface AppDataUsageItem extends Keyed {
   type: "app-data-usage";
@@ -368,7 +368,7 @@ export interface AppDataUsageItem extends Keyed {
   /** ISO 8601. */
   updatedAt: string;
   /**
-   * The UTC day (YYYY-MM-DD) that `writtenBytes` counts: the daily write budget (5 MB per app and
+   * The UTC day (YYYY-MM-DD) that `writtenBytes` counts: the daily write budget (50 MB per app and
    * day, each write counting what DynamoDB bills it, `writeCost` in app-data/data.ts), kept within it
    * by the same transaction's condition. The first write of a later day starts the count again.
    */

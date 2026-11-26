@@ -1,5 +1,6 @@
 // Ticket 2.4: the data API's rules, on the in-memory store (criteria 1 to 4; 5 is browser.test.ts,
-// 6 is handlers/app-data.test.ts).
+// 6 is handlers/app-data.test.ts). Ticket 3.17 raised the limits: 10 MB per app, 350 KB per value,
+// 500 keys, 50 MB written per app and UTC day (its criteria 1 to 4 are marked "3.17").
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { FakeAppDataStore } from "./fakes.js";
@@ -78,10 +79,10 @@ describe("the data API's routes and limits", () => {
     expect([...APP_DATA_ROUTES]).toEqual(["GET", "PUT", "DELETE", "OPTIONS"].map(route));
   });
 
-  it("limits an app to 1 MB, a value to 100 KB and an app to 100 keys of 1 to 64 letters, digits, dashes and underscores", () => {
-    expect(MAX_APP_DATA_BYTES).toBe(1024 * 1024);
-    expect(MAX_VALUE_BYTES).toBe(100 * 1024);
-    expect(MAX_KEYS).toBe(100);
+  it("limits an app to 10 MB, a value to 350 KB and an app to 500 keys of 1 to 64 letters, digits, dashes and underscores (ticket 3.17)", () => {
+    expect(MAX_APP_DATA_BYTES).toBe(10 * 1024 * 1024);
+    expect(MAX_VALUE_BYTES).toBe(350 * 1024);
+    expect(MAX_KEYS).toBe(500);
     for (const good of ["a", "High_score-1", "x".repeat(64), "0", "-", "_"]) expect(DATA_KEY_PATTERN.test(good), good).toBe(true);
     for (const bad of ["", "x".repeat(65), "a b", "a.b", "a/b", "a#b", "é", "a%2Fb", "../me"]) expect(DATA_KEY_PATTERN.test(bad), bad).toBe(false);
   });
@@ -101,6 +102,28 @@ describe("criterion 1: an app stores a value and reads it back as the same JSON"
       expect(read.headers).toMatchObject({ "content-type": "application/json", "cache-control": "no-store" });
       expect(JSON.parse(read.body ?? ""), key).toEqual(value);
     }
+  });
+
+  it("3.17 criterion 1: stores a 300 KB value and reads it back unchanged, sent plain or base64", async () => {
+    const { call, store } = setup();
+    // An object of mixed text (accents, emoji: multi-byte UTF-8) whose canonical JSON is ~300 KB.
+    const value = { title: "Galerie d'Ada ☕", items: Array.from({ length: 2400 }, (_, i) => ({ id: i, note: `Note ${i}: naïve 😀 ${"x".repeat(90)}` })) };
+    const text = JSON.stringify(value);
+    const bytes = Buffer.byteLength(text, "utf8");
+    expect(bytes).toBeGreaterThan(300 * 1024);
+    expect(bytes).toBeLessThanOrEqual(MAX_VALUE_BYTES);
+    for (const base64 of [false, true]) {
+      const key = base64 ? "b64" : "plain";
+      expect((await call(request("PUT", key, { body: text, base64 }))).statusCode, key).toBe(204);
+      const read = await call(request("GET", key));
+      expect(read.statusCode, key).toBe(200);
+      expect(read.body, key).toBe(text);
+      expect(JSON.parse(read.body ?? ""), key).toEqual(value);
+      expect(store.values.get(`ada-42/${key}`)?.bytes, key).toBe(bytes);
+    }
+    // A string value of exactly 300 KB too.
+    expect((await call(put("exact", valueOfBytes(300 * 1024)))).statusCode).toBe(204);
+    expect((await call(request("GET", "exact"))).body).toBe(JSON.stringify(valueOfBytes(300 * 1024)));
   });
 
   it("replaces a value, and answers a missing key 200 null", async () => {
@@ -147,7 +170,7 @@ describe("criterion 1: an app stores a value and reads it back as the same JSON"
 });
 
 describe("criterion 2: a write past a limit is refused with 413 and a plain reason, and nothing is stored", () => {
-  it("refuses a value over 100 KB (canonical JSON), keeping the stored one", async () => {
+  it("3.17 criterion 2: refuses a value over 350 KB (canonical JSON) with 413, keeping the stored one", async () => {
     const { call, store } = setup();
     expect((await call(put("big", valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(204);
     await call(put("big", "small"));
@@ -155,20 +178,22 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
     const response = await call(put("big", valueOfBytes(MAX_VALUE_BYTES + 1)));
     expect(response.statusCode).toBe(413);
     expect(JSON.parse(response.body ?? "")).toEqual({ message: APP_DATA_MESSAGES.valueTooBig });
-    expect(APP_DATA_MESSAGES.valueTooBig).toBe("This value is too big: a value can hold at most 100 KB.");
+    expect(APP_DATA_MESSAGES.valueTooBig).toBe("This value is too big: a value can hold at most 350 KB.");
     expect(snapshot(store)).toBe(before);
   });
 
-  it("refuses a body over 100 KB before parsing it, base64 or not", async () => {
+  it("refuses a body over 350 KB before parsing it, base64 or not", async () => {
     const { call, store } = setup();
     const padded = `${" ".repeat(MAX_VALUE_BYTES)}1`;
     expect((await call(request("PUT", "a", { body: padded }))).statusCode).toBe(413);
     expect((await call(request("PUT", "a", { body: padded, base64: true }))).statusCode).toBe(413);
     expect((await call(request("PUT", "a", { body: "x".repeat(MAX_VALUE_BYTES * 2), base64: false }))).statusCode).toBe(413);
     expect(store.values.size).toBe(0);
+    // The largest value still passes base64 (the raw limit is not below it).
+    expect((await call(put("max", valueOfBytes(MAX_VALUE_BYTES), { base64: true }))).statusCode).toBe(204);
   });
 
-  it("refuses a value that canonical JSON makes longer than 100 KB (numbers written short)", async () => {
+  it("refuses a value that canonical JSON makes longer than 350 KB (numbers written short)", async () => {
     const { call, store } = setup();
     // 1e21 stays "1e+21", but 1e20 becomes "100000000000000000000": 4 bytes sent, 21 stored.
     const body = `[${Array.from({ length: Math.ceil(MAX_VALUE_BYTES / 22) + 1 }, () => "1e20").join(",")}]`;
@@ -178,11 +203,13 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
     expect(store.values.size).toBe(0);
   });
 
-  it("refuses a write that would take the app past 1 MB, keeping everything as it was", async () => {
+  it("3.17 criterion 3: refuses a write that would take the app past 10 MB, naming 10 MB, keeping everything as it was", async () => {
     const { call, store } = setup();
-    const full = Math.floor(MAX_APP_DATA_BYTES / MAX_VALUE_BYTES); // 10 values of 100 KB
+    const full = Math.floor(MAX_APP_DATA_BYTES / MAX_VALUE_BYTES); // 29 values of 350 KB
+    expect(full).toBe(29);
     for (let i = 0; i < full; i += 1) expect((await call(put(`v${i}`, valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(204);
-    const left = MAX_APP_DATA_BYTES - full * MAX_VALUE_BYTES; // 24 KB
+    const left = MAX_APP_DATA_BYTES - full * MAX_VALUE_BYTES; // 90 KB
+    expect(left).toBe(90 * 1024);
     expect((await call(put("last", valueOfBytes(left)))).statusCode).toBe(204);
     expect(store.usage.get("ada-42")?.bytes).toBe(MAX_APP_DATA_BYTES);
     const before = snapshot(store);
@@ -191,7 +218,7 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
       expect(response.statusCode, key).toBe(413);
       expect(JSON.parse(response.body ?? ""), key).toEqual({ message: APP_DATA_MESSAGES.appFull });
     }
-    expect(APP_DATA_MESSAGES.appFull).toBe("This app has no room left: an app can store at most 1 MB.");
+    expect(APP_DATA_MESSAGES.appFull).toBe("This app has no room left: an app can store at most 10 MB.");
     expect(snapshot(store)).toBe(before);
     // A smaller value in place of a bigger one still fits, and a delete makes room.
     expect((await call(put("last", valueOfBytes(left - 1)))).statusCode).toBe(204);
@@ -199,33 +226,34 @@ describe("criterion 2: a write past a limit is refused with 413 and a plain reas
     expect((await call(put("more", 1))).statusCode).toBe(204);
   });
 
-  it("refuses a 101st key, while the 100 keys can still be replaced", async () => {
+  it("refuses a 501st key, while the 500 keys can still be replaced", async () => {
     const { call, store } = setup();
     for (let i = 0; i < MAX_KEYS; i += 1) expect((await call(put(`k${i}`, i))).statusCode).toBe(204);
     const before = snapshot(store);
     const response = await call(put("one-more", 1));
     expect(response.statusCode).toBe(413);
     expect(JSON.parse(response.body ?? "")).toEqual({ message: APP_DATA_MESSAGES.tooManyKeys });
-    expect(APP_DATA_MESSAGES.tooManyKeys).toBe("This app already has 100 keys, the most it can keep. Remove one to add another.");
+    expect(APP_DATA_MESSAGES.tooManyKeys).toBe("This app already has 500 keys, the most it can keep. Remove one to add another.");
     expect(snapshot(store)).toBe(before);
     expect((await call(put("k5", "changed"))).statusCode).toBe(204);
     expect(store.usage.get("ada-42")?.keys).toBe(MAX_KEYS);
   });
 
-  it("never lets parallel writes pass 100 keys or 1 MB (the store's conditions hold, not the earlier read)", async () => {
+  it("never lets parallel writes pass 500 keys or 10 MB (the store's conditions hold, not the earlier read)", async () => {
     const { call, store } = setup();
-    const keys = await Promise.all(Array.from({ length: 130 }, (_, i) => call(put(`p${i}`, i))));
+    const keys = await Promise.all(Array.from({ length: MAX_KEYS + 30 }, (_, i) => call(put(`p${i}`, i))));
     expect(keys.filter((r) => r.statusCode === 204)).toHaveLength(MAX_KEYS);
     expect(keys.every((r) => [204, 409, 413].includes(r.statusCode))).toBe(true);
     expect(store.usage.get("ada-42")?.keys).toBe(MAX_KEYS);
     expect([...store.values.keys()].filter((k) => k.startsWith("ada-42/"))).toHaveLength(MAX_KEYS);
 
     const other = setup();
-    const big = await Promise.all(Array.from({ length: 14 }, (_, i) => other.call(put(`b${i}`, valueOfBytes(MAX_VALUE_BYTES)))));
-    expect(big.filter((r) => r.statusCode === 204)).toHaveLength(10);
+    const fit = Math.floor(MAX_APP_DATA_BYTES / MAX_VALUE_BYTES);
+    const big = await Promise.all(Array.from({ length: fit + 4 }, (_, i) => other.call(put(`b${i}`, valueOfBytes(MAX_VALUE_BYTES)))));
+    expect(big.filter((r) => r.statusCode === 204)).toHaveLength(fit);
     const total = [...other.store.values.values()].reduce((sum, v) => sum + v.bytes, 0);
     expect(total).toBeLessThanOrEqual(MAX_APP_DATA_BYTES);
-    expect(other.store.usage.get("ada-42")).toEqual({ bytes: total, keys: 10 });
+    expect(other.store.usage.get("ada-42")).toEqual({ bytes: total, keys: fit });
   });
 
   it("tries again when another write got in between, pausing between tries, and answers 409 after 4 lost races, storing nothing", async () => {
@@ -297,9 +325,12 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
   const TODAY = "2026-11-24";
   const YESTERDAY = "2026-11-23";
   const TOMORROW = "2026-11-25";
-  /** What DynamoDB bills a write of a small value in a small app (value item 1 KB + totals item 1 KB), and of a 100 KB one. */
+  /** What DynamoDB bills a write of a small value in a small app (value item 1 KB + totals item 1 KB), and of a 350 KB one. */
   const SMALL = 2 * 1024;
-  const BIG = 101 * 1024 + 1024;
+  /** 350 KB + 256 bytes of item overhead is 351 KB in whole KB, plus the 1 KB totals item. */
+  const BIG = 351 * 1024 + 1024;
+  /** The totals item of an app with 500 keys of 64 characters: 256 + 500 x 72 bytes, 36 KB in whole KB. */
+  const LONG_KEYS_TOTALS = 36 * 1024;
 
   it("counts each write as what DynamoDB bills it: both items, in whole KB, at the larger of the old and new value", () => {
     expect(MIN_WRITE_COST_BYTES).toBe(1024);
@@ -309,7 +340,7 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
     expect(writeCost(768, undefined, none, "score")).toBe(SMALL);
     expect(writeCost(769, undefined, none, "score")).toBe(3 * 1024);
     expect(writeCost(MAX_VALUE_BYTES, undefined, none, "score")).toBe(BIG);
-    // DynamoDB bills the larger of the old and the new item: replacing 100 KB with 1 byte, or deleting it.
+    // DynamoDB bills the larger of the old and the new item: replacing 350 KB with 1 byte, or deleting it.
     expect(writeCost(1, MAX_VALUE_BYTES, none, "score")).toBe(BIG);
     expect(writeCost(undefined, MAX_VALUE_BYTES, none, "score")).toBe(BIG);
     expect(writeCost(undefined, 1, none, "score")).toBe(SMALL);
@@ -317,14 +348,14 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
     for (const [bytes, previous] of [[1, undefined], [5000, 70_000], [MAX_VALUE_BYTES, 3]] as const) {
       expect(writeCost(bytes, previous, none, "k")).toBeGreaterThanOrEqual(Math.max(1024, bytes, previous ?? 0));
     }
-    // The totals item grows with the keys: 100 keys of 64 characters make it ~7.3 KB, rewritten by every write.
+    // The totals item grows with the keys: 500 keys of 64 characters make it ~35.4 KB, rewritten by every write.
     const long = new Map(Array.from({ length: MAX_KEYS }, (_, i) => [String(i).padStart(64, "k"), 1] as const));
     expect(usageItemBytes(long, String(0).padStart(64, "k"))).toBe(USAGE_ITEM_BASE_BYTES + MAX_KEYS * (64 + USAGE_ENTRY_BYTES));
-    expect(writeCost(1, 1, long, String(0).padStart(64, "k"))).toBe(1024 + 8 * 1024);
+    expect(writeCost(1, 1, long, String(0).padStart(64, "k"))).toBe(1024 + LONG_KEYS_TOTALS);
   });
 
-  it("allows 5 MB of writes per app and UTC day, counting PUTs and DELETEs as they are billed; reads and refused writes count nothing", async () => {
-    expect(DAILY_WRITE_BUDGET_BYTES).toBe(5 * 1024 * 1024);
+  it("allows 50 MB of writes per app and UTC day, counting PUTs and DELETEs as they are billed; reads and refused writes count nothing", async () => {
+    expect(DAILY_WRITE_BUDGET_BYTES).toBe(50 * 1024 * 1024);
     expect(APP_DATA_MESSAGES.writeBudget).toBe("This app has saved a lot of data today. Saving starts again tomorrow.");
     const { call, store } = setup();
     await call(put("score", 1));
@@ -348,7 +379,7 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
     for (const key of keys) expect((await call(put(key, 1))).statusCode).toBe(204);
     const before = store.written.get("ada-42")?.bytes ?? 0;
     expect((await call(put(keys[0] ?? "", 2))).statusCode).toBe(204);
-    expect((store.written.get("ada-42")?.bytes ?? 0) - before).toBe(1024 + 8 * 1024);
+    expect((store.written.get("ada-42")?.bytes ?? 0) - before).toBe(1024 + LONG_KEYS_TOTALS);
   });
 
   it("refuses a PUT or DELETE past the budget with 429 and a plain reason, storing nothing; reads still work", async () => {
@@ -356,7 +387,7 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
     await call(put("score", 1));
     store.written.set("ada-42", { day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES - 2 * SMALL });
     expect((await call(put("score", 2))).statusCode).toBe(204);
-    // A 100 KB value no longer fits, a small one still does (exactly reaching the budget).
+    // A 350 KB value no longer fits, a small one still does (exactly reaching the budget).
     expect((await call(put("big", valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(429);
     expect((await call(put("score", 3))).statusCode).toBe(204);
     expect(store.written.get("ada-42")).toEqual({ day: TODAY, bytes: DAILY_WRITE_BUDGET_BYTES });
@@ -372,18 +403,33 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
     expect(logs.filter((l) => l.status === 429).map((l) => l.outcome)).toEqual(["write-budget", "write-budget", "write-budget", "write-budget"]);
   });
 
-  it("stops a loop of 100 KB replacements of one key after 5 MB (50 writes)", async () => {
+  it("3.17 criterion 4: stops a loop of 350 KB replacements of one key once it has written 50 MB in the UTC day (145 writes)", async () => {
     const { call, store } = setup();
     const allowed = Math.floor(DAILY_WRITE_BUDGET_BYTES / BIG);
-    expect(allowed).toBe(50);
+    expect(allowed).toBe(145);
     for (let i = 0; i < allowed; i += 1) {
       expect((await call(put("same", valueOfBytes(MAX_VALUE_BYTES - (i % 2))))).statusCode, String(i)).toBe(204);
     }
-    expect((await call(put("same", valueOfBytes(MAX_VALUE_BYTES)))).statusCode).toBe(429);
+    const refused = await call(put("same", valueOfBytes(MAX_VALUE_BYTES)));
+    expect(refused.statusCode).toBe(429);
+    expect(JSON.parse(refused.body ?? "")).toEqual({ message: APP_DATA_MESSAGES.writeBudget });
     expect(store.written.get("ada-42")?.bytes).toBeLessThanOrEqual(DAILY_WRITE_BUDGET_BYTES);
   });
 
-  it("charges the 'PUT 100 KB, then PUT 1' trick honestly: replacing a big value counts the big value it overwrites", async () => {
+  it("3.17 criterion 4: refuses the next write, small or not, once an app has written exactly 50 MB in the UTC day, storing nothing", async () => {
+    const { call, store } = setup();
+    await call(put("score", 1));
+    store.written.set("ada-42", { day: TODAY, bytes: 50 * 1024 * 1024 });
+    const before = snapshot(store);
+    for (const r of [put("score", 2), put("new", 1), request("DELETE", "score")]) {
+      const response = await call(r);
+      expect(response.statusCode, r.routeKey).toBe(429);
+      expect(JSON.parse(response.body ?? ""), r.routeKey).toEqual({ message: "This app has saved a lot of data today. Saving starts again tomorrow." });
+    }
+    expect(snapshot(store)).toBe(before);
+  });
+
+  it("charges the 'PUT 350 KB, then PUT 1' trick honestly: replacing a big value counts the big value it overwrites", async () => {
     const { call, store } = setup();
     let writes = 0;
     for (;;) {
@@ -392,12 +438,12 @@ describe("the daily write budget: replacing values in a loop cannot run up the t
       const response = await call(put("same", big ? valueOfBytes(MAX_VALUE_BYTES) : 1));
       if (response.statusCode === 429) break;
       expect(response.statusCode).toBe(204);
-      // Each write, the small one too, counts at least the 100 KB value item DynamoDB rewrites.
+      // Each write, the small one too, counts at least the 350 KB value item DynamoDB rewrites.
       expect((store.written.get("ada-42")?.bytes ?? 0) - before, String(writes)).toBe(BIG);
       writes += 1;
     }
-    // Try 2 counted 101 KB a pair (100 KB + 1 KB) and let ~400 writes through a day (20 MB); now 50 in 5 MB.
-    expect(writes).toBe(50);
+    // Try 2 counted 101 KB a pair (100 KB + 1 KB) and let ~400 writes through a day (20 MB); then 50 in 5 MB; since 3.17, 145 in 50 MB.
+    expect(writes).toBe(145);
     expect(store.written.get("ada-42")?.bytes).toBeLessThanOrEqual(DAILY_WRITE_BUDGET_BYTES);
   });
 

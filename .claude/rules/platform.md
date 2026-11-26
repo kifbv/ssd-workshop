@@ -44,7 +44,7 @@ paths:
   Writes that all update one item (an app's `DATA_USAGE`) cancel each other with `TransactionConflict` on DynamoDB,
   which the in-memory fakes do not reproduce: pause 20 to 80 ms at random before another try.
 - A public write path whose limits a loop can stay under (replacing one value) needs a cost cap of its own: a daily
-  byte budget per app in the same transaction (ticket 2.4: 5 MB per UTC day, 429) and route throttles. Count what
+  byte budget per app in the same transaction (ticket 2.4: 5 MB per UTC day, 50 MB since 3.17, 429) and route throttles. Count what
   DynamoDB bills: every item the transaction writes, in whole KB, at the larger of its old and new size (replacing
   100 KB with 1 byte still costs 100 KB), and the totals item too (it grows with the keys).
 - DynamoDB bills a `GetItem` on the whole item's size, whatever the `ProjectionExpression`: a request path that may
@@ -300,5 +300,8 @@ paths:
   double quotes (`"Pay cash to the baker"`): the prompt says to use single quotes inside the text. A text the model writes
   in the participant's language (the guardrail's `decline`) is used only when it keeps the fixed text's shape
   (`localDecline`), else the English template; a fixed marker the code reads stays English inside it (`(server)`).
+  A one-word prompt change can tip such an answer into "(login), (outside service)" then "Wait, ..." and a second JSON
+  object (unreadable): say what to do in the combined case (two reasons, one bracket each), and run the live eval several
+  times, not once (ticket 3.17: 4 of 33 before, 0 of 12 and 3 x 17/17 after).
 - Removing block tags (`</spec>`, `</message>`) from untrusted text is repeated until nothing changes (`withoutTags`,
   `api/conversation/tags.ts`): one pass lets nested tags rebuild one (`</parti</participant>cipant>`, ticket 3.16 try 2).
