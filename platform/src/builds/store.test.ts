@@ -30,6 +30,8 @@ describe("npm run builds on AWS (ticket 2.9)", () => {
     expect([...REQUEUE_REMOVED]).toContain("attemptId");
     // Ticket 3.4: a retried build gets a new place at the end of the waiting line.
     expect([...REQUEUE_REMOVED]).toContain("queueKey");
+    // Ticket 3.6: a retried change build stays the same change (its kind, number and spec version are kept).
+    for (const kept of ["kind", "changeNumber", "specVersion", "participantId", "nickname"]) expect([...REQUEUE_REMOVED], kept).not.toContain(kept);
     placeholdersMatch(update);
     placeholdersMatch(sent[1]?.input as ScanCommandInput);
     // The list reads no failure text or participant data beyond the nickname.

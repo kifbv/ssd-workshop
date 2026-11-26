@@ -5,17 +5,18 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { clientSettings } from "../aws.js";
 import { BedrockModel } from "../conversation/model.js";
 import { SqsBuildQueue, SqsMessageQueue } from "../conversation/queue.js";
-import { parseJob } from "../conversation/state.js";
+import { parseJob, parseSuggestionsJob } from "../conversation/state.js";
 import { DynamoConversationStore } from "../conversation/store.js";
 import { errorName } from "../sign-in/code-request.js";
-import { processJob, type WorkerDeps, type WorkerLogEntry } from "../conversation/worker.js";
+import { processJob, processSuggestionsJob, type WorkerDeps, type WorkerLogEntry } from "../conversation/worker.js";
 import { AI_QUEUE_URL, BUILD_QUEUE_URL, MODEL_ID, REGION, TABLE_NAME } from "../settings.js";
 
 /**
  * The AI worker (ticket 1.7): one SQS record per invocation (batch size 1), holding a participant id
  * and a message id. Rules in ../conversation/worker.ts; since ticket 2.7 it also runs the readiness check and
  * sends a passed build's id to the launch queue; since ticket 3.5 it puts a job held by the global Stop back on its own
- * queue, with a delay.
+ * queue, with a delay; since ticket 3.6 it also answers change requests, queues change builds and writes the suggested
+ * changes (a suggestions job: `{"participantId","suggestions":true}`).
  */
 
 /** The parts of an SQS event the worker reads. */
@@ -54,7 +55,10 @@ export function createHandler(deps: WorkerDeps): (event: SqsEvent, context?: Wor
     const signal = AbortSignal.timeout(aiDeadlineMs(context?.getRemainingTimeInMillis() ?? 300_000));
     for (const record of event.Records ?? []) {
       // The original error goes no further than its name (deliberately not attached as a cause).
-      const failed = await processJob(parseJob(record.body), deps, signal).then(
+      // Ticket 3.6: a suggestions job names a participant only; anything else is a message job (or invalid).
+      const suggestionsFor = parseSuggestionsJob(record.body);
+      const work = suggestionsFor === undefined ? processJob(parseJob(record.body), deps, signal) : processSuggestionsJob(suggestionsFor, deps, signal);
+      const failed = await work.then(
         () => undefined,
         (error: unknown) => errorName(error),
       );

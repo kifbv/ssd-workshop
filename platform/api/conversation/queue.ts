@@ -2,14 +2,14 @@
 // stored participant message, holding only the participant id and the message id (never the text).
 // Ticket 2.7: the hand-off from the AI worker to the build launcher, holding only the build id.
 import { SendMessageCommand, type SendMessageCommandOutput } from "@aws-sdk/client-sqs";
-import { buildJobBody, jobBody, type AiJob, type BuildJob, type BuildQueue, type HeldJobs, type MessageQueue } from "./state.js";
+import { buildJobBody, jobBody, suggestionsJobBody, type AiJob, type BuildJob, type BuildQueue, type HeldJobs, type MessageQueue, type SuggestionsQueue } from "./state.js";
 
 /** The one method of SQSClient the queue uses, so tests can stub it. */
 export interface SqsSender {
   send(command: SendMessageCommand): Promise<SendMessageCommandOutput>;
 }
 
-export class SqsMessageQueue implements MessageQueue, HeldJobs {
+export class SqsMessageQueue implements MessageQueue, HeldJobs, SuggestionsQueue {
   constructor(
     private readonly client: SqsSender,
     private readonly queueUrl: string,
@@ -22,6 +22,17 @@ export class SqsMessageQueue implements MessageQueue, HeldJobs {
   /** Ticket 3.5: the same job again, delivered after `delaySeconds` (a new message: its receive count starts again). */
   async sendLater(job: AiJob, delaySeconds: number): Promise<void> {
     await this.client.send(new SendMessageCommand({ QueueUrl: this.queueUrl, MessageBody: jobBody(job), DelaySeconds: delaySeconds }));
+  }
+
+  /** Ticket 3.6: asks the AI worker for a participant's suggested changes (the participant id only), after an optional delay. */
+  async sendSuggestions(participantId: string, delaySeconds?: number): Promise<void> {
+    await this.client.send(
+      new SendMessageCommand({
+        QueueUrl: this.queueUrl,
+        MessageBody: suggestionsJobBody(participantId),
+        ...(delaySeconds === undefined ? {} : { DelaySeconds: delaySeconds }),
+      }),
+    );
   }
 }
 

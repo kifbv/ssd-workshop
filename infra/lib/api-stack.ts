@@ -16,6 +16,7 @@ import {
   AI_DLQ_NAME,
   AI_QUEUE_NAME,
   AI_WORKER_FUNCTION_NAME,
+  AI_WORKER_BUILD_CHECK_ATTRIBUTES,
   AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
   AI_WORKER_UPDATE_ATTRIBUTES,
   API_NAME,
@@ -115,6 +116,9 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/build", method: HttpMethod.GET },
   // Ticket 3.5: the workshop's state (paused or not), asked every 30 s by every signed-in screen (one SETTINGS read).
   { path: "/api/status", method: HttpMethod.GET },
+  // Ticket 3.6: Build this change and Not this one, on the caller's proposed version.
+  { path: "/api/conversation/change/build", method: HttpMethod.POST },
+  { path: "/api/conversation/change/discard", method: HttpMethod.POST },
 ] as const;
 
 /**
@@ -482,6 +486,18 @@ export class ApiStack extends Stack {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": [...AI_WORKER_BUILD_UPDATE_ATTRIBUTES] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    // Ticket 3.6: the change build's transaction checks that the build it follows is live or failed (nothing running).
+    worker.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:ConditionCheckItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["BUILD#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...AI_WORKER_BUILD_CHECK_ATTRIBUTES] },
         },
       }),
     );

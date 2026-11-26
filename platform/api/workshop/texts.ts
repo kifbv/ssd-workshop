@@ -11,6 +11,10 @@ export const PHASE_3_TEXTS = {
   workshopPaused: "The workshop is paused for a moment.",
   /** Ticket 3.9: the repository's SPEC.md equals the stored spec. */
   specUnchanged: "Your repository's spec has not changed.",
+  /** Ticket 3.6: a change request (or Build this change) while one of their builds is queued or running. */
+  changeWhileBuilding: "Your app is being built right now. You can ask for another change once it is live.",
+  /** Ticket 3.6: a change request before the app was ever live (its first build is not live yet, or failed). */
+  changeBeforeLive: "You can ask for changes once your app is live.",
   /** Ticket 3.11: a participant opens the facilitator dashboard. */
   facilitatorsOnly: "This page is for facilitators.",
 } as const;

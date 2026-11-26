@@ -36,6 +36,8 @@ export interface StoredMessage {
   suggestion?: string;
   /** The guardrail's reason, for the facilitator. */
   verdictReason?: string;
+  /** Ticket 3.6: set (only by Build this change) on the request that runs the change's readiness check. */
+  request?: "change-build";
 }
 
 export interface StoredConversation {
@@ -45,8 +47,14 @@ export interface StoredConversation {
   latestSpecVersion?: number;
   /** The approved spec version (ticket 1.9): no more messages once set. */
   approvedSpecVersion?: number;
-  /** The build the readiness check started (ticket 2.7). */
+  /** The build the readiness check started (ticket 2.7), or the newest change build (ticket 3.6). */
   buildId?: string;
+  /** Ticket 3.6: the version a change answer proposed, not yet built or put aside. */
+  proposedSpecVersion?: number;
+  /** Ticket 3.6: the three suggested changes, once written. */
+  suggestions?: string[];
+  /** Ticket 3.6: when the suggestions were last asked for (ISO 8601). */
+  suggestionsRequestedAt?: string;
 }
 
 /** One version of a participant's spec (ticket 1.9). */
@@ -56,6 +64,8 @@ export interface StoredSpec {
   /** ISO 8601. */
   createdAt: string;
   approved: boolean;
+  /** Ticket 3.6: a proposed change's "What changes" list. */
+  whatChanges?: string[];
 }
 
 /** True when a pending message was left behind by a crashed worker (see STALE_PENDING_SECONDS). */
@@ -89,17 +99,27 @@ export type Finish =
   | { kind: "declined"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "failed"; reply: string; guardrail?: GuardrailRecord }
   | { kind: "over-budget"; reply: string; guardrail?: GuardrailRecord }
+  /** Ticket 3.6: every change request is used; no AI call was made (reply kind `limit`, message `failed`). */
+  | { kind: "over-limit"; reply: string; guardrail?: undefined }
   | { kind: "flagged"; guardrail: GuardrailRecord };
 
-/** The message status each way of ending stores (`over-budget` ends as `failed`: the participant may send again). */
+/**
+ * The message status each way of ending stores (`over-budget` and `over-limit` end as `failed`: the participant may send
+ * again once a facilitator added budget, or the admin raised the cap).
+ */
 export function finishStatus(kind: Finish["kind"]): MessageStatus {
-  return kind === "over-budget" ? "failed" : kind;
+  return kind === "over-budget" || kind === "over-limit" ? "failed" : kind;
 }
 
 /** A new spec version an answer made (ticket 1.9), stored with the answer in one transaction. */
 export interface NewSpec {
   version: number;
   text: string;
+  /**
+   * Ticket 3.6: a change answer's "What changes" list. Its presence makes the version the conversation's proposed one
+   * (`proposedSpecVersion`), waiting for Build this change or Not this one.
+   */
+  whatChanges?: string[];
 }
 
 export interface NewMessage {
@@ -110,6 +130,8 @@ export interface NewMessage {
   createdAt: string;
   /** Epoch seconds. */
   nowSeconds: number;
+  /** Ticket 3.6: only Build this change's own request carries it. */
+  request?: "change-build";
 }
 
 /** `approved`: the participant approved their spec, so no message is taken any more (ticket 1.9). */
@@ -140,8 +162,10 @@ export interface ConversationStore {
   /**
    * Stores a pending message and makes it the conversation's message in flight, only if none is
    * (a stale pending one does not count); otherwise `busy`, or `waiting` for a facilitator.
+   * Ticket 3.6: with `afterBuild` (a change request at step 4) only while the conversation's build is still that one,
+   * instead of only while no spec is approved (`busy` when it moved on).
    */
-  createMessage(participantId: string, message: NewMessage): Promise<CreateResult>;
+  createMessage(participantId: string, message: NewMessage, afterBuild?: string): Promise<CreateResult>;
   getMessage(participantId: string, messageId: string): Promise<StoredMessage | undefined>;
   /** The text of the reply to a message, if there is one. */
   getReplyText(participantId: string, messageId: string): Promise<string | undefined>;
@@ -217,7 +241,61 @@ export interface ConversationStore {
    * only while it is still pending and the conversation's message in flight. False when not (nothing written).
    */
   holdMessage(participantId: string, messageId: string, nowSeconds: number): Promise<boolean>;
+  /**
+   * Ticket 3.6, Build this change: stores the request (`message`, CHANGE_BUILD_REQUEST at step building, marked
+   * `change-build`) as the conversation's message in flight and marks the version approved (`approvedAt`), in one
+   * transaction, only while `version` is the proposed one, the conversation's build is still `buildId` and nothing is in
+   * flight (a stale pending message is let go). Otherwise `stale` (no longer the proposal or the build moved), `busy` or
+   * `waiting`.
+   */
+  requestChangeBuild(participantId: string, version: number, buildId: string, message: NewMessage): Promise<ChangeRequestResult>;
+  /**
+   * Ticket 3.6, Not this one: removes the proposal, only while `version` is the proposed one and nothing is in flight
+   * (a stale pending message does not count). The version's item stays as history; nothing counts.
+   */
+  discardChange(participantId: string, version: number, nowSeconds: number, nowIso: string): Promise<DiscardResult>;
+  /**
+   * Ticket 3.6: ends the change-build request, only while it is pending and in flight, `version` still the proposed one
+   * and the conversation's build still `previousBuildId` (the profile at step building): the message, the reply, the
+   * conversation (no message in flight; `ready`: the new build id, `approvedSpecVersion` = version, the proposal
+   * removed), and the tokens. `ready` also, in the same transaction: the previous build must be `live` or `failed`
+   * (nothing of theirs running), the new build (kind `change`, its change number and spec version, only if absent) and
+   * the profile's `changeRequestsUsed` from `used` to `used + 1`, only while it is `used` and below `cap`.
+   * False when a condition failed (nothing written).
+   */
+  finishChangeBuild(participantId: string, messageId: string, outcome: ChangeBuildFinish, nowIso: string): Promise<boolean>;
+  /**
+   * Ticket 3.6: notes that the suggestions were asked for (`suggestionsRequestedAt` = now), only while none are stored
+   * and they were not asked for since `askedBeforeIso`. False when not (nothing written).
+   */
+  markSuggestionsRequested(participantId: string, nowIso: string, askedBeforeIso: string): Promise<boolean>;
+  /** Ticket 3.6: stores the suggestions once (only if none are stored) with their tokens. False when some were already there. */
+  storeSuggestions(participantId: string, suggestions: readonly string[], usage: TokenUsage, nowIso: string): Promise<boolean>;
 }
+
+/** Ticket 3.6: `requestChangeBuild`'s outcomes. */
+export type ChangeRequestResult = "created" | "stale" | "busy" | "waiting";
+/** Ticket 3.6: `discardChange`'s outcomes. */
+export type DiscardResult = "discarded" | "stale" | "busy" | "waiting";
+
+/**
+ * Ticket 3.6: how a change-build request ends. `ready` queues the change build (and counts the change); the others keep
+ * the proposal, so the participant can ask for a fix or press Build this change again.
+ */
+export type ChangeBuildFinish =
+  | {
+      kind: "ready";
+      reply: string;
+      version: number;
+      previousBuildId: string;
+      answer: AnswerRecord;
+      build: { buildId: string; nickname: string; changeNumber: number };
+      /** `changeRequestsUsed` as read (the write requires it unchanged) and the cap it must stay below. */
+      used: number;
+      cap: number;
+    }
+  | { kind: "not-ready"; reply: string; version: number; previousBuildId: string; answer: AnswerRecord }
+  | { kind: "failed" | "over-budget" | "over-limit"; reply: string; version: number; previousBuildId: string; usage?: TokenUsage };
 
 /** What the AI worker reads of a profile for the readiness check (ticket 2.7). */
 export interface ParticipantInfo {
@@ -241,6 +319,10 @@ export interface StoredBuild {
   failureReasons?: string[];
   /** Ticket 3.4: its place in the waiting line, once the launcher saw it queued. */
   queueKey?: string;
+  /** Ticket 3.6: `first` (also when absent) or `change`. */
+  kind: "first" | "change";
+  /** Ticket 3.6, change builds: which change it is. */
+  changeNumber?: number;
 }
 
 /**
@@ -304,6 +386,34 @@ export function parseJob(body: string | undefined): AiJob | undefined {
 
 export function jobBody(job: AiJob): string {
   return JSON.stringify({ participantId: job.participantId, messageId: job.messageId });
+}
+
+/**
+ * Ticket 3.6: the job that asks the AI worker for a participant's suggested changes (no message: the participant id
+ * alone, and the mark), sent by the conversation function once the app is live, and by the worker to itself while the
+ * global Stop holds it.
+ */
+export interface SuggestionsQueue {
+  sendSuggestions(participantId: string, delaySeconds?: number): Promise<void>;
+}
+
+export function suggestionsJobBody(participantId: string): string {
+  return JSON.stringify({ participantId, suggestions: true });
+}
+
+/** The participant id of a suggestions job body, or undefined when the body is not one. */
+export function parseSuggestionsJob(body: string | undefined): string | undefined {
+  if (typeof body !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const { participantId, suggestions, messageId } = parsed as Record<string, unknown>;
+  if (suggestions !== true || messageId !== undefined || typeof participantId !== "string" || participantId === "" || participantId.includes("#")) return undefined;
+  return participantId;
 }
 
 /** Hands a build to the build launcher (ticket 2.7; consumed from ticket 2.9): the build id only. */

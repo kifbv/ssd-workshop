@@ -1,6 +1,7 @@
 // `npm run eval -- <suite>` (ticket 1.7): runs a suite of examples against the real model and
 // scores the answers. `guardrails` (ticket 1.7), `clarify` (ticket 1.8), `spec` (ticket 1.9), `readiness` (ticket 2.7)
-// and `build` (ticket 2.8: the coding agent and the runner, with GitHub, the table and the queue in memory).
+// and `build` (ticket 2.8: the coding agent and the runner, with GitHub, the table and the queue in memory), and
+// `suggestions` (ticket 3.6: three suggested changes for each workshop example spec).
 // The scoring is pure and unit tested; ./main.ts calls Bedrock.
 import type { Exchange } from "../../api/conversation/answer.js";
 import { addUsage } from "../../api/conversation/model.js";
@@ -8,7 +9,7 @@ import type { ReadinessVerdict } from "../../api/conversation/readiness.js";
 import { checkSpec, extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import type { GuardrailVerdict, TokenUsage } from "../../api/types.js";
 
-export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build"] as const;
+export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build", "suggestions"] as const;
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
@@ -36,6 +37,9 @@ Suites:
                scrolling sideways, and show its title and every screen its spec names; prints the duration,
                tokens and cost of each. --model tries another EU profile (priced at the build role's prices),
                --example runs one spec only
+  suggestions  the readiness file's workshop example specs through the real suggestions call (ticket 3.6): each
+               gets exactly three suggested changes, each under 80 characters, and each passes the real
+               guardrail check as on-path (a suggestion is sent as a change request when tapped)
 
 Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example; build about $1 per spec).`;
 
@@ -684,4 +688,67 @@ export function formatBuildSummary(results: readonly BuildEvalResult[]): string[
     `Build: ${passed}/${results.length} passed`,
     `Duration: ${minutes(duration)} in all; tokens: ${total.inputTokens} in, ${total.outputTokens} out, cost $${total.costUsd.toFixed(4)}`,
   ];
+}
+
+// ---- suggestions (ticket 3.6) ----
+
+export interface SuggestionsEvalOutcome {
+  /** Undefined when the answer was unreadable (the worker would store nothing). */
+  suggestions?: string[];
+  /** The real guardrail's verdict on each suggestion, in order. */
+  verdicts: GuardrailVerdict[];
+  usage: TokenUsage;
+}
+
+export interface SuggestionsEvalResult extends ClarifyScore {
+  example: ReadinessExample;
+  outcome?: SuggestionsEvalOutcome;
+}
+
+/** Scores one spec's suggestions: exactly three, each under 80 characters, each on path for the guardrail. */
+export function scoreSuggestions(outcome: SuggestionsEvalOutcome): ClarifyScore {
+  const list = outcome.suggestions;
+  if (list === undefined) return { pass: false, detail: "unreadable answer (nothing would be stored)" };
+  const problems: string[] = [];
+  if (list.length !== 3) problems.push(`${list.length} suggestions (expected 3)`);
+  for (const s of list) if (Array.from(s).length >= 80) problems.push(`"${s}" is ${Array.from(s).length} characters`);
+  outcome.verdicts.forEach((verdict, i) => {
+    if (verdict !== "on-path") problems.push(`"${list[i] ?? ""}" is ${verdict} for the guardrail`);
+  });
+  if (outcome.verdicts.length !== list.length) problems.push("not every suggestion was checked");
+  return problems.length === 0 ? { pass: true, detail: "3 suggestions, each under 80 characters and on path" } : { pass: false, detail: problems.join("; ") };
+}
+
+/** Runs every example spec, one at a time; a failed call counts as a failure. */
+export async function runSuggestionsEval(
+  examples: readonly ReadinessExample[],
+  suggest: (example: ReadinessExample) => Promise<SuggestionsEvalOutcome>,
+  onResult: (result: SuggestionsEvalResult, index: number) => void = () => undefined,
+): Promise<SuggestionsEvalResult[]> {
+  const results: SuggestionsEvalResult[] = [];
+  for (const [i, example] of examples.entries()) {
+    let result: SuggestionsEvalResult;
+    try {
+      const outcome = await suggest(example);
+      result = { example, outcome, ...scoreSuggestions(outcome) };
+    } catch (error) {
+      result = { example, pass: false, detail: `error ${error instanceof Error ? error.name : "Error"}` };
+    }
+    results.push(result);
+    onResult(result, i);
+  }
+  return results;
+}
+
+/** One line per example spec, then its suggestions with their length and verdict (indented). */
+export function formatSuggestionsResult(result: SuggestionsEvalResult, index: number): string {
+  const head = `${result.pass ? "PASS" : "FAIL"} ${String(index + 1).padStart(2)} ${result.example.name}: ${result.detail}`;
+  const lines = (result.outcome?.suggestions ?? []).map((s, i) => `     | ${s} (${Array.from(s).length} chars, ${result.outcome?.verdicts[i] ?? "unchecked"})`);
+  return [head, ...lines].join("\n");
+}
+
+export function formatSuggestionsSummary(results: readonly SuggestionsEvalResult[]): string[] {
+  const passed = results.filter((r) => r.pass).length;
+  const total = addUsage(...results.map((r) => r.outcome?.usage));
+  return [`Suggestions: ${passed}/${results.length} passed`, `Tokens: ${total.inputTokens} in, ${total.outputTokens} out, cost $${total.costUsd.toFixed(4)}`];
 }

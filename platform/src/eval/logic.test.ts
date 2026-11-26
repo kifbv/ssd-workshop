@@ -38,6 +38,11 @@ import {
   parseReadinessExamples,
   runReadinessEval,
   scoreReadiness,
+  formatSuggestionsResult,
+  formatSuggestionsSummary,
+  runSuggestionsEval,
+  scoreSuggestions,
+  type ReadinessExample,
 } from "./logic.js";
 
 function must<T>(value: T | undefined): T {
@@ -501,5 +506,44 @@ describe("scoreBuild", () => {
       "Build: 1/2 passed",
       "Duration: 3m05s in all; tokens: 600000 in, 20000 out, cost $0.7500",
     ]);
+  });
+});
+
+describe("suggestions suite (ticket 3.6 criterion 6)", () => {
+  const usage = { inputTokens: 10, outputTokens: 5, costUsd: 0.001 };
+  const three = ["Add a weekly total to the home screen", "Sort the list by date", "Show a reminder when nothing is logged"];
+  const example: ReadinessExample = { name: "Habit tracker", category: "example", expected: "ready", spec: "spec", keywords: [] };
+
+  it("takes the suite with no arguments", () => {
+    expect(parseEvalArgs(["suggestions"])).toEqual({ suite: "suggestions" });
+    expect(parseEvalArgs(["suggestions", "x"])).toHaveProperty("error");
+  });
+
+  it("passes exactly three suggestions under 80 characters that the guardrail finds on path", () => {
+    expect(scoreSuggestions({ suggestions: three, verdicts: ["on-path", "on-path", "on-path"], usage }).pass).toBe(true);
+  });
+
+  it("fails an unreadable answer, a wrong count, a suggestion of 80 characters or more, an off-path one, or a missing check", () => {
+    expect(scoreSuggestions({ verdicts: [], usage })).toEqual({ pass: false, detail: "unreadable answer (nothing would be stored)" });
+    expect(scoreSuggestions({ suggestions: three.slice(0, 2), verdicts: ["on-path", "on-path"], usage }).detail).toContain("2 suggestions (expected 3)");
+    const long = "a".repeat(80);
+    expect(scoreSuggestions({ suggestions: [three[0] ?? "", three[1] ?? "", long], verdicts: ["on-path", "on-path", "on-path"], usage }).detail).toContain("is 80 characters");
+    expect(scoreSuggestions({ suggestions: [three[0] ?? "", three[1] ?? "", "a".repeat(79)], verdicts: ["on-path", "on-path", "on-path"], usage }).pass).toBe(true);
+    expect(scoreSuggestions({ suggestions: three, verdicts: ["on-path", "flag", "on-path"], usage }).detail).toContain("is flag for the guardrail");
+    expect(scoreSuggestions({ suggestions: three, verdicts: ["on-path", "on-path"], usage }).detail).toContain("not every suggestion was checked");
+  });
+
+  it("runs every example, counts a failed call as a failure, and prints each suggestion with its length and verdict", async () => {
+    const results = await runSuggestionsEval([example, { ...example, name: "Broken" }], async (e) => {
+      if (e.name === "Broken") throw Object.assign(new Error("x"), { name: "ThrottlingException" });
+      return { suggestions: three, verdicts: ["on-path", "on-path", "on-path"], usage };
+    });
+    expect(results.map((r) => r.pass)).toEqual([true, false]);
+    expect(results[1]?.detail).toBe("error ThrottlingException");
+    const text = formatSuggestionsResult(must(results[0]), 0);
+    expect(text).toContain("PASS  1 Habit tracker");
+    expect(text).toContain("| Sort the list by date (21 chars, on-path)");
+    expect(formatSuggestionsSummary(results)[0]).toBe("Suggestions: 1/2 passed");
+    expect(exitCode(results)).not.toBe(0);
   });
 });
