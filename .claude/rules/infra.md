@@ -295,3 +295,18 @@ paths:
 - Validate CDK context (`builderImageDigest`) at the top of `buildApp`, before any stack: a stack's constructor runs
   after every earlier stack has bundled its Lambdas, so a refusal test that waits for it times out on CI's runner. One
   helper in `config.ts` holds the rule for both places.
+- AWS WAF for CloudFront (ticket 3.13): the web ACL has scope `CLOUDFRONT`, lives in us-east-1 (edge stack) and the
+  distribution names it by ARN (`webAclId: webAcl.attrArn`, same stack). CloudFront's custom error responses also
+  apply to WAF's answers: with the distribution's 403 -> `/404.html` mapping, a WAF block would look like a missing
+  page, so the block action uses a custom response code (429) that is not remapped. Size a per-address rate limit for
+  a whole room behind one venue NAT (every participant's polling plus their apps), not for one person.
+- A value sessions must not read (Franck's alert address, ticket 3.13) never goes into CDK context or a template:
+  sessions can `cloudformation:GetTemplate` every `ssd-workshop-*` stack. Use a CloudFormation dynamic reference to an
+  SSM String parameter under `/ssd-workshop/` that Franck creates (`{{resolve:ssm:<name>:<version>}}`, version pinned
+  in `config.ts` so a change is reviewed and re-deployed), keep the resource in its own stack so the access stack can
+  deny that stack's events and drift results to sessions, and never use GitHub variables (printed in the public deploy
+  log) or secrets (the deploy workflow test forbids `secrets.`).
+- Cost Explorer (`AWS::CE::*`, ticket 3.13): us-east-1; tags are `ResourceTags` (CDK's `Tags.of` fills them; they are
+  create-only, so a tag change replaces the resource); ARNs carry only a generated id, so IAM limits them by tag; an
+  EMAIL subscriber takes only DAILY or WEEKLY (IMMEDIATE needs SNS). On-demand Bedrock calls carry no cost allocation
+  tag, so a monitor on `project=ssd-workshop` misses the AI spend.

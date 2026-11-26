@@ -24,6 +24,7 @@ import { HttpOrigin, S3BucketOrigin } from "aws-cdk-lib/aws-cloudfront-origins";
 import { AaaaRecord, ARecord, HostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
 import { CloudFrontTarget } from "aws-cdk-lib/aws-route53-targets";
 import { Bucket } from "aws-cdk-lib/aws-s3";
+import { CfnWebACL } from "aws-cdk-lib/aws-wafv2";
 import type { Construct } from "constructs";
 import {
   API_ORIGIN_DOMAIN,
@@ -46,6 +47,14 @@ import {
   SITE_BUCKET_NAME,
   SITE_BUCKET_REGIONAL_DOMAIN,
   SITE_INDEX_FUNCTION_NAME,
+  WAF_API_PATH_PREFIX,
+  WAF_API_RATE_LIMIT,
+  WAF_API_RATE_RULE_NAME,
+  WAF_BLOCK_BODY,
+  WAF_BLOCK_BODY_KEY,
+  WAF_BLOCK_STATUS,
+  WAF_RATE_WINDOW_SECONDS,
+  WEB_ACL_NAME,
 } from "./config.js";
 
 /** The code of the CloudFront Function on `/apps/*` (plain JavaScript, unit-tested by evaluating it). */
@@ -224,7 +233,46 @@ export class EdgeStack extends Stack {
       code: FunctionCode.fromFile({ filePath: SITE_INDEX_FUNCTION_FILE }),
     });
 
+    // Ticket 3.13: AWS WAF in front of the API. A CLOUDFRONT-scope web ACL must be in us-east-1, which is why it is
+    // here, next to the distribution that names it by ARN (same stack, no cross-region reference). One rule: an address
+    // sending more than WAF_API_RATE_LIMIT requests to /api/* within WAF_RATE_WINDOW_SECONDS gets 429 there until its
+    // count falls back under the limit; pages and apps are never counted or blocked. The path is URL-decoded first, so
+    // an encoded `/%61pi/` counts too. Not WAF's default 403: the distribution's 403 -> 404 page error response would
+    // turn a block into a missing page. Tagged by the app's Tags; metric names ssd-workshop-*.
+    const webAcl = new CfnWebACL(this, "WebAcl", {
+      name: WEB_ACL_NAME,
+      scope: "CLOUDFRONT",
+      description: `${PREFIX}: per-address rate limit on ${WAF_API_PATH_PREFIX}`,
+      defaultAction: { allow: {} },
+      customResponseBodies: { [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY } },
+      visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WEB_ACL_NAME, sampledRequestsEnabled: true },
+      rules: [
+        {
+          name: WAF_API_RATE_RULE_NAME,
+          priority: 0,
+          action: { block: { customResponse: { responseCode: WAF_BLOCK_STATUS, customResponseBodyKey: WAF_BLOCK_BODY_KEY } } },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_API_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                byteMatchStatement: {
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: "STARTS_WITH",
+                  searchString: WAF_API_PATH_PREFIX,
+                  textTransformations: [{ priority: 0, type: "URL_DECODE" }],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_API_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
+      ],
+    });
+
     this.distribution = new Distribution(this, "Distribution", {
+      webAclId: webAcl.attrArn,
       comment: `${PREFIX} site`,
       domainNames: [DOMAIN],
       certificate,

@@ -1,4 +1,5 @@
 import { App, type AppProps, Aspects, Tags } from "aws-cdk-lib";
+import { AlertsStack } from "./alerts-stack.js";
 import { ApiStack } from "./api-stack.js";
 import { WorkshopIamAspect } from "./aspects.js";
 import { AppsStack } from "./apps-stack.js";
@@ -25,7 +26,8 @@ export { REGION, EDGE_REGION } from "./config.js";
  * Builds the workshop CDK app: the assets bucket, the site bucket with its pages,
  * the data table and HTTP API (eu-central-1) and the certificate, CloudFront and
  * DNS record (us-east-1), the build network, cluster and image repository
- * (eu-central-1, ticket 2.1), and the apps bucket with its deployer (eu-central-1, ticket 2.5).
+ * (eu-central-1, ticket 2.1), the apps bucket with its deployer (eu-central-1, ticket 2.5), and the web ACL
+ * (edge stack) and cost anomaly alerts (us-east-1, ticket 3.13).
  * Every resource is tagged `project=ssd-workshop`; every role has the
  * `/ssd-workshop/` path and the `ssd-workshop-boundary` permissions boundary.
  */
@@ -83,6 +85,15 @@ export function buildApp(props?: AppProps): App {
     description: "SSD Workshop: build network, ECS cluster, builder image, task and launcher",
   });
   builds.addStackDependency(assets);
+
+  // Ticket 3.13: Cost Anomaly Detection (us-east-1, Cost Explorer's home; no file assets, so an inline template). It
+  // takes nothing from the other stacks; declared last, so `cdk deploy --all` reaches it after the others (a missing
+  // alert address parameter then fails this stack alone).
+  new AlertsStack(app, STACK_NAMES.alerts, {
+    env: { account: ACCOUNT, region: EDGE_REGION },
+    synthesizer: inlineTemplateSynthesizer(),
+    description: "SSD Workshop: cost anomaly monitor on project=ssd-workshop and its daily email",
+  });
 
   return app;
 }

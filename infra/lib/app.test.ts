@@ -114,6 +114,22 @@ import {
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   GITHUB_SECRET_NAME,
   TABLE_NAME,
+  ALERT_EMAIL_PARAMETER,
+  ALERT_EMAIL_PARAMETER_VERSION,
+  COST_ANOMALY_FREQUENCY,
+  COST_ANOMALY_THRESHOLD_USD,
+  COST_MONITOR_NAME,
+  COST_SUBSCRIPTION_NAME,
+  TAG_KEY,
+  TAG_VALUE,
+  WAF_API_PATH_PREFIX,
+  WAF_API_RATE_LIMIT,
+  WAF_API_RATE_RULE_NAME,
+  WAF_BLOCK_BODY,
+  WAF_BLOCK_BODY_KEY,
+  WAF_BLOCK_STATUS,
+  WAF_RATE_WINDOW_SECONDS,
+  WEB_ACL_NAME,
 } from "./config.js";
 import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api/participant/participant.js";
 import { ADMIN_ROUTES as ADMIN_ROUTE_KEYS } from "../../platform/api/admin/admin.js";
@@ -169,7 +185,7 @@ interface Resource {
   DependsOn?: string | string[];
 }
 
-const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api, STACK_NAMES.builds, STACK_NAMES.apps];
+const STACKS = [STACK_NAMES.assets, STACK_NAMES.site, STACK_NAMES.edge, STACK_NAMES.api, STACK_NAMES.builds, STACK_NAMES.apps, STACK_NAMES.alerts];
 
 /** Types that must carry the project tag in their own template (taggable in CloudFormation). */
 const MUST_BE_TAGGED = [
@@ -194,6 +210,10 @@ const MUST_BE_TAGGED = [
   "AWS::CloudFront::Function",
   "AWS::SecretsManager::Secret",
   "AWS::ECS::TaskDefinition",
+  // Ticket 3.13: the web ACL (Tags) and the cost anomaly monitor and subscription (ResourceTags).
+  "AWS::WAFv2::WebACL",
+  "AWS::CE::AnomalyMonitor",
+  "AWS::CE::AnomalySubscription",
 ];
 
 /** Types CloudFormation cannot tag; anything else must be tagged or added here on purpose. */
@@ -367,7 +387,8 @@ function resourceReaches(resource: unknown, arns: readonly string[], logicalIds:
 }
 
 function tagsOf(r: Resource): Record<string, unknown> {
-  const tags = r.Properties?.Tags as { Key: string; Value: unknown }[] | Record<string, unknown> | undefined;
+  // Cost Explorer's types call them ResourceTags (ticket 3.13).
+  const tags = (r.Properties?.Tags ?? r.Properties?.ResourceTags) as { Key: string; Value: unknown }[] | Record<string, unknown> | undefined;
   if (tags === undefined) return {};
   if (Array.isArray(tags)) return Object.fromEntries(tags.map((t) => [t.Key, t.Value]));
   return tags;
@@ -381,6 +402,8 @@ describe("stacks", () => {
     expect(stack(STACK_NAMES.api).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.apps).environment).toMatchObject({ account: ACCOUNT, region: REGION });
     expect(stack(STACK_NAMES.edge).environment).toMatchObject({ account: ACCOUNT, region: EDGE_REGION });
+    // Ticket 3.13: Cost Explorer's API lives in us-east-1.
+    expect(stack(STACK_NAMES.alerts).environment).toMatchObject({ account: ACCOUNT, region: EDGE_REGION });
   });
 
   it("deploys assets, then site, then edge; the api stack after assets", () => {
@@ -412,7 +435,7 @@ describe("stacks", () => {
     }
     // The assets stack creates the bucket and the edge stack is in another region,
     // so both send their template inline and must have no file assets.
-    for (const name of [STACK_NAMES.assets, STACK_NAMES.edge]) {
+    for (const name of [STACK_NAMES.assets, STACK_NAMES.edge, STACK_NAMES.alerts]) {
       const s = stack(name);
       expect(s.stackTemplateAssetObjectUrl).toBeUndefined();
       expect(s.assets).toEqual([]);
@@ -3385,5 +3408,133 @@ describe("CloudFront /facilitator* behaviour: the facilitator dashboard at /faci
       FunctionCode: readFileSync(SITE_INDEX_FUNCTION_FILE, "utf8"),
     });
     expect(SITE_INDEX_FUNCTION_NAME).toBe("ssd-workshop-site-index");
+  });
+});
+
+describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
+  const acls = () => ofType("AWS::WAFv2::WebACL");
+  const acl = () => must(acls()[0]);
+
+  it("creates one web ACL, ssd-workshop-edge, scope CLOUDFRONT, in the us-east-1 edge stack, tagged project=ssd-workshop", () => {
+    expect(acls()).toHaveLength(1);
+    const [stackName, , resource] = acl();
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(stack(STACK_NAMES.edge).environment.region).toBe("us-east-1");
+    expect(resource.Properties).toMatchObject({ Name: WEB_ACL_NAME, Scope: "CLOUDFRONT", DefaultAction: { Allow: {} } });
+    expect(WEB_ACL_NAME).toBe("ssd-workshop-edge");
+    expect(tagsOf(resource)[TAG_KEY]).toBe(TAG_VALUE);
+    expect(resource.Properties?.VisibilityConfig).toEqual({ CloudWatchMetricsEnabled: true, MetricName: WEB_ACL_NAME, SampledRequestsEnabled: true });
+  });
+
+  it("has exactly one rule: per address, at most the limit of requests to /api/* in 5 minutes, then blocked (429)", () => {
+    const rules = acl()[2].Properties?.Rules as Record<string, unknown>[];
+    expect(rules).toEqual([
+      {
+        Name: WAF_API_RATE_RULE_NAME,
+        Priority: 0,
+        Action: { Block: { CustomResponse: { ResponseCode: WAF_BLOCK_STATUS, CustomResponseBodyKey: WAF_BLOCK_BODY_KEY } } },
+        Statement: {
+          RateBasedStatement: {
+            Limit: WAF_API_RATE_LIMIT,
+            EvaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+            AggregateKeyType: "IP",
+            ScopeDownStatement: {
+              ByteMatchStatement: {
+                FieldToMatch: { UriPath: {} },
+                PositionalConstraint: "STARTS_WITH",
+                SearchString: WAF_API_PATH_PREFIX,
+                TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }],
+              },
+            },
+          },
+        },
+        VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_API_RATE_RULE_NAME, SampledRequestsEnabled: true },
+      },
+    ]);
+    expect(WAF_API_PATH_PREFIX).toBe("/api/");
+    expect(WAF_RATE_WINDOW_SECONDS).toBe(300);
+    // API Gateway's throttle answer, so pages and apps read a block as "too many requests".
+    expect(acl()[2].Properties?.CustomResponseBodies).toEqual({ [WAF_BLOCK_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_BLOCK_BODY } });
+    expect(JSON.parse(WAF_BLOCK_BODY)).toEqual({ message: "Too Many Requests" });
+    // A room behind one venue address must never reach it: ~45 people polling every 2 s (150 requests per 5 minutes
+    // each), their apps' data calls and three dashboards are at most ~9,400 (docs/decisions.md "(3.13) Rate limit").
+    expect(WAF_API_RATE_LIMIT).toBeGreaterThanOrEqual(45 * 150 + 2_000 + 3 * 60);
+  });
+
+  it("covers every /api/ behaviour of the distribution and nothing else", () => {
+    const config = ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as { CacheBehaviors: { PathPattern: string }[] };
+    const patterns = config.CacheBehaviors.map((b) => b.PathPattern);
+    for (const pattern of patterns.filter((p) => p.startsWith("/api"))) expect(pattern.startsWith(WAF_API_PATH_PREFIX), pattern).toBe(true);
+    expect(patterns).toEqual(expect.arrayContaining(["/api/*", "/api/apps/*"]));
+  });
+
+  it("answers a block with 429, never 403: the distribution turns every 403 into the 404 page (ticket 2.5)", () => {
+    const config = ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as { CustomErrorResponses: { ErrorCode: number }[] };
+    const remapped = config.CustomErrorResponses.map((r) => r.ErrorCode);
+    expect(remapped).toContain(403);
+    expect(WAF_BLOCK_STATUS).toBe(429);
+    expect(remapped).not.toContain(WAF_BLOCK_STATUS);
+  });
+
+  it("is the distribution's web ACL (WebACLId is the ACL's ARN, same stack, no cross-region reference)", () => {
+    const distributions = ofType("AWS::CloudFront::Distribution");
+    expect(distributions).toHaveLength(1);
+    const [distStack, , distribution] = must(distributions[0]);
+    expect(distStack).toBe(STACK_NAMES.edge);
+    const config = distribution.Properties?.DistributionConfig as { WebACLId?: unknown };
+    expect(config.WebACLId).toEqual({ "Fn::GetAtt": [acl()[1], "Arn"] });
+  });
+});
+
+describe("Cost Anomaly Detection (ticket 3.13 criterion 3)", () => {
+  const monitors = () => ofType("AWS::CE::AnomalyMonitor");
+  const subscriptions = () => ofType("AWS::CE::AnomalySubscription");
+
+  it("lives in its own stack ssd-workshop-alerts in us-east-1, inline template, nothing else in it", () => {
+    expect(STACK_NAMES.alerts).toBe("ssd-workshop-alerts");
+    expect(stack(STACK_NAMES.alerts).environment.region).toBe("us-east-1");
+    const types = resources(STACK_NAMES.alerts).map(([, r]) => r.Type).filter((t) => t !== "AWS::CDK::Metadata").sort();
+    expect(types).toEqual(["AWS::CE::AnomalyMonitor", "AWS::CE::AnomalySubscription"]);
+  });
+
+  it("monitors the cost allocation tag project=ssd-workshop (custom monitor), tagged project=ssd-workshop", () => {
+    expect(monitors()).toHaveLength(1);
+    const [stackName, , monitor] = must(monitors()[0]);
+    expect(stackName).toBe(STACK_NAMES.alerts);
+    expect(monitor.Properties).toMatchObject({ MonitorName: COST_MONITOR_NAME, MonitorType: "CUSTOM" });
+    expect(monitor.Properties?.MonitorDimension).toBeUndefined();
+    expect(JSON.parse(monitor.Properties?.MonitorSpecification as string)).toEqual({
+      Tags: { Key: "project", Values: ["ssd-workshop"], MatchOptions: ["EQUALS"] },
+    });
+    expect(tagsOf(monitor)[TAG_KEY]).toBe(TAG_VALUE);
+  });
+
+  it("emails Franck's alert address daily for anomalies of $10 or more, the address read from SSM at deploy time", () => {
+    expect(subscriptions()).toHaveLength(1);
+    const [stackName, , subscription] = must(subscriptions()[0]);
+    expect(stackName).toBe(STACK_NAMES.alerts);
+    const monitorId = must(monitors()[0])[1];
+    expect(subscription.Properties).toMatchObject({
+      SubscriptionName: COST_SUBSCRIPTION_NAME,
+      MonitorArnList: [{ Ref: monitorId }],
+      Frequency: COST_ANOMALY_FREQUENCY,
+    });
+    expect(COST_ANOMALY_FREQUENCY).toBe("DAILY");
+    expect(JSON.parse(subscription.Properties?.ThresholdExpression as string)).toEqual({
+      Dimensions: { Key: "ANOMALY_TOTAL_IMPACT_ABSOLUTE", MatchOptions: ["GREATER_THAN_OR_EQUAL"], Values: [String(COST_ANOMALY_THRESHOLD_USD)] },
+    });
+    expect(subscription.Properties?.Threshold).toBeUndefined();
+    const reference = `{{resolve:ssm:${ALERT_EMAIL_PARAMETER}:${ALERT_EMAIL_PARAMETER_VERSION}}}`;
+    expect(subscription.Properties?.Subscribers).toEqual([{ Type: "EMAIL", Address: reference }]);
+    expect(ALERT_EMAIL_PARAMETER).toBe("/ssd-workshop/alert-email");
+    expect(tagsOf(subscription)[TAG_KEY]).toBe(TAG_VALUE);
+  });
+
+  it("holds no email address in any template but the workshop's SES sender (the alert address is a deploy setting in SSM)", () => {
+    for (const name of STACKS) {
+      const found = JSON.stringify(stack(name).template).match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/g) ?? [];
+      expect(found.filter((address) => address !== SENDER_ADDRESS), name).toEqual([]);
+    }
+    expect(JSON.stringify(stack(STACK_NAMES.alerts).template.Parameters ?? {})).toBe("{}");
   });
 });

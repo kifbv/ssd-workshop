@@ -9,15 +9,16 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v2` (v1 retained until Franck deletes it, ticket 2.14) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v2` (v1 retained until Franck deletes it, ticket 2.14) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-alerts` | us-east-1 | ticket 3.13: Cost Anomaly Detection, monitor `ssd-workshop-cost` on the cost allocation tag `project=ssd-workshop` and daily email subscription `ssd-workshop-cost-alerts` to the address in SSM `/ssd-workshop/alert-email`; see "Safety nets (ticket 3.13)" | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push), GitHub App secret `ssd-workshop-github` (ticket 2.6), FIFO launch queue `ssd-workshop-builds.fifo` and its dead-letter queue (ticket 2.7; the AI worker is its only sender, the launcher its consumer), from ticket 2.9 the builder task definition `ssd-workshop-builder` (image by digest, logs `/ecs/ssd-workshop-builder`), the launcher Lambda `ssd-workshop-builds-launcher`, the check queue and schedule `ssd-workshop-builds-check`; see "Build network (ticket 2.1)" and "Builds: builder task and launcher (ticket 2.9)" | `CliCredentialsStackSynthesizer`, assets bucket (from ticket 2.9) |
 
 Deploy order: cdk-assets, then site and apps, then edge; api after cdk-assets (it needs the assets
 bucket for its Lambda code, and nothing from site or edge); apps after cdk-assets and before edge (edge
 serves its bucket at `/apps/*`); builds after cdk-assets (from ticket 2.9 its launcher's code is a file asset; it takes nothing
-from the other stacks). Nothing is passed between regions: the edge
+from the other stacks); alerts last (it takes nothing from the others). Nothing is passed between regions: the edge
 stack finds the site bucket by its fixed name, and the site bucket policy lets this account's
 CloudFront distributions read it.
 
@@ -818,6 +819,84 @@ Do it outside a session with real participants: Stop holds everyone's messages a
    paused for a moment." within 30 seconds. A message the participant sends stays pending.
 4. Press "Resume the workshop": "Workshop running." and the Stop button again; the participant's pending message gets
    its answer and the paused line goes.
+
+## Safety nets (ticket 3.13)
+
+```mermaid
+flowchart LR
+  visitor[One address<br/>e.g. a venue NAT] -->|/api/*| waf{WAF ssd-workshop-edge<br/>over 15,000 in 5 min?}
+  waf -->|no| api[HTTP API]
+  waf -->|yes| block[429 Too Many Requests<br/>until the count falls]
+  visitor -->|pages, /apps/*| cf[CloudFront, never counted]
+  bill[(Cost Explorer<br/>project=ssd-workshop)] --> monitor[Anomaly monitor<br/>ssd-workshop-cost]
+  monitor -->|impact of $10 or more, daily| mail[Email to Franck<br/>address in SSM]
+```
+
+### One-time steps before merging (Franck)
+
+The deploy fails (and rolls back the edge stack's WAF change, or the alerts stack) until steps 1 and 2 are done; do step 3 before the first deploy too, in case Cost Explorer refuses a monitor on a tag that is not active yet (not verified). If the alerts stack fails, read the reason in the CloudFormation console, not in the public Actions log: a rejected subscriber could name the address. Check the stored value with `get-parameter` before merging.
+
+1. Add the access rights listed in `docs/decisions.md`, "3.13 Cost and abuse safety nets", "Access stack rights needed
+   (Franck)", to `infra/access/access-stack.yaml` and apply it.
+2. Store the alert address (never in the repository), in us-east-1 where the alerts stack reads it:
+
+   ```sh
+   export AWS_PROFILE=franck
+   aws ssm put-parameter --region us-east-1 --name /ssd-workshop/alert-email --type String \
+     --tags Key=project,Value=ssd-workshop --value '<your alert address>'
+   aws ssm get-parameter --region us-east-1 --name /ssd-workshop/alert-email --query Parameter.Version
+   # expect: 1 (the version infra/lib/config.ts ALERT_EMAIL_PARAMETER_VERSION names)
+   ```
+
+   To change the address later: `put-parameter ... --overwrite` (version 2), then a pull request that sets
+   `ALERT_EMAIL_PARAMETER_VERSION = 2`; the deploy after its merge switches the subscription.
+3. Activate the cost allocation tag `project` (Billing and Cost Management > Cost allocation tags, or the command below).
+   It is listed only once billing data has seen it (up to 24 hours after the first tagged resource), and costs are
+   grouped by it only from activation onwards. If `rankly.games` is a member of an AWS Organization, only the
+   management account can activate it.
+
+   ```sh
+   aws ce update-cost-allocation-tags-status --cost-allocation-tags-status TagKey=project,Status=Active
+   aws ce list-cost-allocation-tags --tag-keys project --query 'CostAllocationTags[].Status'
+   # expect: ["Active"]
+   ```
+
+4. If an email from AWS asks to confirm the anomaly alert subscription, confirm it (direct email subscribers usually
+   need no confirmation).
+
+### 3.13 live check (criterion 2, after the deploy)
+
+Run by Franck from a machine outside the workshop room and outside a session with participants: it blocks that
+address from `/api/*` for about 5 minutes. It sends about 16,000 requests to a path the API has no route for (API
+Gateway answers 404 itself, no Lambda runs): a few cents of CloudFront, WAF and API Gateway requests. Some answers
+during the burst may be 429 from API Gateway's own stage throttle; WAF counts them all the same.
+
+```sh
+url=https://workshop.rankly.games/api/waf-check
+seq 16000 | xargs -P 40 -I{} curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 "$url" | sort | uniq -c
+# expect: mostly 404 (some 429 from API Gateway), and 429 at the end once WAF blocks the address
+for i in $(seq 1 12); do
+  curl -s -w ' %{http_code}\n' https://workshop.rankly.games/api/health
+  sleep 10
+done
+# expect: {"message":"Too Many Requests"} 429 within about a minute of the burst (WAF checks about every 30 s)
+curl -s -o /dev/null -w '%{http_code}\n' https://workshop.rankly.games/
+# expect: 200 (pages are never blocked)
+aws wafv2 list-web-acls --region us-east-1 --scope CLOUDFRONT --query "WebACLs[?Name=='ssd-workshop-edge'].Id" --output text
+aws wafv2 get-rate-based-statement-managed-keys --region us-east-1 --scope CLOUDFRONT --web-acl-name ssd-workshop-edge \
+  --web-acl-id <id from above> --rule-name ssd-workshop-api-rate --query 'ManagedKeysIPV4.Addresses'
+# expect: your own address (/32) while blocked
+```
+
+Then every minute: `curl -s -o /dev/null -w '%{http_code}\n' https://workshop.rankly.games/api/health` answers 429
+until about 5 minutes after the burst ended, then 200 again. Note whether the 429 carried
+`access-control-allow-origin: *` on an `/api/apps/` path (`curl -si -H 'Origin: null'
+https://workshop.rankly.games/api/apps/x/data/y | grep -i access-control` while blocked) and tell Claude: it decides
+whether a blocked sandboxed app can read the answer (decision "(3.13) A block answers 429").
+
+Criteria 1 and 3 are synth tests (`infra/lib/app.test.ts`, "WAF web ACL on the distribution" and "Cost Anomaly
+Detection"). After the deploy, the monitor and subscription show in Billing and Cost Management > Cost Anomaly
+Detection; the first daily email comes only when an anomaly of $10 or more is found.
 
 ## Build network (ticket 2.1)
 
