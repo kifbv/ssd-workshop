@@ -105,7 +105,7 @@ shell and no package manager. You cannot run or preview the app, so check your w
 5. Storing data: `await workshopData.get(key)` returns the stored JSON value or `null`;
    `await workshopData.set(key, value)` stores any JSON value; `await workshopData.remove(key)`
    deletes it. Keys use only letters, digits, `-` and `_`. Every call can fail: wrap it in
-   `try`/`catch` and show `error.message` on the page. Limits: 100 KB per value, 100 keys and 1 MB
+   `try`/`catch` and show `error.message` on the page. Limits: 350 KB per value, 500 keys and 10 MB
    per app. All visitors share the same data, and anyone with the app's address can read and change it.
 6. No personal data: no email addresses, phone numbers, names of real people, passwords or keys in
    the code, and do not ask visitors for an email address or a password. The app has no sign-in.

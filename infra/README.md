@@ -463,7 +463,7 @@ aws apigatewayv2 get-stage --region eu-central-1 --api-id <API id from infra/lib
 #         "GET ..." and "OPTIONS ..." at 20/40
 ```
 
-Each app may also write 5 MB per UTC day, counted as DynamoDB bills its writes (`writeDay`, `writtenBytes` in its
+Each app may also write 50 MB per UTC day (ticket 3.17; was 5 MB), counted as DynamoDB bills its writes (`writeDay`, `writtenBytes` in its
 `DATA_USAGE` item, which also holds each key's size in `sizes`); past that,
 `PUT` and `DELETE` answer 429 "This app has saved a lot of data today. Saving starts again tomorrow." until
 midnight UTC.

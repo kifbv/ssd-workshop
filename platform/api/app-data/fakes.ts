@@ -1,7 +1,7 @@
 // An in-memory stand-in for the data API's table access (ticket 2.4), shared by its tests (not
 // bundled: no handler imports it). It follows the same conditions as DynamoAppDataStore: a value is
 // written only while the key's size is still the one that was read and the totals item exists as read,
-// and the app's totals change in the same step, only while they stay within 1 MB and 100 keys and the
+// and the app's totals change in the same step, only while they stay within 10 MB and 500 keys and the
 // day's writes within the daily write budget (a new day only over an older one).
 //
 // The table keeps each key's size twice, in the value item and in the totals item's `sizes` map, always

@@ -155,13 +155,20 @@ describe("parseReadinessAnswer", () => {
   });
 
   it("lets a spec read from a free public service that needs no key, and still refuses keys, accounts, sending and AI (readiness-v2, ticket 2.14)", () => {
-    expect(READINESS_PROMPT_VERSION).toBe("readiness-v3");
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v4");
     expect(READINESS_SYSTEM_PROMPT).toContain("information read from a free public service that needs no key and no account");
     for (const service of ["Wikipedia", "Open Library", "Open-Meteo", "Frankfurter", "TVMaze", "REST Countries"]) expect(READINESS_SYSTEM_PROMPT).toContain(service);
     expect(READINESS_SYSTEM_PROMPT).toContain(
       "outside service: a service that needs a key, a password, an account or a sign-in with another site, or that costs money; sending anything out: emails, text messages, push notifications or other notifications, sharing to social media; AI or chat services; importing from other apps",
     );
     expect(READINESS_SYSTEM_PROMPT).not.toContain("anything from another website or service");
+  });
+
+  it("states the data API's room as 10 MB per app (readiness-v4, ticket 3.17)", () => {
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v4");
+    expect(READINESS_SYSTEM_PROMPT).toContain("kept by the workshop's own small storage service: up to 10 MB per app, shared by everyone");
+    expect(READINESS_SYSTEM_PROMPT).not.toContain("1 MB");
+    expect(READINESS_SYSTEM_PROMPT).toContain("when one part of the spec has two problems, write two reasons, one bracket each");
   });
 
   it("asks for reasons in the participant's language, each ending with the problem's English word in brackets (readiness-v3, ticket 3.16)", () => {
