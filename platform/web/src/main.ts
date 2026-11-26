@@ -47,6 +47,9 @@ import {
   CHANGE_LOOP_ALT,
   CHANGE_LOOP_DIAGRAM,
   changeActionResult,
+  editorAnswer,
+  editResult,
+  liveSpecResult,
   proposalResult,
   stepFourMessages,
   stepFourView,
@@ -738,6 +741,7 @@ function showLive(build: Build): void {
     messages = [];
     proposal = null;
     stepFour = {};
+    closeEditor();
     suggestionsShown = "";
     suggestionsRereads = 0;
     byId<HTMLTextAreaElement>("live-chat-input").value = "";
@@ -752,7 +756,7 @@ function showLive(build: Build): void {
 // ---- Step 4: change requests (ticket 3.8) ----
 
 /** The step 4 facts of the last conversation read: changes used and the cap, suggestions, the proposed version. */
-let stepFour: Pick<Conversation, "changeRequestsUsed" | "changeRequestsPerPerson" | "suggestions" | "proposedSpecVersion"> = {};
+let stepFour: Pick<Conversation, "changeRequestsUsed" | "changeRequestsPerPerson" | "suggestions" | "proposedSpecVersion" | "approvedSpecVersion"> = {};
 /** The proposed change on the page (its "What changes" list), or none. */
 let proposal: Proposal | null = null;
 
@@ -765,6 +769,7 @@ async function fillStepFour(conversation: Conversation): Promise<void> {
     ...(conversation.changeRequestsPerPerson === undefined ? {} : { changeRequestsPerPerson: conversation.changeRequestsPerPerson }),
     ...(conversation.suggestions === undefined ? {} : { suggestions: conversation.suggestions }),
     ...(conversation.proposedSpecVersion === undefined ? {} : { proposedSpecVersion: conversation.proposedSpecVersion }),
+    ...(conversation.approvedSpecVersion === undefined ? {} : { approvedSpecVersion: conversation.approvedSpecVersion }),
   };
   renderSuggestions(conversation.suggestions ?? []);
   stopPolling();
@@ -883,6 +888,38 @@ function renderStepFour(): void {
   byId("rebuild-fold").hidden = !state.showForm;
   byId<HTMLButtonElement>("rebuild-button").disabled = waiting !== null;
   byId("live-typing-text").textContent = state.typingText;
+  renderEditor(state.showForm);
+}
+
+// ---- Step 4: Edit my spec (ticket 3.15) ----
+
+/** The editor is open, on this live version; the edit it sent (its reply shows under the buttons); its own note. */
+let editorOpen = false;
+let editorVersion: number | undefined;
+let editSentId: string | null = null;
+let editorNote: { message: string; tone: Tone } | null = null;
+
+/** Closes the editor and drops its text (Cancel, leaving step 4, a stale live version). */
+function closeEditor(): void {
+  editorOpen = false;
+  editorVersion = undefined;
+  editSentId = null;
+  editorNote = null;
+  byId<HTMLTextAreaElement>("spec-editor-input").value = "";
+}
+
+/** Edit my spec while changes are left and the live version is known; the editor while open; the answer under it. */
+function renderEditor(changesLeft: boolean): void {
+  const offered = changesLeft && stepFour.approvedSpecVersion !== undefined;
+  if (!offered && editorOpen) closeEditor();
+  byId("edit-spec").hidden = !offered;
+  byId("edit-spec-button").hidden = editorOpen;
+  byId("spec-editor").hidden = !editorOpen;
+  byId<HTMLButtonElement>("spec-editor-rebuild").disabled = waiting !== null;
+  const answer = editorAnswer(messages, editSentId, editorNote);
+  const line = byId("spec-editor-answer");
+  line.dataset["tone"] = answer?.tone ?? "info";
+  line.textContent = answer?.message ?? "";
 }
 
 /**
@@ -1209,6 +1246,72 @@ function wire(): void {
     }).finally(() => {
       if (current === "live") render();
     });
+  });
+
+  // Ticket 3.15: Edit my spec opens the live version (the one last sent to build) in the editor; nothing is sent yet.
+  const editButton = byId<HTMLButtonElement>("edit-spec-button");
+  editButton.addEventListener("click", () => {
+    const version = stepFour.approvedSpecVersion;
+    if (version === undefined) return;
+    clearMessage("live");
+    void whileBusy(editButton, async () => {
+      const result = liveSpecResult(await call("GET", `/api/conversation/spec?version=${version}`));
+      if (current !== "live") return;
+      if (result.kind === "spec") {
+        editorOpen = true;
+        editorVersion = result.version;
+        editSentId = null;
+        editorNote = null;
+        byId<HTMLTextAreaElement>("spec-editor-input").value = result.text;
+        render();
+        byId("spec-editor-heading").focus();
+      } else if (result.kind === "gone") {
+        say("live", PHASE_3_TEXTS.editStale, "info");
+        await loadConversation();
+      } else if (result.kind === "signed-out") {
+        stopPolling();
+        showEmail(MESSAGES.signedOut);
+      } else say("live", result.message, result.tone);
+    }).finally(() => {
+      if (current === "live") render();
+    });
+  });
+
+  // Ticket 3.15: Rebuild with my edits. The request is answered like Rebuild from my repository's (the reply may queue a
+  // change build, and the page then follows it to step 3); a refusal keeps the editor open with the text.
+  const editRebuildButton = byId<HTMLButtonElement>("spec-editor-rebuild");
+  editRebuildButton.addEventListener("click", () => {
+    const version = editorVersion;
+    if (!editorOpen || version === undefined || waiting !== null) return;
+    const text = byId<HTMLTextAreaElement>("spec-editor-input").value;
+    clearMessage("live");
+    editSentId = null;
+    editorNote = null;
+    void whileBusy(editRebuildButton, async () => {
+      const result = editResult(await call("POST", "/api/conversation/change/edit", { version, text }));
+      if (result.kind === "sent") {
+        editSentId = result.id;
+        await afterChangeAction({ kind: "done" });
+      } else if (result.kind === "gone") {
+        closeEditor();
+        say("live", PHASE_3_TEXTS.editStale, "info");
+        await refreshLive();
+      } else if (result.kind === "invalid") {
+        editorNote = { message: result.message, tone: "error" };
+      } else if (result.kind === "refused") {
+        editorNote = { message: result.message, tone: "error" };
+        await afterChangeAction(result);
+      } else await afterChangeAction(result);
+    }).finally(() => {
+      if (current === "live") render();
+    });
+  });
+
+  // Ticket 3.15: Cancel closes the editor and drops the edits (Edit my spec opens the live version again).
+  byId<HTMLButtonElement>("spec-editor-cancel").addEventListener("click", () => {
+    closeEditor();
+    render();
+    byId("edit-spec-button").focus();
   });
 
   // Sign out (ticket 3.1): the API deletes the session and clears the cookie; the page stops polling.

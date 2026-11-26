@@ -290,3 +290,9 @@ paths:
   fake throwing `AccessDeniedException`). Log a task by its id (last ARN part) only: overrides can hold a build's token.
   A check that stops tasks on what DescribeTasks shows (3.14's subnets) never acts on a missing detail of a young task
   (a PROVISIONING task may not show it yet): wait a grace from `createdAt`, and bound every ListTasks loop (pages per status).
+- A second source for a pipeline (3.15: text typed on the page for 3.9's rebuild) enters it at the point where the first
+  source's input is ready (a found read), with its own texts, never a copy of the run. The approval the shared run writes
+  stays tied to input another role wrote: the launcher builds an AI-worker-approved version only as the exact text on
+  the marked request (`repositorySpec` from the launcher, `editedSpec` from the conversation function). A store reader
+  that keeps only known marks (`getMessage`'s `request`) must learn every new mark, or the marked request falls through
+  as an ordinary message. A route that edits the live record takes the version it opened and answers 404 when it moved.

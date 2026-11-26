@@ -14,6 +14,7 @@ import {
   QUEUED_DEAD_REASON,
   QUEUE_TIMEOUT_REASON,
   SPEC_MISSING_REASON,
+  EDIT_SPEC_UNCONFIRMED_REASON,
   REBUILD_SPEC_UNCONFIRMED_REASON,
   START_FAILED_REASON,
   STOPPED_REASON,
@@ -428,6 +429,33 @@ describe("launching a change build (ticket 3.7)", () => {
       arrange(s, read);
       expect(await processLaunch(message(CHANGE), s.deps), label).toBe("failed");
       expect(s.table.builds.get(CHANGE), label).toMatchObject({ status: "failed", failureReasons: [REBUILD_SPEC_UNCONFIRMED_REASON] });
+      expect(s.table.builds.get(CHANGE)?.changeSpec, label).toBeUndefined();
+      expect(s.tasks.started, label).toEqual([]);
+    }
+  });
+
+  it("ticket 3.15: WHEN a version approved by Rebuild with my edits is exactly the edit its request holds THEN it is built as a change (the runner commits it as SPEC.md); any other text fails without a task", async () => {
+    const REQUEST = "m-edit";
+    const arrange = (s: ReturnType<typeof changeSetup>, edited: string | undefined) => {
+      must(s.table.specs.get(`${PARTICIPANT}#3`)).rebuildRequestId = REQUEST;
+      if (edited !== undefined) s.table.editRequests.set(`${PARTICIPANT}#${REQUEST}`, edited);
+    };
+    const ok = changeSetup();
+    arrange(ok, NEW_SPEC);
+    expect(await processLaunch(message(CHANGE), ok.deps)).toBe("started");
+    // The change input the runner writes into the workspace as SPEC.md and commits with the change (runner.test.ts).
+    expect(ok.table.builds.get(CHANGE)).toMatchObject({ status: "building", changeSpec: NEW_SPEC });
+    for (const [label, edited] of [
+      ["other text", "# Something else\n"],
+      ["no edit stored", undefined],
+    ] as const) {
+      const s = changeSetup();
+      arrange(s, edited);
+      expect(await processLaunch(message(CHANGE), s.deps), label).toBe("failed");
+      expect(s.table.builds.get(CHANGE), label).toMatchObject({
+        status: "failed",
+        failureReasons: [edited === undefined ? REBUILD_SPEC_UNCONFIRMED_REASON : EDIT_SPEC_UNCONFIRMED_REASON],
+      });
       expect(s.table.builds.get(CHANGE)?.changeSpec, label).toBeUndefined();
       expect(s.tasks.started, label).toEqual([]);
     }

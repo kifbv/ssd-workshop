@@ -62,11 +62,16 @@ import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS, CLUSTER_LIST_MAX_PAGES } from "../settings.js";
 import type { BuildStatus } from "../types.js";
 import type { RepositoryRead } from "../conversation/state.js";
-import { REBUILD_REQUEST } from "../workshop/texts.js";
+import { EDIT_REQUEST, REBUILD_REQUEST } from "../workshop/texts.js";
 
 /** Ticket 3.9: the Rebuild from my repository route's request (participant's, at step 4, the exact text and the mark). */
 function isRebuildRequestItem(item: Record<string, AttributeValue> | undefined): item is Record<string, AttributeValue> {
   return item?.author?.S === "participant" && item.step?.S === "building" && item.request?.S === "rebuild-from-repo" && item.text?.S === REBUILD_REQUEST;
+}
+
+/** Ticket 3.15: the Rebuild with my edits route's request (participant's, at step 4, the exact text and the mark). */
+function isEditRequestItem(item: Record<string, AttributeValue> | undefined): boolean {
+  return item?.author?.S === "participant" && item.step?.S === "building" && item.request?.S === "edit-spec" && item.text?.S === EDIT_REQUEST;
 }
 import type {
   ApprovedSpec,
@@ -81,6 +86,7 @@ import type {
   LaunchEntry,
   LaunchRecords,
   RebuildRequestState,
+  RebuildSpecRead,
   RetryBuildState,
   RetryRequest,
   SlotCount,
@@ -372,12 +378,17 @@ export class DynamoLaunchRecords implements LaunchRecords {
     };
   }
 
-  async readRebuildSpec(participantId: string, messageId: string): Promise<{ text: string; repository: string } | undefined> {
-    const item = await this.get(messageKey(participantId, messageId), ["author", "step", "text", "request", "repositoryRead", "repositorySpec", "repositoryName"]);
+  async readRebuildSpec(participantId: string, messageId: string): Promise<RebuildSpecRead | undefined> {
+    const item = await this.get(messageKey(participantId, messageId), ["author", "step", "text", "request", "repositoryRead", "repositorySpec", "repositoryName", "editedSpec"]);
+    // Ticket 3.15: Rebuild with my edits' request: the text its route stored (only the conversation function writes it).
+    if (isEditRequestItem(item)) {
+      const edited = item?.editedSpec?.S;
+      return edited === undefined ? undefined : { source: "page", text: edited };
+    }
     if (!isRebuildRequestItem(item) || item.repositoryRead?.S !== "found") return undefined;
     const text = item.repositorySpec?.S;
     const repository = item.repositoryName?.S;
-    return text === undefined || repository === undefined ? undefined : { text, repository };
+    return text === undefined || repository === undefined ? undefined : { source: "repository", text, repository };
   }
 
   storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean> {

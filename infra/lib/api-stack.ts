@@ -147,6 +147,8 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/change/discard", method: HttpMethod.POST },
   // Ticket 3.9: Rebuild from my repository.
   { path: "/api/conversation/change/rebuild", method: HttpMethod.POST },
+  // Ticket 3.15: Rebuild with my edits.
+  { path: "/api/conversation/change/edit", method: HttpMethod.POST },
 ] as const;
 
 /**

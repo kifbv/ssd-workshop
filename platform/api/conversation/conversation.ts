@@ -14,7 +14,9 @@
 // a sent message is a change request; `POST /api/conversation/change/build` (Build this change) and
 // `POST /api/conversation/change/discard` (Not this one) act on the proposed version, and once the app is live the reads
 // ask the AI worker (once) for three suggested changes. Ticket 3.9: `POST /api/conversation/change/rebuild` (Rebuild from my
-// repository) asks for a change build from the caller's own SPEC.md on GitHub. Every route starts with the
+// repository) asks for a change build from the caller's own SPEC.md on GitHub. Ticket 3.15:
+// `POST /api/conversation/change/edit` (Rebuild with my edits) asks for one from the spec the caller edited on the page,
+// through the same pipeline. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -38,7 +40,9 @@ import { CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY } from "./change.js";
 import { MAX_SPEC_VERSION } from "../keys.js";
 import { READINESS_FAILURE_REPLY, READINESS_REQUEST } from "./readiness.js";
 import { WRITE_SPEC_REQUEST } from "./spec.js";
-import { REBUILD_REQUEST } from "../workshop/texts.js";
+import { EDIT_REQUEST, REBUILD_REQUEST } from "../workshop/texts.js";
+import { cleanRepositorySpec } from "../github/repository.js";
+import { MAX_SPEC_CHARS } from "./spec.js";
 import {
   FAILURE_REPLY,
   HISTORY_PAGE_LIMIT,
@@ -64,6 +68,8 @@ export const CHANGE_BUILD_ROUTE = "POST /api/conversation/change/build";
 export const CHANGE_DISCARD_ROUTE = "POST /api/conversation/change/discard";
 /** Ticket 3.9: Rebuild from my repository (step 4): the caller's own SPEC.md on `main`, read by the platform. */
 export const CHANGE_REBUILD_ROUTE = "POST /api/conversation/change/rebuild";
+/** Ticket 3.15: Rebuild with my edits (step 4): the caller's own live spec, edited on the page. */
+export const CHANGE_EDIT_ROUTE = "POST /api/conversation/change/edit";
 export const CONVERSATION_ROUTES = [
   SEND_ROUTE,
   POLL_ROUTE,
@@ -76,6 +82,7 @@ export const CONVERSATION_ROUTES = [
   CHANGE_BUILD_ROUTE,
   CHANGE_DISCARD_ROUTE,
   CHANGE_REBUILD_ROUTE,
+  CHANGE_EDIT_ROUTE,
 ] as const;
 
 /** Ticket 3.6: a page load asks for the suggested changes again only this long after the last ask (none stored yet). */
@@ -85,6 +92,11 @@ export const SUGGESTIONS_RETRY_MS = 10 * 60 * 1000;
 export const MAX_MESSAGE_CHARS = 2000;
 /** 2000 characters of up to 4 bytes, JSON escapes included, fit; anything larger is refused unread. */
 export const MESSAGE_BODY_LIMITS = { maxBodyBytes: 16_384, maxRawBodyBytes: 24_576 } as const;
+/**
+ * Ticket 3.15: an edited spec holds at most MAX_SPEC_CHARS (8,000) characters. 8,000 characters as JSON escapes (up to
+ * 12 bytes each, a `\uXXXX` surrogate pair) fit in 96 KB; a larger body is answered as too long, unread.
+ */
+export const EDIT_BODY_LIMITS = { maxBodyBytes: 98_304, maxRawBodyBytes: 131_072 } as const;
 
 export const MESSAGES = {
   invalid: `Send a JSON body with a text of 1 to ${MAX_MESSAGE_CHARS} characters.`,
@@ -100,11 +112,14 @@ export const MESSAGES = {
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
   "invalid-change": "Send a JSON body with the version of the proposed change.",
   "invalid-rebuild": "Send a JSON body (it may be empty: {}).",
+  "invalid-edit": "Send a JSON body with the version of your live spec and the edited text.",
+  "edit-empty": PHASE_3_TEXTS.editEmpty,
+  "too-long": PHASE_3_TEXTS.editTooLong,
   "build-running": PHASE_3_TEXTS.changeWhileBuilding,
   "not-live": PHASE_3_TEXTS.changeBeforeLive,
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "change-build" | "change-discard" | "change-rebuild" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "change-build" | "change-discard" | "change-rebuild" | "change-edit" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -125,6 +140,7 @@ export type ConversationOutcome =
   | "not-live"
   | "no-changes-left"
   | "discarded"
+  | "too-long"
   | "failed";
 
 /** The only things ever logged: route, outcome and an error name (no text, id, token or reply). */
@@ -162,7 +178,14 @@ interface Result {
 }
 
 const refused = (reason: keyof typeof MESSAGES, status: number): Result => {
-  const invalid = reason === "invalid" || reason === "invalid-step" || reason === "invalid-approve" || reason === "invalid-change" || reason === "invalid-rebuild";
+  const invalid =
+    reason === "invalid" ||
+    reason === "invalid-step" ||
+    reason === "invalid-approve" ||
+    reason === "invalid-change" ||
+    reason === "invalid-rebuild" ||
+    reason === "invalid-edit" ||
+    reason === "edit-empty";
   return {
     outcome: invalid ? "invalid-request" : reason,
     response: jsonResponse(status, { message: MESSAGES[reason], ...(invalid ? {} : { reason }) }),
@@ -218,14 +241,14 @@ async function createAndQueue(
   text: string,
   deps: ConversationDeps,
   afterBuild?: string,
-  request?: "rebuild-from-repo",
+  request?: { request: "rebuild-from-repo" } | { request: "edit-spec"; editedSpec: string },
 ): Promise<{ result: "created"; id: string } | { result: "busy" | "waiting" | "approved" }> {
   const now = deps.now();
   const id = newMessageId(now, deps.randomBytes);
   const nowSeconds = Math.floor(now.getTime() / 1000);
   const created = await deps.store.createMessage(
     participantId,
-    { id, step, text, createdAt: now.toISOString(), nowSeconds, ...(request === undefined ? {} : { request }) },
+    { id, step, text, createdAt: now.toISOString(), nowSeconds, ...request },
     afterBuild,
   );
   if (created !== "created") return { result: created };
@@ -646,9 +669,52 @@ async function rebuildFromRepository(request: HttpRequest, participant: Particip
   if (participant.step !== "building" || participant.nickname === undefined) return { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   const gate = await changeGate(participant.id, await deps.store.getConversation(participant.id), deps);
   if ("refusal" in gate) return gate.refusal;
-  const created = await createAndQueue(participant.id, "building", REBUILD_REQUEST, deps, gate.buildId, "rebuild-from-repo");
+  const created = await createAndQueue(participant.id, "building", REBUILD_REQUEST, deps, gate.buildId, { request: "rebuild-from-repo" });
   if (created.result !== "created") return refused(created.result === "approved" ? "busy" : created.result, 409);
   return { outcome: "accepted", response: jsonResponse(202, { id: created.id }) };
+}
+
+/**
+ * Ticket 3.15, Rebuild with my edits: body `{ "version": n, "text": "..." }`, where `version` is the caller's live spec
+ * version the editor opened (any other: 404, so a stale editor never rebuilds over a newer live spec) and `text` the
+ * edited spec, at most MAX_SPEC_CHARS characters (counted in code points; longer: 400 "too-long", nothing stored, no AI
+ * call). Only the caller's own conversation is read or written (the session's participant; nothing in the body names
+ * one). At step 4 only (any other step: 404), behind the change gate's 409s. The text is cleaned as a repository's
+ * SPEC.md is (cleanRepositorySpec: line endings, control and format characters, email addresses, trailing spaces) and
+ * stored beside EDIT_REQUEST marked `edit-spec` (`editedSpec`, an attribute only this route writes); the AI worker then
+ * runs Rebuild from my repository's pipeline on it (same spec, shape, guardrail, readiness, the counted change build).
+ * The text is never logged. Answers the request's id for polling.
+ */
+async function editSpec(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  const body = readJsonObject(request, EDIT_BODY_LIMITS);
+  if (body === undefined) return isOversized(request) ? refused("too-long", 400) : refused("invalid-edit", 400);
+  const version = body["version"];
+  const text = body["text"];
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1 || version > MAX_SPEC_VERSION || typeof text !== "string") {
+    return refused("invalid-edit", 400);
+  }
+  // Before anything is read or stored, and before any AI call.
+  if (Array.from(text).length > MAX_SPEC_CHARS) return refused("too-long", 400);
+  const notFound: Result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
+  if (participant.step !== "building" || participant.nickname === undefined) return notFound;
+  const conversation = await deps.store.getConversation(participant.id);
+  if (conversation?.approvedSpecVersion !== version) return notFound;
+  const editedSpec = cleanRepositorySpec(text);
+  if (editedSpec.trim() === "") return refused("edit-empty", 400);
+  const gate = await changeGate(participant.id, conversation, deps);
+  if ("refusal" in gate) return gate.refusal;
+  const created = await createAndQueue(participant.id, "building", EDIT_REQUEST, deps, gate.buildId, { request: "edit-spec", editedSpec });
+  if (created.result !== "created") return refused(created.result === "approved" ? "busy" : created.result, 409);
+  return { outcome: "accepted", response: jsonResponse(202, { id: created.id }) };
+}
+
+/** Ticket 3.15: the body is over EDIT_BODY_LIMITS (so its text cannot be 8,000 characters or fewer, as the page sends it). */
+function isOversized(request: HttpRequest): boolean {
+  if (typeof request.body !== "string") return false;
+  if (Buffer.byteLength(request.body, "utf8") > EDIT_BODY_LIMITS.maxRawBodyBytes) return true;
+  const raw = request.isBase64Encoded === true ? Buffer.from(request.body, "base64").toString("utf8") : request.body;
+  return Buffer.byteLength(raw, "utf8") > EDIT_BODY_LIMITS.maxBodyBytes;
 }
 
 /**
@@ -673,6 +739,7 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === CHANGE_BUILD_ROUTE) return "change-build";
   if (request.routeKey === CHANGE_DISCARD_ROUTE) return "change-discard";
   if (request.routeKey === CHANGE_REBUILD_ROUTE) return "change-rebuild";
+  if (request.routeKey === CHANGE_EDIT_ROUTE) return "change-edit";
   return "unknown";
 }
 
@@ -695,6 +762,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "change-build") result = await buildChange(request, session.participant, deps);
     else if (route === "change-discard") result = await discardChange(request, session.participant, deps);
     else if (route === "change-rebuild") result = await rebuildFromRepository(request, session.participant, deps);
+    else if (route === "change-edit") result = await editSpec(request, session.participant, deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

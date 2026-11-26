@@ -37,6 +37,29 @@ export const PHASE_3_TEXTS = {
   rebuildReady: "Your repository's spec is ready to build. The build is starting now: the AI changes your app to match it.",
   /** Ticket 3.9: step 4's typing line while the platform reads and checks the repository's spec. */
   checkingRepository: "Reading and checking the spec in your repository…",
+  /** Ticket 3.15: Rebuild with my edits on a text equal to the live spec (wording from the brief). */
+  editUnchanged: "Your spec has not changed.",
+  /** Ticket 3.15: the edited text is over 8,000 characters (refused by the route, or after cleaning by the worker; no AI call). */
+  editTooLong:
+    "Your spec is longer than 8,000 characters, the most the workshop can build from. Make it shorter, then press Rebuild with my edits again. Your live app stays as it is.",
+  /** Ticket 3.15: the edited text lacks the spec's shape (checkSpec). */
+  editWrongShape:
+    "Your edited spec does not have the shape of a spec, so it was not built. Keep the title line (# App name), one Mermaid diagram that starts with flowchart TD, then the headings ## What it does, ## Screens and ## Data it keeps, in this order and with nothing else. Fix it, then press Rebuild with my edits again. Your live app stays as it is.",
+  /** Ticket 3.15: the edited text is empty once cleaned (refused by the route). */
+  editEmpty: "Your spec is empty. Write your spec in the box, then press Rebuild with my edits.",
+  /** Ticket 3.15: the live spec changed since the editor was opened (another tab, a rebuild): 404 from the route. */
+  editStale: "Your live spec changed since you opened it. Press Edit my spec again to start from the new one.",
+  /** Ticket 3.15: the guardrail or the readiness check gave no answer. */
+  editFailed: "Sorry, the check of your edited spec did not work this time. Please press Rebuild with my edits again.",
+  /** Ticket 3.15: the guardrail flagged the edited spec (not queued for a facilitator: nothing is built). */
+  editFlagged:
+    "The safety check wants a person to look at your edited spec, so it was not built. Talk to your facilitator, or change your spec and press Rebuild with my edits again.",
+  /** Ticket 3.15: the edited spec passed the checks; the change build is queued in the same transaction. */
+  editReady: "Your edited spec is ready to build. The build is starting now: the AI changes your app to match it.",
+  /** Ticket 3.15: step 4's typing line while the platform checks the edited spec. */
+  checkingEdit: "Checking your edited spec…",
+  /** Ticket 3.15: the live spec could not be read into the editor. */
+  editLoadFailed: "Your spec could not be opened just now. Please press Edit my spec again.",
   /** Ticket 3.6: a change request (or Build this change) while one of their builds is queued or running. */
   changeWhileBuilding: "Your app is being built right now. You can ask for another change once it is live.",
   /** Ticket 3.6: a change request before the app was ever live (its first build is not live yet, or failed). */
@@ -104,6 +127,24 @@ export const REBUILD_REQUEST = "Please rebuild my app from the SPEC.md in my rep
 
 /** Ticket 3.9: the "What changes" line of a version read from the repository (the launcher builds only a version with one). */
 export const REBUILD_WHAT_CHANGES = "Update the app to match SPEC.md as edited in your repository";
+
+/**
+ * Ticket 3.15: the text Rebuild with my edits stores as the participant's message (marked `edit-spec`, which only that
+ * route writes, with the edited text beside it in `editedSpec`); the step 4 page recognises it in flight.
+ */
+export const EDIT_REQUEST = "Please rebuild my app from my edited spec.";
+
+/** Ticket 3.15: the "What changes" line of a version edited on the page (the launcher builds only a version with one). */
+export const EDIT_WHAT_CHANGES = "Update the app to match SPEC.md as edited on the page";
+
+/** Ticket 3.15: the readiness check found problems in the edited spec (reasons as "- " lines; plain text). */
+export function editNotReadyText(reasons: readonly string[]): string {
+  return [
+    "Your edited spec cannot be built yet:",
+    ...reasons.map((r) => `- ${r}`),
+    "Change it in the box, then press Rebuild with my edits again. Your live app stays as it is.",
+  ].join("\n");
+}
 
 /** Ticket 3.9: the readiness check found problems in the repository's spec (reasons as "- " lines; plain text). */
 export function rebuildNotReadyText(reasons: readonly string[]): string {

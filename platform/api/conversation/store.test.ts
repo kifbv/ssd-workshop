@@ -25,7 +25,7 @@ import { SqsBuildQueue, SqsMessageQueue } from "./queue.js";
 import { READINESS_REQUEST } from "./readiness.js";
 import { CHANGE_BUILD_REQUEST } from "./change.js";
 import { buildIdFor, FAILURE_REPLY, STALE_PENDING_SECONDS, type ChangeBuildFinish, type Finish, type ReadinessFinish, type RebuildFinish } from "./state.js";
-import { REBUILD_REQUEST, REBUILD_WHAT_CHANGES } from "../workshop/texts.js";
+import { EDIT_REQUEST, REBUILD_REQUEST, REBUILD_WHAT_CHANGES } from "../workshop/texts.js";
 import { DynamoConversationStore, type ConversationSender } from "./store.js";
 
 type Sent = GetItemCommand | QueryCommand | TransactWriteItemsCommand;
@@ -1061,6 +1061,29 @@ describe("change requests in the conversation store (ticket 3.6)", () => {
     expect((await reader.getMessage("p-1", ID))?.repository).toEqual({ kind: "too-large" });
     // A found read without its repository or its text, an unknown kind, or a message without the mark: no read.
     for (let i = 0; i < 4; i++) expect((await reader.getMessage("p-1", ID))?.repository).toBeUndefined();
+  });
+
+  it("ticket 3.15: stores Rebuild with my edits' request with its mark and the edited spec (only the conversation function's list names editedSpec) and reads the text back only on such a request", async () => {
+    const message = { id: ID, step: "building" as const, text: EDIT_REQUEST, createdAt: NOW_ISO, nowSeconds: 5000, request: "edit-spec" as const, editedSpec: "# A\n" };
+    const { client, sent } = stubClient([{}]);
+    await expect(new DynamoConversationStore(client, TABLE).createMessage("p-1", message, "b-0")).resolves.toBe("created");
+    expect(items(sent[0])[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":request": { S: "edit-spec" }, ":text": { S: EDIT_REQUEST }, ":editedSpec": { S: "# A\n" } });
+    for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
+    expect(CONVERSATION_UPDATE_ATTRIBUTES).toContain("editedSpec");
+    expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("editedSpec");
+    const base = { author: { S: "participant" }, step: { S: "building" }, text: { S: EDIT_REQUEST }, status: { S: "pending" }, pendingSince: { N: "5" } };
+    const read = stubClient([
+      { Item: { ...base, request: { S: "edit-spec" }, editedSpec: { S: "# A\n" } } },
+      { Item: { ...base, request: { S: "rebuild-from-repo" }, editedSpec: { S: "# A\n" } } },
+      { Item: { ...base, editedSpec: { S: "# A\n" } } },
+    ]);
+    const reader = new DynamoConversationStore(read.client, TABLE);
+    expect(await reader.getMessage("p-1", ID)).toMatchObject({ request: "edit-spec", editedSpec: "# A\n" });
+    // On another mark, or none, the attribute is not the edit.
+    expect((await reader.getMessage("p-1", ID))?.editedSpec).toBeUndefined();
+    const plain = await reader.getMessage("p-1", ID);
+    expect(plain?.editedSpec).toBeUndefined();
+    expect(plain?.request).toBeUndefined();
   });
 
   it("ticket 3.9: a rebuild that is ready stores the approved version, counts and queues the change build in one transaction, inside the worker's lists", async () => {

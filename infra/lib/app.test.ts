@@ -1003,6 +1003,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/change/build",
       "POST /api/conversation/change/discard",
       "POST /api/conversation/change/rebuild",
+      "POST /api/conversation/change/edit",
       ...FACILITATOR_ROUTE_KEYS,
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
@@ -1920,6 +1921,14 @@ describe("budget attributes (ticket 3.3)", () => {
     }
   });
 
+  it("ticket 3.15: WHEN the synthesized stacks are inspected THEN only the conversation function may write a request's edited spec (editedSpec), and the launcher may read it", () => {
+    const writers = participantWriters();
+    expect([...new Set(writers.filter((w) => w.attributes.includes("editedSpec")).map((w) => w.role))]).toEqual([CONVERSATION_FUNCTION_NAME]);
+    // The AI worker approves a version only as rebuildApprovedAt, which the launcher builds only as that exact text.
+    expect([...new Set(writers.filter((w) => w.attributes.includes("rebuildApprovedAt")).map((w) => w.role))]).toEqual([AI_WORKER_FUNCTION_NAME]);
+    expect(LAUNCHER_READ_ATTRIBUTES as readonly string[]).toContain("editedSpec");
+  });
+
   it("criterion 7 (ticket 3.10): WHEN the synthesized stacks are inspected THEN only the facilitator role may write paused (Pause) and approvedTextHash (Approve), and it writes nothing else that decides a participant's limits or identity", () => {
     const writers = participantWriters();
     for (const name of ["paused", "approvedTextHash", "extraBudget"]) {
@@ -2156,6 +2165,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "POST /api/conversation/change/build",
       "POST /api/conversation/change/discard",
       "POST /api/conversation/change/rebuild",
+      "POST /api/conversation/change/edit",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -2205,6 +2215,8 @@ describe("api stack: conversation function (ticket 1.7)", () => {
               "approvedSpecVersion", "latestSpecVersion", "approvedAt", "buildId", "stepSince",
               // Ticket 3.6.
               "proposedSpecVersion", "request", "suggestions", "suggestionsRequestedAt",
+              // Ticket 3.15.
+              "editedSpec",
             ],
           },
         },

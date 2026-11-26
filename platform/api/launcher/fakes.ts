@@ -18,6 +18,7 @@ import type {
   LaunchEntry,
   LaunchRecords,
   RebuildRequestState,
+  RebuildSpecRead,
   RetryBuildState,
   RetryRequest,
   SlotCount,
@@ -223,6 +224,8 @@ export class FakeBuildTable implements LaunchRecords {
    * Ticket 3.9: Rebuild from my repository requests, `<participant id>#<message id>` -> pending, the stored read, and
    * (try 2) whether it is the conversation's message in flight (default yes) and since when it is pending.
    */
+  /** Ticket 3.15: Rebuild with my edits requests' `editedSpec`, by `<participant id>#<message id>`. */
+  readonly editRequests = new Map<string, string>();
   readonly rebuildRequests = new Map<string, { pending: boolean; read?: RepositoryRead; inFlight?: boolean; pendingSince?: number }>();
 
   async readRebuildRequest(participantId: string, messageId: string): Promise<RebuildRequestState | undefined> {
@@ -238,9 +241,12 @@ export class FakeBuildTable implements LaunchRecords {
     );
   }
 
-  async readRebuildSpec(participantId: string, messageId: string): Promise<{ text: string; repository: string } | undefined> {
+  async readRebuildSpec(participantId: string, messageId: string): Promise<RebuildSpecRead | undefined> {
+    // Ticket 3.15: an edit request holds the edited text itself.
+    const edited = this.editRequests.get(`${participantId}#${messageId}`);
+    if (edited !== undefined) return { source: "page", text: edited };
     const read = this.rebuildRequests.get(`${participantId}#${messageId}`)?.read;
-    return read?.kind === "found" ? { text: read.text, repository: read.repository } : undefined;
+    return read?.kind === "found" ? { source: "repository", text: read.text, repository: read.repository } : undefined;
   }
 
   async storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean> {

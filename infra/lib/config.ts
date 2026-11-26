@@ -431,6 +431,9 @@ export const CONVERSATION_UPDATE_ATTRIBUTES = [
   "request",
   "suggestions",
   "suggestionsRequestedAt",
+  // Ticket 3.15: Rebuild with my edits' request carries the edited spec (written only by this function's route; the AI
+  // worker builds from it and the launcher builds a version it approved only while its text equals it).
+  "editedSpec",
 ] as const;
 /** Lambda function, role and log group of the AI worker (ticket 1.7). */
 export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
@@ -645,6 +648,9 @@ export const LAUNCHER_READ_ATTRIBUTES = [
   "messageId",
   "repositorySpec",
   "repositoryName",
+  // Ticket 3.15: to build a version Rebuild with my edits approved (`rebuildApprovedAt`, with its request's `messageId`),
+  // the edited text the conversation function stored on that request.
+  "editedSpec",
   // Ticket 3.10: Retry of a stuck build (the build's task, launch time and whether it handed a commit over) and a
   // facilitator's Pause (the profile's `paused`: a paused participant's build waits).
   "taskArn",

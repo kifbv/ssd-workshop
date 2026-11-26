@@ -2,7 +2,7 @@
 // pure functions so every rule is unit tested without a browser. The DOM wiring is in ./main.ts.
 //
 // The "What changes" lines and the spec are the AI's text (guardrail-checked): the page shows them with `textContent`.
-import { CHANGE_BUILD_REQUEST, changesLeftText, changesUsedText, PHASE_3_TEXTS, REBUILD_REQUEST } from "../../api/workshop/texts.js";
+import { CHANGE_BUILD_REQUEST, changesLeftText, changesUsedText, EDIT_REQUEST, PHASE_3_TEXTS, REBUILD_REQUEST } from "../../api/workshop/texts.js";
 import { isChangeRefusal, isVersion, type ChatMessage, type ChangeRefusal, type Conversation } from "./chat.js";
 import { MESSAGES, messageOf, type ApiAnswer, type Show, type Tone } from "./flow.js";
 
@@ -115,7 +115,13 @@ export function stepFourView(
     // The ideas start a new change: hidden while a proposal is open (a message then adjusts it).
     showSuggestions: !usedUp && !open && (conversation.suggestions?.length ?? 0) > 0,
     showProposal: !usedUp && open,
-    typingText: isBuildRequest(pending) ? PHASE_3_TEXTS.checkingChange : isRebuildRequest(pending) ? PHASE_3_TEXTS.checkingRepository : PHASE_3_TEXTS.writingChange,
+    typingText: isBuildRequest(pending)
+      ? PHASE_3_TEXTS.checkingChange
+      : isRebuildRequest(pending)
+        ? PHASE_3_TEXTS.checkingRepository
+        : isEditRequest(pending)
+          ? PHASE_3_TEXTS.checkingEdit
+          : PHASE_3_TEXTS.writingChange,
   };
 }
 
@@ -124,3 +130,61 @@ export const isBuildRequest = (message: ChatMessage | undefined): boolean => mes
 
 /** Ticket 3.9: the message in flight is Rebuild from my repository's request (the repository is read and checked). */
 export const isRebuildRequest = (message: ChatMessage | undefined): boolean => message?.author === "participant" && message.text === REBUILD_REQUEST;
+
+/** Ticket 3.15: the message in flight is Rebuild with my edits' request (the edited spec is checked). */
+export const isEditRequest = (message: ChatMessage | undefined): boolean => message?.author === "participant" && message.text === EDIT_REQUEST;
+
+/** Ticket 3.15: the live spec as `GET /api/conversation/spec?version=n` returns it, to start editing from. */
+export function liveSpecResult(answer: ApiAnswer): { kind: "spec"; version: number; text: string } | { kind: "gone" } | { kind: "signed-out" } | Show {
+  if (answer.status === 200) {
+    const b = record(answer.body);
+    const version = b?.["version"];
+    const text = b?.["text"];
+    if (!isVersion(version) || typeof text !== "string") return show(PHASE_3_TEXTS.editLoadFailed);
+    return { kind: "spec", version, text };
+  }
+  if (answer.status === 404) return { kind: "gone" };
+  if (answer.status === 401) return { kind: "signed-out" };
+  return common(answer);
+}
+
+/**
+ * Ticket 3.15: `POST /api/conversation/change/edit`: sent (202, the request's id, polled like any message); `gone` (404:
+ * the live spec is no longer the one the editor opened); refused (409: busy, waiting, all used, a build running, not
+ * live); `invalid` (400: too long, empty: the API's words, shown by the editor); signed out; or a message.
+ */
+export function editResult(
+  answer: ApiAnswer,
+):
+  | { kind: "sent"; id: string }
+  | { kind: "gone" }
+  | { kind: "refused"; reason?: ChangeRefusal; message: string }
+  | { kind: "invalid"; message: string }
+  | { kind: "signed-out" }
+  | Show {
+  if (answer.status === 202) {
+    const id = record(answer.body)?.["id"];
+    return typeof id === "string" && id !== "" ? { kind: "sent", id } : show(MESSAGES.failed);
+  }
+  if (answer.status === 404) return { kind: "gone" };
+  if (answer.status === 409) {
+    const reason = record(answer.body)?.["reason"];
+    return { kind: "refused", ...(isChangeRefusal(reason) ? { reason } : {}), message: messageOf(answer.body) ?? MESSAGES.failed };
+  }
+  if (answer.status === 400) return { kind: "invalid", message: messageOf(answer.body) ?? MESSAGES.failed };
+  if (answer.status === 401) return { kind: "signed-out" };
+  return common(answer);
+}
+
+/**
+ * Ticket 3.15: the line under the editor's buttons: the reply to the edit the editor sent (once it is there), else the
+ * editor's own note (a refusal before anything was stored), else nothing.
+ */
+export function editorAnswer(messages: readonly ChatMessage[], sentId: string | null, note: { message: string; tone: Tone } | null): { message: string; tone: Tone } | null {
+  if (sentId !== null) {
+    const reply = messages.find((m) => m.id === `${sentId}-r` && m.author === "assistant");
+    if (reply !== undefined) return { message: reply.text, tone: "info" };
+    return null;
+  }
+  return note;
+}

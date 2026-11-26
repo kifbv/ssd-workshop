@@ -1,9 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { CHANGE_BUILD_REQUEST, PHASE_3_TEXTS, REBUILD_REQUEST } from "../../api/workshop/texts.js";
+import { CHANGE_BUILD_REQUEST, EDIT_REQUEST, PHASE_3_TEXTS, REBUILD_REQUEST } from "../../api/workshop/texts.js";
 import { parseBuild, showsStepFour } from "./build-view.js";
 import { parseConversation, sendResult, type ChatMessage } from "./chat.js";
 import { MESSAGES } from "./flow.js";
-import { CHANGE_LOOP_DIAGRAM, changeActionResult, isBuildRequest, isRebuildRequest, proposalResult, stepFourMessages, stepFourView } from "./live-view.js";
+import {
+  CHANGE_LOOP_DIAGRAM,
+  changeActionResult,
+  editorAnswer,
+  editResult,
+  isBuildRequest,
+  isEditRequest,
+  isRebuildRequest,
+  liveSpecResult,
+  proposalResult,
+  stepFourMessages,
+  stepFourView,
+} from "./live-view.js";
 
 const IDEAS = ["Add a weekly chart", "Let me delete a run", "Show my longest run"];
 
@@ -151,5 +163,44 @@ describe("change builds on the page (ticket 3.8)", () => {
     expect(edges.filter((edge) => edge?.[2] === "-.->").map((edge) => edge?.[3])).toEqual(["you"]);
     expect(CHANGE_LOOP_DIAGRAM).not.toContain("Not this one");
     expect(CHANGE_LOOP_DIAGRAM).not.toContain("facilitator");
+  });
+});
+
+describe("step 4's Edit my spec (ticket 3.15)", () => {
+  it("opens the live version's text; a 404 is gone, a broken answer says the spec could not be opened", () => {
+    expect(liveSpecResult({ status: 200, body: { version: 2, text: "# Run log\n", createdAt: "x", approved: true } })).toEqual({ kind: "spec", version: 2, text: "# Run log\n" });
+    expect(liveSpecResult({ status: 200, body: { version: 2 } })).toEqual({ kind: "show", message: PHASE_3_TEXTS.editLoadFailed, tone: "error" });
+    expect(liveSpecResult({ status: 404, body: {} })).toEqual({ kind: "gone" });
+    expect(liveSpecResult({ status: 401, body: {} })).toEqual({ kind: "signed-out" });
+    expect(liveSpecResult({ status: 0, body: null })).toEqual({ kind: "show", message: MESSAGES.offline, tone: "error" });
+  });
+
+  it("reads Rebuild with my edits' answers: sent with its id, gone, refused with the reason, the API's words for a 400", () => {
+    expect(editResult({ status: 202, body: { id: "m-1" } })).toEqual({ kind: "sent", id: "m-1" });
+    expect(editResult({ status: 202, body: {} })).toMatchObject({ kind: "show" });
+    expect(editResult({ status: 404, body: {} })).toEqual({ kind: "gone" });
+    expect(editResult({ status: 409, body: { reason: "no-changes-left", message: "You've used your 5 changes." } })).toEqual({
+      kind: "refused",
+      reason: "no-changes-left",
+      message: "You've used your 5 changes.",
+    });
+    expect(editResult({ status: 400, body: { reason: "too-long", message: PHASE_3_TEXTS.editTooLong } })).toEqual({ kind: "invalid", message: PHASE_3_TEXTS.editTooLong });
+    expect(editResult({ status: 401, body: {} })).toEqual({ kind: "signed-out" });
+  });
+
+  it("shows the reply to the edit it sent under the editor, else its own note; says the edit is being checked while in flight", () => {
+    const messages: ChatMessage[] = [
+      { id: "m-1", author: "participant", text: EDIT_REQUEST, status: "done", step: "building" },
+      { id: "m-1-r", author: "assistant", text: PHASE_3_TEXTS.editUnchanged, step: "building" },
+    ];
+    expect(editorAnswer(messages, "m-1", null)).toEqual({ message: "Your spec has not changed.", tone: "info" });
+    expect(editorAnswer(messages, "m-2", { message: "x", tone: "error" })).toBeNull();
+    expect(editorAnswer(messages, null, { message: PHASE_3_TEXTS.editEmpty, tone: "error" })).toEqual({ message: PHASE_3_TEXTS.editEmpty, tone: "error" });
+    expect(editorAnswer(messages, null, null)).toBeNull();
+    const pending: ChatMessage = { id: "m-3", author: "participant", text: EDIT_REQUEST, status: "pending", step: "building" };
+    expect(isEditRequest(pending)).toBe(true);
+    expect(isEditRequest({ ...pending, author: "assistant" })).toBe(false);
+    expect(isRebuildRequest(pending)).toBe(false);
+    expect(stepFourView({}, null, pending).typingText).toBe(PHASE_3_TEXTS.checkingEdit);
   });
 });

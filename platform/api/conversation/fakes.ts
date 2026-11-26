@@ -200,6 +200,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       ...(m.verdictReason === undefined ? {} : { verdictReason: m.verdictReason }),
       ...(m.request === undefined ? {} : { request: m.request }),
       ...(m.request === "rebuild-from-repo" && m.repository !== undefined ? { repository: { ...m.repository } } : {}),
+      ...(m.request === "edit-spec" && m.editedSpec !== undefined ? { editedSpec: m.editedSpec } : {}),
     };
   }
 
@@ -394,6 +395,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       pendingSince: message.nowSeconds,
       createdAt: message.createdAt,
       ...(message.request === undefined ? {} : { request: message.request }),
+      ...(message.editedSpec === undefined ? {} : { editedSpec: message.editedSpec }),
     });
   }
 

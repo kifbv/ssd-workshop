@@ -702,6 +702,35 @@ build, and counts one change.
 4. In CloudWatch Logs, `/aws/lambda/ssd-workshop-builds-launcher` shows one `"event":"spec-read"` line per press with
    `"outcome":"read"` and the read's kind, and no repository name, token or address.
 
+## Check after the Edit my spec deploy (ticket 3.15)
+
+```mermaid
+flowchart TD
+  open[Step 4: Edit my spec] --> box[Live spec in the text box]
+  box -->|Rebuild with my edits| route[Conversation function: 8,000 characters, cleaning]
+  route --> worker[AI worker: same? shape, guardrail, readiness]
+  worker -->|changed and ready| feed[Step 3 feed: Change n, one counted change]
+  worker -->|same, wrong shape, off path, not ready| reply[Answer under the editor, nothing built]
+```
+
+### 3.15 live check
+
+Run by Franck in a browser at phone width, as a test participant whose app is live and who has changes left. A changed
+spec costs one guardrail call, one readiness call and one change build, and counts one change.
+
+1. On step 4 press **Edit my spec**: the box shows the live spec. Press **Rebuild with my edits** without changing
+   anything: "Checking your edited spec…", then "Your spec has not changed." under the buttons and in the
+   conversation; the count is unchanged.
+2. Rename the heading `## Screens` to `## Pages` and press again: the shape answer shows at once (no AI call), the box
+   keeps the text, and the count is unchanged. Undo the rename.
+3. Paste more than 8,000 characters at the end and press: "Your spec is longer than 8,000 characters, ..." at once.
+   Remove them.
+4. Add one small feature line under `## Screens` and press: within about a minute step 3 shows "Change n: ..." and the
+   feed; once live, step 4 shows the count one lower, and the repository has one new "Change n: ..." commit whose
+   `SPEC.md` has the added line.
+5. In CloudWatch Logs, `/aws/lambda/ssd-workshop-api-conversation` shows `"route":"change-edit"` lines with outcomes only,
+   and neither that log nor the AI worker's holds the spec's text, the nickname or an address.
+
 ## Check after the facilitator API deploy (ticket 3.10)
 
 ```mermaid
