@@ -140,6 +140,7 @@ import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 import {
   APPS_OBJECT_WRITE_ACTIONS,
+  DATA_CLIENT_FILE,
   DEPLOY_QUEUE_MAX_RECEIVES,
   DEPLOY_QUEUE_VISIBILITY_SECONDS,
   DEPLOYER_MAX_CONCURRENCY,
@@ -3175,6 +3176,21 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     (appsResources().find(([, r]) => r.Type === "AWS::S3::BucketPolicy")?.[1].Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement;
   const fnEntry = () => appsResources().find(([, r]) => r.Type === "AWS::Lambda::Function" && r.Properties?.FunctionName === DEPLOYER_FUNCTION_NAME);
   const roleEntry = () => appsResources().find(([, r]) => r.Type === "AWS::IAM::Role" && r.Properties?.RoleName === DEPLOYER_FUNCTION_NAME);
+  const deployerAsset = (): string => {
+    const key = (fnEntry()?.[1].Properties?.Code as { S3Key?: string }).S3Key;
+    const manifest = JSON.parse(readFileSync(join(dir, `${STACK_NAMES.apps}.assets.json`), "utf8")) as {
+      files: Record<string, { source: { path: string }; destinations: Record<string, { objectKey: string }> }>;
+    };
+    const asset = Object.values(manifest.files).find((f) => Object.values(f.destinations).some((d) => d.objectKey === key));
+    return join(dir, asset?.source.path ?? "missing");
+  };
+
+  it("ticket 3.25: bundles the deployer with the platform's templates/basic/workshop-data.js next to its code, byte for byte", () => {
+    expect(DATA_CLIENT_FILE.endsWith(join("templates", "basic", "workshop-data.js"))).toBe(true);
+    expect(existsSync(join(deployerAsset(), "index.js"))).toBe(true);
+    expect(readFileSync(join(deployerAsset(), "workshop-data.js")).equals(readFileSync(DATA_CLIENT_FILE))).toBe(true);
+  });
+
   const deployerStatements = () =>
     appsResources()
       .filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties?.Roles).includes(roleEntry()?.[0] ?? "?"))
@@ -3460,7 +3476,15 @@ describe("apps stack: bucket, queue and deployer (ticket 2.5)", () => {
     const bundle = createRequire(import.meta.url)(join(dir, asset?.source.path ?? "?", "index.js")) as {
       handler: (event: { Records: { body: string }[] }) => Promise<void>;
     };
-    await expect(quietly(() => bundle.handler({ Records: [{ body: "not json" }] }))).resolves.toBeUndefined();
+    // Ticket 3.25: the handler reads the platform's workshop-data.js next to its code, as the Lambda runtime names it.
+    const root = process.env.LAMBDA_TASK_ROOT;
+    process.env.LAMBDA_TASK_ROOT = join(dir, asset?.source.path ?? "?");
+    try {
+      await expect(quietly(() => bundle.handler({ Records: [{ body: "not json" }] }))).resolves.toBeUndefined();
+    } finally {
+      if (root === undefined) delete process.env.LAMBDA_TASK_ROOT;
+      else process.env.LAMBDA_TASK_ROOT = root;
+    }
   });
 });
 

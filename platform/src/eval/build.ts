@@ -17,7 +17,7 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { chromium, type Browser, type Route } from "playwright";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
 import { checkApp, type AppFile } from "../../api/build/check.js";
-import { contentTypeOf } from "../../api/deploy/deploy.js";
+import { contentTypeOf, DATA_CLIENT_PATH, withPlatformDataClient } from "../../api/deploy/deploy.js";
 import { downloadArchive } from "../../api/deploy/github.js";
 import { readTarGz } from "../../api/deploy/tar.js";
 import { FAKE_TOKEN_PREFIX, FakeGitHub } from "../../api/github/fakes.js";
@@ -26,11 +26,12 @@ import { answerChange } from "../../api/conversation/change.js";
 import { usageOf, type ModelClient } from "../../api/conversation/model.js";
 import { loadTemplateFiles } from "../../api/github/template.js";
 import { appArchiveUrl, type ModelSetting } from "../../api/settings.js";
+import { APP_SIGN_IN_TEXTS } from "../../api/workshop/texts.js";
 import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
-import { missingScreens, screenNames, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome } from "./logic.js";
+import { missingScreens, screenNames, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type SignInCheck } from "./logic.js";
 
 const NICKNAME = "eval-app";
 const REPOSITORY = "ssd-eval-app";
@@ -38,17 +39,34 @@ const BUILD_ID = "eval-build-1";
 const CHANGE_BUILD_ID = "eval-build-2";
 const PARTICIPANT = "eval-participant";
 const PHONE = { width: 375, height: 740 };
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept" };
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
+/** Ticket 3.25: what the in-memory data API answers a write without a valid token, as the real one does (3.24). */
+const SIGN_IN_TO_SAVE = JSON.stringify({ message: APP_SIGN_IN_TEXTS.signInToSave });
+
+/**
+ * Ticket 3.25: the sign-in elements a visitor sees once the page settled. `shown`: not hidden and reading "Sign in" (text
+ * or aria-label); `visible`: those also laid out on the first screen (marked so the harness can press the first one).
+ */
+const SIGN_IN_SCRIPT = `(() => {
+  const shown = Array.from(document.querySelectorAll("[data-workshop-sign-in]"))
+    .filter((el) => !el.hidden && /sign in/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || "")));
+  const visible = shown.filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
+  if (visible[0]) visible[0].setAttribute("data-eval-sign-in", "");
+  return { shown: shown.length, visible: visible.length };
+})()`;
 
 /** Labels the title check reads: headings, buttons, tabs, links, labels, legends and aria-labels, hidden ones included. */
 const LABELS_SCRIPT = `Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,button,[role=tab],[role=button],a,label,legend,summary,[aria-label]"))
   .flatMap((el) => [el.textContent || "", el.getAttribute("aria-label") || ""]).filter((t) => t.trim() !== "")`;
 
-/** Opens the app's files at /apps/<nickname>/ in Chromium under the CSP and reads what the title check needs. */
+/**
+ * Opens the app's files at /apps/<nickname>/ in Chromium under the CSP, as a visitor (no token: ticket 3.25), and reads
+ * what the title check and the sign-in check need.
+ */
 async function openInBrowser(
   browser: Browser,
   files: readonly AppFile[],
-): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[] }> {
+): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[]; signIn: SignInCheck }> {
   const origin = "https://workshop.test";
   // Behind the session's proxy, HTTPS answers are re-signed by the proxy's own authority, which Chromium does not know.
   const context = await browser.newContext({ viewport: PHONE, ignoreHTTPSErrors: proxyServer() !== undefined });
@@ -63,24 +81,21 @@ async function openInBrowser(
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("pageerror", (error) => errors.push(error.message));
-  const store = new Map<string, string>();
   const byPath = new Map(files.filter((file) => file.kind === "file").map((file) => [file.path, file]));
   await page.route(`${origin}/**`, async (route: Route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const dataPrefix = `/api/apps/${NICKNAME}/data/`;
     if (path.startsWith(dataPrefix)) {
-      const key = path.slice(dataPrefix.length);
       if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
-      if (request.method() === "PUT") {
-        store.set(key, request.postData() ?? "null");
-        return route.fulfill({ status: 204, headers: CORS });
+      // Ticket 3.24: a visitor has no token, so every write is refused as the real API refuses it (Chromium logs the
+      // 401, so an app that saves without the visitor doing anything fails the console check: apps work read-only).
+      if (request.method() === "PUT" || request.method() === "DELETE") {
+        return route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: SIGN_IN_TO_SAVE });
       }
-      if (request.method() === "DELETE") {
-        store.delete(key);
-        return route.fulfill({ status: 204, headers: CORS });
-      }
-      return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: store.get(key) ?? "null" });
+      // Nothing is ever stored (a visitor cannot save): every key reads null, with `?info=1` too.
+      const body = new URL(request.url()).searchParams.get("info") === "1" ? `{"value":null,"updatedBy":null,"updatedAt":null}` : "null";
+      return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body });
     }
     const appPrefix = `/apps/${NICKNAME}/`;
     const relative = path.startsWith(appPrefix) ? path.slice(appPrefix.length) || "index.html" : "";
@@ -92,18 +107,26 @@ async function openInBrowser(
       body: Buffer.from(file.bytes),
     });
   });
+  // The tab the sign-in button opens: a stand-in for the workshop's hand-off page (its address is what is checked).
+  const handOff = `${origin}/app-sign-in/?app=${NICKNAME}`;
+  await context.route(`${origin}/app-sign-in/**`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Sign in</title>" }));
   try {
     await page.goto(`${origin}/apps/${NICKNAME}/`, { waitUntil: "load" });
     await page.waitForLoadState("networkidle").catch(() => undefined);
     await page.waitForTimeout(500);
     const overflow = await page.evaluate<number>(`Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - document.documentElement.clientWidth`);
-    return {
-      errors,
-      overflow: Math.max(0, overflow),
-      title: await page.title(),
-      labels: await page.evaluate<string[]>(LABELS_SCRIPT),
-      outsideHosts: [...outsideHosts].sort(),
-    };
+    const title = await page.title();
+    const labels = await page.evaluate<string[]>(LABELS_SCRIPT);
+    // Ticket 3.25: the visitor finds the sign-in button, and pressing it opens the hand-off page in a new tab.
+    const found = await page.evaluate<{ shown: number; visible: number }>(SIGN_IN_SCRIPT);
+    let opens: boolean | undefined;
+    if (found.visible > 0) {
+      const popup = context.waitForEvent("page", { timeout: 5_000 }).catch(() => undefined);
+      await page.click("[data-eval-sign-in]", { timeout: 5_000 }).catch(() => undefined);
+      const tab = await popup;
+      opens = tab !== undefined && (await tab.waitForURL(handOff, { timeout: 5_000 }).then(() => true, () => false));
+    }
+    return { errors, overflow: Math.max(0, overflow), title, labels, outsideHosts: [...outsideHosts].sort(), signIn: { ...found, opens } };
   } finally {
     await context.close();
   }
@@ -192,6 +215,7 @@ async function runEvalBuild(
       overflow: 0,
       missing: [],
       outsideHosts: [],
+      signIn: { shown: 0, visible: 0, opens: undefined },
       durationMs,
       usage: {
         inputTokens: total.inputTokens - usageBefore.inputTokens,
@@ -201,8 +225,10 @@ async function runEvalBuild(
     };
     const message = world.queue.sent[sentBefore];
     if (outcome !== "handed-over" || message === undefined || message.commit !== build?.pushedCommit) return { outcome: base };
-    // What the deployer would publish: the repository at the message's commit.
-    const published = readTarGz(await downloadArchive(appArchiveUrl(NICKNAME, message.commit), { fetch: fetchFake }));
+    // What the deployer would publish: the repository at the message's commit, with (ticket 3.25) the platform's current
+    // workshop-data.js, whatever the repository holds.
+    const dataClient = (await loadTemplateFiles()).find((file) => file.path === DATA_CLIENT_PATH)?.bytes ?? new Uint8Array();
+    const published = withPlatformDataClient(readTarGz(await downloadArchive(appArchiveUrl(NICKNAME, message.commit), { fetch: fetchFake })), dataClient);
     return { outcome: base, published, commit: message.commit };
   } finally {
     await Promise.all(temporary.map((dir) => rm(dir, { recursive: true, force: true })));
@@ -210,7 +236,7 @@ async function runEvalBuild(
 }
 
 /** The deploy check and the page at 375 px for the published files, scored against `spec`'s title and screens. */
-async function checkPublished(browser: Browser, published: AppFile[], spec: string): Promise<Pick<BuildEvalOutcome, "checkPassed" | "consoleErrors" | "overflow" | "missing" | "outsideHosts"> & { page: { title: string; labels: string[] } }> {
+async function checkPublished(browser: Browser, published: AppFile[], spec: string): Promise<Pick<BuildEvalOutcome, "checkPassed" | "consoleErrors" | "overflow" | "missing" | "outsideHosts" | "signIn"> & { page: { title: string; labels: string[] } }> {
   const check = checkApp(published);
   const page = await openInBrowser(browser, published);
   return {
@@ -219,6 +245,7 @@ async function checkPublished(browser: Browser, published: AppFile[], spec: stri
     overflow: page.overflow,
     missing: missingScreens(specTitle(spec), screenNames(spec), page),
     outsideHosts: page.outsideHosts,
+    signIn: page.signIn,
     page: { title: page.title, labels: page.labels },
   };
 }
@@ -233,7 +260,7 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser): Pro
   const run = await runEvalBuild(world, BUILD_ID, baseCommit, attemptId);
   if (run.published === undefined) return { outcome: run.outcome };
   const checked = await checkPublished(browser, run.published, spec);
-  return { outcome: { ...run.outcome, checkPassed: checked.checkPassed, consoleErrors: checked.consoleErrors, overflow: checked.overflow, missing: checked.missing, outsideHosts: checked.outsideHosts }, ...(run.commit === undefined ? {} : { commit: run.commit }) };
+  return { outcome: { ...run.outcome, checkPassed: checked.checkPassed, consoleErrors: checked.consoleErrors, overflow: checked.overflow, missing: checked.missing, outsideHosts: checked.outsideHosts, signIn: checked.signIn }, ...(run.commit === undefined ? {} : { commit: run.commit }) };
 }
 
 /**

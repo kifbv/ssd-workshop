@@ -10,6 +10,7 @@
     "eval": "tsx src/eval/main.ts",
     "conversation": "tsx src/conversation/main.ts",
     "builds": "tsx src/builds/main.ts",
+    "apps": "tsx src/apps/main.ts",
     "participant": "tsx src/participant/main.ts",
     "backfill-list-type": "tsx src/list-type/main.ts"
   },

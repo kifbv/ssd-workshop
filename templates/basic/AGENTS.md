@@ -15,7 +15,8 @@ shell and no package manager. You cannot run or preview the app, so check your w
   tags, `workshop-data.js` before `app.js`.
 - `style.css`: all styles.
 - `app.js`: all behaviour. A classic script (no `import`/`export`), run after the page is parsed.
-- `workshop-data.js`: the data client. Do not change it.
+- `workshop-data.js`: the data client and the workshop's sign-in to save. Do not change it: the
+  workshop publishes its own current copy with the app, whatever this folder holds.
 - `SPEC.md`: the approved spec. Do not change it.
 - `README.md`: explains the files to the participant. If you add a file, add a row for it to the
   table there, in the same plain words.
@@ -106,23 +107,41 @@ shell and no package manager. You cannot run or preview the app, so check your w
    `await workshopData.set(key, value)` stores any JSON value; `await workshopData.remove(key)`
    deletes it. Keys use only letters, digits, `-` and `_`. Every call can fail: wrap it in
    `try`/`catch` and show `error.message` on the page. Limits: 350 KB per value, 500 keys and 10 MB
-   per app. All visitors share the same data, and anyone with the app's address can read and change it.
-6. No personal data: no email addresses, phone numbers, names of real people, passwords or keys in
-   the code, and do not ask visitors for an email address or a password. The app has no sign-in.
-7. No `console.log` or `console.error` left in the code, and no errors in the browser console.
-8. Phones first: it must work at 375 px wide with nothing scrolling sideways (no fixed widths wider
+   per app. All visitors share the same data: anyone with the app's address can read it, and anyone
+   signed in to the workshop can change it.
+6. Saving needs the workshop's sign-in (reading does not). Every app works read-only for visitors:
+   - Everything the app shows loads and works without sign-in. Never save when the page opens or on
+     a timer; save only when the visitor does something (presses a button, sends a form).
+   - Where saving happens (next to each form or button that saves), put the sign-in button:
+     `<button type="button" data-workshop-sign-in hidden>Sign in to save</button>`, in `index.html`.
+     Do not give it a click handler: `workshop-data.js` shows it to visitors who are not signed in,
+     hides it once they are, and opens the workshop's sign-in in a new tab when it is pressed (the
+     visitor comes back to the app there, signed in). Style it in `style.css` (the `.sign-in` class).
+   - A save by a visitor who is not signed in fails with the message "Sign in to the workshop to save
+     in this app.": show it with the other errors (rule 5).
+   - `workshopData.whoAmI()` gives the visitor's workshop nickname once signed in, or `null`; the app
+     may show it ("You save as Ada."). `workshopData.signInLink()` gives the sign-in page's address.
+   - The app may show who posted: `await workshopData.getInfo(key)` returns
+     `{ value, updatedBy, updatedAt }`, the value with the nickname of whoever saved it last and when
+     (both `null` when unknown). Show only that nickname, never anything else about a person. To show
+     who posted each item of a list, store the nickname from `whoAmI()` in the item when it is saved.
+7. No personal data: no email addresses, phone numbers, names of real people, passwords or keys in
+   the code, and do not ask visitors for an email address or a password. The app has no accounts or
+   sign-in of its own: the workshop's sign-in (rule 6) is the only one.
+8. No `console.log` or `console.error` left in the code, and no errors in the browser console.
+9. Phones first: it must work at 375 px wide with nothing scrolling sideways (no fixed widths wider
    than the screen; use `max-width: 100%` on images). Tap targets at least 44 px high.
-9. Light and dark mode: keep the colour variables in `style.css` and the
+10. Light and dark mode: keep the colour variables in `style.css` and the
    `prefers-color-scheme: dark` block, and give every new colour a value in both.
-10. Accessible: real `<button>`, `<label>` and heading elements, `alt` text on images, enough colour
+11. Accessible: real `<button>`, `<label>` and heading elements, `alt` text on images, enough colour
     contrast, visible focus, and `role="status"` on text that changes after an action.
-11. No inline `<script>` or `<style>` elements and no `style="..."` or `on...="..."` attributes
+12. No inline `<script>` or `<style>` elements and no `style="..."` or `on...="..."` attributes
     (`onclick`, `onload`, ...): the app's security policy blocks them, so they would do nothing.
     Put styles in `style.css` and behaviour in `app.js` (use `addEventListener`), and set text with
     `textContent`. Scripts, styles and fonts come only from the app's own files; data and images may
     also come from https addresses (rule 3), and images from `data:` addresses. Forms never send to
     another site.
-12. Set the page's `<title>` and `<h1>` to the app's name from `SPEC.md`.
+13. Set the page's `<title>` and `<h1>` to the app's name from `SPEC.md`.
 
 ## The deploy check
 

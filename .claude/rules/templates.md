@@ -36,3 +36,14 @@ paths:
   fails on any console error: the data API answers a missing key with `200` and `null`, never 404.
 - ESLint lints `templates/**/*.js` as browser scripts with the globals declared in `eslint.config.mjs`;
   a new browser global used there must be added to that list.
+- Since ticket 3.25 the deployer publishes the platform's `templates/basic/workshop-data.js` (bundled with it) in every
+  app, whatever the repository holds: a change to it reaches new deploys at once, and live apps through
+  `npm run apps -- refresh` (Franck). Keep it passing the deploy check (`deploy.test.ts` checks it): send the token as
+  `options.headers.authorization = "Bearer " + pass` (a property set with `=`; `authorization:` or `"authorization",`
+  fails the check), and never write the header with a colon in a comment either. Keep it backward compatible: older
+  apps' `app.js` call only `get`, `set`, `remove`.
+- Sign-in in apps (3.25): the token and nickname arrive in the fragment (`#wt=<token>&wn=<nickname>`) and are removed
+  with `history.replaceState` at once (it works in the sandbox's opaque origin in Chromium); in Playwright, a `goto` that
+  changes only the fragment does not reload the page: go to `about:blank` first. A visitor's save gets a 401, which
+  Chromium logs as a console error: a test of that path allows exactly that line. Style an element made by
+  `workshop-data.js` through the CSSOM (`element.style.x = ...`), never a `style` attribute (the CSP refuses it).

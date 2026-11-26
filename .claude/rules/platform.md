@@ -321,3 +321,8 @@ paths:
   session (retried; a failure there is logged by outcome and the ending still answers done). A cleanup that leaves the
   session in place (allow-list removal) needs its own mark checked in the same transaction (the profile's `role`). Prove such races over every interleaving against a small condition-evaluating stand-in for DynamoDB
   (`MiniDynamo` in `app-token/store.test.ts`), with a control showing the old order fails.
+- Only the deployer's role may write app files (bucket policy, Franck included): an operator command that must change
+  live apps (3.25's `npm run apps -- refresh`) sends a message of its own kind to the deploy queue (`{"refresh": nick}`,
+  parsed strictly beside the deploy job) and lets the deployer do it. A file a Lambda needs at run time travels with its
+  code (`afterBundling` copy, read from `LAMBDA_TASK_ROOT`); a synth test that `require`s the bundle sets
+  `LAMBDA_TASK_ROOT` to the asset folder.

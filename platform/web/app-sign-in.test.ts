@@ -94,7 +94,7 @@ async function mockApi(handlers: Record<string, (call: Call) => Reply>): Promise
 }
 
 describe("the hand-off page /app-sign-in (ticket 3.24)", () => {
-  it("criterion 2 (page): WHEN a signed-in participant presses Continue THEN they land on /apps/<nick>/#wt=<token>", async () => {
+  it("criterion 2 (page): WHEN a signed-in participant presses Continue THEN they land on /apps/<nick>/#wt=<token>&wn=<their nickname>", async () => {
     const calls = await mockApi({
       "GET /api/me": () => ({ status: 200, body: BOB }),
       "POST /api/app-tokens": () => ({ status: 200, body: { token: TOKEN, app: "ada", nickname: "Bob", expiresAt: 1 } }),
@@ -104,7 +104,7 @@ describe("the hand-off page /app-sign-in (ticket 3.24)", () => {
     expect(await page.locator("#app-sign-in-explainer").textContent()).toBe(APP_SIGN_IN_TEXTS.explainer);
     const before = await page.evaluate(() => history.length);
     await page.getByRole("button", { name: "Continue" }).click();
-    await page.waitForURL(`${origin}/apps/ada/#wt=${TOKEN}`);
+    await page.waitForURL(`${origin}/apps/ada/#wt=${TOKEN}&wn=Bob`);
     expect(appPagesServed).toEqual(["/apps/ada/"]);
     const post = calls.find((c) => c.method === "POST");
     expect(post).toMatchObject({ path: "/api/app-tokens", body: JSON.stringify({ app: "Ada" }) });

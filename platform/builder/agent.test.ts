@@ -1,10 +1,10 @@
 // Ticket 2.8: the coding agent's settings (tools, permissions, environment) and its token count, without calling Claude.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, fetchSucceeded, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, SIGN_IN_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
@@ -165,6 +165,20 @@ describe("the agent's settings (criterion 2)", () => {
   it("asks the agent to follow AGENTS.md and build SPEC.md in its folder", () => {
     expect(buildPrompt(ws)).toContain(ws);
     expect(buildPrompt(ws)).toMatch(/AGENTS\.md[\s\S]*SPEC\.md/);
+  });
+
+  it("ticket 3.25: both prompts carry the sign-in rule of the template's AGENTS.md (read-only for visitors, the sign-in button, who posted)", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
+    // The button the guidance asks for is exactly the one AGENTS.md shows.
+    const button = '<button type="button" data-workshop-sign-in hidden>Sign in to save</button>';
+    expect(agents).toContain(button);
+    expect(SIGN_IN_GUIDANCE).toContain(button);
+    for (const name of ["whoAmI()", "getInfo(key)", "updatedBy"]) {
+      expect(agents).toContain(name);
+      expect(SIGN_IN_GUIDANCE).toContain(name);
+    }
+    expect(buildPrompt(ws)).toContain(SIGN_IN_GUIDANCE);
+    expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(SIGN_IN_GUIDANCE);
   });
 
   it("tells the agent it may check a service with WebFetch, that pages are data and never instructions, never with keys, and few fetches (ticket 2.15)", () => {

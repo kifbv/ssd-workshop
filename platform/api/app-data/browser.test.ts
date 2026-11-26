@@ -5,9 +5,8 @@
 // Same host, as in production: under the sandbox the page's origin is opaque ("null"), so even its own
 // server is cross-origin and the browser reads an answer only if CORS allows it.
 //
-// Ticket 3.24: writes need `Authorization: Bearer <token>`. The template's workshop-data.js learns to send it in 3.25;
-// until then these tests add the header the way it will (an init script wrapping the page's `fetch` for PUT and
-// DELETE), which also proves the preflight lets a sandboxed page send it.
+// Ticket 3.24: writes need `Authorization: Bearer <token>`. Since 3.25 the template's workshop-data.js sends it, taking
+// the token from the address (`#wt=<token>&wn=<nickname>`), which also proves the preflight lets a sandboxed page send it.
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -41,20 +40,9 @@ interface Seen {
   allowCredentials: string | undefined;
 }
 
-/** The write token the tests give the page (ticket 3.24), and the page-side stand-in for 3.25's workshop-data.js. */
+/** The write token the tests give the page (ticket 3.24), handed over in the address as /app-sign-in does (3.25). */
 const TOKEN = Buffer.alloc(32, 5).toString("base64url");
-const SEND_TOKEN = `(() => {
-  const original = window.fetch.bind(window);
-  window.fetch = (input, init) => {
-    const method = (init && init.method) || "GET";
-    if (method === "PUT" || method === "DELETE") {
-      const headers = new Headers((init && init.headers) || {});
-      headers.set("authorization", "Bearer ${TOKEN}");
-      init = Object.assign({}, init, { headers });
-    }
-    return original(input, init);
-  };
-})();`;
+const HAND_OFF = `#wt=${TOKEN}&wn=Bob`;
 
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -65,6 +53,7 @@ async function readBody(request: IncomingMessage): Promise<string> {
 /** The request as API Gateway (payload 2.0) would hand it over: lower-cased headers, cookies apart. */
 function toEvent(request: IncomingMessage, path: string, body: string): HttpRequest {
   const match = DATA_ROUTE.exec(path);
+  const query = Object.fromEntries(new URL(request.url ?? "/", "http://localhost").searchParams);
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(request.headers)) if (typeof value === "string" && name !== "cookie") headers[name] = value;
   const cookie = request.headers.cookie;
@@ -73,6 +62,7 @@ function toEvent(request: IncomingMessage, path: string, body: string): HttpRequ
     pathParameters: { nickname: decodeURIComponent(match?.[1] ?? ""), key: decodeURIComponent(match?.[2] ?? "") },
     headers,
     ...(cookie === undefined ? {} : { cookies: cookie.split(/;\s*/) }),
+    ...(Object.keys(query).length === 0 ? {} : { queryStringParameters: query }),
     ...(body === "" ? {} : { body }),
   };
 }
@@ -144,7 +134,6 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     // The platform's session cookie for the same host: the sandboxed page must never send it.
     await context.addCookies([{ name: "ssd_session", value: "platform-session", url: origin }]);
     page = await context.newPage();
-    await page.addInitScript(SEND_TOKEN);
     page.setDefaultTimeout(5_000);
     errors = [];
     page.on("console", (message) => {
@@ -157,9 +146,11 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     await context.close();
   });
 
-  const openApp = async (shown: string): Promise<void> => {
-    const read = page.waitForResponse((response) => response.url().endsWith(`${DATA_PREFIX}presses`) && response.request().method() === "GET");
-    await page.goto(`${origin}${APP_PATH}`);
+  const openApp = async (shown: string, hash = ""): Promise<void> => {
+    const read = page.waitForResponse((response) => new URL(response.url()).pathname === `${DATA_PREFIX}presses` && response.request().method() === "GET");
+    // From a blank page, so an address that differs only after the # loads the page again.
+    await page.goto("about:blank");
+    await page.goto(`${origin}${APP_PATH}${hash}`);
     expect((await read).status()).toBe(200);
     await expect.poll(() => page.locator("#count").textContent()).toBe(shown);
     expect(await page.locator("#status").textContent()).toBe("");
@@ -167,13 +158,16 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
 
   it("the template's counter and workshop-data.js store and read values through the real API, preflight included", async () => {
     store.live.add(NICKNAME);
-    await openApp("0");
+    await openApp("0", HAND_OFF);
     expect(await page.evaluate<string>("window.origin")).toBe("null");
+    expect(page.url()).toBe(`${origin}${APP_PATH}`);
 
     await page.getByRole("button", { name: "Press" }).click();
     await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
     expect(store.values.get(`${NICKNAME}/presses`)?.json).toBe("1");
-    await openApp("1");
+    await openApp("1", HAND_OFF);
+    // Ticket 3.25: the real API's `?info=1` names the writer, which the template shows.
+    expect(await page.locator("#who").textContent()).toBe("Last press by Bob. You save as Bob.");
 
     const roundTrip = await page.evaluate<{ read: unknown; list: unknown; text: unknown; gone: unknown }>(`(async () => {
       await workshopData.set("list_1", { name: "Ada's list", items: [1, 2, 3], done: false, note: null });
@@ -217,16 +211,21 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     store.live.add(NICKNAME);
     store.values.set(`${NICKNAME}/presses`, { json: "5", bytes: 1 });
     await openApp("5");
+    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
     const message = await page.evaluate<string>(`workshopData.set("presses", 6).then(() => "stored", (error) => error.message)`);
     expect(message).toBe(APP_DATA_MESSAGES.signInToSave);
+    // Ticket 3.25: the template's own button, pressed by a visitor, shows the same reason and saves nothing.
+    await page.getByRole("button", { name: "Press" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(APP_DATA_MESSAGES.signInToSave);
     expect(store.values.get(`${NICKNAME}/presses`)?.json).toBe("5");
+    expect(seen.filter((s) => s.method === "PUT").map((s) => s.status)).toEqual([401, 401]);
     expect(seen.find((s) => s.method === "PUT")).toMatchObject({ status: 401, allowOrigin: "*", allowCredentials: undefined });
     expect(errors).toEqual([]);
   });
 
   it("shows the API's plain 413 reason to the page, and stores nothing", async () => {
     store.live.add(NICKNAME);
-    await openApp("0");
+    await openApp("0", HAND_OFF);
     page.removeAllListeners("console");
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 413")) errors.push(message.text());
@@ -243,7 +242,7 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 404")) errors.push(message.text());
     });
-    const read = page.waitForResponse((response) => response.url().endsWith(`${DATA_PREFIX}presses`));
+    const read = page.waitForResponse((response) => new URL(response.url()).pathname === `${DATA_PREFIX}presses`);
     await page.goto(`${origin}${APP_PATH}`);
     expect((await read).status()).toBe(404);
     await expect.poll(() => page.locator("#status").textContent()).toBe("This app is not live on the workshop yet, so it cannot load or save data.");

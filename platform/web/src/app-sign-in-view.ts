@@ -2,7 +2,8 @@
 // the page, as pure functions so every rule is unit tested without a browser. The DOM wiring is in ./app-sign-in.ts.
 //
 // The token is never stored, logged or shown: it only goes into the one address the page opens next,
-// `/apps/<the same nickname, lower-cased>/#wt=<token>` (the fragment never reaches a server or a log).
+// `/apps/<the same nickname, lower-cased>/#wt=<token>&wn=<the writer's nickname>` (the fragment never reaches a server
+// or a log). Ticket 3.25: the writer's nickname goes with it, so the app's `workshopData.whoAmI()` can name the visitor.
 import { APP_SIGN_IN_TEXTS } from "../../api/workshop/texts.js";
 import { messageOf, parseMe, type ApiAnswer, type Me } from "./flow.js";
 
@@ -27,10 +28,13 @@ export function handOffAddress(app: string): string | undefined {
   return APP_PATTERN.test(app) ? `/app-sign-in/?app=${encodeURIComponent(app)}` : undefined;
 }
 
-/** The only address a token is ever sent to: the same app, lower-cased (as /apps/ serves it), token in the fragment. */
-export function appAddress(app: string, token: string): string | undefined {
-  if (!APP_PATTERN.test(app) || !TOKEN_PATTERN.test(token)) return undefined;
-  return `/apps/${app.toLowerCase()}/#wt=${token}`;
+/**
+ * The only address a token is ever sent to: the same app, lower-cased (as /apps/ serves it), the token and (ticket 3.25)
+ * the writer's nickname, a public name, in the fragment.
+ */
+export function appAddress(app: string, token: string, nickname: string): string | undefined {
+  if (!APP_PATTERN.test(app) || !TOKEN_PATTERN.test(token) || !APP_PATTERN.test(nickname)) return undefined;
+  return `/apps/${app.toLowerCase()}/#wt=${token}&wn=${nickname}`;
 }
 
 export type MeState = { kind: "ask"; nickname: string } | { kind: "signed-out" } | { kind: "no-nickname" } | { kind: "show"; message: string };
@@ -58,7 +62,10 @@ export function tokenState(answer: ApiAnswer, app: string): TokenState {
   if (answer.status === 200 && answer.body !== null && typeof answer.body === "object") {
     const body = answer.body as Record<string, unknown>;
     // The answer must be for the app this page asked for; else nothing is opened.
-    const address = typeof body["token"] === "string" && body["app"] === app.toLowerCase() ? appAddress(app, body["token"]) : undefined;
+    const address =
+      typeof body["token"] === "string" && typeof body["nickname"] === "string" && body["app"] === app.toLowerCase()
+        ? appAddress(app, body["token"], body["nickname"])
+        : undefined;
     return address === undefined ? { kind: "show", message: APP_SIGN_IN_TEXTS.failed } : { kind: "open", address };
   }
   if (answer.status === 404) return { kind: "not-live" };

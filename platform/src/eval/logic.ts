@@ -673,6 +673,25 @@ export function missingScreens(title: string | undefined, screens: readonly stri
   return missing;
 }
 
+/**
+ * Ticket 3.25: what a visitor (no token) sees of the workshop's sign-in in the published app. `shown`: elements with
+ * `data-workshop-sign-in` that workshop-data.js left shown and that read "Sign in" (text or aria-label); `visible`: those
+ * on the first screen; `opens`: whether pressing the first visible one opened the hand-off page
+ * (`/app-sign-in/?app=<nickname>`) in a new tab (undefined when none is on the first screen).
+ */
+export interface SignInCheck {
+  shown: number;
+  visible: number;
+  opens: boolean | undefined;
+}
+
+/** The sign-in problem of a published app, if any: a visitor must find the sign-in button, and it must open the hand-off. */
+export function signInProblem(check: SignInCheck): string | undefined {
+  if (check.shown === 0) return 'no "Sign in to save" button (data-workshop-sign-in) for a visitor';
+  if (check.opens === false) return "the sign-in button does not open the workshop's sign-in page in a new tab";
+  return undefined;
+}
+
 export interface BuildEvalOutcome {
   /** The runner's outcome. */
   outcome: string;
@@ -689,6 +708,8 @@ export interface BuildEvalOutcome {
   missing: string[];
   /** Hosts other than the app's own that the page asked for (ticket 2.14: free outside services), sorted. */
   outsideHosts: string[];
+  /** Ticket 3.25: the sign-in button a visitor sees (none checked before the app was published). */
+  signIn: SignInCheck;
   /** Pages the coding agent read with WebFetch while building (ticket 2.15), from the build feed. */
   fetches: number;
   /** The hosts it read them from, each once, sorted. */
@@ -715,7 +736,7 @@ export function expectsWebFetch(spec: string): boolean {
 
 /**
  * Scores one build: handed over, steps in order, at least one commit, check passed, no console error, no overflow, every
- * screen found, and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
+ * screen found, the sign-in button shown to a visitor (ticket 3.25), and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
  */
 export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): ClarifyScore {
   const problems: string[] = [];
@@ -729,11 +750,15 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
     if (outcome.consoleErrors.length > 0) problems.push(`${outcome.consoleErrors.length} console error(s): ${outcome.consoleErrors.join(" | ").slice(0, 300)}`);
     if (outcome.overflow > 0) problems.push(`scrolls sideways by ${outcome.overflow} px`);
     if (outcome.missing.length > 0) problems.push(`missing ${outcome.missing.join(", ")}`);
+    const signIn = signInProblem(outcome.signIn);
+    if (signIn !== undefined) problems.push(signIn);
   }
   return problems.length === 0
     ? {
         pass: true,
-        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown${
+        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown, sign-in button shown to a visitor${
+          outcome.signIn.opens === true ? " and opens the sign-in" : ""
+        }${
           outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
         }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}`,
       }

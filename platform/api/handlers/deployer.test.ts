@@ -12,7 +12,7 @@ afterEach(() => {
 function deps(download: () => Promise<Uint8Array>) {
   const records = new FakeDeployRecords();
   records.builds.set("b1", { nickname: "Ada", pushedCommit: COMMIT, status: "building" });
-  return { records, deps: { download, objects: new FakeAppObjects(), cdn: new FakeCdn(), records, now: () => new Date(), log: logEntry } };
+  return { records, deps: { download, objects: new FakeAppObjects(), cdn: new FakeCdn(), records, now: () => new Date(), log: logEntry, dataClient: new TextEncoder().encode("// the platform's client\n") } };
 }
 
 const body = JSON.stringify({ buildId: "b1", nickname: "Ada", commit: COMMIT });
@@ -25,7 +25,7 @@ describe("deployer handler (ticket 2.5)", () => {
     await createHandler(t.deps)({ Records: [{ body, attributes: { ApproximateReceiveCount: "1" } }] });
     expect(t.records.builds.get("b1")?.status).toBe("live");
     expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0] ?? "")).toMatchObject({ event: "deployer", outcome: "live", files: 1 });
+    expect(JSON.parse(lines[0] ?? "")).toMatchObject({ event: "deployer", outcome: "live", files: 2 });
     expect(lines[0]).not.toContain("Ada");
     expect(lines[0]).not.toContain(COMMIT);
   });

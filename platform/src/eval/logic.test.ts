@@ -9,6 +9,7 @@ import {
   formatBuildSummary,
   missingScreens,
   scoreBuild,
+  signInProblem,
   scoreChange,
   formatChangeResult,
   type ChangeEvalOutcome,
@@ -462,6 +463,7 @@ describe("scoreBuild", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
+    signIn: { shown: 1, visible: 1, opens: true },
     fetches: 0,
     fetchHosts: [],
     durationMs: 185_000,
@@ -470,6 +472,14 @@ describe("scoreBuild", () => {
 
   it("passes a handed-over build with the steps in order, a commit, a passing check, no error, no overflow and every screen", () => {
     expect(scoreBuild(ok).pass).toBe(true);
+  });
+
+  it("ticket 3.25: requires the sign-in button for a visitor, opening the workshop's sign-in when it is on the first screen", () => {
+    expect(scoreBuild(ok).detail).toContain("sign-in button shown to a visitor and opens the sign-in");
+    expect(scoreBuild({ ...ok, signIn: { shown: 2, visible: 0, opens: undefined } })).toEqual({ pass: true, detail: expect.stringMatching(/sign-in button shown to a visitor$/) as unknown });
+    expect(scoreBuild({ ...ok, signIn: { shown: 0, visible: 0, opens: undefined } })).toEqual({ pass: false, detail: 'no "Sign in to save" button (data-workshop-sign-in) for a visitor' });
+    expect(scoreBuild({ ...ok, signIn: { shown: 1, visible: 1, opens: false } })).toEqual({ pass: false, detail: "the sign-in button does not open the workshop's sign-in page in a new tab" });
+    expect(signInProblem({ shown: 1, visible: 1, opens: true })).toBeUndefined();
   });
 
   it("names the outside services a passing build reached (ticket 2.14)", () => {
@@ -569,6 +579,7 @@ describe("the change suite (ticket 3.7)", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
+    signIn: { shown: 1, visible: 1, opens: true },
     fetches: 0,
     fetchHosts: [],
     durationMs: 120_000,
