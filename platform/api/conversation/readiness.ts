@@ -12,8 +12,11 @@ export const READINESS_MAX_TOKENS = 600;
 /** At most this many reasons are kept, each cut to READINESS_REASON_CHARS characters on one line. */
 export const MAX_READINESS_REASONS = 5;
 export const READINESS_REASON_CHARS = 400;
-/** A spec longer than this is not sent (specs are refused above 8000 characters when written). */
-const MAX_SPEC_TEXT = 12_000;
+/**
+ * A spec longer than this is not sent whole (specs are refused above 8000 characters when written). Ticket 3.9: a
+ * repository's SPEC.md may hold up to 20 KB, all of which must be checked, so the limit is 20,480 characters.
+ */
+export const MAX_SPEC_TEXT = 20_480;
 
 /**
  * The participant message Approve spec stores for the AI worker (ticket 2.7), at step `approved`. The

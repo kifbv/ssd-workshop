@@ -13,7 +13,8 @@
 // every 30 s), so every participant page shows the paused banner. Ticket 3.6: at step 4 (step `building` with the app live)
 // a sent message is a change request; `POST /api/conversation/change/build` (Build this change) and
 // `POST /api/conversation/change/discard` (Not this one) act on the proposed version, and once the app is live the reads
-// ask the AI worker (once) for three suggested changes. Every route starts with the
+// ask the AI worker (once) for three suggested changes. Ticket 3.9: `POST /api/conversation/change/rebuild` (Rebuild from my
+// repository) asks for a change build from the caller's own SPEC.md on GitHub. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -37,6 +38,7 @@ import { CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY } from "./change.js";
 import { MAX_SPEC_VERSION } from "../keys.js";
 import { READINESS_FAILURE_REPLY, READINESS_REQUEST } from "./readiness.js";
 import { WRITE_SPEC_REQUEST } from "./spec.js";
+import { REBUILD_REQUEST } from "../workshop/texts.js";
 import {
   FAILURE_REPLY,
   HISTORY_PAGE_LIMIT,
@@ -60,6 +62,8 @@ export const STATUS_ROUTE = "GET /api/status";
 /** Ticket 3.6: Build this change and Not this one, on the caller's proposed spec version. */
 export const CHANGE_BUILD_ROUTE = "POST /api/conversation/change/build";
 export const CHANGE_DISCARD_ROUTE = "POST /api/conversation/change/discard";
+/** Ticket 3.9: Rebuild from my repository (step 4): the caller's own SPEC.md on `main`, read by the platform. */
+export const CHANGE_REBUILD_ROUTE = "POST /api/conversation/change/rebuild";
 export const CONVERSATION_ROUTES = [
   SEND_ROUTE,
   POLL_ROUTE,
@@ -71,6 +75,7 @@ export const CONVERSATION_ROUTES = [
   STATUS_ROUTE,
   CHANGE_BUILD_ROUTE,
   CHANGE_DISCARD_ROUTE,
+  CHANGE_REBUILD_ROUTE,
 ] as const;
 
 /** Ticket 3.6: a page load asks for the suggested changes again only this long after the last ask (none stored yet). */
@@ -94,11 +99,12 @@ export const MESSAGES = {
   "no-spec": "There is no spec to approve yet.",
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
   "invalid-change": "Send a JSON body with the version of the proposed change.",
+  "invalid-rebuild": "Send a JSON body (it may be empty: {}).",
   "build-running": PHASE_3_TEXTS.changeWhileBuilding,
   "not-live": PHASE_3_TEXTS.changeBeforeLive,
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "change-build" | "change-discard" | "unknown";
+export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "change-build" | "change-discard" | "change-rebuild" | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -156,7 +162,7 @@ interface Result {
 }
 
 const refused = (reason: keyof typeof MESSAGES, status: number): Result => {
-  const invalid = reason === "invalid" || reason === "invalid-step" || reason === "invalid-approve" || reason === "invalid-change";
+  const invalid = reason === "invalid" || reason === "invalid-step" || reason === "invalid-approve" || reason === "invalid-change" || reason === "invalid-rebuild";
   return {
     outcome: invalid ? "invalid-request" : reason,
     response: jsonResponse(status, { message: MESSAGES[reason], ...(invalid ? {} : { reason }) }),
@@ -212,11 +218,16 @@ async function createAndQueue(
   text: string,
   deps: ConversationDeps,
   afterBuild?: string,
+  request?: "rebuild-from-repo",
 ): Promise<{ result: "created"; id: string } | { result: "busy" | "waiting" | "approved" }> {
   const now = deps.now();
   const id = newMessageId(now, deps.randomBytes);
   const nowSeconds = Math.floor(now.getTime() / 1000);
-  const created = await deps.store.createMessage(participantId, { id, step, text, createdAt: now.toISOString(), nowSeconds }, afterBuild);
+  const created = await deps.store.createMessage(
+    participantId,
+    { id, step, text, createdAt: now.toISOString(), nowSeconds, ...(request === undefined ? {} : { request }) },
+    afterBuild,
+  );
   if (created !== "created") return { result: created };
   try {
     await deps.queue.send({ participantId, messageId: id });
@@ -613,6 +624,24 @@ async function discardChange(request: HttpRequest, participant: ParticipantRecor
 }
 
 /**
+ * Ticket 3.9, Rebuild from my repository: at step 4 only (any other step: 404, like a change route's), while the app is
+ * live, nothing of the caller's is building and changes are left (the change gate's 409s); stores REBUILD_REQUEST marked
+ * `rebuild-from-repo` (an attribute only this route writes) as the message in flight and hands it to the AI worker, which
+ * has the launcher read the caller's own SPEC.md, checks it and queues the change build. Answers its id for polling. The
+ * body must be JSON (415 otherwise, so a plain form cannot press it from another site); its content is ignored.
+ */
+async function rebuildFromRepository(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  if (readJsonObject(request) === undefined) return refused("invalid-rebuild", 400);
+  if (participant.step !== "building" || participant.nickname === undefined) return { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
+  const gate = await changeGate(participant.id, await deps.store.getConversation(participant.id), deps);
+  if ("refusal" in gate) return gate.refusal;
+  const created = await createAndQueue(participant.id, "building", REBUILD_REQUEST, deps, gate.buildId, "rebuild-from-repo");
+  if (created.result !== "created") return refused(created.result === "approved" ? "busy" : created.result, 409);
+  return { outcome: "accepted", response: jsonResponse(202, { id: created.id }) };
+}
+
+/**
  * Ticket 3.5: `GET /api/status`, the workshop's state for any signed-in person (`{ paused: true }` while the global
  * Stop is on, else `{}`): one small `SETTINGS` read, which every signed-in screen repeats every 30 s so an idle page
  * shows and clears the paused banner. A failed read is a 500 (the page keeps what it showed), not a false "running".
@@ -633,6 +662,7 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === STATUS_ROUTE) return "status";
   if (request.routeKey === CHANGE_BUILD_ROUTE) return "change-build";
   if (request.routeKey === CHANGE_DISCARD_ROUTE) return "change-discard";
+  if (request.routeKey === CHANGE_REBUILD_ROUTE) return "change-rebuild";
   return "unknown";
 }
 
@@ -654,6 +684,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "status") result = await workshopStatus(deps);
     else if (route === "change-build") result = await buildChange(request, session.participant, deps);
     else if (route === "change-discard") result = await discardChange(request, session.participant, deps);
+    else if (route === "change-rebuild") result = await rebuildFromRepository(request, session.participant, deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

@@ -119,6 +119,8 @@ export const CONVERSATION_ROUTES = [
   // Ticket 3.6: Build this change and Not this one, on the caller's proposed version.
   { path: "/api/conversation/change/build", method: HttpMethod.POST },
   { path: "/api/conversation/change/discard", method: HttpMethod.POST },
+  // Ticket 3.9: Rebuild from my repository.
+  { path: "/api/conversation/change/rebuild", method: HttpMethod.POST },
 ] as const;
 
 /**

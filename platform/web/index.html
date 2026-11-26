@@ -249,6 +249,11 @@
           <textarea id="live-chat-input" name="text" rows="3" maxlength="2000" required></textarea>
           <button id="live-chat-send" type="submit" data-busy-label="Sending…">Send</button>
         </form>
+        <details id="rebuild-fold" class="advanced">
+          <summary>Advanced: edited SPEC.md on GitHub?</summary>
+          <p class="help">If you changed <code>SPEC.md</code> in your repository yourself, the platform can read it from <code>main</code>, check it like any change and rebuild your app from it. It counts as one of your changes.</p>
+          <button id="rebuild-button" type="button" class="secondary" data-busy-label="Asking…">Rebuild from my repository</button>
+        </details>
         <p id="message-live" class="message" role="status" aria-live="polite"></p>
         <p id="live-chat-budget" class="help" hidden></p>
 

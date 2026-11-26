@@ -18,6 +18,11 @@ import {
   type ChangeBuildFinish,
   type ChangeRequestResult,
   type DiscardResult,
+  type RebuildFinish,
+  type RepositoryRead,
+  REBUILD_REPLY_KINDS,
+  rebuildSpent,
+  rebuildStatus,
   type SuggestionsQueue,
   type BuildJob,
   type BuildQueue,
@@ -189,7 +194,16 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       ...(m.suggestion === undefined ? {} : { suggestion: m.suggestion }),
       ...(m.verdictReason === undefined ? {} : { verdictReason: m.verdictReason }),
       ...(m.request === undefined ? {} : { request: m.request }),
+      ...(m.request === "rebuild-from-repo" && m.repository !== undefined ? { repository: { ...m.repository } } : {}),
     };
+  }
+
+  /** Ticket 3.9: what the launcher stores on a Rebuild from my repository request (DynamoLaunchRecords.storeRepositorySpec). */
+  storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): boolean {
+    const message = this.messages.get(participantId)?.get(messageId);
+    if (message === undefined || message.repository !== undefined) return false;
+    this.messagesOf(participantId).set(messageId, { ...message, repository: { ...read } });
+    return true;
   }
 
   async getReplyText(participantId: string, messageId: string): Promise<string | undefined> {
@@ -564,6 +578,71 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
     return true;
   }
 
+  async finishRebuild(participantId: string, messageId: string, outcome: RebuildFinish, nowIso: string): Promise<boolean> {
+    this.fail("finishRebuild");
+    const message = this.messages.get(participantId)?.get(messageId);
+    const conversation = this.conversations.get(participantId);
+    const profile = this.profiles.get(participantId);
+    // The same conditions as the DynamoDB transaction, all or nothing.
+    if (message?.status !== "pending" || this.repliesOf(participantId).has(messageId)) return false;
+    if (conversation?.pendingId !== messageId || conversation.buildId !== outcome.previousBuildId) return false;
+    const specs = this.specs.get(participantId) ?? [];
+    if (outcome.kind === "ready") {
+      const used = profile?.changeRequestsUsed;
+      if (profile?.step !== "building") return false;
+      if (!((used === undefined && outcome.used === 0) || used === outcome.used) || outcome.used >= outcome.cap) return false;
+      const previous = this.builds.get(outcome.previousBuildId)?.status;
+      if (previous !== "live" && previous !== "failed") return false;
+      if (this.builds.has(outcome.build.buildId)) return false;
+      if (specs.some((v) => v.version === outcome.spec.version)) return false;
+    }
+    const guardrail = "guardrail" in outcome ? outcome.guardrail : undefined;
+    const answer = "answer" in outcome ? outcome.answer : undefined;
+    this.messagesOf(participantId).set(messageId, {
+      ...message,
+      status: rebuildStatus(outcome.kind),
+      ...(guardrail === undefined
+        ? {}
+        : { verdict: guardrail.verdict, verdictReason: guardrail.reason, suggestion: guardrail.suggestion, guardrailUsage: guardrail.usage }),
+    });
+    this.repliesOf(participantId).set(messageId, {
+      text: outcome.reply,
+      kind: REBUILD_REPLY_KINDS[outcome.kind],
+      createdAt: nowIso,
+      ...(outcome.kind === "ready" ? { specVersion: outcome.spec.version } : {}),
+      ...(answer === undefined
+        ? {}
+        : { prompt: answer.prompt, modelId: answer.modelId, promptVersion: answer.promptVersion, historyCount: answer.historyCount, usage: answer.usage }),
+    });
+    const rest = withoutInFlight(conversation);
+    if (outcome.kind === "ready" && profile !== undefined) {
+      delete rest.proposedSpecVersion;
+      const version = outcome.spec.version;
+      this.specs.set(participantId, [
+        ...specs,
+        { version, text: outcome.spec.text, messageId, createdAt: nowIso, approvedAt: nowIso, whatChanges: [...outcome.spec.whatChanges] },
+      ]);
+      this.conversations.set(participantId, { ...rest, state: "open", buildId: outcome.build.buildId, approvedSpecVersion: version, latestSpecVersion: version });
+      this.profiles.set(participantId, { ...profile, changeRequestsUsed: outcome.used + 1 });
+      this.builds.set(outcome.build.buildId, {
+        buildId: outcome.build.buildId,
+        nickname: outcome.build.nickname,
+        participantId,
+        status: "queued",
+        kind: "change",
+        changeNumber: outcome.build.changeNumber,
+        specVersion: version,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    } else {
+      this.conversations.set(participantId, { ...rest, state: "open" });
+    }
+    const spent = rebuildSpent(outcome);
+    if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) this.add(participantId, spent);
+    return true;
+  }
+
   async markSuggestionsRequested(participantId: string, nowIso: string, askedBeforeIso: string): Promise<boolean> {
     this.fail("markSuggestionsRequested");
     const c = this.conversations.get(participantId);
@@ -648,6 +727,8 @@ export class FakeQueue implements MessageQueue, HeldJobs, SuggestionsQueue {
 
 export class FakeBuildQueue implements BuildQueue {
   readonly sent: BuildJob[] = [];
+  /** Ticket 3.9: spec-read requests (Rebuild from my repository), in order. */
+  readonly specReads: AiJob[] = [];
   failure: Error | undefined;
   /** How many sends fail before it works again (undefined: every send while `failure` is set). */
   failTimes: number | undefined;
@@ -661,6 +742,11 @@ export class FakeBuildQueue implements BuildQueue {
       }
     }
     this.sent.push({ ...job });
+  }
+
+  async sendSpecRead(job: AiJob): Promise<void> {
+    if (this.failure !== undefined && this.failTimes === undefined) throw this.failure;
+    this.specReads.push({ ...job });
   }
 }
 

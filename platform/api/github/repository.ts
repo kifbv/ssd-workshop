@@ -461,3 +461,80 @@ export async function openRepositoryAdmin(credentials: AppCredentials, deps: Git
     },
   };
 }
+
+/**
+ * Ticket 3.9: the largest `SPEC.md` Rebuild from my repository reads (20 KB). A larger one is refused before any AI
+ * call, by GitHub's reported size, so its bytes are never downloaded.
+ */
+export const MAX_REPOSITORY_SPEC_BYTES = 20 * 1024;
+
+/**
+ * Ticket 3.9: what reading `SPEC.md` on `main` found. `found` carries the cleaned text (cleanRepositorySpec);
+ * `missing`: no `main`, or no `SPEC.md` file at the top of it (a folder or a link of that name counts as missing);
+ * `too-large`: over MAX_REPOSITORY_SPEC_BYTES; `unreadable`: not UTF-8 text; `empty`: nothing but spaces once cleaned.
+ */
+export type RepositorySpec =
+  | { kind: "found"; text: string }
+  | { kind: "missing" }
+  | { kind: "too-large" }
+  | { kind: "unreadable" }
+  | { kind: "empty" };
+
+/**
+ * Ticket 3.9: a `SPEC.md` from a participant's repository as the platform keeps it: line endings made `\n`, control
+ * characters other than tab and line feed and format characters (`\p{Cf}`: bidi controls, zero-width characters, the
+ * BOM) removed, then email-shaped text replaced as in every published `SPEC.md` (removeEmailAddresses), and spaces at
+ * the ends of lines and blank lines at the end dropped.
+ */
+export function cleanRepositorySpec(text: string): string {
+  const cleaned = text
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[\p{Cf}\p{Cs}]/gu, "")
+    .replace(/[^\P{Cc}\t\n]/gu, "");
+  return removeEmailAddresses(cleaned)
+    .replace(/[ \t]+$/gmu, "")
+    .replace(/\n+$/u, "")
+    .concat("\n");
+}
+
+/**
+ * Ticket 3.9, Rebuild from my repository: reads `SPEC.md` at the top of `main` with a one-repository read-only token
+ * (`contents: read`, checked like readRepositoryMain's): the branch, its commit, the top tree, then the file's blob,
+ * each id checked against GIT_ID_PATTERN. The tree's size for the file is checked before the blob is asked for (a file
+ * over MAX_REPOSITORY_SPEC_BYTES is never downloaded), and the decoded bytes again. The bytes must be valid UTF-8 (a
+ * strict decoder). Nothing is written. GitHub problems (refusals, time limits) are thrown as GitHubProblem.
+ */
+export async function readRepositorySpec(credentials: AppCredentials, nickname: string, deps: GitHubDeps): Promise<RepositorySpec> {
+  const name = repositoryNameFor(nickname);
+  const jwt = appJwt(credentials, deps.now());
+  const installation = await findInstallation(deps, jwt);
+  const { token } = await repositoryToken(deps, jwt, installation.id, name, "read");
+  const call = (step: GitHubStep, path: string): Promise<GitHubAnswer> =>
+    withRetry(deps, () => githubCall(deps, step, "GET", `/repos/${APPS_GITHUB_OWNER}/${name}${path}`, token));
+  const branch = await call("get-branch", `/git/ref/heads/${APPS_DEFAULT_BRANCH}`);
+  if (branch.status === 404 || branch.status === 409) return { kind: "missing" };
+  const head = gitId(record(expectStatus(branch, "get-branch", 200).object).sha, "get-branch");
+  const commit = expectStatus(await call("get-commit", `/git/commits/${head}`), "get-commit", 200);
+  const treeId = gitId(record(commit.tree).sha, "get-commit");
+  const tree = expectStatus(await call("get-tree", `/git/trees/${treeId}`), "get-tree", 200);
+  const entry = (Array.isArray(tree.tree) ? tree.tree.map(record) : []).find((e) => e.path === SPEC_FILE);
+  if (entry === undefined || entry.type !== "blob" || (entry.mode !== "100644" && entry.mode !== "100755")) return { kind: "missing" };
+  if (typeof entry.size === "number" && entry.size > MAX_REPOSITORY_SPEC_BYTES) return { kind: "too-large" };
+  const blobId = gitId(entry.sha, "get-tree");
+  const blob = expectStatus(await call("get-blob", `/git/blobs/${blobId}`), "get-blob", 200);
+  if (typeof blob.size === "number" && blob.size > MAX_REPOSITORY_SPEC_BYTES) return { kind: "too-large" };
+  const content = text(blob.content);
+  // Base64 of at most MAX_REPOSITORY_SPEC_BYTES, with GitHub's line breaks every 60 characters: anything longer is too large.
+  if (blob.encoding !== "base64" || content === undefined) return { kind: "unreadable" };
+  if (content.length > Math.ceil(MAX_REPOSITORY_SPEC_BYTES / 3) * 4 * 1.1 + 4) return { kind: "too-large" };
+  const bytes = Buffer.from(content.replace(/\s+/gu, ""), "base64");
+  if (bytes.length > MAX_REPOSITORY_SPEC_BYTES) return { kind: "too-large" };
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const cleaned = cleanRepositorySpec(decoded);
+  return cleaned.trim() === "" ? { kind: "empty" } : { kind: "found", text: cleaned };
+}

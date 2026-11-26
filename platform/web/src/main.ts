@@ -874,6 +874,9 @@ function renderStepFour(): void {
   byId("proposal").hidden = !state.showProposal;
   byId<HTMLButtonElement>("build-change-button").disabled = waiting !== null;
   byId<HTMLButtonElement>("discard-change-button").disabled = waiting !== null;
+  // Ticket 3.9: Rebuild from my repository, in its Advanced fold, while changes are left.
+  byId("rebuild-fold").hidden = !state.showForm;
+  byId<HTMLButtonElement>("rebuild-button").disabled = waiting !== null;
   byId("live-typing-text").textContent = state.typingText;
 }
 
@@ -1183,6 +1186,25 @@ function wire(): void {
       });
     });
   }
+
+  // Ticket 3.9: Rebuild from my repository. The request is answered like Build this change's (the reply may queue a
+  // change build, and the page then follows it to step 3).
+  const rebuildButton = byId<HTMLButtonElement>("rebuild-button");
+  rebuildButton.addEventListener("click", () => {
+    if (waiting !== null) return;
+    clearMessage("live");
+    void whileBusy(rebuildButton, async () => {
+      const result = changeActionResult(await call("POST", "/api/conversation/change/rebuild", {}));
+      if (result.kind === "gone") {
+        // 404: step 4 is not open (any more): read the build again.
+        await refreshLive();
+        return;
+      }
+      await afterChangeAction(result);
+    }).finally(() => {
+      if (current === "live") render();
+    });
+  });
 
   // Sign out (ticket 3.1): the API deletes the session and clears the cookie; the page stops polling.
   const signOutButton = byId<HTMLButtonElement>("sign-out-button");

@@ -355,6 +355,9 @@ export const AI_WORKER_FUNCTION_NAME = `${PREFIX}-api-ai-worker`;
  * change build's outcome sets `approvedSpecVersion` and `buildId`, removes `proposedSpecVersion` and counts the change
  * (`changeRequestsUsed`, the only role that may write it, conditional on its exact previous value and the cap, in the
  * transaction that creates the change build); the suggested changes (`suggestions`, once).
+ * Ticket 3.9: `approvedAt`, on the version Rebuild from my repository creates from the participant's SPEC.md in the same
+ * transaction that queues its change build (the press is the participant's approval; created only if absent). Never
+ * `repositoryRead` or `repositorySpec` (only the launcher writes what it read from GitHub).
  */
 export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "pk",
@@ -396,6 +399,7 @@ export const AI_WORKER_UPDATE_ATTRIBUTES = [
   "proposedSpecVersion",
   "changeRequestsUsed",
   "suggestions",
+  "approvedAt",
 ] as const;
 /**
  * The attribute names the AI worker may name in `BUILD#*` (UpdateItem only; ticket 2.7): a new build record, created
@@ -525,7 +529,20 @@ export const LAUNCHER_READ_ATTRIBUTES = [
   "kind",
   "changeNumber",
   "whatChanges",
+  // Ticket 3.9: a Rebuild from my repository request (the message's author, step, mark and status, and whether a read is
+  // already stored on it).
+  "author",
+  "step",
+  "request",
+  "repositoryRead",
 ] as const;
+/**
+ * Ticket 3.9: the names the launcher may name in `PARTICIPANT#*` (UpdateItem of a Rebuild from my repository request
+ * only, conditional on the item existing and no read stored yet): what it read of the participant's SPEC.md on GitHub.
+ * No other role may write them (synth test), so the AI worker can trust them; IAM cannot bind them to the request's
+ * item (no sort key condition), but the worker reads them only on a pending request with the route's mark.
+ */
+export const LAUNCHER_PARTICIPANT_UPDATE_ATTRIBUTES = ["pk", "sk", "repositoryRead", "repositorySpec"] as const;
 /**
  * The attribute names the launcher may name in `BUILD#*` (UpdateItem, also inside its claim transaction): the move from
  * `queued` to `building` under a new launch (`attemptId`, ticket 2.9 try 2), the started task, and failure. `nickname`, `participantId` and `pushedCommit` are only

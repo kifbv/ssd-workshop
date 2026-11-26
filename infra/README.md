@@ -674,6 +674,32 @@ left. A change costs about one change call and one change build of his AI budget
 The repository shows one new commit "Change 1: ..." with the updated `SPEC.md` (ticket 3.7). To start over, reset the
 test participant (section "Reset a test participant").
 
+## Check after the Rebuild from my repository deploy (ticket 3.9)
+
+```mermaid
+flowchart TD
+  press[Step 4: Rebuild from my repository] --> worker[AI worker: Stop, budget, changes left]
+  worker -->|spec-read request| launcher[Build launcher: reads SPEC.md on main, read-only token]
+  launcher -->|job back| worker2[AI worker: same? guardrail, readiness]
+  worker2 -->|changed and ready| feed[Step 3 feed: Change n]
+  worker2 -->|same, too large, off path, not ready| reply[Answer in the change conversation, nothing built]
+```
+
+Run by Franck in a browser, as a test participant whose app is live and who has changes left, with the participant's
+repository open on GitHub in another tab. A changed spec costs one guardrail call, one readiness call and one change
+build, and counts one change.
+
+1. On step 4, open "Advanced: edited SPEC.md on GitHub?" and press **Rebuild from my repository** without changing
+   anything on GitHub: "Reading and checking the spec in your repository…", then "Your repository's spec has not
+   changed." The count is unchanged and step 4 stays.
+2. On GitHub, edit `SPEC.md` on `main` (add one small feature line) and commit. Press the button again: within about
+   a minute step 3 shows "Change n: ..." and the feed; when it is live, step 4 shows the count one lower and the
+   repository has one new "Change n: ..." commit whose `SPEC.md` is the edited one.
+3. Optional: commit a `SPEC.md` over 20 KB (paste a long text): the press answers that the spec is too large, at once,
+   and the count stays. Put the file back afterwards.
+4. In CloudWatch Logs, `/aws/lambda/ssd-workshop-builds-launcher` shows one `"event":"spec-read"` line per press with
+   `"outcome":"read"` and the read's kind, and no repository name, token or address.
+
 ## Build network (ticket 2.1)
 
 ```mermaid

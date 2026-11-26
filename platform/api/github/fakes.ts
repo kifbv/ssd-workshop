@@ -155,11 +155,11 @@ export class FakeGitHub {
    * A commit already on `main` (a repository some earlier run or a person left): the given files, message and
    * parents, by the builder's identity. Returns its id.
    */
-  seedCommit(name: string, files: Record<string, string>, message: string, parents: string[] = []): string {
+  seedCommit(name: string, files: Record<string, string | Uint8Array>, message: string, parents: string[] = []): string {
     const repo = this.repo(name);
     const tree = new Map<string, string>();
     for (const [path, content] of Object.entries(files)) {
-      const bytes = new TextEncoder().encode(content);
+      const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
       const blob = gitBlobSha(bytes);
       repo.blobs.set(blob, bytes);
       tree.set(path, blob);
@@ -304,7 +304,19 @@ export class FakeGitHub {
       const sha = rest.slice("/git/trees/".length);
       const tree = repo.trees.get(sha);
       if (!tree) return json(404, { message: "Not Found" });
-      return json(200, { sha, truncated: false, tree: [...tree].map(([path, blob]) => ({ path, mode: "100644", type: "blob", sha: blob })) });
+      // Ticket 3.9: blobs carry their size, as GitHub's trees do.
+      return json(200, {
+        sha,
+        truncated: false,
+        tree: [...tree].map(([path, blob]) => ({ path, mode: "100644", type: "blob", sha: blob, size: repo.blobs.get(blob)?.length ?? 0 })),
+      });
+    }
+    if (method === "GET" && rest.startsWith("/git/blobs/")) {
+      // Ticket 3.9: GitHub's blob answer, base64 with a line break every 60 characters.
+      const bytes = repo.blobs.get(rest.slice("/git/blobs/".length));
+      if (!bytes) return json(404, { message: "Not Found" });
+      const content = (Buffer.from(bytes).toString("base64").match(/.{1,60}/g) ?? []).join("\n");
+      return json(200, { sha: rest.slice("/git/blobs/".length), size: bytes.length, encoding: "base64", content });
     }
     if (method === "POST" && rest === "/git/blobs") {
       const bytes = body.encoding === "base64" ? Buffer.from(String(body.content), "base64") : Buffer.from(String(body.content));

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CHANGE_BUILD_REQUEST, PHASE_3_TEXTS } from "../../api/workshop/texts.js";
+import { CHANGE_BUILD_REQUEST, PHASE_3_TEXTS, REBUILD_REQUEST } from "../../api/workshop/texts.js";
 import { parseBuild, showsStepFour } from "./build-view.js";
 import { parseConversation, sendResult, type ChatMessage } from "./chat.js";
 import { MESSAGES } from "./flow.js";
-import { CHANGE_LOOP_DIAGRAM, changeActionResult, isBuildRequest, proposalResult, stepFourMessages, stepFourView } from "./live-view.js";
+import { CHANGE_LOOP_DIAGRAM, changeActionResult, isBuildRequest, isRebuildRequest, proposalResult, stepFourMessages, stepFourView } from "./live-view.js";
 
 const IDEAS = ["Add a weekly chart", "Let me delete a run", "Show my longest run"];
 
@@ -80,6 +80,14 @@ describe("what step 4 shows (ticket 3.8)", () => {
     expect(isBuildRequest({ ...request, author: "assistant" })).toBe(false);
     expect(isBuildRequest({ ...request, text: "Add a chart" })).toBe(false);
     expect(stepFourView({}, null, request).typingText).toBe(PHASE_3_TEXTS.checkingChange);
+  });
+
+  it("ticket 3.9: says the repository is being read and checked while Rebuild from my repository's request is in flight", () => {
+    const request: ChatMessage = { id: "m", author: "participant", text: REBUILD_REQUEST, status: "pending" };
+    expect(isRebuildRequest(request)).toBe(true);
+    expect(isRebuildRequest({ ...request, author: "assistant" })).toBe(false);
+    expect(isBuildRequest(request)).toBe(false);
+    expect(stepFourView({}, null, request).typingText).toBe(PHASE_3_TEXTS.checkingRepository);
   });
 });
 

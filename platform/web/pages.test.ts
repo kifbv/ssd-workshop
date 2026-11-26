@@ -16,7 +16,7 @@ import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
 import { BUILD_TEXTS } from "./src/build-view.js";
-import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText } from "../api/workshop/texts.js";
+import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText, REBUILD_REQUEST } from "../api/workshop/texts.js";
 
 const jsQR = jsQRModule.default;
 
@@ -1604,6 +1604,13 @@ function fakeStepFour(used = 1) {
       convo.state.pendingId = id;
       return { status: 202, body: { id, version } };
     },
+    "POST /api/conversation/change/rebuild": () => {
+      if (step4.used >= step4.cap) return { status: 409, body: { reason: "no-changes-left", message: "You've used your 5 changes." } };
+      const id = `m${convo.state.nextId++}`;
+      convo.state.messages.push({ id, author: "participant", text: REBUILD_REQUEST, status: "pending", step: "building" });
+      convo.state.pendingId = id;
+      return { status: 202, body: { id } };
+    },
     "POST /api/conversation/change/discard": (call) => {
       const version = (call.body as { version: number }).version;
       if (version !== step4.proposed) return { status: 404, body: { message: "Not found." } };
@@ -1951,6 +1958,50 @@ describe("step 4: change requests (ticket 3.8)", () => {
     await page.getByRole("button", { name: "Not this one" }).click();
     await expect.poll(() => page.locator("#suggestions").isVisible()).toBe(true);
     await expectNoSideScroll();
+  }, 30_000);
+  it("ticket 3.9: WHEN Rebuild from my repository is pressed (under its Advanced fold) THEN the page says the repository is being checked, an unchanged spec is answered in the conversation, and a changed one moves to the change build's feed", async () => {
+    const api = fakeStepFour(1);
+    const calls = await mockApi(api.handlers);
+    await openStepFour();
+    const rebuilds = () => calls.filter((c) => c.method === "POST" && c.path === "/api/conversation/change/rebuild");
+    const fold = page.locator("#rebuild-fold");
+    expect(await fold.isVisible()).toBe(true);
+    expect(await page.locator("#rebuild-button").isVisible()).toBe(false);
+    await page.locator("#rebuild-fold summary").click();
+    await page.getByRole("button", { name: "Rebuild from my repository" }).click();
+    await expect.poll(() => rebuilds().map((c) => c.body)).toEqual([{}]);
+    await expect.poll(liveBubbles).toEqual([REBUILD_REQUEST]);
+    await expect.poll(() => page.locator("#live-typing-text").textContent()).toBe(PHASE_3_TEXTS.checkingRepository);
+    expect(await page.locator("#rebuild-button").isDisabled()).toBe(true);
+    expect(await page.locator("#live-chat-send").isDisabled()).toBe(true);
+    await expectNoSideScroll();
+    // Unchanged: the answer shows, nothing is built, the count stays.
+    api.convo.answer(PHASE_3_TEXTS.specUnchanged);
+    must(api.convo.state.messages.at(-1)).step = "building";
+    await pollAfter(2000);
+    await expect.poll(liveBubbles).toEqual([REBUILD_REQUEST, PHASE_3_TEXTS.specUnchanged]);
+    expect(await screen("live").isVisible()).toBe(true);
+    expect(await page.locator("#changes-left").textContent()).toBe("Changes left: 4 of 5");
+    await expect.poll(() => page.locator("#rebuild-button").isDisabled()).toBe(false);
+
+    // Changed: the reply queues a change build and the page follows it to step 3.
+    await page.getByRole("button", { name: "Rebuild from my repository" }).click();
+    await expect.poll(() => rebuilds().length).toBe(2);
+    await expect.poll(() => page.locator("#live-typing-text").textContent()).toBe(PHASE_3_TEXTS.checkingRepository);
+    await settle();
+    api.ready();
+    await pollAfter(2000);
+    await expect.poll(() => screen("build").isVisible()).toBe(true);
+    expect(await page.locator("#build-change").textContent()).toBe(changeBuildingText(2));
+    expect(sends(calls)).toEqual([]);
+  }, 30_000);
+
+  it("ticket 3.9: WHEN every change is used THEN Rebuild from my repository is not offered", async () => {
+    const api = fakeStepFour(5);
+    await mockApi(api.handlers);
+    await openStepFour();
+    expect(await page.locator("#changes-used").isVisible()).toBe(true);
+    expect(await page.locator("#rebuild-fold").isVisible()).toBe(false);
   }, 30_000);
 });
 

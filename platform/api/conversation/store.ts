@@ -59,6 +59,12 @@ import {
   type ChangeBuildFinish,
   type ChangeRequestResult,
   type DiscardResult,
+  type RebuildFinish,
+  type RepositoryRead,
+  REBUILD_REPLY_KINDS,
+  REPOSITORY_READ_KINDS,
+  rebuildSpent,
+  rebuildStatus,
 } from "./state.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -162,6 +168,19 @@ function specOf(item: Record<string, AttributeValue> | undefined): StoredSpec | 
   };
 }
 
+/**
+ * Ticket 3.9: what the launcher stored on a Rebuild from my repository request (`repositoryRead`, and `repositorySpec`
+ * for a found file), or undefined while it has not read yet (or the values are not ones it writes).
+ */
+function repositoryReadOf(item: Record<string, AttributeValue>): RepositoryRead | undefined {
+  const kind = item["repositoryRead"]?.S;
+  if (kind === "found") {
+    const text = item["repositorySpec"]?.S;
+    return text === undefined ? undefined : { kind, text };
+  }
+  return kind !== undefined && (REPOSITORY_READ_KINDS as readonly string[]).includes(kind) ? { kind: kind as Exclude<RepositoryRead["kind"], "found"> } : undefined;
+}
+
 const BUILD_STATUSES: readonly BuildStatus[] = ["queued", "building", "deploying", "live", "failed"];
 const isBuildStatus = (v: unknown): v is BuildStatus => typeof v === "string" && (BUILD_STATUSES as string[]).includes(v);
 
@@ -254,6 +273,8 @@ export class DynamoConversationStore implements ConversationStore {
                 status: str("pending"),
                 createdAt: str(message.createdAt),
                 pendingSince: num(message.nowSeconds),
+                // Ticket 3.9: Rebuild from my repository's request carries its mark.
+                ...(message.request === undefined ? {} : { request: str(message.request) }),
               },
               { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
             ),
@@ -285,6 +306,7 @@ export class DynamoConversationStore implements ConversationStore {
     const verdictReason = item["verdictReason"]?.S;
     const approvedTextHash = item["approvedTextHash"]?.S;
     const request = item["request"]?.S;
+    const repository = request === "rebuild-from-repo" ? repositoryReadOf(item) : undefined;
     return {
       id: messageId,
       step,
@@ -294,7 +316,8 @@ export class DynamoConversationStore implements ConversationStore {
       ...(approvedTextHash === undefined ? {} : { approvedTextHash }),
       ...(suggestion === undefined ? {} : { suggestion }),
       ...(verdictReason === undefined ? {} : { verdictReason }),
-      ...(request === "change-build" ? { request } : {}),
+      ...(request === "change-build" || request === "rebuild-from-repo" ? { request } : {}),
+      ...(repository === undefined ? {} : { repository }),
     };
   }
 
@@ -1007,49 +1030,161 @@ export class DynamoConversationStore implements ConversationStore {
         { remove: ready ? ["pendingId", "pendingSince", "proposedSpecVersion"] : ["pendingId", "pendingSince"] },
       ),
     ];
-    if (ready) {
-      const { used, cap } = outcome;
-      items.push(
-        // The change counts here, in the transaction that queues its build: from exactly `used` (no lost update), and
-        // only below the cap. A retry of the build (npm run builds -- retry) never writes the profile.
-        setItem(this.tableName, participantKey(participantId), { changeRequestsUsed: num(used + 1) }, {
-          expression:
-            used === 0
-              ? "#step = :building AND (attribute_not_exists(#changeRequestsUsed) OR (#changeRequestsUsed = :used AND #changeRequestsUsed < :cap))"
-              : "#step = :building AND #changeRequestsUsed = :used AND #changeRequestsUsed < :cap",
-          names: { "#step": "step" },
-          values: { ":building": str("building"), ":used": num(used), ":cap": num(cap) },
-        }),
-        // Nothing of theirs is running: the build the change follows is live (or a change build that failed).
-        {
-          ConditionCheck: {
-            TableName: this.tableName,
-            Key: keyOf(buildKey(outcome.previousBuildId)),
-            ConditionExpression: "#status IN (:live, :failed)",
-            ExpressionAttributeNames: { "#status": "status" },
-            ExpressionAttributeValues: { ":live": str("live"), ":failed": str("failed") },
-          },
+    if (ready) items.push(...this.changeBuildItems(participantId, outcome.previousBuildId, outcome.version, outcome.build, outcome.used, outcome.cap, nowIso));
+    const spent = answered ? outcome.answer.usage : outcome.usage;
+    if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) items.push(this.usageItem(participantId, spent, nowIso));
+    try {
+      await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * Ticket 3.6 (shared with 3.9): the items that queue a change build: the change counted from exactly `used` (no lost
+   * update) and only below the cap, the build it follows `live` or `failed`, and the new build (only if absent).
+   */
+  private changeBuildItems(
+    participantId: string,
+    previousBuildId: string,
+    version: number,
+    build: { buildId: string; nickname: string; changeNumber: number },
+    used: number,
+    cap: number,
+    nowIso: string,
+  ): TransactWriteItem[] {
+    return [
+      // The change counts here, in the transaction that queues its build: from exactly `used` (no lost update), and
+      // only below the cap. A retry of the build (npm run builds -- retry) never writes the profile.
+      setItem(this.tableName, participantKey(participantId), { changeRequestsUsed: num(used + 1) }, {
+        expression:
+          used === 0
+            ? "#step = :building AND (attribute_not_exists(#changeRequestsUsed) OR (#changeRequestsUsed = :used AND #changeRequestsUsed < :cap))"
+            : "#step = :building AND #changeRequestsUsed = :used AND #changeRequestsUsed < :cap",
+        names: { "#step": "step" },
+        values: { ":building": str("building"), ":used": num(used), ":cap": num(cap) },
+      }),
+      // Nothing of theirs is running: the build the change follows is live (or a change build that failed).
+      {
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: keyOf(buildKey(previousBuildId)),
+          ConditionExpression: "#status IN (:live, :failed)",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: { ":live": str("live"), ":failed": str("failed") },
         },
+      },
+      setItem(
+        this.tableName,
+        buildKey(build.buildId),
+        {
+          type: str("build"),
+          buildId: str(build.buildId),
+          nickname: str(build.nickname),
+          participantId: str(participantId),
+          status: str("queued"),
+          kind: str("change"),
+          changeNumber: num(build.changeNumber),
+          specVersion: num(version),
+          createdAt: str(nowIso),
+          updatedAt: str(nowIso),
+        },
+        { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+      ),
+    ];
+  }
+
+  async finishRebuild(participantId: string, messageId: string, outcome: RebuildFinish, nowIso: string): Promise<boolean> {
+    const ready = outcome.kind === "ready";
+    const guardrail = "guardrail" in outcome ? outcome.guardrail : undefined;
+    const answer = "answer" in outcome ? outcome.answer : undefined;
+    const items: TransactWriteItem[] = [
+      setItem(
+        this.tableName,
+        messageKey(participantId, messageId),
+        {
+          status: str(rebuildStatus(outcome.kind)),
+          ...(guardrail === undefined
+            ? {}
+            : {
+                verdict: str(guardrail.verdict),
+                verdictReason: str(guardrail.reason),
+                suggestion: str(guardrail.suggestion),
+                guardrailInputTokens: num(guardrail.usage.inputTokens),
+                guardrailOutputTokens: num(guardrail.usage.outputTokens),
+                guardrailCostUsd: num(guardrail.usage.costUsd),
+              }),
+        },
+        { expression: "#status = :pending", values: { ":pending": str("pending") } },
+      ),
+      setItem(
+        this.tableName,
+        messageKey(participantId, replyId(messageId)),
+        {
+          type: str("message"),
+          author: str("assistant"),
+          text: str(outcome.reply),
+          kind: str(REBUILD_REPLY_KINDS[outcome.kind]),
+          replyTo: str(messageId),
+          createdAt: str(nowIso),
+          ...(ready ? { specVersion: num(outcome.spec.version) } : {}),
+          ...(answer === undefined
+            ? {}
+            : {
+                prompt: str(answer.prompt),
+                modelId: str(answer.modelId),
+                promptVersion: str(answer.promptVersion),
+                historyCount: num(answer.historyCount),
+                inputTokens: num(answer.usage.inputTokens),
+                outputTokens: num(answer.usage.outputTokens),
+                costUsd: num(answer.usage.costUsd),
+              }),
+        },
+        { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
+      ),
+      setItem(
+        this.tableName,
+        conversationKey(participantId),
+        {
+          state: str("open"),
+          updatedAt: str(nowIso),
+          ...(ready
+            ? { buildId: str(outcome.build.buildId), approvedSpecVersion: num(outcome.spec.version), latestSpecVersion: num(outcome.spec.version) }
+            : {}),
+        },
+        {
+          expression: "#pendingId = :messageId AND #buildId = :previousBuildId",
+          names: { "#pendingId": "pendingId", ...(ready ? {} : { "#buildId": "buildId" }) },
+          values: { ":messageId": str(messageId), ":previousBuildId": str(outcome.previousBuildId) },
+        },
+        // Built from the repository: an open proposal is replaced by it. Otherwise the proposal (if any) stays.
+        { remove: ready ? ["pendingId", "pendingSince", "proposedSpecVersion"] : ["pendingId", "pendingSince"] },
+      ),
+    ];
+    if (ready) {
+      items.push(
+        // The repository's spec as the next version, approved by the participant's press (the launcher builds only an
+        // approved version with a "What changes" list).
         setItem(
           this.tableName,
-          buildKey(outcome.build.buildId),
+          specKey(participantId, outcome.spec.version),
           {
-            type: str("build"),
-            buildId: str(outcome.build.buildId),
-            nickname: str(outcome.build.nickname),
-            participantId: str(participantId),
-            status: str("queued"),
-            kind: str("change"),
-            changeNumber: num(outcome.build.changeNumber),
-            specVersion: num(outcome.version),
+            type: str("spec"),
+            specVersion: num(outcome.spec.version),
+            text: str(outcome.spec.text),
+            messageId: str(messageId),
             createdAt: str(nowIso),
-            updatedAt: str(nowIso),
+            approvedAt: str(nowIso),
+            whatChanges: strList(outcome.spec.whatChanges),
           },
           { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },
         ),
+        ...this.changeBuildItems(participantId, outcome.previousBuildId, outcome.spec.version, outcome.build, outcome.used, outcome.cap, nowIso),
       );
     }
-    const spent = answered ? outcome.answer.usage : outcome.usage;
+    const spent = rebuildSpent(outcome);
     if (spent !== undefined && spent.inputTokens + spent.outputTokens > 0) items.push(this.usageItem(participantId, spent, nowIso));
     try {
       await this.client.send(new TransactWriteItemsCommand({ TransactItems: items }));

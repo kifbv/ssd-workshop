@@ -248,3 +248,9 @@ paths:
   test's mocked API keys handlers by path only: read the query from `call.search` (`?version=3`). A text the page must
   recognise (Build this change's request) lives in `platform/api/workshop/texts.ts`, never in a module that pulls model
   code into the browser bundle (`api/conversation/change.ts` re-exports it).
+- Work that needs the GitHub App key (only the launcher may read it, `GitHubKeyForTheLauncherOnly`) for an AI worker job
+  (3.9, Rebuild from my repository): the worker sends a marked request through the launch queue (exact body
+  `{"readSpec": ...}`, its own deduplication id), the launcher reads with a read-only token, stores the result on the
+  request in attributes only it may write (once: `attribute_not_exists`) and sends the job back to the AI queue; the
+  worker's second pass acts on the stored result. Never widen the key's readers. A size limit on a file from GitHub is
+  checked on the tree entry's `size` before the blob is downloaded, then on the bytes.

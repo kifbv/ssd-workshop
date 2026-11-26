@@ -44,6 +44,7 @@ import {
   conversationKey,
   launchKey,
   LAUNCHES_PK,
+  messageKey,
   participantKey,
   queueEntryKey,
   slotCountKey,
@@ -55,6 +56,8 @@ import type { WorkshopSettings } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
+import type { RepositoryRead } from "../conversation/state.js";
+import { REBUILD_REQUEST } from "../workshop/texts.js";
 import type {
   ApprovedSpec,
   ChangeInput,
@@ -65,6 +68,7 @@ import type {
   LaunchBuild,
   LaunchEntry,
   LaunchRecords,
+  RebuildRequestState,
   SlotCount,
   SlotItem,
   TaskStart,
@@ -332,6 +336,25 @@ export class DynamoLaunchRecords implements LaunchRecords {
     if (text === undefined) return undefined;
     const whatChanges = (item.whatChanges?.L ?? []).flatMap((line) => (line.S === undefined ? [] : [line.S]));
     return { text, ...(whatChanges.length > 0 ? { whatChanges } : {}) };
+  }
+
+  async readRebuildRequest(participantId: string, messageId: string): Promise<RebuildRequestState | undefined> {
+    const item = await this.get(messageKey(participantId, messageId), ["author", "step", "text", "status", "request", "repositoryRead"]);
+    if (item?.author?.S !== "participant" || item.step?.S !== "building" || item.request?.S !== "rebuild-from-repo" || item.text?.S !== REBUILD_REQUEST) {
+      return undefined;
+    }
+    return { pending: item.status?.S === "pending", read: item.repositoryRead?.S !== undefined };
+  }
+
+  storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean> {
+    const found = read.kind === "found";
+    return this.update(
+      messageKey(participantId, messageId),
+      found ? "SET #repositoryRead = :read, #repositorySpec = :spec" : "SET #repositoryRead = :read",
+      "attribute_exists(#pk) AND attribute_not_exists(#repositoryRead)",
+      { "#pk": "pk", "#repositoryRead": "repositoryRead", ...(found ? { "#repositorySpec": "repositorySpec" } : {}) },
+      { ":read": str(read.kind), ...(found ? { ":spec": str(read.text) } : {}) },
+    );
   }
 
   setChangeInput(buildId: string, attemptId: string, input: ChangeInput, nowIso: string): Promise<boolean> {

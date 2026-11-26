@@ -4,7 +4,23 @@
 // build slots (counter and holders) and the waiting line, with the same conditions as the real transactions.
 import type { BuildStatus } from "../types.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
-import type { ApprovedSpec, BuildTasks, ChangeInput, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
+import type { RepositoryRead } from "../conversation/state.js";
+import type {
+  ApprovedSpec,
+  BuildTasks,
+  ChangeInput,
+  ClaimResult,
+  DeadLetter,
+  DeadLetters,
+  LaunchBuild,
+  LaunchEntry,
+  LaunchRecords,
+  RebuildRequestState,
+  SlotCount,
+  SlotItem,
+  TaskStart,
+  TaskState,
+} from "./launcher.js";
 
 export interface FakeBuild {
   nickname: string;
@@ -196,6 +212,23 @@ export class FakeBuildTable implements LaunchRecords {
 
   async readProfileNickname(participantId: string): Promise<string | undefined> {
     return this.profiles.get(participantId);
+  }
+
+  /** Ticket 3.9: Rebuild from my repository requests, `<participant id>#<message id>` -> pending and the stored read. */
+  readonly rebuildRequests = new Map<string, { pending: boolean; read?: RepositoryRead }>();
+
+  async readRebuildRequest(participantId: string, messageId: string): Promise<RebuildRequestState | undefined> {
+    this.maybeFail("readRebuildRequest");
+    const request = this.rebuildRequests.get(`${participantId}#${messageId}`);
+    return request && { pending: request.pending, read: request.read !== undefined };
+  }
+
+  async storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean> {
+    this.maybeFail("storeRepositoryRead");
+    const request = this.rebuildRequests.get(`${participantId}#${messageId}`);
+    if (request === undefined || request.read !== undefined) return false;
+    request.read = read;
+    return true;
   }
 
   async readConversation(participantId: string): Promise<{ buildId?: string; approvedSpecVersion?: number }> {
