@@ -147,6 +147,8 @@ describe("clarify.json (ticket 1.8 criteria 1 and 2)", () => {
       "movies tracker",
       "nutrition calculator",
       "movies with posters from a free API",
+      "reminders sent by email",
+      "idea in French",
     ]);
     // Ticket 2.14: the outside-service idea must hear about a free service that needs no key, never that it is impossible,
     // and get no technical question.
@@ -252,6 +254,9 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       { text: "Plant reminders!\n1. How many plants?\n2. Indoors?\n3. Water how often?", inputTokens: 100, outputTokens: 50 },
       { text: 'All set: press "Write my spec".\n[READY_FOR_SPEC]', inputTokens: 100, outputTokens: 50 },
       { text: `Movies. The posters can come from Wikipedia, which is free and needs no key.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
+      { text: `Friday reminders, shown on the app's page as a board your team opens.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
+      { text: "No: the workshop keeps it, and anyone with the app's link can see it.\n1. What can wait?", inputTokens: 100, outputTokens: 50 },
+      { text: "Un suivi des plantes du bureau.\n1. Qui va arroser vos plantes ?\n2. Quoi noter ?\n3. Quels rappels ?", inputTokens: 100, outputTokens: 50 },
     ]);
     const seen: string[] = [];
     const results = await runClarifyEval(
@@ -262,7 +267,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       },
       (r, i) => seen.push(formatClarifyResult(r, i)),
     );
-    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true]);
+    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true]);
     expect(results[2]?.detail).toBe("error Error");
     // The history goes to the model before the new message.
     expect(model.requests[3]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
@@ -270,11 +275,12 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
     expect(seen[0]).toContain("     | 1. Who is it for?");
     expect(seen[4]).toContain("(offers to write the spec)");
     expect(formatClarifySummary(results)).toEqual([
-      "Clarify: 5/6 passed",
-      `Tokens: 500 in, 250 out, cost $${usageOf({ inputTokens: 500, outputTokens: 250 }).costUsd.toFixed(4)}`,
-      "  first-reply: 3/4",
+      "Clarify: 8/9 passed",
+      `Tokens: 800 in, 400 out, cost $${usageOf({ inputTokens: 800, outputTokens: 400 }).costUsd.toFixed(4)}`,
+      "  first-reply: 5/6",
       "  change-of-mind: 1/1",
       "  offers-spec: 1/1",
+      "  answers-question: 1/1",
     ]);
     expect(exitCode(results)).toBe(1);
     expect(exitCode(results.filter((r) => r.pass))).toBe(0);
@@ -605,5 +611,80 @@ describe("the change suite (ticket 3.7)", () => {
     expect(lines.join("\n")).toContain("first build: 3m20s");
     expect(lines.join("\n")).toContain("change build: 2m00s, 2 files written, 400000 tokens in, 10000 out, cost $0.5000");
     expect(lines.at(-1)).toBe("Duration: 5m29s in all (change build 2m00s); tokens: 803000 in, 20600 out, cost $1.0200");
+  });
+});
+
+describe("ticket 3.16 eval cases", () => {
+  const usage = usageOf({ inputTokens: 100, outputTokens: 10 });
+
+  it("guardrails.json: photographed documents and sending ideas on-path, colleagues' contact details declined, French declines checked for their language", () => {
+    const examples = parseGuardrailExamples(FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const verdictOf = (text: string) => examples.find((e) => e.text === text)?.expected;
+    expect(verdictOf("An app to photograph documents and list them.")).toBe("on-path");
+    expect(verdictOf("Send a message by email to a list of contacts an admin sets up.")).toBe("on-path");
+    expect(verdictOf("Collect my colleagues' phone numbers and home addresses.")).toBe("decline");
+    const french = examples.filter((e) => e.category === "in French" && e.expected === "decline");
+    expect(french.length).toBeGreaterThanOrEqual(2);
+    for (const e of french) expect(e.declineWords).toEqual(expect.arrayContaining(["désolé", "atelier"]));
+    expect(parseGuardrailExamples('{"examples":[{"category":"x","text":"y","expected":"on-path","declineWords":["a"]}]}')).toMatchObject({ error: expect.stringContaining("example 1") });
+  });
+
+  it("a French decline passes only with the model's own sentence naming one of the words", async () => {
+    const example: GuardrailExample = { category: "in French", text: "t", expected: "decline", declineWords: ["désolé", "atelier"] };
+    const french = "Désolé, cela dépasse cet atelier, mais pourquoi pas un carnet de recettes ?";
+    const run = (outcome: Partial<GuardrailOutcome>) => runGuardrailEval([example], async () => ({ verdict: "decline" as const, reason: "r", usage, ...outcome }));
+    const [good] = await run({ reply: french, localized: true });
+    expect(good?.pass).toBe(true);
+    expect(formatResult(must(good), 0)).toBe(`PASS  1 [in French] decline: t | r\n     | ${french}`);
+    const [template] = await run({ reply: "Sorry, that's outside what we can build in this workshop, but how about a quiz instead?", localized: false });
+    expect(template?.pass).toBe(false);
+    expect(formatResult(must(template), 0)).toContain("! the decline is the English template");
+    const [english] = await run({ reply: "Sorry, this is outside the workshop, but how about a quiz?", localized: true });
+    expect(english?.problem).toBe("the decline names none of (désolé, atelier)");
+    const [onPath] = await run({ verdict: "on-path" });
+    expect(onPath?.pass).toBe(false);
+  });
+
+  it("clarify: answers-question needs a history, every mentionsEach group is named, at most five numbered questions", () => {
+    const question = example({ check: "answers-question", history: [{ question: "q", answer: "a" }], mentionsEach: [["workshop"], ["anyone", "everyone"], ["link"]] });
+    expect(scoreClarify(question, { text: "The workshop keeps it, and anyone with the link can see it.", offersSpec: false })).toEqual({
+      pass: true,
+      detail: "answers, names what it must",
+    });
+    expect(scoreClarify(question, { text: "It stays on your phone.", offersSpec: false }).detail).toBe(
+      "never mentions (workshop); never mentions (anyone, everyone); never mentions (link)",
+    );
+    expect(
+      scoreClarify(question, { text: "The workshop keeps it; everyone with the link sees it.\n1. A?\n2. B?\n3. C?\n4. D?\n5. E?\n6. F?", offersSpec: false }).detail,
+    ).toContain("6 numbered questions (expected at most 5)");
+    expect(parseClarifyExamples('{"examples":[{"name":"x","check":"answers-question","text":"hi"}]}')).toMatchObject({ error: expect.stringContaining("example 1") });
+    expect(parseClarifyExamples('{"examples":[{"name":"x","check":"first-reply","text":"hi","mentionsEach":[[]]}]}')).toMatchObject({
+      error: expect.stringContaining("example 1"),
+    });
+    const examples = parseClarifyExamples(CLARIFY_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const email = must(examples.find((e) => e.name === "reminders sent by email"));
+    expect(email.avoids).toEqual(expect.arrayContaining(["server", "email address", "addresses"]));
+    expect(must(examples.find((e) => e.name === "will my data stay on my phone")).check).toBe("answers-question");
+  });
+
+  it("readiness: a French spec's reasons must each be French and name the problem in the agreed form", () => {
+    const examples = parseReadinessExamples(readFileSync(new URL("../../api/eval/readiness.json", import.meta.url), "utf8"));
+    if ("error" in examples) throw new Error(examples.error);
+    const french = examples.filter((e) => (e.languageWords ?? []).length > 0);
+    expect(french.map((e) => e.keywords)).toEqual([["(outside service)"], ["(server)"]]);
+    expect(french.every((e) => e.participantText !== undefined)).toBe(true);
+    const mail = must(french[0]);
+    expect(scoreReadiness(mail, { verdict: "not-ready", reasons: ["Votre spec envoie un e-mail chaque matin ; affichez la liste sur la page (outside service)."] })).toEqual({
+      pass: true,
+      detail: "not-ready, naming (outside service), every reason in the participant's language",
+    });
+    expect(scoreReadiness(mail, { verdict: "not-ready", reasons: ["Your spec sends an email every morning (outside service)."] }).detail).toContain(
+      "1 reason(s) name none of (votre, vos, vous)",
+    );
+    expect(scoreReadiness(mail, { verdict: "not-ready", reasons: ["Votre spec envoie un e-mail chaque matin (service extérieur)."] }).detail).toContain(
+      "no reason names (outside service)",
+    );
   });
 });

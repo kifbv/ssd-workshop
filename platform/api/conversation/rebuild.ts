@@ -275,7 +275,7 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
       // Decline or flag: nothing is built. A flagged repository spec does not wait for a facilitator (the message's text
       // is the platform's request, not the spec): the participant is told to talk to them or change SPEC.md.
       finishing = true;
-      const reply = check.verdict === "decline" ? declineReply(check.suggestion) : texts.flagged;
+      const reply = check.verdict === "decline" ? declineReply(check.suggestion, check.decline) : texts.flagged;
       return await ended({ kind: "declined", reply, previousBuildId, guardrail }, "declined", check.verdict);
     }
     if (overBudget(budget, guardrail.usage.costUsd)) {

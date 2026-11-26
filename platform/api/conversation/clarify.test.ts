@@ -100,7 +100,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
   });
 
   it("asks for numbered questions about a new idea, follows a changed idea and names the marker in the prompt", () => {
-    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v4");
+    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v5");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("3 to 5 questions as a numbered list");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("drop the old idea completely");
     expect(CLARIFY_SYSTEM_PROMPT).toContain(`end your reply with this exact line on its own: ${READY_MARKER}`);
@@ -117,6 +117,19 @@ describe("the ready marker (clarify-v2 and later)", () => {
     expect(CLARIFY_SYSTEM_PROMPT).toContain("Never ask technical questions about services, addresses, keys or APIs");
   });
 
+  it("tells the real storage facts, offers an in-page version of sending ideas and replies in the participant's language (clarify-v5, ticket 3.16)", () => {
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("offer a version people read on the app's own page instead");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("a message board on the page");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Never ask for email addresses, phone numbers or contact lists");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("the workshop keeps it for the app, in the workshop's own storage, and everyone who has the app's link");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Nothing stays only on the participant's phone or browser");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Never promise that anything stays on their phone");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("always reply in the language the participant writes in");
+    expect(CLARIFY_SYSTEM_PROMPT).not.toContain("plain English");
+    // Everything clarify-v4 said about services stays (checked above), and still no technical talk.
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("never discuss servers, hosting, programming languages or code");
+  });
+
   it("treats a reply that is only the marker as empty (the worker then fails it with the neutral reply)", async () => {
     const model = new FakeModel([{ text: READY_MARKER, inputTokens: 1, outputTokens: 1 }]);
     await expect(answerMessage(model, "clarify", [], "hi")).rejects.toMatchObject({ name: "EmptyAnswer" });
@@ -129,7 +142,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
     const replies = [...must(s.table.replies.get("me-1")).values()];
     expect(replies.map((r) => r.offersSpec)).toEqual([undefined, true]);
     expect(replies[1]?.text).not.toContain("READY");
-    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v4", "clarify-v4"]);
+    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v5", "clarify-v5"]);
     // The history sent to the model holds the stored text, never the marker.
     s.model.push(verdictReply("on-path"), { text: "Sure.", inputTokens: 1, outputTokens: 1 });
     await s.call(send("one more thing"));

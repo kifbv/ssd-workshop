@@ -8,7 +8,7 @@ import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { answerMessage, answerRequest } from "../../api/conversation/answer.js";
 import { extractSpec, parseSpec } from "../../api/conversation/spec.js";
-import { checkGuardrail } from "../../api/conversation/guardrail.js";
+import { checkGuardrail, declineReply } from "../../api/conversation/guardrail.js";
 import { checkReadiness } from "../../api/conversation/readiness.js";
 import { addUsage, BedrockModel, usageOf } from "../../api/conversation/model.js";
 import { suggestChanges } from "../../api/conversation/suggestions.js";
@@ -201,7 +201,7 @@ async function main(): Promise<number> {
     console.log(`Model: ${MODEL_ID} (${REGION}), ${examples.length} examples`);
     const results = await runReadinessEval(
       examples,
-      (example) => checkReadiness(model, example.spec),
+      (example) => checkReadiness(model, example.spec, undefined, example.participantText),
       (result, index) => console.log(formatReadinessResult(result, index)),
     );
     for (const line of formatReadinessSummary(results)) console.log(line);
@@ -233,7 +233,11 @@ async function main(): Promise<number> {
   console.log(`Model: ${MODEL_ID} (${REGION}), ${examples.length} examples`);
   const results = await runGuardrailEval(
     examples,
-    (text) => checkGuardrail(model, text),
+    async (text) => {
+      const check = await checkGuardrail(model, text);
+      // Ticket 3.16: a decline shows the sentence the participant would see, and whether it is the model's own.
+      return check.verdict === "decline" ? { ...check, reply: declineReply(check.suggestion, check.decline), localized: check.decline !== undefined } : check;
+    },
     (result, index) => console.log(formatResult(result, index)),
   );
   for (const line of formatSummary(results)) console.log(line);

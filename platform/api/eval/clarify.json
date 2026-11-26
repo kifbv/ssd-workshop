@@ -1,5 +1,5 @@
 {
-  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer, and name one of its `mentions` when it has some (ticket 2.14: an idea that wants outside information hears about a free service that needs no key); any reply must name none of its `avoids` (never that outside services are impossible, no technical question); after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec.",
+  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer, and name one of its `mentions` when it has some (ticket 2.14: an idea that wants outside information hears about a free service that needs no key); any reply must name none of its `avoids` (never that outside services are impossible, no technical question); after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec. Ticket 3.16: `mentionsEach` lists word groups the reply must each name (an idea that sends emails gets a version read on the app's page, with no question about servers or addresses; a question about data on the phone hears that the workshop keeps it and anyone with the link sees it; an idea in French gets a French reply); an `answers-question` example is a question in the middle of a conversation.",
   "examples": [
     {
       "name": "fitness tracker",
@@ -46,6 +46,32 @@
       "text": "I want an app to manage the movies i've seen and the ones i want to see. It should have a search bar where i type the name of a movie and it automatically search through a free API so that i can get the poster of the movie etc. When i select a movie it saves it on my list of movies to watch and i can later give my own rating and other notes and then the app i saved under my list of watched movies. Feel free to suggest other functionality.",
       "mentions": ["Wikipedia", "free", "no key", "needs no key", "public"],
       "avoids": ["cannot reach", "can't reach", "cannot connect", "can't connect", "cannot use outside", "not possible", "isn't possible", "API key", "endpoint", "JSON", "CORS", "URL"]
+    },
+    {
+      "name": "reminders sent by email",
+      "check": "first-reply",
+      "text": "An app that emails my team a reminder every Friday afternoon to fill in their timesheets.",
+      "mentionsEach": [["page"], ["board", "read", "see", "open"]],
+      "avoids": ["server", "email address", "e-mail address", "addresses", "SMTP", "API", "mailing list", "phone number"]
+    },
+    {
+      "name": "will my data stay on my phone",
+      "check": "answers-question",
+      "history": [
+        {
+          "question": "A habit tracker for drinking water and reading, with a streak counter.",
+          "answer": "A tracker that counts your daily water and reading streaks.\n1. Is it just for you, or shared with others?\n2. What do you want to record each day: done or not done, or an amount?\n3. Should it show anything besides the streaks, such as a weekly view?\n4. What can a first version leave out?"
+        }
+      ],
+      "text": "Just for me. Will my data stay on my phone?",
+      "mentionsEach": [["workshop"], ["anyone", "everyone", "everybody", "whoever"], ["link", "address"]],
+      "avoids": ["server", "database", "localStorage", "local storage"]
+    },
+    {
+      "name": "idea in French",
+      "check": "first-reply",
+      "text": "Je voudrais une appli pour suivre les plantes du bureau et savoir quand les arroser.",
+      "mentionsEach": [["vous", "votre", "vos", "tu", "ton", "tes"], ["plante", "arros"]]
     }
   ]
 }

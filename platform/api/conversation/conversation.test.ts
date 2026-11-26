@@ -230,6 +230,17 @@ describe("criterion 2: a declined message gets one polite sentence and no answer
   });
 });
 
+describe("ticket 3.16 criterion 5: a decline in the participant's language", () => {
+  it("WHEN a participant who writes in French is declined THEN the reply is the guardrail's French sentence, ending with the suggestion as a question", async () => {
+    const s = setup();
+    const id = json(await handleConversationRequest(send("Une appli qui collecte les numéros de téléphone et adresses de mes collègues"), s.deps))["id"] as string;
+    const french = "Désolé, cela dépasse ce que nous pouvons construire dans cet atelier, mais que diriez-vous plutôt d'un carnet de recettes pour l'équipe ?";
+    s.model.push({ text: JSON.stringify({ verdict: "decline", reason: "colleagues' contact details", suggestion: "a recipe book for the team", decline: french }), inputTokens: 400, outputTokens: 60 });
+    expect(await s.drain()).toEqual(["declined"]);
+    expect(json(await handleConversationRequest(poll(id), s.deps))).toEqual({ id, status: "declined", reply: french });
+  });
+});
+
 describe("criterion 3: a flagged message waits for the facilitator", () => {
   it("WHEN the guardrail check says flag THEN the participant's state is waiting and later messages are refused until a decision", async () => {
     const s = setup();

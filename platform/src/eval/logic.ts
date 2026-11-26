@@ -80,6 +80,11 @@ export interface GuardrailExample {
   category: string;
   text: string;
   expected: GuardrailVerdict;
+  /**
+   * Ticket 3.16, a decline in the participant's language: when not empty, the decline sentence shown must be the
+   * model's own (not the English template) and name at least one of these words (start of a word, any case).
+   */
+  declineWords?: string[];
 }
 
 const VERDICTS: readonly string[] = ["on-path", "decline", "flag"];
@@ -96,17 +101,19 @@ export function parseGuardrailExamples(json: string): GuardrailExample[] | { err
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: GuardrailExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { category, text, expected } = (e ?? {}) as Record<string, unknown>;
+    const { category, text, expected, declineWords = [] } = (e ?? {}) as Record<string, unknown>;
     if (
       typeof category !== "string" ||
       typeof text !== "string" ||
       text.trim() === "" ||
       typeof expected !== "string" ||
-      !VERDICTS.includes(expected)
+      !VERDICTS.includes(expected) ||
+      !isStringList(declineWords) ||
+      (declineWords.length > 0 && expected !== "decline")
     ) {
-      return { error: `example ${i + 1} needs a category, a text and an expected verdict (on-path, decline or flag)` };
+      return { error: `example ${i + 1} needs a category, a text and an expected verdict (on-path, decline or flag), and declineWords only on a decline` };
     }
-    result.push({ category, text, expected: expected as GuardrailVerdict });
+    result.push({ category, text, expected: expected as GuardrailVerdict, ...(declineWords.length > 0 ? { declineWords } : {}) });
   }
   return result;
 }
@@ -115,6 +122,9 @@ export interface GuardrailOutcome {
   verdict: GuardrailVerdict;
   reason: string;
   usage: TokenUsage;
+  /** A decline: the sentence the participant would see (declineReply), and whether it is the model's own (ticket 3.16). */
+  reply?: string;
+  localized?: boolean;
 }
 
 export interface EvalResult {
@@ -122,7 +132,19 @@ export interface EvalResult {
   verdict: GuardrailVerdict | "error";
   reason: string;
   usage?: TokenUsage;
+  reply?: string;
   pass: boolean;
+  /** Why a matching verdict still failed (the decline's language). */
+  problem?: string;
+}
+
+/** Ticket 3.16: a decline expected in the participant's language is the model's sentence and names one of the words. */
+export function declineLanguageProblem(example: GuardrailExample, outcome: Pick<GuardrailOutcome, "verdict" | "reply" | "localized">): string | undefined {
+  const words = example.declineWords ?? [];
+  if (words.length === 0 || outcome.verdict !== "decline") return undefined;
+  if (outcome.localized !== true) return "the decline is the English template, not the participant's language";
+  if (!words.some((w) => startsWord(outcome.reply ?? "", w))) return `the decline names none of (${words.join(", ")})`;
+  return undefined;
 }
 
 /** Runs every example, one at a time (gentle on the quota); a failed call counts as a mismatch. */
@@ -136,7 +158,16 @@ export async function runGuardrailEval(
     let result: EvalResult;
     try {
       const outcome = await classify(example.text);
-      result = { example, verdict: outcome.verdict, reason: outcome.reason, usage: outcome.usage, pass: outcome.verdict === example.expected };
+      const problem = declineLanguageProblem(example, outcome);
+      result = {
+        example,
+        verdict: outcome.verdict,
+        reason: outcome.reason,
+        usage: outcome.usage,
+        ...(outcome.reply === undefined ? {} : { reply: outcome.reply }),
+        pass: outcome.verdict === example.expected && problem === undefined,
+        ...(problem === undefined ? {} : { problem }),
+      };
     } catch (error) {
       result = { example, verdict: "error", reason: error instanceof Error ? error.name : "Error", pass: false };
     }
@@ -150,8 +181,11 @@ const clip = (text: string, max: number): string => (text.length <= max ? text :
 
 export function formatResult(result: EvalResult, index: number): string {
   const mark = result.pass ? "PASS" : "FAIL";
-  const verdict = result.pass ? result.verdict : `${result.verdict} (expected ${result.example.expected})`;
-  return `${mark} ${String(index + 1).padStart(2)} [${result.example.category}] ${verdict}: ${clip(result.example.text, 70)} | ${clip(result.reason, 80)}`;
+  const verdict = result.verdict === result.example.expected ? result.verdict : `${result.verdict} (expected ${result.example.expected})`;
+  const head = `${mark} ${String(index + 1).padStart(2)} [${result.example.category}] ${verdict}: ${clip(result.example.text, 70)} | ${clip(result.reason, 80)}`;
+  // Ticket 3.16: a decline's sentence is shown, so a reviewer sees its language.
+  const lines = [head, ...(result.problem === undefined ? [] : [`     ! ${result.problem}`]), ...(result.reply === undefined ? [] : [`     | ${result.reply}`])];
+  return lines.join("\n");
 }
 
 export function formatSummary(results: readonly EvalResult[]): string[] {
@@ -173,8 +207,9 @@ export const exitCode = (results: readonly { pass: boolean }[]): number => (resu
 
 // ---- clarify (ticket 1.8) ----
 
-export type ClarifyCheck = "first-reply" | "change-of-mind" | "offers-spec";
-const CLARIFY_CHECKS: readonly string[] = ["first-reply", "change-of-mind", "offers-spec"];
+/** `answers-question` (ticket 3.16): a question in the middle of a conversation; the reply may go on asking (at most 5). */
+export type ClarifyCheck = "first-reply" | "change-of-mind" | "offers-spec" | "answers-question";
+const CLARIFY_CHECKS: readonly string[] = ["first-reply", "change-of-mind", "offers-spec", "answers-question"];
 
 export interface ClarifyExample {
   name: string;
@@ -190,6 +225,8 @@ export interface ClarifyExample {
   mentions: string[];
   /** Any check: the reply names none of these (start of a word, any case), e.g. "cannot reach" or a technical word (ticket 2.14). */
   avoids: string[];
+  /** Any check (ticket 3.16): for each group, the reply names at least one of its words (start of a word, any case). */
+  mentionsEach?: string[][];
 }
 
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim() !== "");
@@ -206,7 +243,7 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: ClarifyExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [], avoids = [] } = (e ?? {}) as Record<string, unknown>;
+    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [], avoids = [], mentionsEach = [] } = (e ?? {}) as Record<string, unknown>;
     const historyOk =
       Array.isArray(history) &&
       history.every((h) => {
@@ -224,13 +261,16 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
       !isStringList(oldKeywords) ||
       !isStringList(mentions) ||
       !isStringList(avoids) ||
+      !Array.isArray(mentionsEach) ||
+      !mentionsEach.every((group) => isStringList(group) && group.length > 0) ||
+      (check === "answers-question" && (history as unknown[]).length === 0) ||
       (check === "change-of-mind" && (newKeywords.length === 0 || oldKeywords.length === 0 || (history as unknown[]).length === 0));
     if (bad) {
       return {
-        error: `example ${i + 1} needs a name, a check (first-reply, change-of-mind or offers-spec), a text, a history of question/answer pairs, and for change-of-mind a history and new and old keywords`,
+        error: `example ${i + 1} needs a name, a check (first-reply, change-of-mind, offers-spec or answers-question), a text, a history of question/answer pairs, for change-of-mind and answers-question a history, for change-of-mind new and old keywords, and mentionsEach as non-empty word lists`,
       };
     }
-    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions, avoids });
+    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions, avoids, ...(mentionsEach.length > 0 ? { mentionsEach: mentionsEach as string[][] } : {}) });
   }
   return result;
 }
@@ -279,6 +319,13 @@ export function scoreClarify(example: ClarifyExample, answer: Pick<ClarifyAnswer
   if (example.check === "first-reply" && example.mentions.length > 0 && !example.mentions.some((k) => startsWord(answer.text, k))) {
     problems.push(`never mentions (${example.mentions.join(", ")})`);
   }
+  if (example.check === "answers-question") {
+    if (items.length > 5) problems.push(`${items.length} numbered questions (expected at most 5)`);
+    if (questions < items.length) problems.push(`${items.length - questions} numbered item(s) without a question mark`);
+  }
+  for (const group of example.mentionsEach ?? []) {
+    if (!group.some((k) => startsWord(answer.text, k))) problems.push(`never mentions (${group.join(", ")})`);
+  }
   const avoided = example.avoids.filter((k) => startsWord(answer.text, k));
   if (avoided.length > 0) problems.push(`says what it should not (${avoided.join(", ")})`);
   if (example.check === "change-of-mind") {
@@ -293,6 +340,7 @@ export function scoreClarify(example: ClarifyExample, answer: Pick<ClarifyAnswer
   }
   if (problems.length > 0) return { pass: false, detail: problems.join("; ") };
   if (example.check === "offers-spec") return { pass: true, detail: "offers to write the spec" };
+  if (example.check === "answers-question") return { pass: true, detail: `answers, names what it must${items.length > 0 ? `, then ${items.length} numbered questions` : ""}` };
   return { pass: true, detail: `${items.length} numbered questions` };
 }
 
@@ -488,6 +536,10 @@ export interface ReadinessExample {
   spec: string;
   /** not-ready: some reason names one of these (any case). */
   keywords: string[];
+  /** Ticket 3.16: the participant's latest message, sent along only for the reasons' language. */
+  participantText?: string;
+  /** Ticket 3.16, not-ready: every reason names at least one of these words (start of a word, any case): its language. */
+  languageWords?: string[];
 }
 
 /** The examples of a readiness file, or an error naming the first bad entry. */
@@ -502,7 +554,7 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: ReadinessExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { name, category, expected, spec, keywords = [] } = (e ?? {}) as Record<string, unknown>;
+    const { name, category, expected, spec, keywords = [], participantText, languageWords = [] } = (e ?? {}) as Record<string, unknown>;
     const bad =
       typeof name !== "string" ||
       typeof category !== "string" ||
@@ -510,11 +562,16 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
       typeof spec !== "string" ||
       checkSpec(spec).length > 0 ||
       !isStringList(keywords) ||
-      (expected === "not-ready" && keywords.length === 0);
+      (expected === "not-ready" && keywords.length === 0) ||
+      (participantText !== undefined && (typeof participantText !== "string" || participantText.trim() === "")) ||
+      !isStringList(languageWords) ||
+      (languageWords.length > 0 && expected !== "not-ready");
     if (bad) {
-      return { error: `example ${i + 1} needs a name, a category, an expected verdict (ready or not-ready), a spec of the right shape, and for not-ready keywords` };
+      return {
+        error: `example ${i + 1} needs a name, a category, an expected verdict (ready or not-ready), a spec of the right shape, for not-ready keywords, and languageWords only on not-ready`,
+      };
     }
-    result.push({ name, category, expected, spec, keywords });
+    result.push({ name, category, expected, spec, keywords, ...(languageWords.length > 0 ? { languageWords } : {}), ...(typeof participantText === "string" ? { participantText } : {}) });
   }
   return result;
 }
@@ -536,6 +593,12 @@ export function scoreReadiness(example: ReadinessExample, outcome: Pick<Readines
   if (example.expected === "ready") return { pass: true, detail: "ready" };
   const named = example.keywords.filter((k) => outcome.reasons.some((r) => r.toLowerCase().includes(k.toLowerCase())));
   if (named.length === 0) return { pass: false, detail: `not-ready, but no reason names ${example.keywords.join(" / ")}` };
+  const languageWords = example.languageWords ?? [];
+  if (languageWords.length > 0) {
+    const other = outcome.reasons.filter((r) => !languageWords.some((w) => startsWord(r, w)));
+    if (other.length > 0) return { pass: false, detail: `not-ready, but ${other.length} reason(s) name none of (${languageWords.join(", ")})` };
+    return { pass: true, detail: `not-ready, naming ${named.join(", ")}, every reason in the participant's language` };
+  }
   return { pass: true, detail: `not-ready, naming ${named.join(", ")}` };
 }
 
