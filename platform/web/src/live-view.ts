@@ -15,26 +15,25 @@ export interface Proposal {
 
 /**
  * The change loop, drawn in step 4's "Behind the scenes" box (Mermaid, top to bottom so it reads on a phone). The same
- * loop as the phase 3 brief's diagram, in the participant's words.
+ * loop as the phase 3 brief's diagram, in the participant's words, kept to one column with short labels and a single
+ * return arrow: it is drawn about 300 px wide, so its 16 px labels stay at 11 px or more in a 375 px wide page
+ * (tested in pages.test.ts). The facilitator's look at an unusual request and Not this one are in the paragraph under it.
  */
 export const CHANGE_LOOP_DIAGRAM = [
   "flowchart TD",
   "  you[Your change request] --> check{Safety check}",
-  "  check -->|unusual| facilitator[Your facilitator looks at it]",
-  "  facilitator -->|approved| update",
-  "  check -->|fits the workshop| update[Claude updates the spec:<br/>What changes]",
-  "  update -->|Not this one| you",
+  "  check --> update[Claude updates the spec:<br/>What changes]",
   "  update -->|Build this change| ready[Readiness check]",
   "  ready --> queue[(Build queue)]",
-  "  queue --> builder[Claude edits your app's files]",
+  "  queue --> builder[Claude edits<br/>your app's files]",
   "  builder --> github[GitHub: one new commit]",
-  "  github --> deployer[Deployer: checks, then publishes]",
+  "  github --> deployer[Deployer checks<br/>and publishes]",
   "  deployer --> live[New version live]",
-  "  live -->|next change| you",
+  "  live -.->|next change| you",
 ].join("\n");
 
 export const CHANGE_LOOP_ALT =
-  "Diagram of the change loop: your change request goes through a safety check, Claude updates the spec, you press Build this change, then the readiness check, the build queue, Claude edits your app, GitHub saves one commit and the deployer publishes the new version.";
+  "Diagram of the change loop: your change request goes through a safety check, Claude updates the spec, you press Build this change, then the readiness check, the build queue, Claude edits your app's files, GitHub saves one commit and the deployer checks and publishes the new version; the next change starts the loop again.";
 
 const show = (message: string, tone: Tone = "error"): Show => ({ kind: "show", message, tone });
 

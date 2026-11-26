@@ -543,6 +543,9 @@ main:has(#screen-spec:not([hidden])) {
 .live-failed .reasons {
   margin: 0;
 }
+.suggestions {
+  margin-top: 1rem;
+}
 .suggestions-list {
   display: grid;
   gap: 0.5rem;

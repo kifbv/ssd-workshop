@@ -16,7 +16,7 @@ import { PAGES_CONTENT_SECURITY_POLICY } from "../../infra/lib/config.js";
 import { buildWeb } from "./build.js";
 import { MESSAGES } from "./src/flow.js";
 import { BUILD_TEXTS } from "./src/build-view.js";
-import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS } from "../api/workshop/texts.js";
+import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText } from "../api/workshop/texts.js";
 
 const jsQR = jsQRModule.default;
 
@@ -1671,6 +1671,16 @@ describe("step 4: change requests (ticket 3.8)", () => {
     const box = must((await img.boundingBox()) ?? undefined);
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(PHONE.width);
+    // Readable on the phone: the picture is scaled down to fit the card, and its labels (the SVG's font size, Mermaid's
+    // 16 px) must still show at 11 CSS px or more.
+    const drawn = await img.evaluate((i: HTMLImageElement) => ({
+      natural: i.naturalWidth,
+      shown: i.getBoundingClientRect().width,
+      fontPx: Number(/#[\w-]+\{[^}]*?font-size:(\d+(?:\.\d+)?)px/.exec(decodeURIComponent(i.src))?.[1]),
+    }));
+    expect(drawn.fontPx).toBeGreaterThanOrEqual(14);
+    expect(drawn.shown).toBeLessThanOrEqual(drawn.natural);
+    expect((drawn.fontPx * drawn.shown) / drawn.natural).toBeGreaterThanOrEqual(11);
     expect(await img.getAttribute("alt")).toContain("change loop");
     expect(await page.locator("#live-diagram-text").textContent()).toContain("Build this change");
     await expectNoSideScroll();
@@ -1776,7 +1786,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     const calls = await mockApi(api.handlers);
     await openStepFour();
     await expect.poll(() => page.locator("#proposal").isVisible()).toBe(true);
-    expect(await page.locator("#proposal-version").textContent()).toBe("Version 4, not built yet");
+    expect(await page.locator("#proposal-version").textContent()).toBe(proposalVersionText(4));
     expect(await page.locator("#suggestions").isVisible()).toBe(false);
     await page.getByRole("button", { name: "Not this one" }).click();
     await expect.poll(() => page.locator("#proposal").isVisible()).toBe(false);

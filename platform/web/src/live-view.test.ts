@@ -131,9 +131,17 @@ describe("change builds on the page (ticket 3.8)", () => {
     expect(showsStepFour(parseBuild({ ...live, status: "building", kind: "change" }) ?? (live as never))).toBe(false);
   });
 
-  it("draws the change loop top to bottom with both buttons in it", () => {
-    expect(CHANGE_LOOP_DIAGRAM.split("\n")[0]).toBe("flowchart TD");
-    expect(CHANGE_LOOP_DIAGRAM).toContain("Build this change");
-    expect(CHANGE_LOOP_DIAGRAM).toContain("Not this one");
+  it("draws the change loop top to bottom in one column, with one arrow back to the next change", () => {
+    const lines = CHANGE_LOOP_DIAGRAM.split("\n");
+    expect(lines[0]).toBe("flowchart TD");
+    expect(CHANGE_LOOP_DIAGRAM).toContain("|Build this change|");
+    // Side branches make it wide (and its labels small on a phone): only the dotted "next change" arrow goes back.
+    const edges = lines.slice(1).map((line) => /^\s*(\w+)\b.*?(-->|-\.->)(?:\|[^|]*\|)?\s*(\w+)/.exec(line));
+    expect(edges.every((edge) => edge !== null)).toBe(true);
+    const sources = edges.map((edge) => edge?.[1]);
+    expect(new Set(sources).size).toBe(sources.length);
+    expect(edges.filter((edge) => edge?.[2] === "-.->").map((edge) => edge?.[3])).toEqual(["you"]);
+    expect(CHANGE_LOOP_DIAGRAM).not.toContain("Not this one");
+    expect(CHANGE_LOOP_DIAGRAM).not.toContain("facilitator");
   });
 });

@@ -47,6 +47,11 @@ export function changesLeftText(used: number, cap: number): string {
 /** Ticket 3.8: the text Build this change stores as the participant's message (ticket 3.6's CHANGE_BUILD_REQUEST). */
 export const CHANGE_BUILD_REQUEST = "Please build this change.";
 
+/** Ticket 3.8: the heading line of a spec update on step 4 ("Version 3, not built yet"). */
+export function proposalVersionText(version: number): string {
+  return `Version ${version}, not built yet`;
+}
+
 /** Ticket 3.8: step 3's line during a change build ("Change 2: the AI is changing your app ..."). */
 export function changeBuildingText(changeNumber: number | undefined): string {
   const name = changeNumber === undefined ? "Your change" : `Change ${changeNumber}`;

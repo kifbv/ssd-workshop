@@ -42,7 +42,7 @@ import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
 import { qrModules, qrSvgPath } from "./qr.js";
 import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, showsStepFour, stageStates, type Build } from "./build-view.js";
-import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS } from "../../api/workshop/texts.js";
+import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText } from "../../api/workshop/texts.js";
 import {
   CHANGE_LOOP_ALT,
   CHANGE_LOOP_DIAGRAM,
@@ -805,7 +805,7 @@ async function loadProposal(): Promise<void> {
 
 /** Fills the spec update: its version, the "What changes" list, and the whole spec under a fold. */
 function showProposal(update: Proposal): void {
-  byId("proposal-version").textContent = `Version ${update.version}, not built yet`;
+  byId("proposal-version").textContent = proposalVersionText(update.version);
   byId("proposal-changes").replaceChildren(
     ...update.whatChanges.map((line) => {
       const li = document.createElement("li");

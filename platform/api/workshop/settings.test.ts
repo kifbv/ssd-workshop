@@ -8,7 +8,7 @@ import {
   PARTICIPANT_LIMIT_ATTRIBUTES,
   settingsFromItem,
 } from "./settings.js";
-import { CHANGE_BUILD_REQUEST, changeBuildFailedText, changeBuildingText, changesLeftText, changesUsedText, PHASE_3_TEXTS, queuePositionText } from "./texts.js";
+import { CHANGE_BUILD_REQUEST, changeBuildFailedText, changeBuildingText, changesLeftText, changesUsedText, PHASE_3_TEXTS, proposalVersionText, queuePositionText } from "./texts.js";
 
 const VALID = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15 };
 
@@ -107,6 +107,7 @@ describe("phase 3 texts (ticket 3.2)", () => {
     expect(changeBuildingText(undefined)).toMatch(/^Your change: /);
     expect(changeBuildFailedText(3)).toMatch(/^Change 3 could not be built, so your app still shows the version before it\./);
     expect(changeBuildFailedText(undefined)).toMatch(/^Your last change could not be built/);
+    expect(proposalVersionText(3)).toBe("Version 3, not built yet");
   });
 
   it("names no amount, address or other participant (plain text for textContent)", () => {
@@ -120,6 +121,7 @@ describe("phase 3 texts (ticket 3.2)", () => {
       changeBuildingText(undefined),
       changeBuildFailedText(2),
       changeBuildFailedText(undefined),
+      proposalVersionText(3),
     ];
     for (const text of all) {
       expect(text, text).not.toMatch(/[$@<>]/);

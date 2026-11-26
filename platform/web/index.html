@@ -262,7 +262,7 @@
               <pre id="live-diagram-text"></pre>
             </details>
           </figure>
-          <p class="help">Each change goes round this loop. A safety check reads your request first; then Claude, the AI model on Amazon Bedrock, writes the next version of your spec and a short "What changes" list. When you press Build this change, the readiness check runs and your build joins the queue. The coding agent starts from your app's files on GitHub and changes only what the list says, the builder saves them in one commit, and the deployer checks them and publishes them at the same address and QR code. A change counts once its build is queued; a declined request or Not this one does not count.</p>
+          <p class="help">Each change goes round this loop. A safety check reads your request first (an unusual one waits until your facilitator has looked at it); then Claude, the AI model on Amazon Bedrock, writes the next version of your spec and a short "What changes" list. Not this one sends you back to the box; when you press Build this change, the readiness check runs and your build joins the queue. The coding agent starts from your app's files on GitHub and changes only what the list says, the builder saves them in one commit, and the deployer checks them and publishes them at the same address and QR code. A change counts once its build is queued; a declined request or Not this one does not count.</p>
         </aside>
       </section>
     </main>
