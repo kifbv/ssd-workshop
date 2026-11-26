@@ -578,8 +578,9 @@ On a phone signed in to the workshop (with a nickname):
    page has a link or button that opens `/app-sign-in/?app=<nick>` in a new tab (`target="_blank"` or `window.open`;
    after 3.25 the template's "Sign in to save"; before it, a test app with such a link). The new tab must show
    "Save in <nick>'s app as <your nickname>?" (not "Sign in to the workshop first" and not "We couldn't reach the
-   workshop"), and Continue must land on the app with `#wt=` in the address. A wrong answer means the tab is still
-   sandboxed on that browser: stop and report.
+   workshop"), and Continue must land on the app (with `#wt=` in the address before 3.25; since 3.25 the app removes it
+   at once). A wrong answer means the tab is still sandboxed on that browser:
+   stop and report.
 
 ## Right after the sign-in-in-apps deploy (ticket 3.25): refresh the live apps
 

@@ -47,3 +47,7 @@ paths:
   changes only the fragment does not reload the page: go to `about:blank` first. A visitor's save gets a 401, which
   Chromium logs as a console error: a test of that path allows exactly that line. Style an element made by
   `workshop-data.js` through the CSSOM (`element.style.x = ...`), never a `style` attribute (the CSP refuses it).
+- The build eval is noisy: a change to AGENTS.md or the builder's prompt can tip one example (ticket 3.25: placing new
+  prompt lines before the WebFetch lines made the Wikipedia example skip WebFetch 3 times in a row). Run the changed
+  example several times (`npm run eval -- build --example <n>`), compare with a baseline on `main` before blaming the
+  change, then run the whole suite once. A field beside a button in a flex row needs `min-width: 0` (AGENTS.md rule 9).

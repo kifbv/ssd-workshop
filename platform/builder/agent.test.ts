@@ -170,7 +170,7 @@ describe("the agent's settings (criterion 2)", () => {
   it("ticket 3.25: both prompts carry the sign-in rule of the template's AGENTS.md (read-only for visitors, the sign-in button, who posted)", () => {
     const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
     // The button the guidance asks for is exactly the one AGENTS.md shows.
-    const button = '<button type="button" data-workshop-sign-in hidden>Sign in to save</button>';
+    const button = '<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>';
     expect(agents).toContain(button);
     expect(SIGN_IN_GUIDANCE).toContain(button);
     for (const name of ["whoAmI()", "getInfo(key)", "updatedBy"]) {

@@ -112,8 +112,10 @@ shell and no package manager. You cannot run or preview the app, so check your w
 6. Saving needs the workshop's sign-in (reading does not). Every app works read-only for visitors:
    - Everything the app shows loads and works without sign-in. Never save when the page opens or on
      a timer; save only when the visitor does something (presses a button, sends a form).
-   - Where saving happens (next to each form or button that saves), put the sign-in button:
-     `<button type="button" data-workshop-sign-in hidden>Sign in to save</button>`, in `index.html`.
+   - Where saving happens (by each form or button that saves), put the sign-in button in `index.html`:
+     `<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>`, on a
+     line of its own just after the form or the saving button (never inside a row of fields or
+     buttons, which it could make wider than the screen).
      Do not give it a click handler: `workshop-data.js` shows it to visitors who are not signed in,
      hides it once they are, and opens the workshop's sign-in in a new tab when it is pressed (the
      visitor comes back to the app there, signed in). Style it in `style.css` (the `.sign-in` class).
@@ -130,7 +132,9 @@ shell and no package manager. You cannot run or preview the app, so check your w
    sign-in of its own: the workshop's sign-in (rule 6) is the only one.
 8. No `console.log` or `console.error` left in the code, and no errors in the browser console.
 9. Phones first: it must work at 375 px wide with nothing scrolling sideways (no fixed widths wider
-   than the screen; use `max-width: 100%` on images). Tap targets at least 44 px high.
+   than the screen; use `max-width: 100%` on images). A field and a button side by side in a flex
+   row: give the field `flex: 1` and `min-width: 0` (a text field does not shrink below its default
+   width otherwise, and pushes the button off the screen). Tap targets at least 44 px high.
 10. Light and dark mode: keep the colour variables in `style.css` and the
    `prefers-color-scheme: dark` block, and give every new colour a value in both.
 11. Accessible: real `<button>`, `<label>` and heading elements, `alt` text on images, enough colour
