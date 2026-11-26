@@ -53,10 +53,11 @@ export type PlatformRequest = "change-build" | "rebuild-from-repo";
 
 /**
  * Ticket 3.9: what the launcher found in the participant's repository for a Rebuild from my repository request: the
- * cleaned text (`found`), or why there is none (`github-error`: GitHub or the App's key could not be used).
+ * cleaned text (`found`, with the name of the repository it was read from, which the worker checks against the
+ * profile's), or why there is none (`github-error`: GitHub or the App's key could not be used).
  */
 export type RepositoryRead =
-  | { kind: "found"; text: string }
+  | { kind: "found"; text: string; repository: string }
   | { kind: "missing" | "too-large" | "unreadable" | "empty" | "github-error" };
 
 export const REPOSITORY_READ_KINDS = ["found", "missing", "too-large", "unreadable", "empty", "github-error"] as const;

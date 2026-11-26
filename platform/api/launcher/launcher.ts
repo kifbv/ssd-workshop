@@ -71,9 +71,10 @@ import {
   readRepositoryMain,
   readRepositorySpec,
   removeEmailAddresses,
+  repositoryNameFor,
   type RepositoryFile,
 } from "../github/repository.js";
-import { parseSpecReadJob, type AiJob, type RepositoryRead } from "../conversation/state.js";
+import { isStale, parseSpecReadJob, type AiJob, type RepositoryRead } from "../conversation/state.js";
 import { parseDeployJob, storedReason } from "../deploy/deploy.js";
 import { BUILD_ID_PATTERN, newQueueKey } from "../keys.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
@@ -112,6 +113,12 @@ export interface LaunchBuild {
 export interface ApprovedSpec {
   text: string;
   whatChanges?: string[];
+  /**
+   * Ticket 3.9 try 2: set when the version was approved only by Rebuild from my repository (`rebuildApprovedAt`, which the
+   * AI worker writes, never `approvedAt`, which only the conversation function writes): the request message it was made
+   * for. The launcher then builds it only while its text equals the `repositorySpec` it stored on that request itself.
+   */
+  rebuildRequestId?: string;
 }
 
 /**
@@ -170,6 +177,12 @@ export interface LaunchRecords {
    * once (no read stored yet). False when refused.
    */
   storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean>;
+  /**
+   * Ticket 3.9 try 2: the text and repository name the launcher stored on a Rebuild from my repository request
+   * (`repositorySpec`, `repositoryName`: attributes only the launcher writes), only for the route's marked request with a
+   * `found` read; undefined otherwise.
+   */
+  readRebuildSpec(participantId: string, messageId: string): Promise<{ text: string; repository: string } | undefined>;
   /**
    * Ticket 3.7: stores a change build's input (`changeSpec`, `changeList`) on the build, only while it is `building`
    * under this launch without a task. False when refused.
@@ -252,6 +265,10 @@ export interface RebuildRequestState {
   pending: boolean;
   /** A read is already stored on it. */
   read: boolean;
+  /** Ticket 3.9 try 2: it is the conversation's message in flight (`pendingId`). */
+  inFlight: boolean;
+  /** Ticket 3.9 try 2: when it became pending (epoch seconds; the stale rule's input). */
+  pendingSince?: number;
 }
 
 /** A task as the check sees it. */
@@ -400,7 +417,17 @@ export async function processSpecRead(body: string | undefined, deps: SpecReadDe
   const job = parseSpecReadJob(body);
   if (job === undefined) return log("invalid");
   const request = await deps.records.readRebuildRequest(job.participantId, job.messageId);
-  if (request === undefined || !request.pending) return log("skipped");
+  // Only the conversation's own request in flight, not stale (the worker would skip it): nothing is asked of GitHub.
+  const nowSeconds = Math.floor(deps.now().getTime() / 1000);
+  if (
+    request === undefined ||
+    !request.pending ||
+    !request.inFlight ||
+    request.pendingSince === undefined ||
+    isStale({ status: "pending", pendingSince: request.pendingSince }, nowSeconds)
+  ) {
+    return log("skipped");
+  }
   if (request.read) {
     await deps.aiQueue.send(job);
     return log("resent");
@@ -410,7 +437,9 @@ export async function processSpecRead(body: string | undefined, deps: SpecReadDe
   try {
     const nickname = await deps.records.readProfileNickname(job.participantId);
     if (nickname === undefined) throw Object.assign(new Error("no nickname"), { name: "NoNickname" });
-    read = await readRepositorySpec(await deps.credentials(), nickname, deps.github);
+    const found = await readRepositorySpec(await deps.credentials(), nickname, deps.github);
+    // The name of the repository it was read from goes with the text: the worker checks it against the profile's.
+    read = found.kind === "found" ? { ...found, repository: repositoryNameFor(nickname) } : found;
   } catch (problem) {
     read = { kind: "github-error" };
     error = errorName(problem);
@@ -423,6 +452,9 @@ export async function processSpecRead(body: string | undefined, deps: SpecReadDe
 }
 
 export const SPEC_MISSING_REASON = "The approved spec could not be found, so the build did not start.";
+/** Ticket 3.9 try 2: a version approved by Rebuild from my repository whose text is not what the launcher read. */
+export const REBUILD_SPEC_UNCONFIRMED_REASON =
+  "The spec could not be confirmed as the one read from your repository, so the build did not start. Press Rebuild from my repository again.";
 export const START_FAILED_REASON = "The build could not be started: the build service had no room for it. Your facilitator can restart it.";
 export const LAUNCH_SERVICE_REASON = "The build could not be started because of a problem on the workshop's side.";
 export const STOPPED_REASON = "The build stopped before it was finished.";
@@ -557,6 +589,14 @@ export async function processLaunch(body: string | undefined, deps: LauncherDeps
     const version = checked.specVersion;
     const spec = version === undefined ? undefined : await deps.records.readApprovedSpec(participantId, version);
     if (spec === undefined) throw new LaunchFailure(SPEC_MISSING_REASON);
+    if (spec.rebuildRequestId !== undefined) {
+      // Ticket 3.9 try 2: approved by Rebuild from my repository (the AI worker's rebuildApprovedAt), so built only as
+      // the exact text the launcher itself read from this participant's own repository for that request.
+      const read = await deps.records.readRebuildSpec(participantId, spec.rebuildRequestId);
+      if (read === undefined || read.text !== spec.text || read.repository !== repositoryNameFor(nickname)) {
+        throw new LaunchFailure(REBUILD_SPEC_UNCONFIRMED_REASON);
+      }
+    }
     const credentials = await deps.credentials();
     let baseCommit: string;
     if (build.kind === "change") {

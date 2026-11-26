@@ -682,7 +682,7 @@ flowchart TD
   worker -->|spec-read request| launcher[Build launcher: reads SPEC.md on main, read-only token]
   launcher -->|job back| worker2[AI worker: same? guardrail, readiness]
   worker2 -->|changed and ready| feed[Step 3 feed: Change n]
-  worker2 -->|same, too large, off path, not ready| reply[Answer in the change conversation, nothing built]
+  worker2 -->|same, too large, wrong shape, off path, not ready| reply[Answer in the change conversation, nothing built]
 ```
 
 Run by Franck in a browser, as a test participant whose app is live and who has changes left, with the participant's
@@ -696,7 +696,8 @@ build, and counts one change.
    a minute step 3 shows "Change n: ..." and the feed; when it is live, step 4 shows the count one lower and the
    repository has one new "Change n: ..." commit whose `SPEC.md` is the edited one.
 3. Optional: commit a `SPEC.md` over 20 KB (paste a long text): the press answers that the spec is too large, at once,
-   and the count stays. Put the file back afterwards.
+   and the count stays. Put the file back afterwards. Likewise a `SPEC.md` without its Mermaid diagram (try 2): the
+   press answers that it does not have the shape of a spec, without an AI call, and the count stays.
 4. In CloudWatch Logs, `/aws/lambda/ssd-workshop-builds-launcher` shows one `"event":"spec-read"` line per press with
    `"outcome":"read"` and the read's kind, and no repository name, token or address.
 

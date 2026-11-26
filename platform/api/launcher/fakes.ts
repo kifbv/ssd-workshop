@@ -51,7 +51,8 @@ export class FakeBuildTable implements LaunchRecords {
   readonly profiles = new Map<string, string>();
   readonly conversations = new Map<string, { buildId?: string; approvedSpecVersion?: number }>();
   /** `<participant id>#<version>` -> spec. */
-  readonly specs = new Map<string, { text: string; approved: boolean; whatChanges?: string[] }>();
+  /** `rebuildRequestId` (ticket 3.9 try 2): approved only by Rebuild from my repository, for that request. */
+  readonly specs = new Map<string, { text: string; approved: boolean; whatChanges?: string[]; rebuildRequestId?: string }>();
   /** Lower-cased nickname -> participant id (the `NICK#` claims). */
   readonly nicknames = new Map<string, string>();
   readonly launches = new Map<string, LaunchEntry>();
@@ -214,13 +215,28 @@ export class FakeBuildTable implements LaunchRecords {
     return this.profiles.get(participantId);
   }
 
-  /** Ticket 3.9: Rebuild from my repository requests, `<participant id>#<message id>` -> pending and the stored read. */
-  readonly rebuildRequests = new Map<string, { pending: boolean; read?: RepositoryRead }>();
+  /**
+   * Ticket 3.9: Rebuild from my repository requests, `<participant id>#<message id>` -> pending, the stored read, and
+   * (try 2) whether it is the conversation's message in flight (default yes) and since when it is pending.
+   */
+  readonly rebuildRequests = new Map<string, { pending: boolean; read?: RepositoryRead; inFlight?: boolean; pendingSince?: number }>();
 
   async readRebuildRequest(participantId: string, messageId: string): Promise<RebuildRequestState | undefined> {
     this.maybeFail("readRebuildRequest");
     const request = this.rebuildRequests.get(`${participantId}#${messageId}`);
-    return request && { pending: request.pending, read: request.read !== undefined };
+    return (
+      request && {
+        pending: request.pending,
+        read: request.read !== undefined,
+        inFlight: request.inFlight ?? true,
+        ...(request.pendingSince === undefined ? {} : { pendingSince: request.pendingSince }),
+      }
+    );
+  }
+
+  async readRebuildSpec(participantId: string, messageId: string): Promise<{ text: string; repository: string } | undefined> {
+    const read = this.rebuildRequests.get(`${participantId}#${messageId}`)?.read;
+    return read?.kind === "found" ? { text: read.text, repository: read.repository } : undefined;
   }
 
   async storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean> {
@@ -238,7 +254,11 @@ export class FakeBuildTable implements LaunchRecords {
   async readApprovedSpec(participantId: string, version: number): Promise<ApprovedSpec | undefined> {
     const spec = this.specs.get(`${participantId}#${String(version)}`);
     if (!spec?.approved) return undefined;
-    return { text: spec.text, ...(spec.whatChanges === undefined || spec.whatChanges.length === 0 ? {} : { whatChanges: [...spec.whatChanges] }) };
+    return {
+      text: spec.text,
+      ...(spec.whatChanges === undefined || spec.whatChanges.length === 0 ? {} : { whatChanges: [...spec.whatChanges] }),
+      ...(spec.rebuildRequestId === undefined ? {} : { rebuildRequestId: spec.rebuildRequestId }),
+    };
   }
 
   /** As DynamoLaunchRecords.setChangeInput: only while `building` under this launch without a task. */

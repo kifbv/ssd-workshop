@@ -16,8 +16,9 @@ import { CHANGE_REBUILD_ROUTE, handleConversationRequest, POLL_ROUTE, type Conve
 import { FakeBuildQueue, FakeConversationTable, FakeModel, FakeQueue, readinessReply, verdictReply } from "./fakes.js";
 import { declineReply, GUARDRAIL_SYSTEM_PROMPT } from "./guardrail.js";
 import { READINESS_SYSTEM_PROMPT } from "./readiness.js";
-import { isRebuildRequest, sameSpec } from "./rebuild.js";
-import { buildIdFor, jobBody, parseJob, parseSpecReadJob, specReadJobBody } from "./state.js";
+import { isRebuildRequest, sameSpec, shapeRefusal } from "./rebuild.js";
+import { MAX_SPEC_CHARS } from "./spec.js";
+import { buildIdFor, jobBody, parseJob, parseSpecReadJob, specReadJobBody, STALE_PENDING_SECONDS } from "./state.js";
 import { processJob, type WorkerDeps, type WorkerLogEntry } from "./worker.js";
 
 function must<T>(value: T | undefined): T {
@@ -90,7 +91,12 @@ function setup(options: { repositorySpec?: string | Uint8Array; used?: number; f
       readRebuildRequest: async (participantId, messageId) => {
         const message = await table.getMessage(participantId, messageId);
         if (message === undefined || !isRebuildRequest(message)) return undefined;
-        return { pending: message.status === "pending", read: message.repository !== undefined };
+        return {
+          pending: message.status === "pending",
+          read: message.repository !== undefined,
+          inFlight: table.conversations.get(participantId)?.pendingId === messageId,
+          pendingSince: message.pendingSince,
+        };
       },
       storeRepositoryRead: async (participantId, messageId, read) => table.storeRepositoryRead(participantId, messageId, read),
       readProfileNickname: async (participantId) => table.profiles.get(participantId)?.nickname,
@@ -172,7 +178,12 @@ describe("Rebuild from my repository (ticket 3.9)", () => {
     expect(s.used()).toBe(1);
     const version = must(s.table.specs.get("me-1")?.find((v) => v.version === 2));
     expect(version).toMatchObject({ text: `${EDITED}\n`, whatChanges: [REBUILD_WHAT_CHANGES] });
-    expect(version.approvedAt).toBeDefined();
+    // Approved by the press as the AI worker's own mark (rebuildApprovedAt), never approvedAt (the conversation function's).
+    expect(version.rebuildApprovedAt).toBeDefined();
+    expect(version.approvedAt).toBeUndefined();
+    expect(version.messageId).toBe(id);
+    // The launcher stored the repository it read from next to the text.
+    expect((await s.table.getMessage("me-1", id))?.repository).toEqual({ kind: "found", text: `${EDITED}\n`, repository: "ssd-ada-runner" });
     expect(s.table.conversations.get("me-1")).toMatchObject({ buildId, approvedSpecVersion: 2, latestSpecVersion: 2 });
     expect(s.table.builds.get(buildId)).toMatchObject({ status: "queued", kind: "change", changeNumber: 1, specVersion: 2, nickname: "Ada-Runner", participantId: "me-1" });
     expect(await replyOf(s, id)).toEqual({ status: "done", reply: PHASE_3_TEXTS.rebuildReady });
@@ -373,6 +384,81 @@ describe("Rebuild from my repository (ticket 3.9)", () => {
     expect(await proposing.drain()).toEqual(["reading", "launcher read", "building"]);
     expect(proposing.table.conversations.get("me-1")?.proposedSpecVersion).toBeUndefined();
     expect(proposing.table.conversations.get("me-1")).toMatchObject({ approvedSpecVersion: 3, latestSpecVersion: 3 });
+  });
+
+  it("try 2: WHEN the repository's spec is over 8,000 characters or lacks the spec's shape THEN it is refused with its text, without an AI call and nothing counted", async () => {
+    const tooLong = `${EDITED.replace("## Data it keeps", `- Notes: ${"a long line ".repeat(700)}\n\n## Data it keeps`)}`;
+    expect(tooLong.length).toBeGreaterThan(MAX_SPEC_CHARS);
+    expect(new TextEncoder().encode(tooLong).length).toBeLessThan(MAX_REPOSITORY_SPEC_BYTES);
+    // Cleaning can lengthen it: under 8,000 characters as written, over once each address reads "[email removed]".
+    const lengthened = EDITED.replace("## Data it keeps", `- Contacts: ${Array.from({ length: 700 }, (_, i) => `a${i}@b.io`).join(" ")}\n\n## Data it keeps`);
+    expect(lengthened.length).toBeLessThanOrEqual(MAX_SPEC_CHARS);
+    expect(removeEmailAddresses(lengthened).length).toBeGreaterThan(MAX_SPEC_CHARS);
+    const noDiagram = EDITED.replace(/```mermaid[\s\S]*?```\n\n/, "");
+    const otherSections = EDITED.replace("## Screens", "## Pages");
+    for (const [label, spec, text] of [
+      ["too long", tooLong, PHASE_3_TEXTS.specTooLongForPlatform],
+      ["lengthened by cleaning", lengthened, PHASE_3_TEXTS.specTooLongForPlatform],
+      ["no diagram", noDiagram, PHASE_3_TEXTS.specWrongShape],
+      ["other sections", otherSections, PHASE_3_TEXTS.specWrongShape],
+    ] as const) {
+      const s = setup({ repositorySpec: spec });
+      const id = await press(s);
+      expect(await s.drain(), label).toEqual(["reading", "launcher read", "refused"]);
+      expect(await replyOf(s, id), label).toEqual({ status: "done", reply: text });
+      expect(s.model.requests, label).toEqual([]);
+      expect(s.table.usage.get("me-1"), label).toBeUndefined();
+      nothingQueued(s);
+    }
+    expect(PHASE_3_TEXTS.specTooLongForPlatform).toContain("8,000 characters");
+    expect(PHASE_3_TEXTS.specWrongShape).toContain("## What it does, ## Screens and ## Data it keeps");
+    expect(shapeRefusal(`${EDITED}\n`)).toBeUndefined();
+    // The same spec is answered as unchanged before the shape check runs.
+    const same = setup();
+    const again = await press(same);
+    expect(await same.drain()).toEqual(["reading", "launcher read", "unchanged"]);
+    expect((await replyOf(same, again)).reply).toBe(PHASE_3_TEXTS.specUnchanged);
+  });
+
+  it("access review try 2: WHEN the stored read names another repository than the profile's THEN its text is not used (failed, no AI call, nothing queued)", async () => {
+    const s = setup({ repositorySpec: EDITED });
+    const store = s.launcherDeps.records.storeRepositoryRead;
+    s.launcherDeps.records.storeRepositoryRead = (participantId, messageId, read) =>
+      store(participantId, messageId, read.kind === "found" ? { ...read, repository: "ssd-bob" } : read);
+    const id = await press(s);
+    expect(await s.drain()).toEqual(["reading", "launcher read", "failed"]);
+    expect(await replyOf(s, id)).toEqual({ status: "failed", reply: PHASE_3_TEXTS.rebuildFailed });
+    expect(s.workerLogs.at(-1)).toMatchObject({ error: "RepositoryMismatch" });
+    expect(s.model.requests).toEqual([]);
+    nothingQueued(s);
+  });
+
+  it("access review try 2: the launcher reads GitHub only for the conversation's request in flight, not stale; a forged body mixing Ada's id with Bob's request is skipped", async () => {
+    // Ada's id with Bob's request id: no such request in Ada's partition.
+    const s = setup({ repositorySpec: EDITED });
+    const res = await s.call(rebuild(THEIRS));
+    const bobs = json(res)["id"] as string;
+    expect(await processJob(must(s.queue.sent.shift()), s.workerDeps)).toBe("reading");
+    s.builds.specReads.splice(0);
+    const before = JSON.stringify([...s.table.messages.entries()].map(([k, v]) => [k, [...v.entries()]]));
+    expect(await processSpecRead(specReadJobBody({ participantId: "me-1", messageId: bobs }), s.launcherDeps)).toBe("skipped");
+    expect(s.github.calls).toEqual([]);
+    expect(s.queue.sent).toEqual([]);
+    expect(JSON.stringify([...s.table.messages.entries()].map(([k, v]) => [k, [...v.entries()]]))).toBe(before);
+
+    // Not the conversation's message in flight.
+    const t = setup({ repositorySpec: EDITED });
+    const mine = await press(t);
+    expect(await processJob(must(t.queue.sent.shift()), t.workerDeps)).toBe("reading");
+    must(t.table.conversations.get("me-1")).pendingId = "another";
+    expect(await processSpecRead(must(t.builds.specReads.map(specReadJobBody).at(0)), t.launcherDeps)).toBe("skipped");
+    must(t.table.conversations.get("me-1")).pendingId = mine;
+    // Stale: pending for longer than the stale rule allows.
+    t.advance(STALE_PENDING_SECONDS + 1);
+    expect(await processSpecRead(must(t.builds.specReads.map(specReadJobBody).at(0)), t.launcherDeps)).toBe("skipped");
+    expect(t.github.calls).toEqual([]);
+    expect(t.queue.sent).toEqual([]);
+    expect((await t.table.getMessage("me-1", mine))?.repository).toBeUndefined();
   });
 
   it("the worker acts only on the request with its mark and exact text; the launcher's body is exact", () => {

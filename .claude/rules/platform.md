@@ -253,4 +253,11 @@ paths:
   `{"readSpec": ...}`, its own deduplication id), the launcher reads with a read-only token, stores the result on the
   request in attributes only it may write (once: `attribute_not_exists`) and sends the job back to the AI queue; the
   worker's second pass acts on the stored result. Never widen the key's readers. A size limit on a file from GitHub is
-  checked on the tree entry's `size` before the blob is downloaded, then on the bytes.
+  checked on the tree entry's `size` before the blob is downloaded, then on the bytes. Store the repository name with
+  the text (the worker checks it against the profile's) and read GitHub only for the conversation's request in flight.
+- Text from outside that becomes a stored version (3.9's SPEC.md) passes the same `checkSpec` as a model-written one
+  before any AI call, or a later change request can never change it. A second writer of an approval (3.9: the AI worker
+  for a rebuild) gets its OWN attribute (`rebuildApprovedAt`, never `approvedAt`), and the consumer (the launcher)
+  accepts it only with a content tie to input only it wrote (`repositorySpec`); one shared approval attribute would let
+  that writer approve anything. A `GetItem` that lists its own `ExpressionAttributeNames` beside a shared projection
+  (`getSpec`) must gain every new name too: test placeholders both ways on reads as well as writes.

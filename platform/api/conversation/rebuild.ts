@@ -8,18 +8,22 @@
 //    stores what it found on the message (`repositoryRead`, `repositorySpec`: attributes only it may write) and sends
 //    the job back to the AI worker.
 // 2. With the read: no readable SPEC.md (missing, over 20 KB, not UTF-8, empty, GitHub down) ends the request with its
-//    text and no AI call; the same spec as the live one (compared in the published form, cleanRepositorySpec on both
-//    sides) ends it with "Your repository's spec has not changed."; otherwise the guardrail (decline or flag: nothing
-//    built), then the readiness check, then one transaction that stores the spec as the next version (approved, with a
-//    fixed "What changes" line), counts the change and queues the change build, exactly as Build this change does.
+//    text and no AI call; a read from another repository than the profile's fails it; the same spec as the live one
+//    (compared in the published form, cleanRepositorySpec on both sides) ends it with "Your repository's spec has not
+//    changed."; a spec the platform could not change later (checkSpec: over MAX_SPEC_CHARS, or without the one
+//    flowchart and the three sections) is refused with its own text, still without an AI call; otherwise the guardrail
+//    (decline or flag: nothing built), then the readiness check, then one transaction that stores the spec as the next
+//    version (approved by the press: `rebuildApprovedAt`, with a fixed "What changes" line), counts the change and
+//    queues the change build, exactly as Build this change does.
 //
 // SQS delivers at least once: every final write is conditional on the message still pending and in flight, and the
 // build id comes from the message id, so a redelivery after the transaction only re-sends the build id.
-import { cleanRepositorySpec } from "../github/repository.js";
+import { cleanRepositorySpec, repositoryNameFor } from "../github/repository.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { TokenUsage } from "../types.js";
 import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
 import { changesUsedText, PHASE_3_TEXTS, REBUILD_REQUEST, REBUILD_WHAT_CHANGES, rebuildNotReadyText } from "../workshop/texts.js";
+import { checkSpec, MAX_SPEC_CHARS } from "./spec.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, type ModelClient } from "./model.js";
 import { checkReadiness, READINESS_PROMPT_VERSION } from "./readiness.js";
@@ -99,6 +103,17 @@ export function refusalText(read: Exclude<RepositoryRead, { kind: "found" }>): s
  */
 export function sameSpec(repositoryText: string, liveText: string): boolean {
   return cleanRepositorySpec(repositoryText) === cleanRepositorySpec(liveText);
+}
+
+/**
+ * Ticket 3.9 try 2: the participant-facing refusal of a repository spec the platform cannot keep (checkSpec's problems),
+ * or undefined when it has the shape every stored version has. A spec over MAX_SPEC_CHARS has its own text; any other
+ * problem (no title, not one flowchart, other sections) gets the shape text.
+ */
+export function shapeRefusal(text: string): string | undefined {
+  const problems = checkSpec(text);
+  if (problems.length === 0) return undefined;
+  return text.length > MAX_SPEC_CHARS ? PHASE_3_TEXTS.specTooLongForPlatform : PHASE_3_TEXTS.specWrongShape;
 }
 
 const FINISH_ATTEMPTS = 3;
@@ -188,11 +203,19 @@ export async function runRebuild(job: AiJob, message: StoredMessage, deps: Rebui
       finishing = true;
       return await ended({ kind: "refused", reply: refusalText(read), previousBuildId }, "refused");
     }
+    // The text must come from the participant's own repository (the launcher stores the name it read from).
+    if (read.repository !== repositoryNameFor(nickname)) throw Object.assign(new Error("read from another repository"), { name: "RepositoryMismatch" });
     const live = await deps.store.getSpec(participantId, liveVersion);
     if (live === undefined) throw Object.assign(new Error("the live spec is missing"), { name: "MissingSpec" });
+    // Order: the 20 KB cap and the cleaning (launcher), the same-spec check, the shape check, then the AI calls.
     if (sameSpec(read.text, live.text)) {
       finishing = true;
       return await ended({ kind: "unchanged", reply: PHASE_3_TEXTS.specUnchanged, previousBuildId }, "unchanged");
+    }
+    const refusal = shapeRefusal(read.text);
+    if (refusal !== undefined) {
+      finishing = true;
+      return await ended({ kind: "refused", reply: refusal, previousBuildId }, "refused");
     }
     const check = await checkGuardrail(deps.model, read.text, signal);
     guardrail = { verdict: check.verdict, reason: check.reason, suggestion: check.suggestion, usage: check.usage };

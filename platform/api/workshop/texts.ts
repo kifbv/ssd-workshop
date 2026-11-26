@@ -19,6 +19,12 @@ export const PHASE_3_TEXTS = {
   specUnreadable: "Your repository's SPEC.md is not plain text, so it was not read. Save it as plain text (UTF-8), then press Rebuild from my repository again.",
   /** Ticket 3.9: SPEC.md holds nothing but spaces. */
   specEmpty: "Your repository's SPEC.md is empty. Write your spec in it, then press Rebuild from my repository again.",
+  /** Ticket 3.9 try 2: SPEC.md (cleaned) is longer than the 8,000 characters every stored spec keeps to (checkSpec). */
+  specTooLongForPlatform:
+    "Your repository's SPEC.md is longer than 8,000 characters, the most the workshop can build from. Make it shorter, then press Rebuild from my repository again. Your live app stays as it is.",
+  /** Ticket 3.9 try 2: SPEC.md lacks the spec's shape (title, one flowchart diagram, the three sections; checkSpec). */
+  specWrongShape:
+    "Your repository's SPEC.md does not have the shape of a spec, so it was not built. Keep the title line (# App name), one Mermaid diagram that starts with flowchart TD, then the headings ## What it does, ## Screens and ## Data it keeps, in this order and with nothing else. Fix it, then press Rebuild from my repository again. Your live app stays as it is.",
   /** Ticket 3.9: GitHub (or the platform's GitHub App) could not be used. */
   repositoryUnavailable: "Your repository could not be read just now. Please press Rebuild from my repository again in a minute.",
   /** Ticket 3.9: the guardrail or the readiness check gave no answer (a model error, a time limit). */

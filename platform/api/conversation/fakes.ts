@@ -99,6 +99,8 @@ export interface FakeSpec {
   messageId: string;
   createdAt: string;
   approvedAt?: string;
+  /** Ticket 3.9: set (instead of approvedAt) on the version Rebuild from my repository creates. */
+  rebuildApprovedAt?: string;
   whatChanges?: string[];
 }
 
@@ -110,7 +112,7 @@ function specOf(spec: FakeSpec): StoredSpec {
     version: spec.version,
     text: spec.text,
     createdAt: spec.createdAt,
-    approved: spec.approvedAt !== undefined,
+    approved: spec.approvedAt !== undefined || spec.rebuildApprovedAt !== undefined,
     ...(spec.whatChanges === undefined ? {} : { whatChanges: [...spec.whatChanges] }),
   };
 }
@@ -620,7 +622,7 @@ export class FakeConversationTable extends FakeTable implements ConversationStor
       const version = outcome.spec.version;
       this.specs.set(participantId, [
         ...specs,
-        { version, text: outcome.spec.text, messageId, createdAt: nowIso, approvedAt: nowIso, whatChanges: [...outcome.spec.whatChanges] },
+        { version, text: outcome.spec.text, messageId, createdAt: nowIso, rebuildApprovedAt: nowIso, whatChanges: [...outcome.spec.whatChanges] },
       ]);
       this.conversations.set(participantId, { ...rest, state: "open", buildId: outcome.build.buildId, approvedSpecVersion: version, latestSpecVersion: version });
       this.profiles.set(participantId, { ...profile, changeRequestsUsed: outcome.used + 1 });

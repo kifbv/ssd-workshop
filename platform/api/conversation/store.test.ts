@@ -1,6 +1,7 @@
 import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { GetItemCommand, QueryCommand, TransactWriteItemsCommand, type TransactWriteItem } from "@aws-sdk/client-dynamodb";
 import { SendMessageCommand } from "@aws-sdk/client-sqs";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ACCOUNT as INFRA_ACCOUNT,
@@ -215,9 +216,9 @@ describe("DynamoConversationStore", () => {
     }
     // An answer never moves the step (only the readiness check's outcome does, ticket 2.7).
     expect(namesUsed(sent[0])).not.toContain("step");
-    // Ticket 3.9: the worker may write approvedAt only on the version Rebuild from my repository creates (finishRebuild);
-    // an answer never approves anything.
-    expect(namesUsed(sent[0])).not.toContain("approvedAt");
+    expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("approvedAt");
+    // Ticket 3.9: an answer never approves anything (the rebuild's own mark either).
+    expect(namesUsed(sent[0])).not.toContain("rebuildApprovedAt");
   });
 
   it("adds spent tokens to the usage totals on their own, inside the worker's attribute list", async () => {
@@ -427,6 +428,16 @@ describe("DynamoConversationStore", () => {
       Limit: 1,
     });
     expect((sent[3] as GetItemCommand).input.Key).toEqual({ pk: { S: "PARTICIPANT#p-1" }, sk: { S: "SPEC#0002" } });
+    // Ticket 3.9 try 2: every name the spec reads' projections use is defined, and every defined one is used.
+    for (const command of [sent[0], sent[3]] as (QueryCommand | GetItemCommand)[]) {
+      const input = command.input;
+      const text = `${input.ProjectionExpression ?? ""} ${"KeyConditionExpression" in input ? (input.KeyConditionExpression ?? "") : ""}`;
+      expect(new Set(text.match(/#[A-Za-z]+/g))).toEqual(new Set(Object.keys(input.ExpressionAttributeNames ?? {})));
+      expect(input.ProjectionExpression).toContain("#rebuildApprovedAt");
+    }
+    // A version Rebuild from my repository approved (rebuildApprovedAt) reads as approved.
+    const rebuilt = stubClient([{ Item: { ...item, rebuildApprovedAt: { S: NOW_ISO } } }]);
+    await expect(new DynamoConversationStore(rebuilt.client, TABLE).getSpec("p-1", 2)).resolves.toMatchObject({ approved: true });
   });
 
   it("approves a version and stores the readiness request in one transaction inside the conversation function's list, and tells why it could not (tickets 1.9, 2.7)", async () => {
@@ -1010,23 +1021,25 @@ describe("change requests in the conversation store (ticket 3.6)", () => {
     await expect(new DynamoConversationStore(client, TABLE).createMessage("p-1", message, "b-0")).resolves.toBe("created");
     expect(items(sent[0])[1]?.Update?.ExpressionAttributeValues).toMatchObject({ ":request": { S: "rebuild-from-repo" }, ":text": { S: REBUILD_REQUEST } });
     for (const name of namesUsed(sent[0])) expect(CONVERSATION_UPDATE_ATTRIBUTES, name).toContain(name);
-    for (const name of ["repositoryRead", "repositorySpec"]) {
+    for (const name of ["repositoryRead", "repositorySpec", "repositoryName"]) {
       expect(CONVERSATION_UPDATE_ATTRIBUTES, name).not.toContain(name);
       expect(AI_WORKER_UPDATE_ATTRIBUTES, name).not.toContain(name);
     }
     const base = { author: { S: "participant" }, step: { S: "building" }, text: { S: REBUILD_REQUEST }, status: { S: "pending" }, pendingSince: { N: "5" } };
     const read = stubClient([
-      { Item: { ...base, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "found" }, repositorySpec: { S: "# A\n" } } },
+      { Item: { ...base, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "found" }, repositorySpec: { S: "# A\n" }, repositoryName: { S: "ssd-ada" } } },
       { Item: { ...base, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "too-large" } } },
+      // Try 2: a found text without the repository it was read from is no read.
+      { Item: { ...base, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "found" }, repositorySpec: { S: "# A\n" } } },
       { Item: { ...base, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "found" } } },
       { Item: { ...base, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "odd" } } },
       { Item: { ...base, repositoryRead: { S: "found" }, repositorySpec: { S: "# A\n" } } },
     ]);
     const reader = new DynamoConversationStore(read.client, TABLE);
-    expect((await reader.getMessage("p-1", ID))?.repository).toEqual({ kind: "found", text: "# A\n" });
+    expect((await reader.getMessage("p-1", ID))?.repository).toEqual({ kind: "found", text: "# A\n", repository: "ssd-ada" });
     expect((await reader.getMessage("p-1", ID))?.repository).toEqual({ kind: "too-large" });
-    // A found read without its text, an unknown kind, or a message without the mark: no read.
-    for (let i = 0; i < 3; i++) expect((await reader.getMessage("p-1", ID))?.repository).toBeUndefined();
+    // A found read without its repository or its text, an unknown kind, or a message without the mark: no read.
+    for (let i = 0; i < 4; i++) expect((await reader.getMessage("p-1", ID))?.repository).toBeUndefined();
   });
 
   it("ticket 3.9: a rebuild that is ready stores the approved version, counts and queues the change build in one transaction, inside the worker's lists", async () => {
@@ -1064,7 +1077,13 @@ describe("change requests in the conversation store (ticket 3.6)", () => {
     });
     expect(list[3]?.Update).toMatchObject({
       ConditionExpression: "attribute_not_exists(#pk)",
-      ExpressionAttributeValues: { ":text": { S: "# A\n" }, ":approvedAt": { S: NOW_ISO }, ":whatChanges": { L: [{ S: REBUILD_WHAT_CHANGES }] }, ":specVersion": { N: "3" } },
+      ExpressionAttributeValues: {
+        ":text": { S: "# A\n" },
+        ":rebuildApprovedAt": { S: NOW_ISO },
+        ":messageId": { S: ID },
+        ":whatChanges": { L: [{ S: REBUILD_WHAT_CHANGES }] },
+        ":specVersion": { N: "3" },
+      },
     });
     expect(list[4]?.Update?.ExpressionAttributeValues).toMatchObject({ ":changeRequestsUsed": { N: "2" }, ":used": { N: "1" } });
     expect(list[6]?.Update?.ExpressionAttributeValues).toMatchObject({ ":kind": { S: "change" }, ":changeNumber": { N: "2" }, ":specVersion": { N: "3" } });
@@ -1092,6 +1111,37 @@ describe("change requests in the conversation store (ticket 3.6)", () => {
     for (const name of namesUsed(sent[2])) expect(AI_WORKER_UPDATE_ATTRIBUTES, name).toContain(name);
     // A lost race writes nothing.
     await expect(store.finishRebuild("p-1", ID, ready, NOW_ISO)).resolves.toBe(false);
+  });
+
+  it("ticket 3.9 try 2: among the AI worker's writes, only finishRebuild's new version (created only if absent) carries an approval, and it is rebuildApprovedAt, never approvedAt", async () => {
+    const answer = { prompt: REBUILD_REQUEST, modelId: MODEL_ID, promptVersion: "readiness-v2", historyCount: 0, usage: usage(900, 60) };
+    const outcomes: RebuildFinish[] = [
+      { kind: "ready", reply: "ok", previousBuildId: "b-0", spec: { version: 3, text: "# A\n", whatChanges: [REBUILD_WHAT_CHANGES] }, guardrail, answer, build: { buildId: "b-1", nickname: "Ada", changeNumber: 2 }, used: 1, cap: 5 },
+      { kind: "not-ready", reply: "no", previousBuildId: "b-0", guardrail, answer },
+      { kind: "declined", reply: "no", previousBuildId: "b-0", guardrail },
+      { kind: "unchanged", reply: "same", previousBuildId: "b-0" },
+      { kind: "refused", reply: "no", previousBuildId: "b-0" },
+      { kind: "failed", reply: "no", previousBuildId: "b-0", usage: usage(1, 1) },
+      { kind: "over-budget", reply: "no", previousBuildId: "b-0" },
+      { kind: "over-limit", reply: "no", previousBuildId: "b-0" },
+    ];
+    const { client, sent } = stubClient(outcomes.map(() => ({})));
+    const store = new DynamoConversationStore(client, TABLE);
+    for (const outcome of outcomes) await store.finishRebuild("p-1", ID, outcome, NOW_ISO);
+    const approving = sent.flatMap((command, i) =>
+      items(command)
+        .filter((item) => Object.values(item.Update?.ExpressionAttributeNames ?? {}).some((name) => name === "approvedAt" || name === "rebuildApprovedAt"))
+        .map((item) => ({ outcome: outcomes[i]?.kind, item })),
+    );
+    expect(approving.map((a) => a.outcome)).toEqual(["ready"]);
+    const put = approving[0]?.item.Update;
+    expect(put?.Key?.["sk"]?.S).toBe("SPEC#0003");
+    expect(put?.ConditionExpression).toBe("attribute_not_exists(#pk)");
+    expect(Object.values(put?.ExpressionAttributeNames ?? {})).not.toContain("approvedAt");
+    // In the source, the store writes rebuildApprovedAt in that one place, and the worker's list never names approvedAt.
+    const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+    expect(source.match(/rebuildApprovedAt: str\(/g)).toHaveLength(1);
+    expect(AI_WORKER_UPDATE_ATTRIBUTES).not.toContain("approvedAt");
   });
 
   it("ticket 3.9: sends a spec-read request to the launch queue, grouped by participant, deduplicated by the message", async () => {

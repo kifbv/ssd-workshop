@@ -1688,14 +1688,24 @@ describe("budget attributes (ticket 3.3)", () => {
     expect(listWriters).toEqual([AI_WORKER_FUNCTION_NAME]);
   });
 
-  it("WHEN the synthesized stacks are inspected THEN only the launcher may write what it read of SPEC.md (repositoryRead, repositorySpec; ticket 3.9), and only the GitHub key's reader", () => {
+  it("WHEN the synthesized stacks are inspected THEN only the launcher may write what it read of SPEC.md (repositoryRead, repositorySpec, repositoryName; ticket 3.9), and only the GitHub key's reader", () => {
     const writers = participantWriters();
-    for (const name of ["repositoryRead", "repositorySpec"]) {
+    for (const name of ["repositoryRead", "repositorySpec", "repositoryName"]) {
       expect([...new Set(writers.filter((w) => w.attributes.includes(name)).map((w) => w.role))], name).toEqual([BUILD_LAUNCHER_FUNCTION_NAME]);
     }
     // The launcher's participant writes name nothing else (never a step, a count, a spec version or a message's text).
     const launcherNames = [...new Set(writers.filter((w) => w.role === BUILD_LAUNCHER_FUNCTION_NAME).flatMap((w) => w.attributes))].sort();
-    expect(launcherNames).toEqual(["pk", "repositoryRead", "repositorySpec", "sk"]);
+    expect(launcherNames).toEqual(["pk", "repositoryName", "repositoryRead", "repositorySpec", "sk"]);
+    // Try 2: an approval by Rebuild from my repository is its own name, only the AI worker's, and approvedAt is only the
+    // conversation function's: the launcher tells them apart and builds the first only as the text it read itself.
+    const approvers = (name: string) => [...new Set(writers.filter((w) => w.attributes.includes(name)).map((w) => w.role))];
+    expect(approvers("rebuildApprovedAt")).toEqual([AI_WORKER_FUNCTION_NAME]);
+    expect(approvers("approvedAt")).toEqual([CONVERSATION_FUNCTION_NAME]);
+    // The launcher reads (projected GetItem only) what it needs for that: the request's stored text and repository, the
+    // version's approval and request id, and the in-flight check's names.
+    for (const name of ["repositorySpec", "repositoryName", "rebuildApprovedAt", "messageId", "pendingId", "pendingSince"]) {
+      expect(LAUNCHER_READ_ATTRIBUTES as readonly string[], name).toContain(name);
+    }
   });
 
   it("WHEN the synthesized stacks are inspected THEN only the conversation function, the AI worker and (ticket 3.9) the launcher may send to the AI worker's queue", () => {
@@ -2079,10 +2089,12 @@ describe("api stack: AI worker (ticket 1.7)", () => {
     const conversationNames = conversationUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
     expect(workerNames).toContain("specVersion");
     expect(conversationNames).not.toContain("specVersion");
-    // Ticket 3.9: the worker also sets approvedAt, only on the version Rebuild from my repository creates in the
-    // transaction that queues its build (the participant's press approves the repository's spec).
-    expect(workerNames).toContain("approvedAt");
+    // Ticket 3.9 (try 2): the worker never sets approvedAt; the version Rebuild from my repository creates carries its
+    // own rebuildApprovedAt, which the launcher builds only as the text it read from the repository itself.
+    expect(workerNames).not.toContain("approvedAt");
+    expect(workerNames).toContain("rebuildApprovedAt");
     expect(conversationNames).toContain("approvedAt");
+    expect(conversationNames).not.toContain("rebuildApprovedAt");
     for (const name of ["step", "approvedSpecVersion", "buildId"]) expect(workerNames, name).toContain(name);
     // The worker's build rights never reach the deployer's or the builder's attributes.
     const buildNames = AI_WORKER_BUILD_UPDATE_ATTRIBUTES as readonly string[];
@@ -2509,7 +2521,7 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
         Resource: tableArn,
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "repositoryRead", "repositorySpec"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "repositoryRead", "repositorySpec", "repositoryName"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
         },
       },

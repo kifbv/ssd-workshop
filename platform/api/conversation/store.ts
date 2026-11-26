@@ -142,9 +142,10 @@ const SPEC_NAMES = {
   "#text": "text",
   "#createdAt": "createdAt",
   "#approvedAt": "approvedAt",
+  "#rebuildApprovedAt": "rebuildApprovedAt",
   "#whatChanges": "whatChanges",
 };
-const SPEC_PROJECTION = "#sk, #specVersion, #text, #createdAt, #approvedAt, #whatChanges";
+const SPEC_PROJECTION = "#sk, #specVersion, #text, #createdAt, #approvedAt, #rebuildApprovedAt, #whatChanges";
 
 /** A list of strings as stored (`L` of `S`), keeping only the strings. */
 function stringList(value: AttributeValue | undefined): string[] | undefined {
@@ -163,7 +164,9 @@ function specOf(item: Record<string, AttributeValue> | undefined): StoredSpec | 
     version,
     text,
     createdAt: item["createdAt"]?.S ?? "",
-    approved: item["approvedAt"]?.S !== undefined,
+    // Approve spec and Build this change (the conversation function) set approvedAt; Rebuild from my repository (the AI
+    // worker, ticket 3.9) sets rebuildApprovedAt, which the launcher builds only with the request's repositorySpec.
+    approved: item["approvedAt"]?.S !== undefined || item["rebuildApprovedAt"]?.S !== undefined,
     ...(whatChanges === undefined ? {} : { whatChanges }),
   };
 }
@@ -176,7 +179,8 @@ function repositoryReadOf(item: Record<string, AttributeValue>): RepositoryRead 
   const kind = item["repositoryRead"]?.S;
   if (kind === "found") {
     const text = item["repositorySpec"]?.S;
-    return text === undefined ? undefined : { kind, text };
+    const repository = item["repositoryName"]?.S;
+    return text === undefined || repository === undefined ? undefined : { kind, text, repository };
   }
   return kind !== undefined && (REPOSITORY_READ_KINDS as readonly string[]).includes(kind) ? { kind: kind as Exclude<RepositoryRead["kind"], "found"> } : undefined;
 }
@@ -502,6 +506,7 @@ export class DynamoConversationStore implements ConversationStore {
           "#text": "text",
           "#createdAt": "createdAt",
           "#approvedAt": "approvedAt",
+          "#rebuildApprovedAt": "rebuildApprovedAt",
           "#whatChanges": "whatChanges",
         },
       }),
@@ -1165,8 +1170,9 @@ export class DynamoConversationStore implements ConversationStore {
     ];
     if (ready) {
       items.push(
-        // The repository's spec as the next version, approved by the participant's press (the launcher builds only an
-        // approved version with a "What changes" list).
+        // The repository's spec as the next version, approved by the participant's press: `rebuildApprovedAt` (never
+        // `approvedAt`, which only the conversation function writes) and the request's `messageId`, so the launcher builds
+        // it only while its text equals the `repositorySpec` the launcher itself stored on that request.
         setItem(
           this.tableName,
           specKey(participantId, outcome.spec.version),
@@ -1176,7 +1182,7 @@ export class DynamoConversationStore implements ConversationStore {
             text: str(outcome.spec.text),
             messageId: str(messageId),
             createdAt: str(nowIso),
-            approvedAt: str(nowIso),
+            rebuildApprovedAt: str(nowIso),
             whatChanges: strList(outcome.spec.whatChanges),
           },
           { expression: "attribute_not_exists(#pk)", names: { "#pk": "pk" } },

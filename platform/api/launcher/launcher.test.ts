@@ -14,6 +14,7 @@ import {
   QUEUED_DEAD_REASON,
   QUEUE_TIMEOUT_REASON,
   SPEC_MISSING_REASON,
+  REBUILD_SPEC_UNCONFIRMED_REASON,
   START_FAILED_REASON,
   STOPPED_REASON,
   UNSTARTED_REASON,
@@ -401,6 +402,33 @@ describe("launching a change build (ticket 3.7)", () => {
     expect(t.table.builds.get(CHANGE)?.failureReasons?.[0]).toMatch(/^GitHub: The app's repository has no main branch/);
     expect(t.tasks.started).toEqual([]);
     expect(t.github.history("ssd-ada-l")).toEqual([]);
+  });
+
+  it("ticket 3.9 try 2: WHEN a version approved by Rebuild from my repository (not by the participant's conversation) is not exactly what the launcher read for that request THEN the build fails without a task", async () => {
+    const REQUEST = "m-rebuild";
+    const arrange = (s: ReturnType<typeof changeSetup>, read: { text: string; repository: string } | undefined) => {
+      const spec = must(s.table.specs.get(`${PARTICIPANT}#3`));
+      spec.rebuildRequestId = REQUEST;
+      if (read !== undefined) s.table.rebuildRequests.set(`${PARTICIPANT}#${REQUEST}`, { pending: false, read: { kind: "found", ...read } });
+    };
+    // The read matches: it builds as any change.
+    const ok = changeSetup();
+    arrange(ok, { text: NEW_SPEC, repository: "ssd-ada-l" });
+    expect(await processLaunch(message(CHANGE), ok.deps)).toBe("started");
+    expect(ok.table.builds.get(CHANGE)).toMatchObject({ status: "building", changeSpec: NEW_SPEC });
+    // Another text, another repository, or no read stored for that request: failed with its reason, no task.
+    for (const [label, read] of [
+      ["other text", { text: "# Something else\n", repository: "ssd-ada-l" }],
+      ["other repository", { text: NEW_SPEC, repository: "ssd-bob" }],
+      ["no read", undefined],
+    ] as const) {
+      const s = changeSetup();
+      arrange(s, read);
+      expect(await processLaunch(message(CHANGE), s.deps), label).toBe("failed");
+      expect(s.table.builds.get(CHANGE), label).toMatchObject({ status: "failed", failureReasons: [REBUILD_SPEC_UNCONFIRMED_REASON] });
+      expect(s.table.builds.get(CHANGE)?.changeSpec, label).toBeUndefined();
+      expect(s.tasks.started, label).toEqual([]);
+    }
   });
 
   it("a first build still starts from the template and the spec, with no change input", async () => {
