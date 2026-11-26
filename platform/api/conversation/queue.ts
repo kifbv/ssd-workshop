@@ -2,7 +2,7 @@
 // stored participant message, holding only the participant id and the message id (never the text).
 // Ticket 2.7: the hand-off from the AI worker to the build launcher, holding only the build id.
 import { SendMessageCommand, type SendMessageCommandOutput } from "@aws-sdk/client-sqs";
-import { buildJobBody, jobBody, suggestionsJobBody, type AiJob, type BuildJob, type BuildQueue, type HeldJobs, type MessageQueue, type SuggestionsQueue } from "./state.js";
+import { buildJobBody, jobBody, specReadJobBody, suggestionsJobBody, type AiJob, type BuildJob, type BuildQueue, type HeldJobs, type MessageQueue, type SuggestionsQueue } from "./state.js";
 
 /** The one method of SQSClient the queue uses, so tests can stub it. */
 export interface SqsSender {
@@ -52,6 +52,21 @@ export class SqsBuildQueue implements BuildQueue {
         QueueUrl: this.queueUrl,
         MessageBody: buildJobBody(job),
         MessageDeduplicationId: job.buildId,
+        MessageGroupId: job.participantId,
+      }),
+    );
+  }
+
+  /**
+   * Ticket 3.9: the spec-read request for a Rebuild from my repository message, in the participant's message group,
+   * deduplicated by its message id (a redelivered AI job sends it again; SQS drops the copy within 5 minutes).
+   */
+  async sendSpecRead(job: AiJob): Promise<void> {
+    await this.client.send(
+      new SendMessageCommand({
+        QueueUrl: this.queueUrl,
+        MessageBody: specReadJobBody(job),
+        MessageDeduplicationId: `spec-read-${job.messageId.replace(/[^A-Za-z0-9_-]/g, "-")}`.slice(0, 128),
         MessageGroupId: job.participantId,
       }),
     );

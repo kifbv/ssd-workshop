@@ -44,6 +44,7 @@ import {
   conversationKey,
   launchKey,
   LAUNCHES_PK,
+  messageKey,
   participantKey,
   queueEntryKey,
   slotCountKey,
@@ -55,6 +56,13 @@ import type { WorkshopSettings } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
+import type { RepositoryRead } from "../conversation/state.js";
+import { REBUILD_REQUEST } from "../workshop/texts.js";
+
+/** Ticket 3.9: the Rebuild from my repository route's request (participant's, at step 4, the exact text and the mark). */
+function isRebuildRequestItem(item: Record<string, AttributeValue> | undefined): item is Record<string, AttributeValue> {
+  return item?.author?.S === "participant" && item.step?.S === "building" && item.request?.S === "rebuild-from-repo" && item.text?.S === REBUILD_REQUEST;
+}
 import type {
   ApprovedSpec,
   ChangeInput,
@@ -65,6 +73,7 @@ import type {
   LaunchBuild,
   LaunchEntry,
   LaunchRecords,
+  RebuildRequestState,
   SlotCount,
   SlotItem,
   TaskStart,
@@ -326,12 +335,51 @@ export class DynamoLaunchRecords implements LaunchRecords {
   }
 
   async readApprovedSpec(participantId: string, version: number): Promise<ApprovedSpec | undefined> {
-    const item = await this.get(specKey(participantId, version), ["specVersion", "text", "approvedAt", "whatChanges"]);
-    if (item?.specVersion?.N !== String(version) || item.approvedAt?.S === undefined) return undefined;
+    const item = await this.get(specKey(participantId, version), ["specVersion", "text", "approvedAt", "rebuildApprovedAt", "messageId", "whatChanges"]);
+    if (item?.specVersion?.N !== String(version)) return undefined;
     const text = item.text?.S;
     if (text === undefined) return undefined;
     const whatChanges = (item.whatChanges?.L ?? []).flatMap((line) => (line.S === undefined ? [] : [line.S]));
-    return { text, ...(whatChanges.length > 0 ? { whatChanges } : {}) };
+    const listed = whatChanges.length > 0 ? { whatChanges } : {};
+    // Approved by the participant through the conversation function (Approve spec, Build this change).
+    if (item.approvedAt?.S !== undefined) return { text, ...listed };
+    // Ticket 3.9 try 2: approved by Rebuild from my repository (the AI worker): built only with its request's read.
+    const requestId = item.messageId?.S;
+    if (item.rebuildApprovedAt?.S !== undefined && requestId !== undefined) return { text, ...listed, rebuildRequestId: requestId };
+    return undefined;
+  }
+
+  /** Ticket 3.9: only the route's marked request (author, step, text and mark), with whether it is the one in flight. */
+  async readRebuildRequest(participantId: string, messageId: string): Promise<RebuildRequestState | undefined> {
+    const item = await this.get(messageKey(participantId, messageId), ["author", "step", "text", "status", "request", "repositoryRead", "pendingSince"]);
+    if (!isRebuildRequestItem(item)) return undefined;
+    const conversation = await this.get(conversationKey(participantId), ["pendingId"]);
+    const since = Number(item.pendingSince?.N);
+    return {
+      pending: item.status?.S === "pending",
+      read: item.repositoryRead?.S !== undefined,
+      inFlight: conversation?.pendingId?.S === messageId,
+      ...(Number.isInteger(since) ? { pendingSince: since } : {}),
+    };
+  }
+
+  async readRebuildSpec(participantId: string, messageId: string): Promise<{ text: string; repository: string } | undefined> {
+    const item = await this.get(messageKey(participantId, messageId), ["author", "step", "text", "request", "repositoryRead", "repositorySpec", "repositoryName"]);
+    if (!isRebuildRequestItem(item) || item.repositoryRead?.S !== "found") return undefined;
+    const text = item.repositorySpec?.S;
+    const repository = item.repositoryName?.S;
+    return text === undefined || repository === undefined ? undefined : { text, repository };
+  }
+
+  storeRepositoryRead(participantId: string, messageId: string, read: RepositoryRead): Promise<boolean> {
+    const found = read.kind === "found";
+    return this.update(
+      messageKey(participantId, messageId),
+      found ? "SET #repositoryRead = :read, #repositorySpec = :spec, #repositoryName = :repository" : "SET #repositoryRead = :read",
+      "attribute_exists(#pk) AND attribute_not_exists(#repositoryRead)",
+      { "#pk": "pk", "#repositoryRead": "repositoryRead", ...(found ? { "#repositorySpec": "repositorySpec", "#repositoryName": "repositoryName" } : {}) },
+      { ":read": str(read.kind), ...(found ? { ":spec": str(read.text), ":repository": str(read.repository) } : {}) },
+    );
   }
 
   setChangeInput(buildId: string, attemptId: string, input: ChangeInput, nowIso: string): Promise<boolean> {

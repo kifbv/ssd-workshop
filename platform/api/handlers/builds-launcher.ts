@@ -7,8 +7,11 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { parseGitHubSecret } from "../github/app.js";
 import { readTemplateFolder } from "../github/template-files.js";
 import { DynamoLaunchRecords, EcsBuildTasks, SqsDeadLetters, SqsLaunchVisibility } from "../launcher/aws.js";
-import { processLaunch, runCheck, type LaunchOutcome, type LauncherDeps, type LauncherLogEntry } from "../launcher/launcher.js";
+import { processLaunch, processSpecRead, runCheck, type LaunchOutcome, type LauncherDeps, type LauncherLogEntry } from "../launcher/launcher.js";
+import { SqsMessageQueue } from "../conversation/queue.js";
+import { parseSpecReadJob } from "../conversation/state.js";
 import {
+  AI_QUEUE_URL,
   BUILD_CHECK_QUEUE_NAME,
   BUILD_DLQ_URL,
   BUILD_QUEUE_NAME,
@@ -40,6 +43,10 @@ import {
  * global Stop (outcome `paused`) waits the same way. A running build the Stop put back in the queue has no launch message
  * (the access boundary lets only the AI worker and the scheduler send to the launch queue): after Resume the check
  * launches it itself, with the same deps as a launch, while at least RELAUNCH_MIN_LEFT_MS of the invocation is left.
+ *
+ * Ticket 3.9: the launch queue also carries spec-read requests (`{"readSpec": {...}}`, from the AI worker, the queue's
+ * only sender) for Rebuild from my repository: the launcher, the GitHub App key's only reader, reads the participant's
+ * SPEC.md (read-only token), stores it on their request and sends the job back to the AI worker's queue.
  */
 
 export interface LauncherRecord {
@@ -181,6 +188,20 @@ export async function handler(event: LauncherEvent, context?: LauncherContext): 
     }
     if (source !== "launch") continue;
     const deadline = deadlineOf(context);
+    if (parseSpecReadJob(record.body) !== undefined) {
+      try {
+        const deps = launchDeps(deadline.signal);
+        await processSpecRead(record.body, { ...deps, aiQueue: new SqsMessageQueue(sqs, AI_QUEUE_URL) });
+      } catch (error) {
+        // A failed table write or send: SQS delivers it again. Only a bare error leaves this process (no message).
+        log({ event: "spec-read", outcome: "error", error: error instanceof Error ? error.name : "Error", durationMs: 0 });
+        // eslint-disable-next-line preserve-caught-error -- no cause: the error may name the participant's repository
+        throw new Error("spec read failed");
+      } finally {
+        deadline.clear();
+      }
+      continue;
+    }
     try {
       const outcome = await processLaunch(record.body, launchDeps(deadline.signal));
       result.batchItemFailures.push(...(await answerLaunch(record, outcome, visibility)).batchItemFailures);

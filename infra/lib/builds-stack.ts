@@ -53,6 +53,8 @@ import {
   DEPLOY_DLQ_NAME,
   DEPLOY_QUEUE_NAME,
   GITHUB_SECRET_NAME,
+  AI_QUEUE_NAME,
+  LAUNCHER_PARTICIPANT_UPDATE_ATTRIBUTES,
   LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
   LAUNCHER_LAUNCH_ATTRIBUTES,
   LAUNCHER_QUEUE_ATTRIBUTES,
@@ -330,6 +332,24 @@ export class BuildsStack extends Stack {
           StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
         },
       }),
+    );
+    // Ticket 3.9: Rebuild from my repository. What it read of a participant's SPEC.md goes on their request (these two
+    // names only, which no other role may write), then the job goes back to the AI worker's queue (by name: the api stack
+    // creates it). The AI worker cannot read the GitHub App's key (the boundary lets only this role read it).
+    launcher.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...LAUNCHER_PARTICIPANT_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    launcher.addToRolePolicy(
+      new PolicyStatement({ effect: Effect.ALLOW, actions: ["sqs:SendMessage"], resources: [`arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}`] }),
     );
     // Ticket 3.4: builds at once (the SETTINGS item, read only), the slots (counter and holders) and the waiting line.
     launcher.addToRolePolicy(

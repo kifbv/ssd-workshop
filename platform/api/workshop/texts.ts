@@ -11,6 +11,31 @@ export const PHASE_3_TEXTS = {
   workshopPaused: "The workshop is paused for a moment.",
   /** Ticket 3.9: the repository's SPEC.md equals the stored spec. */
   specUnchanged: "Your repository's spec has not changed.",
+  /** Ticket 3.9: SPEC.md is over 20 KB (refused before any AI call, never downloaded). */
+  specTooLarge: "Your repository's SPEC.md is larger than 20 KB, so it was not read. Make it shorter, then press Rebuild from my repository again.",
+  /** Ticket 3.9: no `main`, or no SPEC.md at its top. */
+  specMissing: "There is no SPEC.md at the top of your repository's main branch. Put it back, then press Rebuild from my repository again.",
+  /** Ticket 3.9: SPEC.md is not UTF-8 text. */
+  specUnreadable: "Your repository's SPEC.md is not plain text, so it was not read. Save it as plain text (UTF-8), then press Rebuild from my repository again.",
+  /** Ticket 3.9: SPEC.md holds nothing but spaces. */
+  specEmpty: "Your repository's SPEC.md is empty. Write your spec in it, then press Rebuild from my repository again.",
+  /** Ticket 3.9 try 2: SPEC.md (cleaned) is longer than the 8,000 characters every stored spec keeps to (checkSpec). */
+  specTooLongForPlatform:
+    "Your repository's SPEC.md is longer than 8,000 characters, the most the workshop can build from. Make it shorter, then press Rebuild from my repository again. Your live app stays as it is.",
+  /** Ticket 3.9 try 2: SPEC.md lacks the spec's shape (title, one flowchart diagram, the three sections; checkSpec). */
+  specWrongShape:
+    "Your repository's SPEC.md does not have the shape of a spec, so it was not built. Keep the title line (# App name), one Mermaid diagram that starts with flowchart TD, then the headings ## What it does, ## Screens and ## Data it keeps, in this order and with nothing else. Fix it, then press Rebuild from my repository again. Your live app stays as it is.",
+  /** Ticket 3.9: GitHub (or the platform's GitHub App) could not be used. */
+  repositoryUnavailable: "Your repository could not be read just now. Please press Rebuild from my repository again in a minute.",
+  /** Ticket 3.9: the guardrail or the readiness check gave no answer (a model error, a time limit). */
+  rebuildFailed: "Sorry, the check of your repository's spec did not work this time. Please press Rebuild from my repository again.",
+  /** Ticket 3.9: the guardrail flagged the repository's spec (it is not queued for a facilitator: nothing is built). */
+  rebuildFlagged:
+    "The safety check wants a person to look at your repository's spec, so it was not built. Talk to your facilitator, or change SPEC.md and press Rebuild from my repository again.",
+  /** Ticket 3.9: the repository's spec passed the checks; the change build is queued in the same transaction. */
+  rebuildReady: "Your repository's spec is ready to build. The build is starting now: the AI changes your app to match it.",
+  /** Ticket 3.9: step 4's typing line while the platform reads and checks the repository's spec. */
+  checkingRepository: "Reading and checking the spec in your repository…",
   /** Ticket 3.6: a change request (or Build this change) while one of their builds is queued or running. */
   changeWhileBuilding: "Your app is being built right now. You can ask for another change once it is live.",
   /** Ticket 3.6: a change request before the app was ever live (its first build is not live yet, or failed). */
@@ -68,4 +93,22 @@ export function changeBuildFailedText(changeNumber: number | undefined): string 
 export function queuePositionText(ahead: number): string {
   if (ahead <= 0) return "Your build is next in the queue.";
   return `Your build is in the queue: ${ahead} ${ahead === 1 ? "build" : "builds"} ahead of you.`;
+}
+
+/**
+ * Ticket 3.9: the text Rebuild from my repository stores as the participant's message (marked `rebuild-from-repo`, which
+ * only that route writes); the step 4 page recognises it in flight.
+ */
+export const REBUILD_REQUEST = "Please rebuild my app from the SPEC.md in my repository.";
+
+/** Ticket 3.9: the "What changes" line of a version read from the repository (the launcher builds only a version with one). */
+export const REBUILD_WHAT_CHANGES = "Update the app to match SPEC.md as edited in your repository";
+
+/** Ticket 3.9: the readiness check found problems in the repository's spec (reasons as "- " lines; plain text). */
+export function rebuildNotReadyText(reasons: readonly string[]): string {
+  return [
+    "Your repository's spec cannot be built yet:",
+    ...reasons.map((r) => `- ${r}`),
+    "Change SPEC.md in your repository, then press Rebuild from my repository again. Your live app stays as it is.",
+  ].join("\n");
 }

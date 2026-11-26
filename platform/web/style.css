@@ -623,3 +623,16 @@ button.suggestion {
   margin: 0;
   font-size: 0.9rem;
 }
+
+/* Ticket 3.9: Rebuild from my repository, under a small Advanced fold on step 4. */
+.advanced {
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+.advanced summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.advanced button {
+  margin-top: 0.5rem;
+}

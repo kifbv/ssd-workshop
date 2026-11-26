@@ -32,12 +32,16 @@
 // proposed version and, when it passes and budget and changes are left, queues a build of kind `change` and counts the
 // change in the same transaction (a redelivery only re-sends the build id, as for the first build). A suggestions job
 // (no message) asks for three suggested changes once the app is live, under the same Stop hold and budget check.
+//
+// Ticket 3.9: Rebuild from my repository stores REBUILD_REQUEST marked `rebuild-from-repo`; ./rebuild.ts runs it (the
+// launcher reads SPEC.md in between, then the guardrail, the readiness check and the same change-build transaction).
 import { errorName } from "../sign-in/code-request.js";
 import { BUDGET_REPLY, budgetOf, overBudget } from "../workshop/budget.js";
 import { changesUsedText } from "../workshop/texts.js";
 import { answerMessage } from "./answer.js";
 import { answerChange, CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY, CHANGE_READY_REPLY, changeNotReadyReply } from "./change.js";
 import { suggestChanges } from "./suggestions.js";
+import { isRebuildRequest, runRebuild, type RebuildOutcome } from "./rebuild.js";
 import { checkGuardrail, declineReply } from "./guardrail.js";
 import { addUsage, usageOf, type ModelClient } from "./model.js";
 import { checkReadiness, notReadyReply, READINESS_FAILURE_REPLY, READINESS_PROMPT_VERSION, READINESS_REQUEST, READY_REPLY } from "./readiness.js";
@@ -81,7 +85,12 @@ export type WorkerOutcome =
   /** Ticket 3.6: every change request is used; no AI call was made and no build was queued. */
   | "over-limit"
   /** Ticket 3.6: the suggested changes were stored. */
-  | "suggested";
+  | "suggested"
+  /**
+   * Ticket 3.9, Rebuild from my repository: the launcher was asked to read SPEC.md (`reading`); the repository's spec is
+   * the live one (`unchanged`) or could not be used (`refused`, no AI call).
+   */
+  | Extract<RebuildOutcome, "reading" | "unchanged" | "refused">;
 
 /** The only things ever logged: outcome, verdict and an error name (no text, prompt, reply or id). */
 export interface WorkerLogEntry {
@@ -139,6 +148,9 @@ async function run(
   const nowSeconds = () => Math.floor(deps.now().getTime() / 1000);
   if (message !== undefined && isReadinessRequest(message)) return runReadiness(job, message, deps, signal);
   if (message !== undefined && isChangeBuildRequest(message)) return runChangeBuild(job, message, deps, signal);
+  if (message !== undefined && isRebuildRequest(message)) return runRebuild(job, message, { ...deps, sleep: deps.sleep ?? realSleep }, signal);
+  // Ticket 3.9: a platform mark on anything but its own request (or a mark this worker does not know) is never answered.
+  if (message?.request !== undefined) return { outcome: "skipped" };
   if (message === undefined || message.status !== "pending" || isStale(message, nowSeconds())) return { outcome: "skipped" };
 
   const sleep = deps.sleep ?? realSleep;

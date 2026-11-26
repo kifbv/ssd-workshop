@@ -32,7 +32,9 @@ export type GitHubStep =
   | "blob"
   | "tree"
   | "commit"
-  | "update-branch";
+  | "update-branch"
+  /** Ticket 3.9: the blob of `SPEC.md` (Rebuild from my repository). */
+  | "get-blob";
 
 export interface GitHubLogEntry {
   event: "github";

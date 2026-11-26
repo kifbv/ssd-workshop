@@ -16,6 +16,9 @@ import {
   openRepositoryAdmin,
   prepareRepository,
   readRepositoryMain,
+  readRepositorySpec,
+  cleanRepositorySpec,
+  MAX_REPOSITORY_SPEC_BYTES,
   repositoryNameFor,
   withSpec,
   removeEmailAddresses,
@@ -830,5 +833,79 @@ describe("openRepositoryAdmin (ticket 2.13, the operator's reset)", () => {
     const before = s.github.calls.length;
     await expect(admin.remove("../x")).rejects.toThrow("does not follow the workshop's rules");
     expect(s.github.calls).toHaveLength(before);
+  });
+});
+
+describe("readRepositorySpec (ticket 3.9: Rebuild from my repository)", () => {
+  const edited = "# Plant diary\r\n\r\nAda (ada@example.org) waters plants.   \r\n\u202Eand moves them.\u200B\n\n\n";
+
+  it("reads SPEC.md on main with a read-only token, cleaned and without email addresses, and writes nothing", async () => {
+    const { github, deps } = setup();
+    github.addRepository("ssd-joan");
+    github.seedCommit("ssd-joan", { "SPEC.md": edited, "index.html": "<p>hi</p>" }, "Edit SPEC.md");
+    const before = github.history("ssd-joan").map((c) => c.sha);
+    expect(await readRepositorySpec(credentials, "Joan", deps)).toEqual({
+      kind: "found",
+      text: "# Plant diary\n\nAda ([email removed]) waters plants.\nand moves them.\n",
+    });
+    expect(github.history("ssd-joan").map((c) => c.sha)).toEqual(before);
+    const ask = github.calls.find((c) => c.path.endsWith("/access_tokens"));
+    expect(ask?.body).toEqual({ repositories: ["ssd-joan"], permissions: { contents: "read" } });
+    // Only reads: no POST, PUT, PATCH or DELETE on the repository.
+    const repoCalls = github.calls.filter((c) => c.path.startsWith("/repos/"));
+    expect(repoCalls.every((c) => c.method === "GET")).toBe(true);
+    expect(repoCalls.map((c) => c.path.split("/").slice(4, 6).join("/"))).toEqual(["git/ref", "git/commits", "git/trees", "git/blobs"]);
+  });
+
+  it("WHEN SPEC.md is over 20 KB THEN it answers too-large without downloading the file", async () => {
+    const { github, deps } = setup();
+    github.addRepository("ssd-kim");
+    github.seedCommit("ssd-kim", { "SPEC.md": "a".repeat(MAX_REPOSITORY_SPEC_BYTES + 1) }, "Big");
+    expect(await readRepositorySpec(credentials, "kim", deps)).toEqual({ kind: "too-large" });
+    expect(github.calls.some((c) => c.path.includes("/git/blobs/"))).toBe(false);
+    // Exactly 20 KB is still read.
+    github.seedCommit("ssd-kim", { "SPEC.md": "b".repeat(MAX_REPOSITORY_SPEC_BYTES) }, "Just fits");
+    expect((await readRepositorySpec(credentials, "kim", deps)).kind).toBe("found");
+  });
+
+  it("checks the blob's size again when the tree gives none", async () => {
+    const s = setup();
+    s.github.addRepository("ssd-kim");
+    s.github.seedCommit("ssd-kim", { "SPEC.md": "c".repeat(MAX_REPOSITORY_SPEC_BYTES + 10) }, "Big");
+    const original = s.deps.fetch;
+    s.deps.fetch = async (url, init) => {
+      const answer = await original(url, init);
+      if (!url.includes("/git/trees/")) return answer;
+      const body = (await answer.json()) as { tree: Record<string, unknown>[] };
+      return new Response(JSON.stringify({ ...body, tree: body.tree.map((entry) => Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "size"))) }), { status: 200 });
+    };
+    expect(await readRepositorySpec(credentials, "kim", s.deps)).toEqual({ kind: "too-large" });
+  });
+
+  it("answers missing without main or without SPEC.md, unreadable for bytes that are not UTF-8, empty for blank text", async () => {
+    const { github, deps } = setup();
+    github.addRepository("ssd-kim");
+    expect(await readRepositorySpec(credentials, "kim", deps)).toEqual({ kind: "missing" });
+    github.seedCommit("ssd-kim", { "README.md": "x" }, "No spec");
+    expect(await readRepositorySpec(credentials, "kim", deps)).toEqual({ kind: "missing" });
+    github.seedCommit("ssd-kim", { "SPEC.md": new Uint8Array([0x23, 0x20, 0xff, 0xfe, 0x41]) }, "Binary");
+    expect(await readRepositorySpec(credentials, "kim", deps)).toEqual({ kind: "unreadable" });
+    github.seedCommit("ssd-kim", { "SPEC.md": " \n\u200B\n\t\n" }, "Blank");
+    expect(await readRepositorySpec(credentials, "kim", deps)).toEqual({ kind: "empty" });
+  });
+
+  it("answers missing for a repository that does not exist, and throws a plain GitHubProblem when GitHub fails", async () => {
+    const s = setup();
+    expect(await readRepositorySpec(credentials, "nobody", s.deps)).toEqual({ kind: "missing" });
+    s.github.addRepository("ssd-kim");
+    s.github.seedCommit("ssd-kim", { "SPEC.md": "# A\n" }, "Spec");
+    intercept(s, (url) => (url.includes("/git/trees/") ? new Response("{}", { status: 500 }) : undefined));
+    await expect(readRepositorySpec(credentials, "kim", s.deps)).rejects.toThrow(/GitHub answered 500 to the step "get-tree"/);
+  });
+
+  it("cleanRepositorySpec: same text whatever the line endings and trailing spaces", () => {
+    expect(cleanRepositorySpec("# A\r\n\r\nB  \r\n")).toBe(cleanRepositorySpec("# A\n\nB"));
+    expect(cleanRepositorySpec("ada@example.org")).toBe("[email removed]\n");
+    expect(cleanRepositorySpec("ada@example\u0001.org")).toBe("[email removed]\n");
   });
 });

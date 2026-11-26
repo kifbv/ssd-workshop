@@ -25,6 +25,7 @@ import {
   DEPLOY_DLQ_NAME,
   LAUNCHER_BUILD_UPDATE_ATTRIBUTES,
   LAUNCHER_LAUNCH_ATTRIBUTES,
+  LAUNCHER_PARTICIPANT_UPDATE_ATTRIBUTES,
   LAUNCHER_QUEUE_ATTRIBUTES,
   LAUNCHER_READ_ATTRIBUTES,
   LAUNCHER_SLOT_ATTRIBUTES,
@@ -32,6 +33,7 @@ import {
   SETTINGS_READ_ATTRIBUTES,
 } from "../../../infra/lib/config.js";
 import { BUILD_QUEUE_PK, BUILD_SLOTS_PK, LAUNCHES_PK, SETTINGS_PK } from "../keys.js";
+import { REBUILD_REQUEST } from "../workshop/texts.js";
 import {
   BUILD_CHECK_QUEUE_NAME,
   BUILD_DLQ_URL,
@@ -89,6 +91,69 @@ function placeholdersMatch(input: Named): void {
 const pkOf = (input: Named): string =>
   (((input.Key ?? input.Item)?.pk ?? (input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[":pk"]) as { S: string }).S;
 
+describe("DynamoLaunchRecords: Rebuild from my repository (ticket 3.9)", () => {
+  it("reads a request only when it is the route's (author, step, text and mark), and stores a read once, on an existing item", async () => {
+    const base = { author: { S: "participant" }, step: { S: "building" }, text: { S: REBUILD_REQUEST }, status: { S: "done" }, request: { S: "rebuild-from-repo" } };
+    const { client, sent } = stub([
+      { Item: { ...base, repositoryRead: { S: "found" }, pendingSince: { N: "1700000000" } } },
+      // Try 2: the conversation's message in flight is another one.
+      { Item: { pendingId: { S: "m-2" } } },
+      { Item: { ...base, request: { S: "change-build" } } },
+      { Item: { ...base, text: { S: "hi" } } },
+      { Item: { ...base, author: { S: "assistant" } } },
+    ]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.readRebuildRequest("p-1", "m-1")).toEqual({ pending: false, read: true, inFlight: false, pendingSince: 1700000000 });
+    for (let i = 0; i < 3; i++) expect(await records.readRebuildRequest("p-1", "m-1")).toBeUndefined();
+    // The conversation is read only for the route's request (keys: the message, then the conversation).
+    expect(sent.map((c) => (c.input as GetItemCommandInput).Key?.["sk"])).toEqual([{ S: "MSG#m-1" }, { S: "CONVERSATION" }, { S: "MSG#m-1" }, { S: "MSG#m-1" }, { S: "MSG#m-1" }]);
+    const conditionFailed = Object.assign(new Error("x"), { name: "ConditionalCheckFailedException" });
+    const second = stub([conditionFailed]);
+    expect(await new DynamoLaunchRecords(second.client, TABLE).storeRepositoryRead("p-1", "m-1", { kind: "missing" })).toBe(false);
+    const update = (second.sent[0]?.input ?? {}) as UpdateItemCommandInput;
+    expect(update).toMatchObject({
+      Key: { pk: { S: "PARTICIPANT#p-1" }, sk: { S: "MSG#m-1" } },
+      UpdateExpression: "SET #repositoryRead = :read",
+      ConditionExpression: "attribute_exists(#pk) AND attribute_not_exists(#repositoryRead)",
+      ReturnValues: "NONE",
+    });
+    expect(sent).toHaveLength(5);
+  });
+
+  it("ticket 3.9 try 2: stores the repository's name with a found text, and reads them back only from the route's request with a found read", async () => {
+    const base = { author: { S: "participant" }, step: { S: "building" }, text: { S: REBUILD_REQUEST }, request: { S: "rebuild-from-repo" } };
+    const { client, sent } = stub([
+      {},
+      { Item: { ...base, repositoryRead: { S: "found" }, repositorySpec: { S: "# Spec\n" }, repositoryName: { S: "ssd-ada" } } },
+      { Item: { ...base, repositoryRead: { S: "missing" } } },
+      { Item: { ...base, request: { S: "change-build" }, repositoryRead: { S: "found" }, repositorySpec: { S: "# Spec\n" }, repositoryName: { S: "ssd-ada" } } },
+      { Item: { ...base, repositoryRead: { S: "found" }, repositorySpec: { S: "# Spec\n" } } },
+    ]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.storeRepositoryRead("p-1", "m-1", { kind: "found", text: "# Spec\n", repository: "ssd-ada" })).toBe(true);
+    expect(sent[0]?.input).toMatchObject({
+      UpdateExpression: "SET #repositoryRead = :read, #repositorySpec = :spec, #repositoryName = :repository",
+      ExpressionAttributeValues: { ":read": { S: "found" }, ":spec": { S: "# Spec\n" }, ":repository": { S: "ssd-ada" } },
+    });
+    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ text: "# Spec\n", repository: "ssd-ada" });
+    for (let i = 0; i < 3; i++) expect(await records.readRebuildSpec("p-1", "m-1")).toBeUndefined();
+  });
+
+  it("ticket 3.9 try 2: a version approved only by Rebuild from my repository (rebuildApprovedAt) names its request; one with neither approval is not approved", async () => {
+    const { client } = stub([
+      { Item: { specVersion: { N: "3" }, text: { S: "# Spec" }, rebuildApprovedAt: { S: NOW }, messageId: { S: "m-9" }, whatChanges: { L: [{ S: "Update" }] } } },
+      { Item: { specVersion: { N: "3" }, text: { S: "# Spec" }, approvedAt: { S: NOW }, rebuildApprovedAt: { S: NOW }, messageId: { S: "m-9" } } },
+      { Item: { specVersion: { N: "3" }, text: { S: "# Spec" }, messageId: { S: "m-9" } } },
+      { Item: { specVersion: { N: "3" }, text: { S: "# Spec" }, rebuildApprovedAt: { S: NOW } } },
+    ]);
+    const records = new DynamoLaunchRecords(client, TABLE);
+    expect(await records.readApprovedSpec("p-1", 3)).toEqual({ text: "# Spec", whatChanges: ["Update"], rebuildRequestId: "m-9" });
+    expect(await records.readApprovedSpec("p-1", 3)).toEqual({ text: "# Spec" });
+    expect(await records.readApprovedSpec("p-1", 3)).toBeUndefined();
+    expect(await records.readApprovedSpec("p-1", 3)).toBeUndefined();
+  });
+});
+
 describe("DynamoLaunchRecords (ticket 2.9)", () => {
   async function everyRequest() {
     const { client, sent } = stub([
@@ -96,12 +161,23 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
       { Item: { nickname: { S: "Ada" } } },
       { Item: { buildId: { S: "b-1" }, approvedSpecVersion: { N: "2" } } },
       { Item: { specVersion: { N: "2" }, text: { S: "# Spec" }, approvedAt: { S: NOW }, whatChanges: { L: [{ S: "Adds a chart" }] } } },
+      // Ticket 3.9: a Rebuild from my repository request, pending, without a read yet.
+      { Item: { author: { S: "participant" }, step: { S: "building" }, text: { S: REBUILD_REQUEST }, status: { S: "pending" }, request: { S: "rebuild-from-repo" }, pendingSince: { N: "1700000000" } } },
+      { Item: { pendingId: { S: "m-1" } } },
+      {},
+      {},
+      // Try 2: what it stored, read back for the build of a version Rebuild from my repository approved.
+      { Item: { author: { S: "participant" }, step: { S: "building" }, text: { S: REBUILD_REQUEST }, request: { S: "rebuild-from-repo" }, repositoryRead: { S: "found" }, repositorySpec: { S: "# Spec\n" }, repositoryName: { S: "ssd-ada" } } },
     ]);
     const records = new DynamoLaunchRecords(client, TABLE);
     expect(await records.readBuild("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued", kind: "change", changeNumber: 2, specVersion: 3 });
     expect(await records.readProfileNickname("p-1")).toBe("Ada");
     expect(await records.readConversation("p-1")).toEqual({ buildId: "b-1", approvedSpecVersion: 2 });
     expect(await records.readApprovedSpec("p-1", 2)).toEqual({ text: "# Spec", whatChanges: ["Adds a chart"] });
+    expect(await records.readRebuildRequest("p-1", "m-1")).toEqual({ pending: true, read: false, inFlight: true, pendingSince: 1700000000 });
+    expect(await records.storeRepositoryRead("p-1", "m-1", { kind: "found", text: "# Spec\n", repository: "ssd-ada" })).toBe(true);
+    expect(await records.storeRepositoryRead("p-1", "m-1", { kind: "too-large" })).toBe(true);
+    expect(await records.readRebuildSpec("p-1", "m-1")).toEqual({ text: "# Spec\n", repository: "ssd-ada" });
     // Ticket 3.4: the cap, the waiting line and the slots.
     expect((await records.readSettings()).buildsAtOnce).toBe(15);
     expect(await records.enqueue("b-1", QUEUE_KEY)).toBe(true);
@@ -135,7 +211,7 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
   it("reads only LAUNCHER_READ_ATTRIBUTES (SETTINGS_READ_ATTRIBUTES, LAUNCHER_SLOT_ATTRIBUTES), consistently, with a projection (so dynamodb:Select is SPECIFIC_ATTRIBUTES)", async () => {
     const sent = await everyRequest();
     const reads = sent.filter((command) => command instanceof GetItemCommand).map((command) => command.input as GetItemCommandInput);
-    expect(reads).toHaveLength(6);
+    expect(reads).toHaveLength(9);
     const names = { records: new Set<string>(), settings: new Set<string>(), slots: new Set<string>() };
     for (const input of reads) {
       placeholdersMatch(input as Named);
@@ -177,15 +253,17 @@ describe("DynamoLaunchRecords (ticket 2.9)", () => {
         if (input.Select === "SPECIFIC_ATTRIBUTES") expect(input.ProjectionExpression).toBeTruthy();
       }
     }
-    const names: Record<string, Set<string>> = { build: new Set(), [LAUNCHES_PK]: new Set(), [BUILD_SLOTS_PK]: new Set(), [BUILD_QUEUE_PK]: new Set() };
+    const names: Record<string, Set<string>> = { build: new Set(), participant: new Set(), [LAUNCHES_PK]: new Set(), [BUILD_SLOTS_PK]: new Set(), [BUILD_QUEUE_PK]: new Set() };
     for (const input of writes) {
       placeholdersMatch(input);
       const pk = pkOf(input);
-      const set = pk.startsWith("BUILD#") ? names.build : names[pk];
+      const set = pk.startsWith("BUILD#") ? names.build : pk.startsWith("PARTICIPANT#") ? names.participant : names[pk];
       expect(set, pk).toBeDefined();
       for (const name of attributeNames(input)) set?.add(name);
     }
     expect([...(names.build ?? [])].sort()).toEqual([...LAUNCHER_BUILD_UPDATE_ATTRIBUTES].sort());
+    // Ticket 3.9: in participants, only what it read of SPEC.md, on an existing item without a read.
+    expect([...(names.participant ?? [])].sort()).toEqual([...LAUNCHER_PARTICIPANT_UPDATE_ATTRIBUTES].sort());
     expect([...(names[LAUNCHES_PK] ?? [])].sort()).toEqual([...LAUNCHER_LAUNCH_ATTRIBUTES].sort());
     expect([...(names[BUILD_SLOTS_PK] ?? [])].sort()).toEqual([...LAUNCHER_SLOT_ATTRIBUTES].sort());
     expect([...(names[BUILD_QUEUE_PK] ?? [])].sort()).toEqual([...LAUNCHER_QUEUE_ATTRIBUTES].sort());

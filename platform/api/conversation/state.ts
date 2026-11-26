@@ -36,9 +36,31 @@ export interface StoredMessage {
   suggestion?: string;
   /** The guardrail's reason, for the facilitator. */
   verdictReason?: string;
-  /** Ticket 3.6: set (only by Build this change) on the request that runs the change's readiness check. */
-  request?: "change-build";
+  /**
+   * Ticket 3.6: set (only by Build this change) on the request that runs the change's readiness check. Ticket 3.9:
+   * `rebuild-from-repo`, set only by Rebuild from my repository.
+   */
+  request?: PlatformRequest;
+  /**
+   * Ticket 3.9: on a Rebuild from my repository request, what the launcher read of `SPEC.md` on `main`
+   * (`repositoryRead`, and `repositorySpec` for a found file: attributes only the launcher may write).
+   */
+  repository?: RepositoryRead;
 }
+
+/** Ticket 3.9: the marks only the platform's own routes put on a message (a participant's message never has one). */
+export type PlatformRequest = "change-build" | "rebuild-from-repo";
+
+/**
+ * Ticket 3.9: what the launcher found in the participant's repository for a Rebuild from my repository request: the
+ * cleaned text (`found`, with the name of the repository it was read from, which the worker checks against the
+ * profile's), or why there is none (`github-error`: GitHub or the App's key could not be used).
+ */
+export type RepositoryRead =
+  | { kind: "found"; text: string; repository: string }
+  | { kind: "missing" | "too-large" | "unreadable" | "empty" | "github-error" };
+
+export const REPOSITORY_READ_KINDS = ["found", "missing", "too-large", "unreadable", "empty", "github-error"] as const;
 
 export interface StoredConversation {
   state: ConversationState;
@@ -130,8 +152,8 @@ export interface NewMessage {
   createdAt: string;
   /** Epoch seconds. */
   nowSeconds: number;
-  /** Ticket 3.6: only Build this change's own request carries it. */
-  request?: "change-build";
+  /** Ticket 3.6: only Build this change's own request carries it (ticket 3.9: or Rebuild from my repository's). */
+  request?: PlatformRequest;
 }
 
 /** `approved`: the participant approved their spec, so no message is taken any more (ticket 1.9). */
@@ -265,6 +287,16 @@ export interface ConversationStore {
    */
   finishChangeBuild(participantId: string, messageId: string, outcome: ChangeBuildFinish, nowIso: string): Promise<boolean>;
   /**
+   * Ticket 3.9: ends a Rebuild from my repository request, only while it is pending and in flight and the conversation's
+   * build is still `previousBuildId`: the message (with the guardrail's result, when it ran), the reply, the conversation
+   * (no message in flight) and the tokens. `ready` also, in the same transaction and like finishChangeBuild's: the
+   * repository's spec as the next version (only if absent, approved, with its "What changes" line), the conversation's
+   * `latestSpecVersion`, `approvedSpecVersion` and `buildId` set and any open proposal removed, the previous build
+   * `live` or `failed`, the new change build (only if absent), and `changeRequestsUsed` from `used` to `used + 1` below
+   * `cap`. False when a condition failed (nothing written).
+   */
+  finishRebuild(participantId: string, messageId: string, outcome: RebuildFinish, nowIso: string): Promise<boolean>;
+  /**
    * Ticket 3.6: notes that the suggestions were asked for (`suggestionsRequestedAt` = now), only while none are stored
    * and they were not asked for since `askedBeforeIso`. False when not (nothing written).
    */
@@ -296,6 +328,57 @@ export type ChangeBuildFinish =
     }
   | { kind: "not-ready"; reply: string; version: number; previousBuildId: string; answer: AnswerRecord }
   | { kind: "failed" | "over-budget" | "over-limit"; reply: string; version: number; previousBuildId: string; usage?: TokenUsage };
+
+/**
+ * Ticket 3.9: how a Rebuild from my repository request ends. `ready` stores the repository's spec as a new version and
+ * queues a change build (counting the change); `unchanged` (the same spec), `refused` (no readable SPEC.md),
+ * `declined` (the guardrail), `not-ready` (the readiness check) and the failures change nothing else.
+ */
+export type RebuildFinish =
+  | {
+      kind: "ready";
+      reply: string;
+      previousBuildId: string;
+      spec: { version: number; text: string; whatChanges: string[] };
+      guardrail: GuardrailRecord;
+      answer: AnswerRecord;
+      build: { buildId: string; nickname: string; changeNumber: number };
+      used: number;
+      cap: number;
+    }
+  | { kind: "not-ready"; reply: string; previousBuildId: string; guardrail: GuardrailRecord; answer: AnswerRecord }
+  | { kind: "declined"; reply: string; previousBuildId: string; guardrail: GuardrailRecord }
+  | { kind: "unchanged" | "refused"; reply: string; previousBuildId: string }
+  | { kind: "failed" | "over-budget" | "over-limit"; reply: string; previousBuildId: string; guardrail?: GuardrailRecord; usage?: TokenUsage };
+
+/** Ticket 3.9: the message status each way of ending a rebuild request stores. */
+export function rebuildStatus(kind: RebuildFinish["kind"]): MessageStatus {
+  if (kind === "declined") return "declined";
+  return kind === "failed" || kind === "over-budget" || kind === "over-limit" ? "failed" : "done";
+}
+
+/** Ticket 3.9: the reply kind of each way of ending a rebuild request. */
+export const REBUILD_REPLY_KINDS = {
+  ready: "answer",
+  "not-ready": "answer",
+  unchanged: "answer",
+  refused: "answer",
+  declined: "decline",
+  failed: "failure",
+  "over-budget": "budget",
+  "over-limit": "limit",
+} as const;
+
+/** Ticket 3.9: the tokens a rebuild outcome carries (the guardrail's and the readiness check's, or what was spent). */
+export function rebuildSpent(outcome: RebuildFinish): TokenUsage | undefined {
+  const parts: (TokenUsage | undefined)[] = [];
+  if ("guardrail" in outcome) parts.push(outcome.guardrail?.usage);
+  if ("answer" in outcome) parts.push(outcome.answer.usage);
+  if ("usage" in outcome) parts.push(outcome.usage);
+  const present = parts.filter((u): u is TokenUsage => u !== undefined);
+  if (present.length === 0) return undefined;
+  return present.reduce((a, b) => ({ inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd }));
+}
 
 /** What the AI worker reads of a profile for the readiness check (ticket 2.7). */
 export interface ParticipantInfo {
@@ -420,6 +503,11 @@ export function parseSuggestionsJob(body: string | undefined): string | undefine
 export interface BuildQueue {
   /** `participantId` groups one participant's launches (FIFO message group); the body holds only the build id. */
   send(job: BuildJob): Promise<void>;
+  /**
+   * Ticket 3.9: asks the launcher (the one holder of the GitHub App's key) to read `SPEC.md` for a Rebuild from my
+   * repository request; it stores what it found on the message and hands the job back to the AI worker.
+   */
+  sendSpecRead(job: AiJob): Promise<void>;
 }
 
 export interface BuildJob {
@@ -430,4 +518,24 @@ export interface BuildJob {
 /** The launch message body: exactly `{"buildId": "<id>"}`. */
 export function buildJobBody(job: BuildJob): string {
   return JSON.stringify({ buildId: job.buildId });
+}
+
+/** Ticket 3.9: the launch queue's spec-read message body: exactly `{"readSpec": {"participantId", "messageId"}}`. */
+export function specReadJobBody(job: AiJob): string {
+  return JSON.stringify({ readSpec: { participantId: job.participantId, messageId: job.messageId } });
+}
+
+/** Ticket 3.9: the job of a spec-read message body (exactly that shape, ids as parseJob takes them), else undefined. */
+export function parseSpecReadJob(body: string | undefined): AiJob | undefined {
+  if (typeof body !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).join() !== "readSpec") return undefined;
+  const inner = (parsed as { readSpec: unknown }).readSpec;
+  if (inner === null || typeof inner !== "object" || Array.isArray(inner) || Object.keys(inner).sort().join() !== "messageId,participantId") return undefined;
+  return parseJob(JSON.stringify(inner));
 }

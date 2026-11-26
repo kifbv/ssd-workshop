@@ -2,7 +2,7 @@
 // pure functions so every rule is unit tested without a browser. The DOM wiring is in ./main.ts.
 //
 // The "What changes" lines and the spec are the AI's text (guardrail-checked): the page shows them with `textContent`.
-import { CHANGE_BUILD_REQUEST, changesLeftText, changesUsedText, PHASE_3_TEXTS } from "../../api/workshop/texts.js";
+import { CHANGE_BUILD_REQUEST, changesLeftText, changesUsedText, PHASE_3_TEXTS, REBUILD_REQUEST } from "../../api/workshop/texts.js";
 import { isChangeRefusal, isVersion, type ChatMessage, type ChangeRefusal, type Conversation } from "./chat.js";
 import { MESSAGES, messageOf, type ApiAnswer, type Show, type Tone } from "./flow.js";
 
@@ -115,9 +115,12 @@ export function stepFourView(
     // The ideas start a new change: hidden while a proposal is open (a message then adjusts it).
     showSuggestions: !usedUp && !open && (conversation.suggestions?.length ?? 0) > 0,
     showProposal: !usedUp && open,
-    typingText: isBuildRequest(pending) ? PHASE_3_TEXTS.checkingChange : PHASE_3_TEXTS.writingChange,
+    typingText: isBuildRequest(pending) ? PHASE_3_TEXTS.checkingChange : isRebuildRequest(pending) ? PHASE_3_TEXTS.checkingRepository : PHASE_3_TEXTS.writingChange,
   };
 }
 
 /** The message in flight is Build this change's request (its readiness check runs), not a change request. */
 export const isBuildRequest = (message: ChatMessage | undefined): boolean => message?.author === "participant" && message.text === CHANGE_BUILD_REQUEST;
+
+/** Ticket 3.9: the message in flight is Rebuild from my repository's request (the repository is read and checked). */
+export const isRebuildRequest = (message: ChatMessage | undefined): boolean => message?.author === "participant" && message.text === REBUILD_REQUEST;

@@ -915,6 +915,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "GET /api/status",
       "POST /api/conversation/change/build",
       "POST /api/conversation/change/discard",
+      "POST /api/conversation/change/rebuild",
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
       "DELETE /api/apps/{nickname}/data/{key}",
@@ -1687,6 +1688,48 @@ describe("budget attributes (ticket 3.3)", () => {
     expect(listWriters).toEqual([AI_WORKER_FUNCTION_NAME]);
   });
 
+  it("WHEN the synthesized stacks are inspected THEN only the launcher may write what it read of SPEC.md (repositoryRead, repositorySpec, repositoryName; ticket 3.9), and only the GitHub key's reader", () => {
+    const writers = participantWriters();
+    for (const name of ["repositoryRead", "repositorySpec", "repositoryName"]) {
+      expect([...new Set(writers.filter((w) => w.attributes.includes(name)).map((w) => w.role))], name).toEqual([BUILD_LAUNCHER_FUNCTION_NAME]);
+    }
+    // The launcher's participant writes name nothing else (never a step, a count, a spec version or a message's text).
+    const launcherNames = [...new Set(writers.filter((w) => w.role === BUILD_LAUNCHER_FUNCTION_NAME).flatMap((w) => w.attributes))].sort();
+    expect(launcherNames).toEqual(["pk", "repositoryName", "repositoryRead", "repositorySpec", "sk"]);
+    // Try 2: an approval by Rebuild from my repository is its own name, only the AI worker's, and approvedAt is only the
+    // conversation function's: the launcher tells them apart and builds the first only as the text it read itself.
+    const approvers = (name: string) => [...new Set(writers.filter((w) => w.attributes.includes(name)).map((w) => w.role))];
+    expect(approvers("rebuildApprovedAt")).toEqual([AI_WORKER_FUNCTION_NAME]);
+    expect(approvers("approvedAt")).toEqual([CONVERSATION_FUNCTION_NAME]);
+    // The launcher reads (projected GetItem only) what it needs for that: the request's stored text and repository, the
+    // version's approval and request id, and the in-flight check's names.
+    for (const name of ["repositorySpec", "repositoryName", "rebuildApprovedAt", "messageId", "pendingId", "pendingSince"]) {
+      expect(LAUNCHER_READ_ATTRIBUTES as readonly string[], name).toContain(name);
+    }
+  });
+
+  it("WHEN the synthesized stacks are inspected THEN only the conversation function, the AI worker and (ticket 3.9) the launcher may send to the AI worker's queue", () => {
+    const queueId = ofType("AWS::SQS::Queue").find(([, , r]) => r.Properties?.QueueName === AI_QUEUE_NAME)?.[1];
+    const queueArn = `arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}`;
+    const reaches = (resource: unknown): boolean => resourceReaches(resource, [queueArn], [must(queueId)], [AI_QUEUE_NAME]);
+    expect(reaches(queueArn)).toBe(true);
+    const roleIds = [CONVERSATION_FUNCTION_NAME, AI_WORKER_FUNCTION_NAME].map((name) => apiFunction(name).roleEntry()?.[0]);
+    const launcherRoleId = ofType("AWS::IAM::Role").find(([, , r]) => r.Properties?.RoleName === BUILD_LAUNCHER_FUNCTION_NAME)?.[1];
+    expect(launcherRoleId).toBeDefined();
+    const senders = new Set<string>();
+    for (const [, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        if (!([st.Action].flat() as string[]).some((g) => actionCovers(g, "sqs:SendMessage"))) continue;
+        if (![st.Resource].flat().some(reaches)) continue;
+        const roles = JSON.stringify(r.Properties?.Roles);
+        expect([...roleIds, launcherRoleId].map((role) => JSON.stringify([{ Ref: role }])), id).toContain(roles);
+        senders.add(roles);
+      }
+    }
+    expect(senders.size).toBe(3);
+  });
+
   it("WHEN the synthesized stacks are inspected THEN only the launcher may write a change build's input (changeSpec, changeList) and the builder task may read it (ticket 3.7)", () => {
     const writers = participantWriters("BUILD#2026-11-24T10-00-00-000Z-0101010101010101");
     expect(writers.length).toBeGreaterThan(2);
@@ -1888,6 +1931,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "GET /api/status",
       "POST /api/conversation/change/build",
       "POST /api/conversation/change/discard",
+      "POST /api/conversation/change/rebuild",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -2045,8 +2089,12 @@ describe("api stack: AI worker (ticket 1.7)", () => {
     const conversationNames = conversationUpdate?.Condition["ForAllValues:StringEquals"]["dynamodb:Attributes"];
     expect(workerNames).toContain("specVersion");
     expect(conversationNames).not.toContain("specVersion");
+    // Ticket 3.9 (try 2): the worker never sets approvedAt; the version Rebuild from my repository creates carries its
+    // own rebuildApprovedAt, which the launcher builds only as the text it read from the repository itself.
     expect(workerNames).not.toContain("approvedAt");
+    expect(workerNames).toContain("rebuildApprovedAt");
     expect(conversationNames).toContain("approvedAt");
+    expect(conversationNames).not.toContain("rebuildApprovedAt");
     for (const name of ["step", "approvedSpecVersion", "buildId"]) expect(workerNames, name).toContain(name);
     // The worker's build rights never reach the deployer's or the builder's attributes.
     const buildNames = AI_WORKER_BUILD_UPDATE_ATTRIBUTES as readonly string[];
@@ -2436,7 +2484,7 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     expect(buildsResources().find(([id]) => id === logGroupId)?.[1].Properties?.LogGroupName).toBe(BUILD_LAUNCHER_FUNCTION_NAME);
   });
 
-  it("the launcher's rights: the secret, reads and writes by attribute list, RunTask of the builder on the builds cluster only, the dead-letter queues; no send", () => {
+  it("the launcher's rights: the secret, reads and writes by attribute list, RunTask of the builder on the builds cluster only, the dead-letter queues; (ticket 3.9) sends only to the AI worker's queue", () => {
     const tasks = `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`;
     const limited = [...ATTRIBUTE_LIMITED_RETURN_VALUES];
     const slotNames = ["pk", "sk", "type", "buildId", "heldSince", "running", "version", "repairMisses"];
@@ -2466,6 +2514,18 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
           StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
         },
       },
+      // Ticket 3.9: what it read of a participant's SPEC.md, on their request (two names only), then the job back to the AI worker.
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: tableArn,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "repositoryRead", "repositorySpec", "repositoryName"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": limited },
+        },
+      },
+      { Effect: "Allow", Action: "sqs:SendMessage", Resource: `arn:aws:sqs:${REGION}:${ACCOUNT}:${AI_QUEUE_NAME}` },
       // Ticket 3.4: the cap (SETTINGS, read only and projected), the slots (counter and holders) and the waiting line.
       settingsReadStatement(tableArn),
       // Reads projected (try 2: StringEquals on Select, so a read of whole items is refused), writes in their own statements.
