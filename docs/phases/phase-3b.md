@@ -2,7 +2,7 @@
 
 Spec sections: 4 (Guardrails, item 1: what an app is), 5 (Security: "each app's stored data is limited to
 1 MB"), 10 (confirmation: "limited to 1 MB"). Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus).
-Status: draft, questions open.
+Status: questions answered 2026-11-26, all as suggested (see `docs/decisions.md`); ready for approval.
 
 Goal: a participant can build an app that takes photos with the phone (or picks them from the
 phone) and keeps them, for example a gallery of their own drawings sorted by tags, and every app gets
@@ -160,4 +160,4 @@ Acceptance criteria (each starts as FAIL):
 
 ## Blocked
 
-- 3.18 to 3.20 wait on answers 1 to 3. 3.16 and 3.17 can start once the brief is merged.
+- None: every ticket can start once the brief is merged, in order.
