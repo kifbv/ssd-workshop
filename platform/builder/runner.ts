@@ -14,6 +14,12 @@
  * 6. deploying: stores the pushed commit on the build (`pushedCommit`, which the deployer's start condition requires)
  *    and sends `{buildId, nickname, commit}` to the deploy queue; the deployer then marks the build live or failed.
  *
+ * Ticket 3.7, change builds (`kind: "change"`): the same steps on the repository's current `main` (the launcher passes its
+ * commit as `baseCommit`; the template is never used), with SPEC.md replaced by the change's spec version and the
+ * agent asked to edit only what the change needs (`changePrompt`, with the "What changes" list); the work is one commit
+ * "Change <n>: <first line of the list>" holding the new SPEC.md (the approved text, rewritten after the agent), pushed
+ * on top of `main` without force. A failure pushes nothing and sends nothing: the live app stays as it was.
+ *
  * Every write is bound to the launch that started this task (`attemptId`, ticket 2.9 try 2): a second runner for the
  * same build can never claim, feed, hand over or fail it. Any failure marks the build `failed` with one plain reason
  * ("The build took too long." at the time limit), only while it is still `building` under this launch. When a feed write is refused (the build is no longer `building`: someone else marked
@@ -28,14 +34,14 @@ import { storedReason, storedReasons } from "../api/deploy/deploy.js";
 import { ArchiveProblem, readTarGz } from "../api/deploy/tar.js";
 import { DownloadProblem } from "../api/deploy/deploy.js";
 import { GitHubProblem, type GitHubDeps } from "../api/github/app.js";
-import { GIT_ID_PATTERN, removeEmailAddresses, type RepositoryFile } from "../api/github/repository.js";
+import { GIT_ID_PATTERN, removeEmailAddresses, SPEC_FILE, type RepositoryFile } from "../api/github/repository.js";
 import { ATTEMPT_ID_PATTERN, BUILD_ID_PATTERN } from "../api/keys.js";
 import { appArchiveUrl, BUILD_AGENT_TIMEOUT_MS, type ModelSetting } from "../api/settings.js";
 import { errorName } from "../api/sign-in/code-request.js";
 import type { TokenUsage } from "../api/types.js";
-import { buildPrompt, type CodingAgent } from "./agent.js";
+import { buildPrompt, changePrompt, type CodingAgent } from "./agent.js";
 import { MAX_FEED_FETCHES, MAX_FEED_FILES, type BuildRecords, type BuildStep, type FeedEvent } from "./records.js";
-import { planCommits, pushCommits, readMain } from "./repository.js";
+import { changeCommitMessage, planChangeCommit, planCommits, pushCommits, readMain } from "./repository.js";
 import { NO_TOKENS, usageOfTokens, type AgentTokens } from "./usage.js";
 
 /** At most this many distinct non-2xx WebFetch statuses go into the writing log line. */
@@ -195,6 +201,8 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     return "no-build";
   }
   const { nickname, participantId } = build;
+  // Ticket 3.7: a change build edits the live app with the input the launcher copied onto the build.
+  const change = build.kind === "change" ? build.change : undefined;
   if (!(await deps.records.claim(job.buildId, job.attemptId, nickname, step("preparing"), nowIso()))) {
     log("start", "no-build");
     return "no-build";
@@ -216,6 +224,8 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
   let phase: BuilderPhase = "preparing";
   try {
     // preparing
+    // A change build without its whole input (number, spec, list) is not built.
+    if (build.kind === "change" && change === undefined) throw new BuildFailure([SERVICE_REASON]);
     workspace = await deps.makeWorkspace();
     // Only the commit the launcher prepared: a `main` that moved since (someone holding the token pushed) is not built.
     const head = await readMain(deps.github, job.token, nickname);
@@ -224,6 +234,10 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     if (entries.some((entry) => entry.kind !== "file" && entry.kind !== "dir")) throw new BuildFailure([NOT_PLAIN_FILES_REASON]);
     const base: RepositoryFile[] = entries.filter((entry) => entry.kind === "file").map((entry) => ({ path: entry.path, bytes: entry.bytes }));
     await writeWorkspace(workspace, base);
+    // Ticket 3.7: the change's spec version replaces SPEC.md (email-shaped text removed, as in every published SPEC.md).
+    // The agent edits the app as it is on `main`; the template is not used.
+    const changeSpec = change === undefined ? undefined : new TextEncoder().encode(removeEmailAddresses(change.spec));
+    if (changeSpec !== undefined) await writeFile(join(workspace, SPEC_FILE), changeSpec);
     log("preparing", "ok", { files: base.length });
 
     // writing
@@ -270,7 +284,7 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
       deps.agent
         .run({
           workspace: ws,
-          prompt: buildPrompt(ws),
+          prompt: change === undefined ? buildPrompt(ws) : changePrompt(ws, change),
           modelId: deps.model.modelId,
           signal: controller.signal,
           onFileWritten: (path) => {
@@ -324,11 +338,13 @@ export async function runBuild(job: BuildJob, deps: RunnerDeps): Promise<BuildOu
     // checking
     phase = "checking";
     await feed(step("checking"));
+    // A change commits the approved version as SPEC.md, whatever the agent did to it.
+    if (changeSpec !== undefined) await writeFile(join(workspace, SPEC_FILE), changeSpec);
     const files = await readAppFolder(workspace);
     const check = checkApp(files);
     if (!check.ok) throw new BuildFailure(storedReasons(check.problems));
     const final: RepositoryFile[] = files.filter((file) => file.kind === "file").map((file) => ({ path: file.path, bytes: file.bytes }));
-    const planned = planCommits(base, final);
+    const planned = change === undefined ? planCommits(base, final) : planChangeCommit(base, final, changeCommitMessage(change.number, change.whatChanges));
     if (planned.length === 0) throw new BuildFailure([NOTHING_CHANGED_REASON]);
     log("checking", "ok", { files: final.length });
 

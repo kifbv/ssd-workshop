@@ -1,5 +1,5 @@
 // Ticket 2.8: the runner, against the in-memory GitHub, table, deploy queue and a scripted agent.
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,12 +11,14 @@ import { loadTemplateFiles } from "../api/github/template.js";
 import { settle } from "../api/sign-in/fakes.js";
 import { FakeAgent, FakeBuildRecords, FakeDeployQueue, type AgentStep } from "./fakes.js";
 import { BUILD_STEPS, MAX_FEED_FETCHES, type FeedEvent } from "./records.js";
-import { BEHAVIOUR_COMMIT_MESSAGE, PAGE_COMMIT_MESSAGE, SINGLE_COMMIT_MESSAGE, planCommits } from "./repository.js";
+import { buildPrompt } from "./agent.js";
+import { BEHAVIOUR_COMMIT_MESSAGE, CHANGE_COMMIT_FALLBACK, CHANGE_COMMIT_MAX, PAGE_COMMIT_MESSAGE, SINGLE_COMMIT_MESSAGE, changeCommitMessage, planChangeCommit, planCommits } from "./repository.js";
 import {
   AGENT_FAILED_REASON,
   HAND_OVER_REASON,
   MAIN_MOVED_REASON,
   NOTHING_CHANGED_REASON,
+  SERVICE_REASON,
   TIME_UP_REASON,
   MAX_LOGGED_FETCH_CODES,
   exitWhenDone,
@@ -548,5 +550,190 @@ describe("planCommits", () => {
     expect(planCommits(base, base)).toEqual([]);
     expect(planCommits(base, [file("index.html", "A"), file("app.js", "b"), file("README.md", "c")]).map((c) => c.message)).toEqual([SINGLE_COMMIT_MESSAGE]);
     expect(planCommits(base, [file("index.html", "a"), file("app.js", "B"), file("README.md", "c")]).map((c) => c.message)).toEqual([SINGLE_COMMIT_MESSAGE]);
+  });
+});
+
+describe("change builds edit the existing app (ticket 3.7)", () => {
+  const LIVE_BUILD = "2026-11-24T09-00-00-000Z-0909090909090909";
+  const BUILT_APP = '"use strict";\n// Runs: the live app.\n';
+  const NEW_SPEC = "# Run Log\n\n## Screens\n- Home: this week's runs and a weekly chart.\n\nQuestions to grace.hopper@example.org\n";
+  const WHAT_CHANGES = ["Adds a weekly chart to the home screen", "Shows the distance of each week"];
+  const CHART_PAGE = PAGE.replace("<h2>Home</h2>", '<h2>Home</h2><section aria-label="Weekly chart"></section>');
+
+  /** The first build is live (its commit on main); the change build is building under one launch, as the launcher leaves it. */
+  async function changeSetup(script: AgentStep[], change: { changeSpec?: string; changeList?: string[]; changeNumber?: number } = {}) {
+    const t = await setup(script);
+    const template = await loadTemplateFiles();
+    const files = Object.fromEntries(template.map((file) => [file.path, new TextDecoder().decode(file.bytes)]));
+    const built = t.github.seedCommit(
+      "ssd-ada",
+      { ...files, "SPEC.md": SPEC.replace(/\S+@\S+/, "[email removed]"), "index.html": PAGE, "app.js": BUILT_APP },
+      SINGLE_COMMIT_MESSAGE,
+      [t.start],
+    );
+    t.records.builds.set(LIVE_BUILD, { nickname: "Ada", participantId: "p-1", status: "live", pushedCommit: built, finishedAt: "2026-11-24T09:10:00.000Z" });
+    t.records.builds.set(BUILD, {
+      nickname: "Ada",
+      participantId: "p-1",
+      status: "building",
+      attemptId: ATTEMPT,
+      kind: "change",
+      changeNumber: 2,
+      changeSpec: NEW_SPEC,
+      changeList: WHAT_CHANGES,
+      ...change,
+    });
+    return { ...t, built, liveBefore: structuredClone(t.records.builds.get(LIVE_BUILD)) };
+  }
+  const changeJob = (t: { built: string }) => ({ buildId: BUILD, token: TOKEN, baseCommit: t.built, attemptId: ATTEMPT });
+  const PUBLISHED_NEW_SPEC = NEW_SPEC.replace("grace.hopper@example.org", "[email removed]");
+
+  it("WHEN a change build starts THEN the workspace holds the repository's main files (not the template) with the new SPEC.md, and the agent gets the What changes list", async () => {
+    const seen: Record<string, string> = {};
+    const script: AgentStep[] = [];
+    const t = await changeSetup(script);
+    script.push(
+      {
+        call: async () => {
+          const ws = t.agent.runs[0]?.workspace ?? "";
+          for (const path of ["index.html", "app.js", "SPEC.md", "AGENTS.md", "workshop-data.js"]) seen[path] = await readFile(join(ws, path), "utf8");
+        },
+      },
+      { write: "index.html", content: CHART_PAGE },
+    );
+    expect(await runBuild(changeJob(t), t.deps)).toBe("handed-over");
+    const template = Object.fromEntries((await loadTemplateFiles()).map((file) => [file.path, new TextDecoder().decode(file.bytes)]));
+    // The live app's files, not the template's starter (the shared counter).
+    expect(seen["index.html"]).toBe(PAGE);
+    expect(seen["index.html"]).not.toBe(template["index.html"]);
+    expect(seen["app.js"]).toBe(BUILT_APP);
+    expect(seen["app.js"]).not.toBe(template["app.js"]);
+    expect(seen["AGENTS.md"]).toBe(template["AGENTS.md"]);
+    // SPEC.md is already the new version, its email address removed.
+    expect(seen["SPEC.md"]).toBe(PUBLISHED_NEW_SPEC);
+    // The change prompt: its number and list, and the rule to edit only what the change needs.
+    const prompt = t.agent.runs[0]?.prompt ?? "";
+    expect(prompt).toContain("This is change 2");
+    for (const line of WHAT_CHANGES) expect(prompt).toContain(`- ${line}`);
+    expect(prompt).toMatch(/editing only what the change needs/);
+    expect(prompt).not.toMatch(/Replace the starter/);
+    expect(t.agent.runs[0]?.prompt).not.toBe(buildPrompt(t.agent.runs[0]?.workspace ?? ""));
+  });
+
+  it("WHEN the change build finishes THEN main has one new commit on top, \"Change 2: ...\", whose SPEC.md is the new version, and the deployer gets it", async () => {
+    // The agent also edits SPEC.md: the approved version is committed anyway.
+    const t = await changeSetup([
+      { write: "index.html", content: CHART_PAGE },
+      { write: "app.js", content: `${BUILT_APP}// Weekly chart.\n` },
+      { write: "SPEC.md", content: "# Something else\n" },
+    ]);
+    expect(await runBuild(changeJob(t), t.deps)).toBe("handed-over");
+    const history = t.github.history("ssd-ada");
+    expect(history).toHaveLength(3);
+    const [commit] = history;
+    expect(commit?.message).toBe("Change 2: Adds a weekly chart to the home screen");
+    expect(commit?.message).toMatch(/^Change 2:/);
+    expect(commit?.parents).toEqual([t.built]);
+    expect(commit?.author).toMatchObject({ name: BUILDER_COMMIT_NAME, email: BUILDER_COMMIT_EMAIL });
+    const files = t.github.filesAt("ssd-ada", commit?.sha ?? "");
+    expect(files["SPEC.md"]).toBe(PUBLISHED_NEW_SPEC);
+    expect(files["index.html"]).toBe(CHART_PAGE);
+    expect(files["app.js"]).toContain("Weekly chart");
+    // Fast-forward only, stored as pushedCommit, and the only commit the deploy message names.
+    expect(t.github.repo("ssd-ada").main).toBe(commit?.sha);
+    const build = t.records.builds.get(BUILD);
+    expect(build?.pushedCommit).toBe(commit?.sha);
+    expect(t.queue.sent).toEqual([{ buildId: BUILD, nickname: "Ada", commit: commit?.sha }]);
+    expect(steps(build?.feed)).toEqual([...BUILD_STEPS]);
+    expect((build?.feed ?? []).filter((event) => event.kind === "commit")).toEqual([{ kind: "commit", sha: commit?.sha, message: commit?.message, at: expect.any(String) }]);
+    expect(JSON.stringify(build?.feed)).not.toContain("grace.hopper");
+  });
+
+  it("WHEN a change build fails THEN the live app stays as it was: nothing pushed, nothing sent to the deployer, the live build untouched", async () => {
+    const failures: { name: string; script: AgentStep[]; change?: { changeSpec?: string; changeList?: string[] }; reason: string | RegExp }[] = [
+      { name: "the agent fails", script: [{ write: "index.html", content: CHART_PAGE }, { fail: true }], reason: AGENT_FAILED_REASON },
+      { name: "the deploy check fails", script: [{ write: "app.js", content: 'fetch("http://example.com/x");\n' }], reason: /http/i },
+      { name: "only SPEC.md changed", script: [{ write: "SPEC.md", content: "# Other\n" }], reason: NOTHING_CHANGED_REASON },
+      { name: "no change input", script: [{ write: "index.html", content: CHART_PAGE }], change: { changeList: [] }, reason: SERVICE_REASON },
+    ];
+    for (const failure of failures) {
+      const t = await changeSetup(failure.script, failure.change);
+      expect(await runBuild(changeJob(t), t.deps), failure.name).toBe("failed");
+      const build = t.records.builds.get(BUILD);
+      expect(build?.status, failure.name).toBe("failed");
+      expect(build?.failureReasons?.join(" "), failure.name).toMatch(failure.reason);
+      expect(build?.pushedCommit, failure.name).toBeUndefined();
+      // The repository's main is still the live app's commit, with its old SPEC.md; no deploy message.
+      expect(t.github.repo("ssd-ada").main, failure.name).toBe(t.built);
+      expect(t.github.history("ssd-ada"), failure.name).toHaveLength(2);
+      expect(t.queue.sent, failure.name).toEqual([]);
+      // The live build's record (what the app serves) is exactly as before.
+      expect(t.records.builds.get(LIVE_BUILD), failure.name).toEqual(t.liveBefore);
+      expect(t.records.writes.some((w) => w.method === "handOver"), failure.name).toBe(false);
+    }
+  });
+
+  it("access review of 3.7: WHEN the What changes list holds an email address THEN the agent's prompt holds none", async () => {
+    const list = ["Adds a weekly chart mailed to ada.lovelace@example.org", "Shows the coach (coach\u0001@club.example.com)", "Lists bob&#64;example.net as \u202eadmin"];
+    const t = await changeSetup([{ write: "index.html", content: CHART_PAGE }], { changeList: list });
+    expect(await runBuild(changeJob(t), t.deps)).toBe("handed-over");
+    const prompt = t.agent.runs[0]?.prompt ?? "";
+    expect(prompt).not.toMatch(/ada\.lovelace|coach.?@|club\.example|bob|example\.net/);
+    expect(prompt).not.toMatch(/[\p{Cf}]/u);
+    expect(prompt).not.toContain("\u0001");
+    expect(prompt).toContain("- Adds a weekly chart mailed to [email removed]");
+    expect(prompt).toContain("- Shows the coach ([email removed])");
+    expect(prompt).toContain("- Lists [email removed] as admin");
+    expect(t.github.history("ssd-ada")[0]?.message).toBe("Change 2: Adds a weekly chart mailed to [email removed]");
+  });
+
+  it("a change build fails before the agent when main moved since the launch", async () => {
+    const t = await changeSetup([{ write: "index.html", content: CHART_PAGE }]);
+    t.github.seedCommit("ssd-ada", { "index.html": "pushed by someone else" }, "Elsewhere", [t.built]);
+    expect(await runBuild(changeJob(t), t.deps)).toBe("failed");
+    expect(t.records.builds.get(BUILD)?.failureReasons).toEqual([MAIN_MOVED_REASON]);
+    expect(t.agent.runs).toEqual([]);
+    expect(t.queue.sent).toEqual([]);
+  });
+});
+
+describe("changeCommitMessage and planChangeCommit (ticket 3.7)", () => {
+  it("is \"Change <n>: \" and the list's first line, on one line, without email addresses, at most 72 characters", () => {
+    expect(changeCommitMessage(2, ["add a weekly chart"])).toBe("Change 2: add a weekly chart");
+    expect(changeCommitMessage(1, ["- Adds a chart\nwith\tbars", "Other"])).toBe("Change 1: Adds a chart with bars");
+    expect(changeCommitMessage(3, ["Mail ada@example.org the chart"])).toBe("Change 3: Mail [email removed] the chart");
+    expect(changeCommitMessage(4, [])).toBe(`Change 4: ${CHANGE_COMMIT_FALLBACK}`);
+    expect(changeCommitMessage(4, ["  ", "\u0000"])).toBe(`Change 4: ${CHANGE_COMMIT_FALLBACK}`);
+    const long = changeCommitMessage(5, ["Adds a weekly chart of the distance you ran each week to the home screen, under the list"]);
+    expect(long.length).toBeLessThanOrEqual(CHANGE_COMMIT_MAX);
+    expect(long).toMatch(/^Change 5: Adds a weekly chart .*\.\.\.$/);
+    expect(changeCommitMessage(6, ["x".repeat(300)]).length).toBeLessThanOrEqual(CHANGE_COMMIT_MAX);
+  });
+
+  it("access review of 3.7: strips bidi and zero-width characters, catches an address split by a control character, and never cuts a character in half", () => {
+    // A right-to-left override (and the other bidi controls) and zero-width characters are removed, not kept.
+    expect(changeCommitMessage(1, ["Adds \u202emargorp\u202c a chart"])).toBe("Change 1: Adds margorp a chart");
+    expect(changeCommitMessage(1, ["\u2066Adds\u2069 a\u200b chart\ufeff"])).toBe("Change 1: Adds a chart");
+    // An address split by a control character (or a zero-width one) is still removed.
+    expect(changeCommitMessage(2, ["Mail ada@example\u0001.org the chart"])).toBe("Change 2: Mail [email removed] the chart");
+    expect(changeCommitMessage(2, ["Mail ada\u0007@\u200bexample.org"])).toBe("Change 2: Mail [email removed]");
+    expect(changeCommitMessage(2, ["Mail ada@example.\u0085org"])).not.toMatch(/ada@/);
+    // An emoji (two UTF-16 units) at the cut point is kept whole or dropped whole: no lone surrogate.
+    for (let pad = 50; pad <= 62; pad += 1) {
+      const message = changeCommitMessage(7, [`${"a".repeat(pad)}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}\u{1F3C3}`]);
+      expect(Array.from(message).length, String(pad)).toBeLessThanOrEqual(CHANGE_COMMIT_MAX);
+      expect(message, String(pad)).not.toMatch(/\p{Cs}/u);
+    }
+    // A line that is only control and format characters is skipped like a blank one.
+    expect(changeCommitMessage(4, ["\u202e\u200b\u0001", "Second"])).toBe("Change 4: Second");
+  });
+
+  it("plans one commit with the whole app when a file other than SPEC.md changed, none otherwise", () => {
+    const file = (path: string, text: string) => ({ path, bytes: new TextEncoder().encode(text) });
+    const base = [file("index.html", "a"), file("SPEC.md", "v1")];
+    expect(planChangeCommit(base, [file("index.html", "a"), file("SPEC.md", "v2")], "Change 1: x")).toEqual([]);
+    const final = [file("index.html", "A"), file("SPEC.md", "v2")];
+    expect(planChangeCommit(base, final, "Change 1: x")).toEqual([{ message: "Change 1: x", files: final }]);
+    expect(planChangeCommit(base, [...base, file("chart.js", "c")], "Change 1: x")).toHaveLength(1);
   });
 });

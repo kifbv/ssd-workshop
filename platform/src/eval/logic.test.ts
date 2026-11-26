@@ -9,6 +9,9 @@ import {
   formatBuildSummary,
   missingScreens,
   scoreBuild,
+  scoreChange,
+  formatChangeResult,
+  type ChangeEvalOutcome,
   screenNames,
   specTitle,
   type BuildEvalOutcome,
@@ -545,5 +548,62 @@ describe("suggestions suite (ticket 3.6 criterion 6)", () => {
     expect(text).toContain("| Sort the list by date (21 chars, on-path)");
     expect(formatSuggestionsSummary(results)[0]).toBe("Suggestions: 1/2 passed");
     expect(exitCode(results)).not.toBe(0);
+  });
+});
+
+describe("the change suite (ticket 3.7)", () => {
+  const build: BuildEvalOutcome = {
+    outcome: "handed-over",
+    failureReasons: [],
+    steps: ["preparing", "writing", "checking", "committing", "deploying"],
+    files: 2,
+    commits: 1,
+    checkPassed: true,
+    consoleErrors: [],
+    overflow: 0,
+    missing: [],
+    outsideHosts: [],
+    fetches: 0,
+    fetchHosts: [],
+    durationMs: 120_000,
+    usage: { inputTokens: 400_000, outputTokens: 10_000, costUsd: 0.5 },
+  };
+  const ok: ChangeEvalOutcome = {
+    first: { ...build, commits: 2, durationMs: 200_000 },
+    specUsage: { inputTokens: 3_000, outputTokens: 600, costUsd: 0.02, durationMs: 9_000 },
+    whatChanges: ["Adds a weekly chart to the home screen"],
+    change: build,
+    commitMessage: "Change 1: Adds a weekly chart to the home screen",
+    specCommitted: true,
+    previousMissing: [],
+  };
+
+  it("takes no arguments", () => {
+    expect(parseEvalArgs(["change"])).toEqual({ suite: "change" });
+    expect(parseEvalArgs(["change", "x"])).toEqual({ error: "change takes no arguments" });
+  });
+
+  it("passes when both builds pass, the change is one \"Change 1:\" commit with the new SPEC.md and every previous screen is still shown", () => {
+    expect(scoreChange(ok)).toEqual({ pass: true, detail: expect.stringContaining("Change 1: Adds a weekly chart") as unknown });
+  });
+
+  it("fails on a failed first build, no new spec, a failed change build, a lost screen, a wrong message, SPEC.md or commit count", () => {
+    expect(scoreChange({ ...ok, first: { ...build, outcome: "failed" } }).detail).toMatch(/^first build: build failed/);
+    expect(scoreChange({ ...ok, specProblem: "no spec" })).toEqual({ pass: false, detail: "no spec" });
+    expect(scoreChange({ ...ok, change: undefined as unknown as BuildEvalOutcome }).detail).toBe("no change build");
+    expect(scoreChange({ ...ok, change: { ...build, consoleErrors: ["boom"] } }).detail).toMatch(/1 console error/);
+    expect(scoreChange({ ...ok, change: { ...build, outcome: "failed", failureReasons: ["x"] } }).detail).toBe("build failed: x");
+    expect(scoreChange({ ...ok, previousMissing: ["Add a run"] }).detail).toBe("previous screens missing: Add a run");
+    expect(scoreChange({ ...ok, commitMessage: "Build the app from the approved spec" }).pass).toBe(false);
+    expect(scoreChange({ ...ok, specCommitted: false }).detail).toBe("SPEC.md is not the new version");
+    expect(scoreChange({ ...ok, change: { ...build, commits: 2 } }).detail).toBe("2 commits (one expected)");
+  });
+
+  it("prints the time, tokens and cost of each step and in all", () => {
+    const lines = formatChangeResult({ outcome: ok, ...scoreChange(ok) });
+    expect(lines[0]).toMatch(/^PASS change: /);
+    expect(lines.join("\n")).toContain("first build: 3m20s");
+    expect(lines.join("\n")).toContain("change build: 2m00s, 2 files written, 400000 tokens in, 10000 out, cost $0.5000");
+    expect(lines.at(-1)).toBe("Duration: 5m29s in all (change build 2m00s); tokens: 803000 in, 20600 out, cost $1.0200");
   });
 });

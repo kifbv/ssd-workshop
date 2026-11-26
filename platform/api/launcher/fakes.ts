@@ -4,7 +4,7 @@
 // build slots (counter and holders) and the waiting line, with the same conditions as the real transactions.
 import type { BuildStatus } from "../types.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
-import type { BuildTasks, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
+import type { ApprovedSpec, BuildTasks, ChangeInput, ClaimResult, DeadLetter, DeadLetters, LaunchBuild, LaunchEntry, LaunchRecords, SlotCount, SlotItem, TaskStart, TaskState } from "./launcher.js";
 
 export interface FakeBuild {
   nickname: string;
@@ -21,6 +21,12 @@ export interface FakeBuild {
   finishedAt?: string;
   feed?: unknown[];
   queueKey?: string;
+  /** Ticket 3.6/3.7: a change build, its number and version, and the input the launcher copied for its runner. */
+  kind?: "first" | "change";
+  changeNumber?: number;
+  specVersion?: number;
+  changeSpec?: string;
+  changeList?: string[];
 }
 
 export class FakeBuildTable implements LaunchRecords {
@@ -29,7 +35,7 @@ export class FakeBuildTable implements LaunchRecords {
   readonly profiles = new Map<string, string>();
   readonly conversations = new Map<string, { buildId?: string; approvedSpecVersion?: number }>();
   /** `<participant id>#<version>` -> spec. */
-  readonly specs = new Map<string, { text: string; approved: boolean }>();
+  readonly specs = new Map<string, { text: string; approved: boolean; whatChanges?: string[] }>();
   /** Lower-cased nickname -> participant id (the `NICK#` claims). */
   readonly nicknames = new Map<string, string>();
   readonly launches = new Map<string, LaunchEntry>();
@@ -66,10 +72,44 @@ export class FakeBuildTable implements LaunchRecords {
     this.builds.set(input.buildId, { nickname: input.nickname, participantId: input.participantId, status: "queued", createdAt: "2026-11-24T09:00:00.000Z" });
   }
 
+  /**
+   * Ticket 3.7: a participant whose app is live (`liveBuildId`, deployed from the repository's main) with a queued change
+   * build of their approved version 3 (as 3.6's ready transaction leaves it).
+   */
+  addQueuedChangeBuild(input: { buildId: string; participantId: string; nickname: string; spec?: string; whatChanges?: string[]; changeNumber?: number }): void {
+    this.profiles.set(input.participantId, input.nickname);
+    this.nicknames.set(input.nickname.toLowerCase(), input.participantId);
+    this.conversations.set(input.participantId, { buildId: input.buildId, approvedSpecVersion: 3 });
+    this.specs.set(`${input.participantId}#3`, {
+      text: input.spec ?? "# Run log\n\nA small app with a weekly chart.",
+      approved: true,
+      ...(input.whatChanges === undefined ? { whatChanges: ["Adds a weekly chart to the home screen"] } : { whatChanges: input.whatChanges }),
+    });
+    this.builds.set(input.buildId, {
+      nickname: input.nickname,
+      participantId: input.participantId,
+      status: "queued",
+      createdAt: "2026-11-24T11:00:00.000Z",
+      kind: "change",
+      changeNumber: input.changeNumber ?? 1,
+      specVersion: 3,
+    });
+  }
+
   async readBuild(buildId: string): Promise<LaunchBuild | undefined> {
     this.maybeFail("readBuild");
     const build = this.builds.get(buildId);
-    return build && { nickname: build.nickname, participantId: build.participantId, status: build.status, ...(build.queueKey === undefined ? {} : { queueKey: build.queueKey }) };
+    return (
+      build && {
+        nickname: build.nickname,
+        participantId: build.participantId,
+        status: build.status,
+        ...(build.queueKey === undefined ? {} : { queueKey: build.queueKey }),
+        ...(build.kind === "change" ? { kind: "change" as const } : {}),
+        ...(build.changeNumber === undefined ? {} : { changeNumber: build.changeNumber }),
+        ...(build.specVersion === undefined ? {} : { specVersion: build.specVersion }),
+      }
+    );
   }
 
   async readSettings(): Promise<WorkshopSettings> {
@@ -162,9 +202,21 @@ export class FakeBuildTable implements LaunchRecords {
     return { ...this.conversations.get(participantId) };
   }
 
-  async readApprovedSpec(participantId: string, version: number): Promise<string | undefined> {
+  async readApprovedSpec(participantId: string, version: number): Promise<ApprovedSpec | undefined> {
     const spec = this.specs.get(`${participantId}#${String(version)}`);
-    return spec?.approved ? spec.text : undefined;
+    if (!spec?.approved) return undefined;
+    return { text: spec.text, ...(spec.whatChanges === undefined || spec.whatChanges.length === 0 ? {} : { whatChanges: [...spec.whatChanges] }) };
+  }
+
+  /** As DynamoLaunchRecords.setChangeInput: only while `building` under this launch without a task. */
+  async setChangeInput(buildId: string, attemptId: string, input: ChangeInput, nowIso: string): Promise<boolean> {
+    this.maybeFail("setChangeInput");
+    const build = this.builds.get(buildId);
+    if (!build || build.status !== "building" || build.attemptId !== attemptId || build.taskArn !== undefined) return false;
+    build.changeSpec = input.spec;
+    build.changeList = [...input.whatChanges];
+    build.updatedAt = nowIso;
+    return true;
   }
 
   async claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string, slot: { cap: number; queueKey: string }): Promise<ClaimResult> {

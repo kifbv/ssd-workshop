@@ -184,7 +184,7 @@ async function proposeChart(s: ReturnType<typeof setup>): Promise<string> {
   return json(res)["id"] as string;
 }
 
-describe("the change answer (change-v1)", () => {
+describe("the change answer (change-v2)", () => {
   it("splits the words, the new spec and the What changes list; a question has neither; broken answers throw", () => {
     expect(readChangeAnswer(changeReply(CHART_SPEC, ["Adds a weekly chart screen", "  Keeps   everything\telse "]).text)).toEqual({
       text: "I added a weekly chart.",

@@ -1,5 +1,5 @@
 // Ticket 2.9: the build launcher and its stuck-build check, against the in-memory table, tasks, queues and GitHub.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "../github/app.js";
 import { FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../github/fakes.js";
 import { SPEC_FILE } from "../github/repository.js";
@@ -7,7 +7,7 @@ import { loadTemplateFiles } from "../github/template.js";
 import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, QUEUE_SEEN_MS, QUEUE_WAIT_MAX_MS, SLOT_REPAIR_FORCE_AFTER } from "../settings.js";
 import { runBuilds } from "../../src/builds/command.js";
 import { FakeBuildsStore, FakeLaunchQueue, FakeTaskWatch } from "../../src/builds/fakes.js";
-import { FakeBuildTable, FakeDeadLetters, FakeTasks } from "./fakes.js";
+import { FakeBuildTable, FakeDeadLetters, FakeTasks, type FakeBuild } from "./fakes.js";
 import { DynamoBuildRecords, type BuilderTableSender } from "../../builder/records.js";
 import {
   DEPLOY_DEAD_REASON,
@@ -287,6 +287,129 @@ describe("launching a build (ticket 2.9)", () => {
     expect(await processLaunch(message(), s.deps)).toBe("failed");
     expect(s.tasks.stopCalls).toEqual([s.tasks.started[0]?.taskArn]);
     expect(s.table.builds.get(BUILD)?.status).toBe("failed");
+  });
+});
+
+describe("launching a change build (ticket 3.7)", () => {
+  const CHANGE = "2026-11-24T11-00-00-000Z-0202020202020202";
+  const NEW_SPEC = "# Run log\n\nLog runs, with a weekly chart.";
+  /** The first build is live: the repository's main holds the built app (two commits). */
+  function changeSetup() {
+    const s = setup();
+    must(s.table.builds.get(BUILD)).status = "live";
+    s.github.addRepository("ssd-ada-l");
+    const start = s.github.seedCommit("ssd-ada-l", { "SPEC.md": "# Run log\n\nLog runs.", "index.html": "<h1>Run log</h1>" }, "Start from the workshop template and the approved spec");
+    const built = s.github.seedCommit("ssd-ada-l", { "SPEC.md": "# Run log\n\nLog runs.", "index.html": "<h1>Run log</h1><h2>Home</h2>", "app.js": "// runs" }, "Build the app from the approved spec", [start]);
+    s.table.addQueuedChangeBuild({ buildId: CHANGE, participantId: PARTICIPANT, nickname: NICKNAME, spec: NEW_SPEC, whatChanges: ["Adds a weekly chart to the home screen"], changeNumber: 2 });
+    return { ...s, built };
+  }
+
+  it("WHEN a change build starts THEN the task's base commit is main's current commit (never the template), the repository is not written, and the build holds the version's text and list", async () => {
+    const s = changeSetup();
+    const before = s.github.history("ssd-ada-l").map((c) => c.sha);
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("started");
+    const [task] = s.tasks.started;
+    expect(task?.buildId).toBe(CHANGE);
+    expect(task?.baseCommit).toBe(s.built);
+    expect(task?.baseCommit).toMatch(/^[0-9a-f]{40}$/);
+    // Nothing committed: main and the history are as they were (no template, no new SPEC.md commit).
+    expect(s.github.history("ssd-ada-l").map((c) => c.sha)).toEqual(before);
+    expect(s.github.repo("ssd-ada-l").main).toBe(s.built);
+    expect(s.github.calls.some((c) => c.method !== "GET" && c.path.startsWith("/repos/"))).toBe(false);
+    // The runner's input, copied from SPEC#0003 of this participant, and its one-repository token.
+    expect(s.table.builds.get(CHANGE)).toMatchObject({ status: "building", changeSpec: NEW_SPEC, changeList: ["Adds a weekly chart to the home screen"], taskArn: task?.taskArn });
+    expect(s.github.grants.get(task?.token ?? "")).toEqual({ permissions: { contents: "write", metadata: "read" }, repositories: ["ssd-ada-l"] });
+    assertQuietLogs(s);
+  });
+
+  it("ignores a change build whose version is no longer the conversation's approved one, or that has no version or number", async () => {
+    const edits: ((build: FakeBuild) => void)[] = [
+      (build) => {
+        build.specVersion = 2;
+      },
+      (build) => {
+        delete build.specVersion;
+      },
+      (build) => {
+        delete build.changeNumber;
+      },
+    ];
+    for (const [i, edit] of edits.entries()) {
+      const change = `edit ${i}`;
+      const s = changeSetup();
+      edit(must(s.table.builds.get(CHANGE)));
+      expect(await processLaunch(message(CHANGE), s.deps), change).toBe("ignored");
+      expect(s.tasks.started).toEqual([]);
+      expect(s.table.builds.get(CHANGE)?.status).toBe("queued");
+    }
+  });
+
+  it("access review of 3.7: WHEN the version's text or What changes list holds an email address THEN the build's stored input holds none", async () => {
+    const s = changeSetup();
+    const spec = must(s.table.specs.get(`${PARTICIPANT}#3`));
+    spec.text = "# Run log\n\nQuestions go to ada.lovelace@example.org or coach&#64;club.example.com.";
+    spec.whatChanges = ["Adds a weekly chart sent to ada.lovelace@example.org", "Shows the coach (coach@club.example.com) on the home screen"];
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("started");
+    const build = must(s.table.builds.get(CHANGE));
+    const stored = JSON.stringify([build.changeSpec, build.changeList]);
+    expect(stored).not.toMatch(/ada\.lovelace|coach@|coach&#64;|club\.example/);
+    expect(build.changeSpec).toBe("# Run log\n\nQuestions go to [email removed] or [email removed].");
+    expect(build.changeList).toEqual(["Adds a weekly chart sent to [email removed]", "Shows the coach ([email removed]) on the home screen"]);
+  });
+
+  it("access review of 3.7 (try 3): WHEN a control character sits inside an address in the text or the list THEN the build's stored input holds none", async () => {
+    const s = changeSetup();
+    const spec = must(s.table.specs.get(`${PARTICIPANT}#3`));
+    spec.text = "# Run log\n\nQuestions go to ada@example\u0001.org or bob\u0000@example.org.\n\tThanks";
+    spec.whatChanges = ["Adds a chart sent to ada@example\u0001.org", "Shows bob\u0000@example.org\non the home screen"];
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("started");
+    const build = must(s.table.builds.get(CHANGE));
+    expect(JSON.stringify([build.changeSpec, build.changeList])).not.toMatch(/ada|bob|example\.org/);
+    expect(build.changeSpec).toBe("# Run log\n\nQuestions go to [email removed] or [email removed].\n\tThanks");
+    expect(build.changeList).toEqual(["Adds a chart sent to [email removed]", "Shows [email removed] on the home screen"]);
+  });
+
+  it("ignores a change build whose participant is not the conversation's owner: no spec read across participants, no task", async () => {
+    const s = changeSetup();
+    // Another participant with their own approved version 3 and the same nickname on their profile.
+    const OTHER = "p-other";
+    s.table.profiles.set(OTHER, NICKNAME);
+    s.table.conversations.set(OTHER, { buildId: "another-build", approvedSpecVersion: 3 });
+    s.table.specs.set(`${OTHER}#3`, { text: "# Their app", approved: true, whatChanges: ["Their change"] });
+    must(s.table.builds.get(CHANGE)).participantId = OTHER;
+    const read = vi.spyOn(s.table, "readApprovedSpec");
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("ignored");
+    expect(read).not.toHaveBeenCalled();
+    expect(s.tasks.started).toEqual([]);
+    expect(s.table.builds.get(CHANGE)).toMatchObject({ status: "queued" });
+    expect(s.table.builds.get(CHANGE)?.changeSpec).toBeUndefined();
+    expect(s.github.calls.filter((c) => c.path.startsWith("/repos/"))).toEqual([]);
+  });
+
+  it("marks a change build failed, without a task, when its version has no What changes list or the repository has no main", async () => {
+    const s = changeSetup();
+    must(s.table.specs.get(`${PARTICIPANT}#3`)).whatChanges = [];
+    expect(await processLaunch(message(CHANGE), s.deps)).toBe("failed");
+    expect(s.table.builds.get(CHANGE)).toMatchObject({ status: "failed", failureReasons: [SPEC_MISSING_REASON] });
+    expect(s.tasks.started).toEqual([]);
+
+    const t = setup();
+    must(t.table.builds.get(BUILD)).status = "live";
+    t.github.addRepository("ssd-ada-l");
+    t.table.addQueuedChangeBuild({ buildId: CHANGE, participantId: PARTICIPANT, nickname: NICKNAME });
+    expect(await processLaunch(message(CHANGE), t.deps)).toBe("failed");
+    expect(t.table.builds.get(CHANGE)?.failureReasons?.[0]).toMatch(/^GitHub: The app's repository has no main branch/);
+    expect(t.tasks.started).toEqual([]);
+    expect(t.github.history("ssd-ada-l")).toEqual([]);
+  });
+
+  it("a first build still starts from the template and the spec, with no change input", async () => {
+    const s = setup();
+    expect(await processLaunch(message(), s.deps)).toBe("started");
+    const build = s.table.builds.get(BUILD);
+    expect(build?.changeSpec).toBeUndefined();
+    expect(build?.changeList).toBeUndefined();
+    expect(s.github.history("ssd-ada-l")[0]?.message).toBe("Start from the workshop template and the approved spec");
   });
 });
 

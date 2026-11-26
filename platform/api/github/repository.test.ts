@@ -15,9 +15,12 @@ import {
   commitRequest,
   openRepositoryAdmin,
   prepareRepository,
+  readRepositoryMain,
   repositoryNameFor,
   withSpec,
   removeEmailAddresses,
+  EMAIL_REMOVED,
+  plainLineWithoutEmails,
   type RepositoryFile,
 } from "./repository.js";
 import { loadTemplateFiles, templateDir } from "./template.js";
@@ -127,6 +130,15 @@ describe("removeEmailAddresses", () => {
       expect(performance.now() - start, text.slice(0, 12)).toBeLessThan(1000);
     }
   });
+
+  it("removes control characters other than line breaks and tabs first, so none can split an address", () => {
+    expect(removeEmailAddresses("ada@example\u0001.org")).toBe(EMAIL_REMOVED);
+    expect(removeEmailAddresses("ada\u0000@example.org")).toBe(EMAIL_REMOVED);
+    expect(removeEmailAddresses("a\u007F\u0085b ada@exa\u009Bmple.org")).toBe(`ab ${EMAIL_REMOVED}`);
+    expect(removeEmailAddresses("# Title\r\n\n\t- item\u0007\n")).toBe("# Title\r\n\n\t- item\n");
+  });
+
+  it("plainLineWithoutEmails drops a lone surrogate", () => expect(plainLineWithoutEmails("x\uD800y")).toBe("xy"));
 
   it("withSpec writes the spec with its addresses removed", () => {
     const files = withSpec(template, "Owner: ada@example.org\n");
@@ -254,6 +266,67 @@ describe("prepareRepository: the repository exists (criterion 2)", () => {
     const { github, deps } = setup();
     github.addRepository("ssd-gail", { private: true });
     await expect(prepareRepository({ credentials, nickname: "gail", spec: SPEC, templateFiles: template }, deps)).rejects.toThrow(/not public/);
+  });
+});
+
+describe("readRepositoryMain (ticket 3.7: where a change build starts)", () => {
+  it("answers main's commit and writes nothing", async () => {
+    const { github, deps } = setup();
+    const first = await prepareRepository({ credentials, nickname: "Joan", spec: SPEC, templateFiles: template }, deps);
+    const before = github.history("ssd-joan").map((c) => c.sha);
+    const calls = github.calls.length;
+    expect(await readRepositoryMain(credentials, "JOAN", deps)).toBe(first.commit);
+    expect(github.history("ssd-joan").map((c) => c.sha)).toEqual(before);
+    // Only reads after the token: the branch, never a blob, tree, commit or ref update.
+    const after = github.calls.slice(calls).filter((c) => c.path.startsWith("/repos/"));
+    expect(after.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /repos/ssd-workshop-apps/ssd-joan/git/ref/heads/main"]);
+  });
+
+  it("fails plainly for a repository without main (no app to change) and for a missing one", async () => {
+    const { github, deps } = setup();
+    github.addRepository("ssd-kim");
+    await expect(readRepositoryMain(credentials, "kim", deps)).rejects.toThrow(/no main branch to change/);
+    await expect(readRepositoryMain(credentials, "nobody", deps)).rejects.toThrow();
+  });
+
+  it("refuses an answer whose commit id is not 40 hex digits", async () => {
+    const s = setup();
+    await prepareRepository({ credentials, nickname: "Luna", spec: SPEC, templateFiles: template }, s.deps);
+    intercept(s, (url) => (url.endsWith("/git/ref/heads/main") ? new Response(JSON.stringify({ object: { sha: "../../x" } }), { status: 200 }) : undefined));
+    await expect(readRepositoryMain(credentials, "Luna", s.deps)).rejects.toThrow(/no valid id/);
+  });
+
+  it("asks for a read-only token (contents read) for that one repository, and the token cannot write", async () => {
+    const { github, deps } = setup();
+    await prepareRepository({ credentials, nickname: "Mia", spec: SPEC, templateFiles: template }, deps);
+    const calls = github.calls.length;
+    await readRepositoryMain(credentials, "Mia", deps);
+    const ask = github.calls.slice(calls).find((c) => c.path.endsWith("/access_tokens"));
+    expect(ask?.body).toEqual({ repositories: ["ssd-mia"], permissions: { contents: "read" } });
+    const [token] = [...github.grants].filter(([, grant]) => grant.permissions.contents === "read").map(([t]) => t);
+    expect(github.grants.get(token ?? "")).toEqual({ permissions: { contents: "read", metadata: "read" }, repositories: ["ssd-mia"] });
+    // The fake, like GitHub, refuses a write with it.
+    const put = await github.fetch("https://api.github.com/repos/ssd-workshop-apps/ssd-mia/contents/x.txt", {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token ?? ""}`, "x-github-api-version": "2022-11-28", "user-agent": "test" },
+      body: JSON.stringify({ message: "x", content: "eA==" }),
+    });
+    expect(put.status).toBe(404);
+  });
+
+  it("refuses a token answer with write rights, more rights, or another repository", async () => {
+    const answers = [
+      { permissions: { contents: "write", metadata: "read" } },
+      { permissions: { contents: "read", metadata: "read", administration: "write" } },
+      { repository_selection: "all" },
+      { repositories: [{ full_name: "ssd-workshop-apps/ssd-other" }] },
+    ];
+    for (const answer of answers) {
+      const s = setup();
+      await prepareRepository({ credentials, nickname: "Mia", spec: SPEC, templateFiles: template }, s.deps);
+      s.github.overrideTokenAnswer = answer;
+      await expect(readRepositoryMain(credentials, "Mia", s.deps), JSON.stringify(answer)).rejects.toThrow(/contents read, so it was not used/);
+    }
   });
 });
 

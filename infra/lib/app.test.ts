@@ -1635,7 +1635,7 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
 
 describe("budget attributes (ticket 3.3)", () => {
   /** Every DynamoDB write statement in every stack that can reach PARTICIPANT# items, by role name, with its attribute list ("*" when none). */
-  function participantWriters(): { role: string; attributes: string[] }[] {
+  function participantWriters(sampleKey = "PARTICIPANT#p-1"): { role: string; attributes: string[] }[] {
     const roleNames = new Map(ofType("AWS::IAM::Role").map(([s, id, r]) => [`${s}/${id}`, String(r.Properties?.RoleName ?? id)]));
     const writers: { role: string; attributes: string[] }[] = [];
     const documents: { roles: string[]; statements: Record<string, unknown>[] }[] = [];
@@ -1660,7 +1660,7 @@ describe("budget attributes (ticket 3.3)", () => {
         if (!DYNAMODB_WRITE_ACTIONS.some((a) => ([] as unknown[]).concat(st.Action).some((g) => typeof g === "string" && actionCovers(g, a)))) continue;
         const conditions = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
         const patterns = Object.values(conditions).flatMap((c) => (c["dynamodb:LeadingKeys"] === undefined ? [] : ([] as unknown[]).concat(c["dynamodb:LeadingKeys"])));
-        if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, "PARTICIPANT#p-1"))) continue;
+        if (patterns.length > 0 && !patterns.some((p) => typeof p === "string" && actionCovers(p, sampleKey))) continue;
         const attributes = Object.values(conditions).find((c) => c["dynamodb:Attributes"] !== undefined)?.["dynamodb:Attributes"];
         for (const role of roles) writers.push({ role, attributes: attributes === undefined ? ["*"] : ([] as unknown[]).concat(attributes).map(String) });
       }
@@ -1685,6 +1685,18 @@ describe("budget attributes (ticket 3.3)", () => {
     expect(countWriters).toEqual([AI_WORKER_FUNCTION_NAME]);
     const listWriters = [...new Set(writers.filter((w) => w.attributes.includes("whatChanges")).map((w) => w.role))];
     expect(listWriters).toEqual([AI_WORKER_FUNCTION_NAME]);
+  });
+
+  it("WHEN the synthesized stacks are inspected THEN only the launcher may write a change build's input (changeSpec, changeList) and the builder task may read it (ticket 3.7)", () => {
+    const writers = participantWriters("BUILD#2026-11-24T10-00-00-000Z-0101010101010101");
+    expect(writers.length).toBeGreaterThan(2);
+    for (const w of writers) expect(w.attributes, w.role).not.toContain("*");
+    for (const name of ["changeSpec", "changeList"]) {
+      expect([...new Set(writers.filter((w) => w.attributes.includes(name)).map((w) => w.role))], name).toEqual([BUILD_LAUNCHER_FUNCTION_NAME]);
+      expect([...BUILDER_BUILD_READ_ATTRIBUTES], name).toContain(name);
+      expect([...BUILDER_BUILD_UPDATE_ATTRIBUTES], name).not.toContain(name);
+    }
+    // The builder task reads nothing outside BUILD#* (no spec version, no message text): its statements are checked whole below.
   });
 });
 

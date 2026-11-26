@@ -4,14 +4,15 @@
  * - "clone": reads `main`'s commit (Git Data API) and downloads the public repository's tarball at that commit (the
  *   deployer's size-capped download and in-memory tar reader), so no git binary is needed;
  * - commits: pushes the agent's work as a few commits through the Git Data API (blobs, a full tree, a commit per
- *   group), each authored and committed by the builder's fixed identity with a fixed message, then moves `main`
+ *   group), each authored and committed by the builder's fixed identity with a fixed message (a change build's one
+ *   commit: "Change <n>: <summary>", ticket 3.7), then moves `main`
  *   forward (never forced) to the last one. The last commit's id, from GitHub's answer, is the build's `pushedCommit`.
  *
  * The token goes only into the `authorization` header; nothing here logs it, a path or a file name.
  */
 import { createHash } from "node:crypto";
 import { expectStatus, githubCall, GitHubProblem, type GitHubDeps, type GitHubStep } from "../api/github/app.js";
-import { commitRequest, GIT_ID_PATTERN, repositoryNameFor, withRetry, type RepositoryFile } from "../api/github/repository.js";
+import { commitRequest, GIT_ID_PATTERN, plainLineWithoutEmails, repositoryNameFor, SPEC_FILE, withRetry, type RepositoryFile } from "../api/github/repository.js";
 import { APPS_DEFAULT_BRANCH, APPS_GITHUB_OWNER } from "../api/settings.js";
 
 const record = (value: unknown): Record<string, unknown> =>
@@ -92,7 +93,10 @@ export async function pushCommits(
   return pushed;
 }
 
-/** Messages of the builder's commits (fixed text: nothing from the participant reaches a commit's metadata). */
+/**
+ * Messages of a first build's commits (fixed text: nothing from the participant reaches a commit's metadata). A change
+ * build's one commit (ticket 3.7) is "Change <n>: " and the first line of its "What changes" list (`changeCommitMessage`).
+ */
 export const PAGE_COMMIT_MESSAGE = "Build the app's page and its look (HTML, CSS and images)";
 export const BEHAVIOUR_COMMIT_MESSAGE = "Add what the app does (JavaScript) and update its notes";
 export const SINGLE_COMMIT_MESSAGE = "Build the app from the approved spec";
@@ -122,4 +126,46 @@ export function planCommits(base: readonly RepositoryFile[], final: readonly Rep
     { message: PAGE_COMMIT_MESSAGE, files: first },
     { message: BEHAVIOUR_COMMIT_MESSAGE, files: final },
   ];
+}
+
+/** Ticket 3.7: a change commit's message is at most this many characters (one line). */
+export const CHANGE_COMMIT_MAX = 72;
+/** The summary when the "What changes" list gives none. */
+export const CHANGE_COMMIT_FALLBACK = "update the app to the new spec";
+
+/**
+ * Ticket 3.7: a change build's commit message, "Change <n>: <summary>": `n` is the build's `changeNumber` (1 for the
+ * participant's first change, so the count matches the step 4 page's), the summary the first line of its "What
+ * changes" list (the platform's stored list, AI-written from the participant's request and checked by the guardrail):
+ * control and format characters removed (line breaks and tabs as spaces), runs of spaces as one, then email-shaped
+ * text removed, a leading "- " dropped, and the whole message cut to CHANGE_COMMIT_MAX characters (code points) on a
+ * word boundary with "...".
+ */
+export function changeCommitMessage(number: number, whatChanges: readonly string[]): string {
+  const head = `Change ${number}: `;
+  // The first line that still says something once cleaned (plainLineWithoutEmails: control and format characters out
+  // first, so an address split by one is still caught, then email addresses), a leading "- " dropped.
+  const first = whatChanges.map((line) => plainLineWithoutEmails(line).replace(/^[\s\-*•]+/u, "").trim()).find((line) => line !== "");
+  // Measured and cut in whole characters (code points), so an emoji at the cut is never split into a lone surrogate.
+  let summary = Array.from(first ?? CHANGE_COMMIT_FALLBACK);
+  const headLength = Array.from(head).length;
+  if (headLength + summary.length > CHANGE_COMMIT_MAX) {
+    const room = CHANGE_COMMIT_MAX - headLength - 3;
+    const cut = summary.slice(0, room);
+    const space = cut.lastIndexOf(" ");
+    summary = [...(space > room / 2 ? cut.slice(0, space) : cut).join("").trimEnd(), ..."..."];
+  }
+  return `${head}${summary.join("")}`;
+}
+
+/**
+ * Ticket 3.7: a change build's work as one commit on top of the `main` it started from, holding the whole app with
+ * the new SPEC.md; none when the agent changed nothing but SPEC.md (the change was not made).
+ */
+export function planChangeCommit(base: readonly RepositoryFile[], final: readonly RepositoryFile[], message: string): PlannedCommit[] {
+  const before = new Map(base.map((file) => [file.path, file.bytes]));
+  const appChanged =
+    final.some((file) => file.path !== SPEC_FILE && !sameBytes(before.get(file.path), file.bytes)) ||
+    base.some((file) => file.path !== SPEC_FILE && !final.some((f) => f.path === file.path));
+  return appChanged ? [{ message, files: final }] : [];
 }

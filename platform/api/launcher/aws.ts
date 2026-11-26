@@ -56,6 +56,8 @@ import { readSettings } from "../workshop/store.js";
 import { BUILDER_CONTAINER_NAME, BUILDS_CLUSTER_NAME, BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
 import type {
+  ApprovedSpec,
+  ChangeInput,
   BuildTasks,
   ClaimResult,
   DeadLetter,
@@ -148,13 +150,24 @@ export class DynamoLaunchRecords implements LaunchRecords {
   }
 
   async readBuild(buildId: string): Promise<LaunchBuild | undefined> {
-    const item = await this.get(buildKey(buildId), ["nickname", "participantId", "status", "queueKey"]);
+    const item = await this.get(buildKey(buildId), ["nickname", "participantId", "status", "queueKey", "kind", "changeNumber", "specVersion"]);
     const nickname = item?.nickname?.S;
     const participantId = item?.participantId?.S;
     const status = item?.status?.S;
     const queueKey = item?.queueKey?.S;
     if (nickname === undefined || participantId === undefined || !(STATUSES as readonly string[]).includes(status ?? "")) return undefined;
-    return { nickname, participantId, status: status as BuildStatus, ...(queueKey === undefined ? {} : { queueKey }) };
+    const changeNumber = Number(item?.changeNumber?.N);
+    const specVersion = Number(item?.specVersion?.N);
+    return {
+      nickname,
+      participantId,
+      status: status as BuildStatus,
+      ...(queueKey === undefined ? {} : { queueKey }),
+      // Ticket 3.7: a change build, and its number and version only when they are whole numbers of 1 or more.
+      ...(item?.kind?.S === "change" ? { kind: "change" as const } : {}),
+      ...(Number.isInteger(changeNumber) && changeNumber >= 1 ? { changeNumber } : {}),
+      ...(Number.isInteger(specVersion) && specVersion >= 1 ? { specVersion } : {}),
+    };
   }
 
   readSettings(): Promise<WorkshopSettings> {
@@ -312,10 +325,29 @@ export class DynamoLaunchRecords implements LaunchRecords {
     };
   }
 
-  async readApprovedSpec(participantId: string, version: number): Promise<string | undefined> {
-    const item = await this.get(specKey(participantId, version), ["specVersion", "text", "approvedAt"]);
+  async readApprovedSpec(participantId: string, version: number): Promise<ApprovedSpec | undefined> {
+    const item = await this.get(specKey(participantId, version), ["specVersion", "text", "approvedAt", "whatChanges"]);
     if (item?.specVersion?.N !== String(version) || item.approvedAt?.S === undefined) return undefined;
-    return item.text?.S;
+    const text = item.text?.S;
+    if (text === undefined) return undefined;
+    const whatChanges = (item.whatChanges?.L ?? []).flatMap((line) => (line.S === undefined ? [] : [line.S]));
+    return { text, ...(whatChanges.length > 0 ? { whatChanges } : {}) };
+  }
+
+  setChangeInput(buildId: string, attemptId: string, input: ChangeInput, nowIso: string): Promise<boolean> {
+    return this.update(
+      buildKey(buildId),
+      "SET #changeSpec = :spec, #changeList = :list, #updatedAt = :now",
+      "#status = :building AND #attemptId = :attemptId AND attribute_not_exists(#taskArn)",
+      { "#changeSpec": "changeSpec", "#changeList": "changeList", "#updatedAt": "updatedAt", "#status": "status", "#attemptId": "attemptId", "#taskArn": "taskArn" },
+      {
+        ":spec": str(input.spec),
+        ":list": { L: input.whatChanges.map(str) },
+        ":now": str(nowIso),
+        ":building": str("building"),
+        ":attemptId": str(attemptId),
+      },
+    );
   }
 
   async claim(buildId: string, nickname: string, participantId: string, attemptId: string, nowIso: string, slot: { cap: number; queueKey: string }): Promise<ClaimResult> {

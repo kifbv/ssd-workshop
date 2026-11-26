@@ -73,10 +73,27 @@ describe("DynamoBuildRecords (ticket 2.8)", () => {
     expect(JSON.stringify(sent.map((command) => command.input))).not.toContain("BUILD_SLOTS");
   });
 
+  it("ticket 3.7: reads a change build's number and input (copied by the launcher), and only a complete one", async () => {
+    const change = { kind: { S: "change" }, changeNumber: { N: "2" }, changeSpec: { S: "# Run Log v3" }, changeList: { L: [{ S: "Adds a weekly chart" }] } };
+    const base = { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "building" } };
+    const { client } = stub([
+      { Item: { ...base, ...change } },
+      { Item: { ...base, ...change, changeList: { L: [] } } },
+      { Item: { ...base, ...change, changeNumber: { N: "0" } } },
+      { Item: { ...base, kind: { S: "change" }, changeNumber: { N: "1" } } },
+      { Item: { ...base, kind: { S: "first" }, changeSpec: { S: "x" } } },
+    ]);
+    const records = new DynamoBuildRecords(client, TABLE);
+    const plain = { nickname: "Ada", participantId: "p-1", status: "building" };
+    expect(await records.read("b-1")).toEqual({ ...plain, kind: "change", change: { number: 2, spec: "# Run Log v3", whatChanges: ["Adds a weekly chart"] } });
+    for (let i = 0; i < 3; i += 1) expect(await records.read("b-1")).toEqual({ ...plain, kind: "change" });
+    expect(await records.read("b-1")).toEqual({ ...plain, kind: "first" });
+  });
+
   it("names exactly BUILDER_BUILD_READ_ATTRIBUTES (GetItem) and BUILDER_BUILD_UPDATE_ATTRIBUTES (UpdateItem) in BUILD#, only BUILDER_USAGE_UPDATE_ATTRIBUTES in the usage item, and returns no attributes", async () => {
     const { client, sent } = stub([{ Item: { nickname: { S: "Ada" }, participantId: { S: "p-1" }, status: { S: "queued" } } }]);
     const records = new DynamoBuildRecords(client, TABLE);
-    expect(await records.read("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued" });
+    expect(await records.read("b-1")).toEqual({ nickname: "Ada", participantId: "p-1", status: "queued", kind: "first" });
     expect(await records.claim("b-1", ATTEMPT, "Ada", step, NOW)).toBe(true);
     expect(await records.addFeed("b-1", ATTEMPT, [{ kind: "file", path: "index.html", at: NOW }, { kind: "fetch", host: "en.wikipedia.org", at: NOW }], NOW)).toBe(true);
     expect(await records.handOver("b-1", ATTEMPT, COMMIT, [{ kind: "step", step: "deploying", at: NOW }], NOW)).toBe(true);

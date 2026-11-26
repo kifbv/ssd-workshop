@@ -7,6 +7,7 @@
 // reaches it; behind a session's HTTPS proxy, Chromium is sent through it (see `launchBrowser`).
 // Ticket 2.15: the agent may read pages with WebFetch; the outcome counts them from the feed (hosts only). Behind a
 // session's proxy the agent gets that proxy for its fetches (`webProxyEnvironment`); the builder task never does.
+// Ticket 3.7: `evalChange` builds an example, then changes it with a change build (the live app on main, edited).
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
@@ -20,18 +21,22 @@ import { contentTypeOf } from "../../api/deploy/deploy.js";
 import { downloadArchive } from "../../api/deploy/github.js";
 import { readTarGz } from "../../api/deploy/tar.js";
 import { FAKE_TOKEN_PREFIX, FakeGitHub } from "../../api/github/fakes.js";
-import { FIRST_COMMIT_MESSAGE, withSpec } from "../../api/github/repository.js";
+import { FIRST_COMMIT_MESSAGE, removeEmailAddresses, SPEC_FILE, withSpec } from "../../api/github/repository.js";
+import { answerChange } from "../../api/conversation/change.js";
+import { usageOf, type ModelClient } from "../../api/conversation/model.js";
 import { loadTemplateFiles } from "../../api/github/template.js";
 import { appArchiveUrl, type ModelSetting } from "../../api/settings.js";
 import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
-import { missingScreens, screenNames, specTitle, type BuildEvalOutcome } from "./logic.js";
+import { missingScreens, screenNames, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome } from "./logic.js";
 
 const NICKNAME = "eval-app";
 const REPOSITORY = "ssd-eval-app";
 const BUILD_ID = "eval-build-1";
+const CHANGE_BUILD_ID = "eval-build-2";
+const PARTICIPANT = "eval-participant";
 const PHONE = { width: 375, height: 740 };
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept" };
 
@@ -104,36 +109,47 @@ async function openInBrowser(
   }
 }
 
-/**
- * Runs one spec end to end. `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
- * path's shape and a status). The caller's AWS credentials stay in this process (the proxy signs with them); the
- * agent's process gets none.
- */
-export async function evalBuild(
-  spec: string,
-  model: ModelSetting,
-  browser: Browser,
-  log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void,
-): Promise<BuildEvalOutcome> {
+/** What one build of the eval needs: the in-memory GitHub, table and queue, the model and the log. */
+interface EvalWorld {
+  github: FakeGitHub;
+  records: FakeBuildRecords;
+  queue: FakeDeployQueue;
+  token: string;
+  model: ModelSetting;
+  log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void;
+}
+
+function evalWorld(model: ModelSetting, log: EvalWorld["log"]): EvalWorld {
   const github = new FakeGitHub(() => new Date());
   github.addRepository(REPOSITORY);
-  const files = withSpec(await loadTemplateFiles(), spec);
-  const baseCommit = github.seedCommit(REPOSITORY, Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)])), FIRST_COMMIT_MESSAGE);
   const token = `${FAKE_TOKEN_PREFIX}eval`;
   github.grants.set(token, { permissions: { contents: "write", metadata: "read" }, repositories: [REPOSITORY] });
-  const records = new FakeBuildRecords();
-  // As the launcher leaves it (ticket 2.9): building under one launch.
-  const attemptId = randomUUID();
-  records.builds.set(BUILD_ID, { nickname: NICKNAME, participantId: "eval-participant", status: "building", attemptId });
-  const queue = new FakeDeployQueue();
-  const fetchFake = (url: string, init?: RequestInit): Promise<Response> => github.fetch(url, init ?? {});
+  return { github, records: new FakeBuildRecords(), queue: new FakeDeployQueue(), token, model, log };
+}
+
+const fetchFakeOf = (github: FakeGitHub) => (url: string, init?: RequestInit): Promise<Response> => github.fetch(url, init ?? {});
+
+/**
+ * Runs the real runner and coding agent on one build already stored in `world.records` (building under `attemptId`),
+ * from `baseCommit`. Returns the outcome (usage: this build's only) and, when handed over, the files the deployer would
+ * publish (the repository at the deploy message's commit).
+ */
+async function runEvalBuild(
+  world: EvalWorld,
+  buildId: string,
+  baseCommit: string,
+  attemptId: string,
+): Promise<{ outcome: BuildEvalOutcome; published?: AppFile[]; commit?: string }> {
+  const fetchFake = fetchFakeOf(world.github);
   const temporary: string[] = [];
+  const usageBefore = world.records.usage.get(PARTICIPANT) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  const sentBefore = world.queue.sent.length;
   const started = Date.now();
   try {
     const outcome = await runBuild(
-      { buildId: BUILD_ID, token, baseCommit, attemptId },
+      { buildId, token: world.token, baseCommit, attemptId },
       {
-        records,
+        records: world.records,
         github: { fetch: fetchFake, now: () => new Date(), log: () => undefined },
         download: (url) => downloadArchive(url, { fetch: fetchFake }),
         agent: new ClaudeAgent(
@@ -146,22 +162,23 @@ export async function evalBuild(
           {
             credentials: defaultProvider(),
             ...(process.env.HTTPS_PROXY || process.env.https_proxy ? { agent: new Agent({ proxyEnv: process.env } as AgentOptions) } : {}),
-            log,
+            log: world.log,
           },
           // In a session, the agent's web fetches must go through the session's proxy (the builder task fetches directly).
           webProxyEnvironment(process.env),
         ),
-        queue,
+        queue: world.queue,
         makeWorkspace: () => mkdtemp(join(tmpdir(), "ssd-eval-build-")),
         removeWorkspace: (dir) => rm(dir, { recursive: true, force: true }),
-        model,
+        model: world.model,
         now: () => new Date(),
-        log,
+        log: world.log,
       },
     );
     const durationMs = Date.now() - started;
-    const build = records.builds.get(BUILD_ID);
+    const build = world.records.builds.get(buildId);
     const feed = build?.feed ?? [];
+    const total = world.records.usage.get(PARTICIPANT) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
     const base: BuildEvalOutcome = {
       outcome,
       failureReasons: build?.failureReasons ?? [],
@@ -176,25 +193,114 @@ export async function evalBuild(
       missing: [],
       outsideHosts: [],
       durationMs,
-      usage: records.usage.get("eval-participant") ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      usage: {
+        inputTokens: total.inputTokens - usageBefore.inputTokens,
+        outputTokens: total.outputTokens - usageBefore.outputTokens,
+        costUsd: total.costUsd - usageBefore.costUsd,
+      },
     };
-    const message = queue.sent[0];
-    if (outcome !== "handed-over" || message === undefined || message.commit !== build?.pushedCommit) return base;
+    const message = world.queue.sent[sentBefore];
+    if (outcome !== "handed-over" || message === undefined || message.commit !== build?.pushedCommit) return { outcome: base };
     // What the deployer would publish: the repository at the message's commit.
     const published = readTarGz(await downloadArchive(appArchiveUrl(NICKNAME, message.commit), { fetch: fetchFake }));
-    const check = checkApp(published);
-    const page = await openInBrowser(browser, published);
-    return {
-      ...base,
-      checkPassed: check.ok,
-      consoleErrors: page.errors,
-      overflow: page.overflow,
-      missing: missingScreens(specTitle(spec), screenNames(spec), page),
-      outsideHosts: page.outsideHosts,
-    };
+    return { outcome: base, published, commit: message.commit };
   } finally {
     await Promise.all(temporary.map((dir) => rm(dir, { recursive: true, force: true })));
   }
+}
+
+/** The deploy check and the page at 375 px for the published files, scored against `spec`'s title and screens. */
+async function checkPublished(browser: Browser, published: AppFile[], spec: string): Promise<Pick<BuildEvalOutcome, "checkPassed" | "consoleErrors" | "overflow" | "missing" | "outsideHosts"> & { page: { title: string; labels: string[] } }> {
+  const check = checkApp(published);
+  const page = await openInBrowser(browser, published);
+  return {
+    checkPassed: check.ok,
+    consoleErrors: page.errors,
+    overflow: page.overflow,
+    missing: missingScreens(specTitle(spec), screenNames(spec), page),
+    outsideHosts: page.outsideHosts,
+    page: { title: page.title, labels: page.labels },
+  };
+}
+
+/** A first build of `spec` in `world`: the repository starts as the launcher prepares it (template and spec). */
+async function firstBuild(world: EvalWorld, spec: string, browser: Browser): Promise<{ outcome: BuildEvalOutcome; commit?: string }> {
+  const files = withSpec(await loadTemplateFiles(), spec);
+  const baseCommit = world.github.seedCommit(REPOSITORY, Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)])), FIRST_COMMIT_MESSAGE);
+  // As the launcher leaves it (ticket 2.9): building under one launch.
+  const attemptId = randomUUID();
+  world.records.builds.set(BUILD_ID, { nickname: NICKNAME, participantId: PARTICIPANT, status: "building", attemptId });
+  const run = await runEvalBuild(world, BUILD_ID, baseCommit, attemptId);
+  if (run.published === undefined) return { outcome: run.outcome };
+  const checked = await checkPublished(browser, run.published, spec);
+  return { outcome: { ...run.outcome, checkPassed: checked.checkPassed, consoleErrors: checked.consoleErrors, overflow: checked.overflow, missing: checked.missing, outsideHosts: checked.outsideHosts }, ...(run.commit === undefined ? {} : { commit: run.commit }) };
+}
+
+/**
+ * Runs one spec end to end. `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
+ * path's shape and a status). The caller's AWS credentials stay in this process (the proxy signs with them); the
+ * agent's process gets none.
+ */
+export async function evalBuild(
+  spec: string,
+  model: ModelSetting,
+  browser: Browser,
+  log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void,
+): Promise<BuildEvalOutcome> {
+  return (await firstBuild(evalWorld(model, log), spec, browser)).outcome;
+}
+
+/**
+ * Ticket 3.7, `npm run eval -- change`: builds `spec` (the first build), then asks the real change conversation
+ * (`answerChange`, prompt change-v2) for `request` on it, and runs the change build as the launcher would start it:
+ * the repository's current `main` as the base commit, the new version and its "What changes" list on the build. The
+ * pushed commit is then checked as the deployer would (deploy check), opened at 375 px, and scored on the new spec's
+ * title and screens and on the previous spec's screens (still there), its message ("Change 1: ...") and its SPEC.md.
+ */
+export async function evalChange(
+  spec: string,
+  request: string,
+  model: ModelSetting,
+  changeModel: ModelClient,
+  browser: Browser,
+  log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void,
+): Promise<ChangeEvalOutcome> {
+  const world = evalWorld(model, log);
+  const first = await firstBuild(world, spec, browser);
+  const empty = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  if (first.commit === undefined) return { first: first.outcome, specUsage: empty, whatChanges: [], previousMissing: [], specCommitted: false };
+  const started = Date.now();
+  const answer = await answerChange(changeModel, [], request, spec, undefined);
+  const specUsage = { ...usageOf(answer), durationMs: Date.now() - started };
+  if (answer.spec === undefined || answer.whatChanges === undefined) {
+    return { first: first.outcome, specUsage, whatChanges: [], previousMissing: [], specCommitted: false, specProblem: "the change call wrote no new spec" };
+  }
+  const newSpec = answer.spec;
+  const attemptId = randomUUID();
+  // As 3.6's ready transaction and the launcher leave it: a change build of the new version, building under one launch.
+  world.records.builds.set(CHANGE_BUILD_ID, {
+    nickname: NICKNAME,
+    participantId: PARTICIPANT,
+    status: "building",
+    attemptId,
+    kind: "change",
+    changeNumber: 1,
+    changeSpec: newSpec,
+    changeList: answer.whatChanges,
+  });
+  const main = world.github.repo(REPOSITORY).main ?? "";
+  const run = await runEvalBuild(world, CHANGE_BUILD_ID, main, attemptId);
+  const base = { first: first.outcome, specUsage, whatChanges: answer.whatChanges, newSpec };
+  if (run.published === undefined || run.commit === undefined) return { ...base, change: run.outcome, previousMissing: [], specCommitted: false };
+  const { page, ...checked } = await checkPublished(browser, run.published, newSpec);
+  const commitMessage = world.github.history(REPOSITORY).find((commit) => commit.sha === run.commit)?.message;
+  return {
+    ...base,
+    change: { ...run.outcome, ...checked },
+    previousMissing: missingScreens(undefined, screenNames(spec), page),
+    specCommitted: world.github.filesAt(REPOSITORY, run.commit)[SPEC_FILE] === removeEmailAddresses(newSpec),
+    ...(commitMessage === undefined ? {} : { commitMessage }),
+  };
 }
 
 /** The HTTPS proxy a session sets for outbound traffic, if any (Chromium does not read it from the environment). */
