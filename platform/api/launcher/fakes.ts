@@ -2,6 +2,7 @@
 // bundled): one table holding builds, profiles, conversations, specs, nickname claims and the watch list, following
 // DynamoLaunchRecords' and DynamoBuildsStore's conditions; the builder's tasks; a dead-letter queue. Ticket 3.4: the
 // build slots (counter and holders) and the waiting line, with the same conditions as the real transactions.
+import { BUILDS_SUBNET_IDS } from "../settings.js";
 import type { BuildStatus } from "../types.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
 import type { RepositoryRead } from "../conversation/state.js";
@@ -9,6 +10,7 @@ import type {
   ApprovedSpec,
   BuildTasks,
   ChangeInput,
+  ClusterTaskList,
   ClaimResult,
   DeadLetter,
   DeadLetters,
@@ -428,11 +430,20 @@ export class FakeBuildTable implements LaunchRecords {
   }
 }
 
-/** The builder's tasks: started tasks run until a test stops them. */
+/**
+ * The builder's tasks: started tasks run until a test stops them. Ticket 3.14: every task of the builds cluster with its
+ * subnets (the launcher's in the build subnets, others added by a test), as ListTasks and DescribeTasks report them.
+ */
 export class FakeTasks implements BuildTasks {
   readonly started: (TaskStart & { taskArn: string; startedBy: string; signal?: AbortSignal })[] = [];
   readonly states = new Map<string, TaskState>();
   readonly stopCalls: string[] = [];
+  /** Ticket 3.14: the reason each stop gave (undefined: the launcher's default). */
+  readonly stopReasons = new Map<string, string | undefined>();
+  /** Ticket 3.14: each task's subnets (from its network interface). */
+  readonly subnets = new Map<string, string[]>();
+  /** Ticket 3.14: when set, listing the cluster's tasks throws (AccessDenied before the boundary allows ListTasks). */
+  listError: Error | undefined;
   /** When set, RunTask answers with this failure and no task. */
   failure: string | undefined;
   /** When set, `start` throws (an AWS error). */
@@ -441,15 +452,48 @@ export class FakeTasks implements BuildTasks {
 
   constructor(private readonly now: () => Date) {}
 
+  private nextArn(): string {
+    this.count += 1;
+    return `arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/${String(this.count).padStart(32, "0")}`;
+  }
+
   async start(start: TaskStart, signal?: AbortSignal): Promise<{ taskArn: string } | { failure: string }> {
     if (this.startError) throw this.startError;
     if (this.failure !== undefined) return { failure: this.failure };
-    this.count += 1;
-    const taskArn = `arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/${String(this.count).padStart(32, "0")}`;
-    // startedBy is the build id, as runTaskRequest sets it.
+    const taskArn = this.nextArn();
+    // startedBy is the build id, as runTaskRequest sets it; Fargate places it in one of the two build subnets.
     this.started.push({ ...start, taskArn, startedBy: start.buildId, ...(signal === undefined ? {} : { signal }) });
     this.states.set(taskArn, { stopped: false, createdAt: this.now() });
+    this.subnets.set(taskArn, [BUILDS_SUBNET_IDS[this.count % 2] ?? BUILDS_SUBNET_IDS[0]]);
     return { taskArn };
+  }
+
+  /** Ticket 3.14: a task someone else started in the builds cluster (RunTask by hand), in these subnets. */
+  addTask(subnetIds: string[]): string {
+    const taskArn = this.nextArn();
+    this.states.set(taskArn, { stopped: false, createdAt: this.now() });
+    this.subnets.set(taskArn, [...subnetIds]);
+    return taskArn;
+  }
+
+  /** Ticket 3.14: a running task's network interface is in these subnets instead. */
+  moveTo(taskArn: string, subnetIds: string[]): void {
+    this.subnets.set(taskArn, [...subnetIds]);
+  }
+
+  /** Ticket 3.14 try 2: when true, the list says the page bound left some tasks out. */
+  listTruncated = false;
+
+  async listClusterTasks(): Promise<ClusterTaskList> {
+    if (this.listError) throw this.listError;
+    const tasks = [...this.states]
+      .filter(([, state]) => !state.stopped)
+      .map(([taskArn, state]) => ({
+        taskArn,
+        subnetIds: [...(this.subnets.get(taskArn) ?? [])],
+        ...(state.createdAt === undefined ? {} : { createdAt: state.createdAt }),
+      }));
+    return { tasks, truncated: this.listTruncated };
   }
 
   async describe(taskArns: readonly string[]): Promise<Map<string, TaskState>> {
@@ -462,8 +506,9 @@ export class FakeTasks implements BuildTasks {
     return out;
   }
 
-  async stop(taskArn: string): Promise<void> {
+  async stop(taskArn: string, reason?: string): Promise<void> {
     this.stopCalls.push(taskArn);
+    this.stopReasons.set(taskArn, reason);
     this.exit(taskArn);
   }
 

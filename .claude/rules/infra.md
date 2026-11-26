@@ -310,3 +310,7 @@ paths:
   create-only, so a tag change replaces the resource); ARNs carry only a generated id, so IAM limits them by tag; an
   EMAIL subscriber takes only DAILY or WEEKLY (IMMEDIATE needs SNS). On-demand Bedrock calls carry no cost allocation
   tag, so a monitor on `project=ssd-workshop` misses the AI spend.
+- ECS `ListTasks` has no task resource (only `container-instance`): grant it on `Resource *` with `ArnEquals`
+  `ecs:cluster` = the cluster's ARN, and it must also be in the boundary (`AccountWideServiceCalls`, ticket 3.14). Watching
+  tasks for something IAM cannot pin (RunTask's subnets, risk 1) goes in the launcher's minute check, the only role
+  allowed to describe and stop build tasks (`WatchBuildsLauncherOnly`); an EventBridge rule on ECS events is refused.

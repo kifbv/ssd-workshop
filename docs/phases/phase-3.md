@@ -225,6 +225,8 @@ Acceptance criteria (each starts as FAIL):
 
 An EventBridge rule on ECS task state changes in the builds cluster calls a small Lambda that stops any task not in the two build subnets, closing the narrowed risk 1 from 2.2 instead of relying on the CloudTrail check.
 
+Changed on 2026-11-26 by Franck's choice: the launcher's minute check instead of an EventBridge rule and Lambda; see docs/decisions.md 3.14.
+
 Depends on: none. Areas: infra, launcher (and access stack, Franck applies).
 
 Acceptance criteria (each starts as FAIL):

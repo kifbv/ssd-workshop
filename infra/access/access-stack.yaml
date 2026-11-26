@@ -169,7 +169,7 @@ Resources:
               StringEquals: {aws:ResourceTag/project: ssd-workshop}
           - Sid: AccountWideServiceCalls
             Effect: Allow
-            Action: [ecr:GetAuthorizationToken, xray:PutTraceSegments]
+            Action: [ecr:GetAuthorizationToken, xray:PutTraceSegments, ecs:ListTasks]
             Resource: "*"
           - Sid: WorkshopMetrics
             Effect: Allow

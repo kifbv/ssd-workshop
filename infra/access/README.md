@@ -107,7 +107,7 @@ flowchart LR
 | `BuildsFromTheirSendersOnly` | Ticket 2.9 try 2 (Franck's yes, 2026-11-24). Deny `sqs:SendMessage` on `ssd-workshop-builds*` (launch queue, its dead-letter queue, check queue) to every workload role but the AI worker (`ssd-workshop-api-ai-worker`, the launch queue's sender) and the check's scheduler role (`ssd-workshop-builds-check-scheduler`, the check queue's sender): a launch message makes the launcher mint a token and start a task. |
 | `PullImages` | Pull images only from `ssd-workshop-*` repositories. |
 | `InvalidateWorkshopSite` | Invalidate only distributions tagged `project=ssd-workshop`. |
-| `AccountWideServiceCalls` | ECR login token and X-Ray traces; neither has a resource scope. |
+| `AccountWideServiceCalls` | ECR login token and X-Ray traces; neither has a resource scope. `ecs:ListTasks` (ticket 3.14, Franck's yes 2026-11-26): the launcher's minute check lists the builds cluster's tasks to stop any outside the build subnets; it returns task ARNs only, and the launcher's own CDK grant limits it to the builds cluster (`ecs:cluster`). A tighter boundary statement did not fit in the 6,144 characters. |
 | `WorkshopMetrics` | Metrics only in the CloudWatch namespace `ssd-workshop`. |
 | `PassWorkshopRoles` | A role may hand only `/ssd-workshop/` roles, and only to ECS tasks. |
 | `ServicesInWorkshopSubnetsOnly` | Deny, as in the deploy policies: ECS services (Express Gateway services included) only in the two workshop subnets. The boundary grants no service rights today; the deny keeps it so if it ever does. |
@@ -281,7 +281,7 @@ The workshop shares the rankly.games account with other projects. These are the 
 close (or that this spec needs open); Franck accepts each one by merging. Each has a check or a
 follow-up.
 
-1. **ECS network placement (narrowed in ticket 2.2, still open).** For `awsvpc` tasks and
+1. **ECS network placement (narrowed in ticket 2.2; since ticket 3.14 a build task outside the build subnets is stopped within about a minute; still open in IAM).** For `awsvpc` tasks and
    services, IAM has no tag key for the subnets and security groups a call names, only `ecs:subnet`
    by id, and per the AWS Service Authorization Reference
    (`servicereference.us-east-1.amazonaws.com/v1/ecs/ecs.json`, read 2026-11-24) `ecs:subnet` exists
@@ -289,6 +289,12 @@ follow-up.
    on RunTask/StartTask. `RunTask` and `StartTask` carry no subnet key, so no policy
    can pin them to subnets (a negated condition on the missing key would deny every `RunTask`; a
    `ForAnyValue` one would deny none).
+   Since ticket 3.14 the launcher's every-minute check lists the builds cluster's tasks (`ecs:ListTasks`,
+   boundary `AccountWideServiceCalls`) and stops any task with a subnet outside `BUILDS_SUBNET_IDS`, or with no subnet
+   after the grace (`OUTSIDE_NO_SUBNET_GRACE_MS`, 5 minutes), logging its id (`outside-task`); a stray task can run for
+   about a minute. Other clusters are not watched. The security-group half stays open: a task in a build subnet with
+   another security group (or a public IP) is not caught, since DescribeTasks shows no security group; checking it would
+   need `ec2:DescribeNetworkInterfaces` for the launcher (Franck's call).
 
    ```mermaid
    flowchart LR
@@ -381,7 +387,11 @@ follow-up.
    fails, and changing one needs Franck or a replacement under a new name.
 8. **Channels without a resource scope in the boundary:** `ssmmessages:*`, `ec2messages:*`
    (Session Manager and Run Command of the calling k3s node), `xray:PutTraceSegments`,
-   `ecr:GetAuthorizationToken`.
+   `ecr:GetAuthorizationToken`, and `ecs:ListTasks` (ticket 3.14): any workload role whose own policy
+   allows it could list the task ARNs (cluster names and task ids, never overrides) of every cluster
+   in the account and region, other projects' included. Today only the launcher has it, held to the
+   builds cluster by `ecs:cluster` in its own grant (synth test); sessions already have `ecs:List*`
+   through `-deploy-read`.
 9. **Code that runs with a workshop role can send the data it may read anywhere on the internet.**
    IAM does not control network egress.
 10. **Participant code runs under workshop roles.** Advanced-track apps run as ECS tasks or on k3s
@@ -389,6 +399,8 @@ follow-up.
     endpoint, instance metadata) and use everything that role may do within the boundary.
     Follow-up (Kubernetes phase): IMDSv2 with hop limit 1 on k3s nodes so pods cannot reach the
     node role, and one minimal role per workload instead of the boundary's full set.
+    Follow-up (ticket 3.14): no broad `ecs:List*` on roles that run participant code (the boundary
+    lets `ecs:ListTasks` through on every cluster, risk 8).
 11. **CloudFront origins and aliases.** A workshop distribution with an origin access control can
     name another project's bucket or Lambda function URL as its origin; it gets their content if
     their bucket or function policy trusts `cloudfront.amazonaws.com` with only `AWS:SourceAccount`

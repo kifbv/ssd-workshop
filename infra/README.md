@@ -898,6 +898,68 @@ Criteria 1 and 3 are synth tests (`infra/lib/app.test.ts`, "WAF web ACL on the d
 Detection"). After the deploy, the monitor and subscription show in Billing and Cost Management > Cost Anomaly
 Detection; the first daily email comes only when an anomaly of $10 or more is found.
 
+## Auto-stop outside the build subnets (ticket 3.14)
+
+```mermaid
+flowchart LR
+  sched[Scheduler<br/>every minute] --> check[Launcher's check]
+  check -->|ListTasks RUNNING, PENDING| cluster[(Cluster<br/>ssd-workshop-builds)]
+  check -->|DescribeTasks: subnet of each task| cluster
+  check --> q{Every subnet one of<br/>BUILDS_SUBNET_IDS?}
+  q -->|yes| keep[Nothing happens]
+  q -->|no| stop[StopTask<br/>'ssd-workshop: outside the build subnets'<br/>log line with the task id]
+  q -->|no subnet yet| age{Older than<br/>5 minutes?}
+  age -->|no| keep
+  age -->|yes| stop
+```
+
+IAM cannot pin `RunTask` to subnets (accepted risk 1), so the launcher's minute check stops any task of the builds
+cluster outside the two build subnets: a stray task lives up to about a minute (two at most, if it starts right after a
+check). It needs `ecs:ListTasks` in the boundary's `AccountWideServiceCalls` (Franck's yes, 2026-11-26): until Franck
+applies the access stack, the check logs one `"event":"outside-task","outcome":"list-failed","error":"AccessDeniedException"`
+line per minute and does everything else as before.
+
+### 3.14 live check (after the deploy and the access stack)
+
+Run by Franck with his own profile (sessions may not `RunTask`). It starts one builder task without a build (no token,
+no build id) in a subnet that is not a build subnet, for example one of the account's default VPC; its command is
+replaced by `sleep 600` so it cannot exit on its own before the check sees it. Cost: a minute or two of one Fargate
+task, under a cent.
+
+```sh
+export AWS_PROFILE=franck AWS_REGION=eu-central-1
+aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query 'Subnets[0].SubnetId' --output text
+# pick a subnet that is NOT subnet-05229d71b1e0b41ff or subnet-0965bcee41d455dba
+other=<subnet id from above>
+task=$(aws ecs run-task --cluster ssd-workshop-builds --task-definition ssd-workshop-builder --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$other],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"builder","command":["sleep","600"]}]}' \
+  --tags key=project,value=ssd-workshop --query 'tasks[0].taskArn' --output text)
+echo "${task##*/}"
+# within about two minutes:
+aws ecs describe-tasks --cluster ssd-workshop-builds --tasks "$task" --query 'tasks[0].[lastStatus,desiredStatus,stoppedReason]'
+# expect: ["STOPPED" (or "DEPROVISIONING"), "STOPPED", "ssd-workshop: outside the build subnets"]
+aws logs tail ssd-workshop-builds-launcher --since 10m | grep outside-task
+# expect: {"event":"outside-task","outcome":"stopped","task":"<the id echoed above>",...}
+# and the check's own line shows "outside":1 that minute
+```
+
+Then check that a real build is left alone while it starts (the grace for a task without a subnet,
+`OUTSIDE_NO_SUBNET_GRACE_MS`): start a build from the workshop page right after the deploy (or press Retry on a failed
+one), and while its task is PROVISIONING or PENDING, and for a few minutes after, watch the launcher's log:
+
+```sh
+aws ecs list-tasks --cluster ssd-workshop-builds --desired-status RUNNING   # note the new task's id
+aws logs tail ssd-workshop-builds-launcher --since 10m --follow | grep -E 'outside-task|build-check'
+# expect: no outside-task line for that task id, and "outside":0 on each build-check line; the build finishes
+```
+
+A `list-failed` line instead means the access stack with `ecs:ListTasks` is not applied yet. A `list-truncated`
+line means the cluster had more than 1,000 tasks of one desired status (`CLUSTER_LIST_MAX_PAGES`); the listed ones
+are still checked. Criteria 1 and 2 are
+tests with the fakes (`platform/api/launcher/launcher.test.ts`, "auto-stop outside the build subnets"), criterion 3 a
+synth test (`infra/lib/app.test.ts`, "ticket 3.14 criterion 3").
+
 ## Build network (ticket 2.1)
 
 ```mermaid

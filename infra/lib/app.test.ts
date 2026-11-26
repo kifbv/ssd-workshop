@@ -2825,6 +2825,8 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
       },
       { Effect: "Allow", Action: "ecs:TagResource", Resource: tasks, Condition: { StringEquals: { "ecs:CreateAction": "RunTask" } } },
       { Effect: "Allow", Action: ["ecs:DescribeTasks", "ecs:StopTask"], Resource: tasks },
+      // Ticket 3.14: listing the builds cluster's tasks (Resource `*` limited to that cluster).
+      { Effect: "Allow", Action: "ecs:ListTasks", Resource: "*", Condition: { ArnEquals: { "ecs:cluster": arnOf(idOf("AWS::ECS::Cluster", "ClusterName", BUILDS_CLUSTER_NAME)) } } },
       {
         Effect: "Allow",
         Action: "iam:PassRole",
@@ -2893,6 +2895,34 @@ describe("builds stack: builder task and launcher (ticket 2.9)", () => {
     }
     // The launcher's two reads and the conversation function's count.
     expect(seen).toBe(3);
+  });
+
+  it("ticket 3.14 criterion 3: WHEN the synthesized stack is inspected THEN only the launcher may list tasks, of the builds cluster only, and it may describe and stop only tasks there", () => {
+    const launcherRole = roleEntry(BUILD_LAUNCHER_FUNCTION_NAME)[0];
+    const cluster = idOf("AWS::ECS::Cluster", "ClusterName", BUILDS_CLUSTER_NAME);
+    const tasks = `arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/*`;
+    const listing: Record<string, unknown>[] = [];
+    const watching: Record<string, unknown>[] = [];
+    for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (st.Effect !== "Allow") continue;
+        const actions = [st.Action].flat() as string[];
+        const lists = actions.some((g) => actionCovers(g, "ecs:ListTasks"));
+        const watches = actions.some((g) => ["ecs:DescribeTasks", "ecs:StopTask"].some((a) => actionCovers(g, a)));
+        if (!lists && !watches) continue;
+        // No other role (a task role, another function) may list, describe or stop build tasks.
+        expect(s, `${s}/${id}`).toBe(STACK_NAMES.builds);
+        expect(JSON.stringify(r.Properties?.Roles), `${s}/${id}`).toBe(JSON.stringify([{ Ref: launcherRole }]));
+        if (lists) listing.push(st);
+        if (watches) watching.push(st);
+      }
+    }
+    // ListTasks alone in its statement, Resource `*` only under the builds cluster's ARN (no other cluster, no IfExists).
+    expect(listing).toEqual([{ Effect: "Allow", Action: "ecs:ListTasks", Resource: "*", Condition: { ArnEquals: { "ecs:cluster": arnOf(cluster) } } }]);
+    expect(buildsOfType("AWS::ECS::Cluster")).toHaveLength(1);
+    expect(buildsOfType("AWS::ECS::Cluster")[0]?.[1].Properties?.ClusterName).toBe(BUILDS_CLUSTER_NAME);
+    // DescribeTasks and StopTask stay on the builds cluster's tasks.
+    expect(watching).toEqual([{ Effect: "Allow", Action: ["ecs:DescribeTasks", "ecs:StopTask"], Resource: tasks }]);
   });
 
   it("nothing but the launcher may RunTask, StartTask, StopTask or pass a role", () => {

@@ -4,7 +4,7 @@ import { parseGitHubSecret, type GitHubDeps, type GitHubLogEntry } from "../gith
 import { FakeGitHub, TEST_PRIVATE_KEY_PEM, TEST_SECRET_TEXT } from "../github/fakes.js";
 import { SPEC_FILE } from "../github/repository.js";
 import { loadTemplateFiles } from "../github/template.js";
-import { BUILD_TASK_MAX_MS, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, QUEUE_SEEN_MS, QUEUE_WAIT_MAX_MS, SLOT_REPAIR_FORCE_AFTER } from "../settings.js";
+import { BUILD_TASK_MAX_MS, BUILDS_SUBNET_IDS, CLUSTER_LIST_MAX_PAGES, HANDED_OVER_GRACE_MS, LAUNCH_UNSTARTED_MS, OUTSIDE_NO_SUBNET_GRACE_MS, QUEUE_SEEN_MS, QUEUE_WAIT_MAX_MS, SLOT_REPAIR_FORCE_AFTER } from "../settings.js";
 import { runBuilds } from "../../src/builds/command.js";
 import { FakeBuildsStore, FakeLaunchQueue, FakeTaskWatch } from "../../src/builds/fakes.js";
 import { FakeBuildTable, FakeDeadLetters, FakeTasks, type FakeBuild } from "./fakes.js";
@@ -19,6 +19,8 @@ import {
   STOPPED_REASON,
   UNSTARTED_REASON,
   LAUNCH_SERVICE_REASON,
+  OUTSIDE_STOP_REASON,
+  isOutsideTask,
   parseLaunchMessage,
   ecsRefusal,
   processLaunch,
@@ -659,6 +661,179 @@ describe("the stuck-build check (ticket 2.9)", () => {
     s.table.failOnce.add("listLaunches");
     await expect(runCheck(s.check)).rejects.toThrow(/^check failed$/);
     expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "error", error: "InternalServerError" });
+  });
+});
+
+describe("auto-stop outside the build subnets (ticket 3.14)", () => {
+  const OTHER_SUBNET = "subnet-0aaaaaaaaaaaaaaaa";
+  const idOf = (taskArn: string): string => taskArn.slice(taskArn.lastIndexOf("/") + 1);
+  const outsideLogs = (s: ReturnType<typeof setup>) => s.logs.filter((entry) => entry.event === "outside-task");
+
+  async function running() {
+    const s = setup();
+    await processLaunch(message(), s.deps);
+    const taskArn = must(s.tasks.started[0]).taskArn;
+    return { ...s, taskArn };
+  }
+
+  it("criterion 1: WHEN a task in the builds cluster runs in another subnet THEN the minute check stops it and logs its id (only its id)", async () => {
+    const s = await running();
+    const stray = s.tasks.addTask([OTHER_SUBNET]);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([stray]);
+    expect(s.tasks.stopReasons.get(stray)).toBe(OUTSIDE_STOP_REASON);
+    expect(OUTSIDE_STOP_REASON).toBe("ssd-workshop: outside the build subnets");
+    // One line for the task: its id, nothing else (no ARN, override, token or email address).
+    expect(outsideLogs(s)).toEqual([{ event: "outside-task", outcome: "stopped", task: idOf(stray), durationMs: 0 }]);
+    expect(JSON.stringify(s.logs)).not.toContain(stray);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", outside: 1, stopped: 0 });
+    // The launcher's own build runs on, and a stopped stray is not stopped again.
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([stray]);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", outside: 0 });
+    assertQuietLogs(s);
+  });
+
+  it("criterion 2: WHEN a task runs in a build subnet (the launcher's, or one started by hand there) THEN nothing happens", async () => {
+    const s = await running();
+    const byHand = s.tasks.addTask([BUILDS_SUBNET_IDS[1]]);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.tasks.states.get(byHand)?.stopped).toBe(false);
+    expect(s.tasks.states.get(s.taskArn)?.stopped).toBe(false);
+    expect(outsideLogs(s)).toEqual([]);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", outside: 0 });
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+  });
+
+  it("WHEN one of a task's subnets is not a build subnet THEN it is stopped too", async () => {
+    const s = await running();
+    const mixed = s.tasks.addTask([BUILDS_SUBNET_IDS[0], OTHER_SUBNET]);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([mixed]);
+    expect(outsideLogs(s).map((entry) => entry.task)).toEqual([idOf(mixed)]);
+    expect(s.logs.at(-1)).toMatchObject({ outside: 1 });
+  });
+
+  it("try 2: WHEN a fresh task has no subnet yet (PROVISIONING) THEN it is not stopped, and nothing is logged for it", async () => {
+    const s = await running();
+    const fresh = s.tasks.addTask([]);
+    s.advance(OUTSIDE_NO_SUBNET_GRACE_MS - 1);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.tasks.states.get(fresh)?.stopped).toBe(false);
+    expect(outsideLogs(s)).toEqual([]);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", outside: 0 });
+  });
+
+  it("try 2: WHEN a task still has no subnet after the grace THEN it is stopped and its id logged", async () => {
+    const s = await running();
+    const old = s.tasks.addTask([]);
+    s.advance(OUTSIDE_NO_SUBNET_GRACE_MS);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([old]);
+    expect(s.tasks.stopReasons.get(old)).toBe(OUTSIDE_STOP_REASON);
+    expect(outsideLogs(s)).toEqual([{ event: "outside-task", outcome: "stopped", task: idOf(old), durationMs: 0 }]);
+  });
+
+  it("try 2: WHEN a fresh task's subnet is known and outside the build subnets THEN it is stopped at once (no grace)", async () => {
+    const s = await running();
+    const stray = s.tasks.addTask([OTHER_SUBNET]);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([stray]);
+  });
+
+  it("try 2: isOutsideTask: a subnet decides at once; no subnet only after the grace; no subnet and no creation time is left alone", () => {
+    const now = new Date("2026-11-26T10:00:00Z");
+    const ago = (ms: number): Date => new Date(now.getTime() - ms);
+    const arn = "arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/0123456789abcdef0123456789abcdef";
+    expect(isOutsideTask({ taskArn: arn, subnetIds: [BUILDS_SUBNET_IDS[0]], createdAt: ago(0) }, now)).toBe(false);
+    expect(isOutsideTask({ taskArn: arn, subnetIds: [OTHER_SUBNET], createdAt: ago(0) }, now)).toBe(true);
+    expect(isOutsideTask({ taskArn: arn, subnetIds: [OTHER_SUBNET] }, now)).toBe(true);
+    expect(isOutsideTask({ taskArn: arn, subnetIds: [], createdAt: ago(OUTSIDE_NO_SUBNET_GRACE_MS - 1) }, now)).toBe(false);
+    expect(isOutsideTask({ taskArn: arn, subnetIds: [], createdAt: ago(OUTSIDE_NO_SUBNET_GRACE_MS) }, now)).toBe(true);
+    expect(isOutsideTask({ taskArn: arn, subnetIds: [] }, now)).toBe(false);
+  });
+
+  it("try 2: WHEN the list hit its page bound THEN one list-truncated line is logged and the listed tasks are still checked", async () => {
+    const s = await running();
+    const stray = s.tasks.addTask([OTHER_SUBNET]);
+    s.tasks.listTruncated = true;
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([stray]);
+    expect(outsideLogs(s)).toEqual([
+      { event: "outside-task", outcome: "list-truncated", pages: CLUSTER_LIST_MAX_PAGES, durationMs: 0 },
+      { event: "outside-task", outcome: "stopped", task: idOf(stray), durationMs: 0 },
+    ]);
+    expect(CLUSTER_LIST_MAX_PAGES).toBe(10);
+  });
+
+  it("WHEN the tasks cannot be listed (AccessDenied before the boundary allows ListTasks) THEN it is logged once per run and the rest of the check goes on", async () => {
+    const s = await running();
+    s.tasks.addTask([OTHER_SUBNET]);
+    s.tasks.listError = Object.assign(new Error("User is not authorized to perform: ecs:ListTasks"), { name: "AccessDeniedException" });
+    s.tasks.exit(s.taskArn);
+    s.launchDeadLetters.add(message("b-dead"));
+    await runCheck(s.check);
+    // The stopped build is still failed and the dead letter handled.
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+    expect(s.launchDeadLetters.messages).toEqual([]);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(outsideLogs(s)).toEqual([{ event: "outside-task", outcome: "list-failed", error: "AccessDeniedException", durationMs: 0 }]);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", failed: 1, outside: 0 });
+    expect(JSON.stringify(s.logs)).not.toContain("not authorized");
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(outsideLogs(s)).toHaveLength(2);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked" });
+  });
+
+  it("WHEN one stray task cannot be stopped THEN its id and the error's name are logged and the others are still stopped", async () => {
+    const s = await running();
+    const first = s.tasks.addTask([OTHER_SUBNET]);
+    const second = s.tasks.addTask([OTHER_SUBNET]);
+    const stop = s.tasks.stop.bind(s.tasks);
+    s.tasks.stop = async (taskArn, reason) => {
+      if (taskArn === first) throw Object.assign(new Error("throttled"), { name: "ThrottlingException" });
+      return stop(taskArn, reason);
+    };
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([second]);
+    expect(outsideLogs(s)).toEqual([
+      { event: "outside-task", outcome: "stop-failed", task: idOf(first), error: "ThrottlingException", durationMs: 0 },
+      { event: "outside-task", outcome: "stopped", task: idOf(second), durationMs: 0 },
+    ]);
+    expect(s.logs.at(-1)).toMatchObject({ event: "build-check", outcome: "checked", outside: 1 });
+  });
+
+  it("WHEN a watched build's own task runs outside the build subnets THEN it is stopped once, and the next minute's check fails the build as any stopped task", async () => {
+    const s = await running();
+    s.tasks.moveTo(s.taskArn, [OTHER_SUBNET]);
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([s.taskArn]);
+    // Not handled twice: the build is left to the watched-builds logic.
+    expect(s.table.builds.get(BUILD)?.status).toBe("building");
+    expect(s.logs.at(-1)).toMatchObject({ outside: 1, failed: 0, stopped: 0 });
+    s.advance(60_000);
+    await runCheck(s.check);
+    expect(s.table.builds.get(BUILD)).toMatchObject({ status: "failed", failureReasons: [STOPPED_REASON] });
+    expect(s.tasks.stopCalls).toEqual([s.taskArn]);
+  });
+
+  it("acts only on task ARNs of the builds cluster in the workshop's account and region", async () => {
+    const s = await running();
+    s.tasks.listClusterTasks = async () => ({
+      tasks: [
+        { taskArn: "arn:aws:ecs:eu-central-1:360206963848:task/other-cluster/0123456789abcdef0123456789abcdef", subnetIds: [OTHER_SUBNET] },
+        { taskArn: "not-an-arn", subnetIds: [OTHER_SUBNET] },
+      ],
+      truncated: false,
+    });
+    await runCheck(s.check);
+    expect(s.tasks.stopCalls).toEqual([]);
+    expect(s.logs.at(-1)).toMatchObject({ outside: 0 });
   });
 });
 

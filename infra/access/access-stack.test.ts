@@ -175,6 +175,7 @@ const BOUNDARY_ALLOW_LIST: Record<string, string> = {
   "SendCodes/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop-email configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
   "AccountWideServiceCalls/ecr:GetAuthorizationToken": "account-wide registry login token; image pulls stay scoped to ssd-workshop-* repositories",
   "AccountWideServiceCalls/xray:PutTraceSegments": "X-Ray has no resource scope; writes trace data only",
+  "AccountWideServiceCalls/ecs:ListTasks": "returns task ARNs only (no overrides); the launcher's own grant is limited to the builds cluster with ecs:cluster (ticket 3.14, Franck's yes 2026-11-26)",
   "WorkshopMetrics/cloudwatch:PutMetricData": "limited by cloudwatch:namespace to ssd-workshop",
   "K3sNodeChannels/ssmmessages:*": "Session Manager channels of the calling instance; no resource scope exists",
   "K3sNodeChannels/ec2messages:*": "Run Command channel of the calling instance; no resource scope exists",

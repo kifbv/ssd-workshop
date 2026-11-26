@@ -11,7 +11,7 @@ import {
   type QueryCommandInput,
   type UpdateItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
-import { DescribeTasksCommand, RunTaskCommand, type DescribeTasksCommandInput, type RunTaskCommandInput } from "@aws-sdk/client-ecs";
+import { DescribeTasksCommand, ListTasksCommand, RunTaskCommand, StopTaskCommand, type DescribeTasksCommandInput, type RunTaskCommandInput } from "@aws-sdk/client-ecs";
 import { ChangeMessageVisibilityCommand } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
 import {
@@ -42,6 +42,7 @@ import {
   BUILDER_CONTAINER_NAME,
   BUILDS_CLUSTER_NAME,
   BUILDS_SUBNET_IDS,
+  CLUSTER_LIST_MAX_PAGES,
   DEPLOY_DLQ_URL,
 } from "../settings.js";
 import { DynamoLaunchRecords, EcsBuildTasks, runTaskRequest, SqsLaunchVisibility, type LauncherTableSender, type TaskSender, type VisibilitySender } from "./aws.js";
@@ -613,6 +614,124 @@ describe("the builder's task (criterion 2)", () => {
     expect(states.get(`${ARN}9`)).toEqual({ stopped: true });
     expect((sent[1]?.input as DescribeTasksCommandInput).cluster).toBe("ssd-workshop-builds");
     expect(sent[1]).toBeInstanceOf(DescribeTasksCommand);
+  });
+});
+
+describe("the builds cluster's tasks (ticket 3.14)", () => {
+  const hex = (n: number): string => n.toString(16).padStart(32, "0");
+  const arn = (n: number): string => `arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/${hex(n)}`;
+  const eni = (...subnets: string[]) => ({
+    type: "ElasticNetworkInterface",
+    details: [{ name: "networkInterfaceId", value: "eni-0123" }, ...subnets.map((value) => ({ name: "subnetId", value })), { name: "privateIPv4Address", value: "10.0.0.1" }],
+  });
+
+  const created = new Date("2026-11-26T10:00:00Z");
+
+  it("lists RUNNING then PENDING tasks of the builds cluster page by page, describes them 100 at a time and reads each one's subnets and creation time", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => arn(i + 1));
+    const page2 = [arn(101), arn(102)];
+    const pending = [arn(102), arn(103)];
+    const described = (arns: string[], subnet: (n: number) => string[]) => ({
+      tasks: arns.map((taskArn) => ({ taskArn, lastStatus: "RUNNING", createdAt: created, attachments: [eni(...subnet(Number.parseInt(taskArn.slice(-32), 16)))] })),
+    });
+    const { client, sent } = stub([
+      { taskArns: page1, nextToken: "t-1" },
+      { taskArns: page2 },
+      { taskArns: pending },
+      described(page1, () => ["subnet-05229d71b1e0b41ff"]),
+      {
+        tasks: [
+          { taskArn: arn(101), lastStatus: "RUNNING", createdAt: created, attachments: [eni("subnet-0aaaaaaaaaaaaaaaa")] },
+          // A Fargate task just started, as RunTask's and DescribeTasks' documented answers show it: its interface
+          // attachment is PRECREATED and already names the subnet, before any interface id or address.
+          {
+            taskArn: arn(102),
+            lastStatus: "PROVISIONING",
+            createdAt: created,
+            attachments: [{ type: "ElasticNetworkInterface", status: "PRECREATED", details: [{ name: "subnetId", value: "subnet-0965bcee41d455dba" }] }],
+          },
+          { taskArn: arn(103), lastStatus: "STOPPED", createdAt: created, attachments: [eni("subnet-0aaaaaaaaaaaaaaaa")] },
+        ],
+        failures: [{ arn: arn(104), reason: "MISSING" }],
+      },
+    ]);
+    const tasks = new EcsBuildTasks(client, "td", "sg");
+    const listed = await tasks.listClusterTasks();
+    expect(sent.slice(0, 3).every((command) => command instanceof ListTasksCommand)).toBe(true);
+    expect(sent.slice(0, 3).map((command) => command.input)).toEqual([
+      { cluster: "ssd-workshop-builds", desiredStatus: "RUNNING", maxResults: 100 },
+      { cluster: "ssd-workshop-builds", desiredStatus: "RUNNING", maxResults: 100, nextToken: "t-1" },
+      { cluster: "ssd-workshop-builds", desiredStatus: "PENDING", maxResults: 100 },
+    ]);
+    // Each task once (102 was in both lists), in batches of at most 100.
+    expect(sent.slice(3).every((command) => command instanceof DescribeTasksCommand)).toBe(true);
+    const batches = sent.slice(3).map((command) => command.input as DescribeTasksCommandInput);
+    expect(batches.map((input) => input.cluster)).toEqual(["ssd-workshop-builds", "ssd-workshop-builds"]);
+    expect(batches.map((input) => input.tasks)).toEqual([page1, [arn(101), arn(102), arn(103)]]);
+    expect(sent).toHaveLength(5);
+    // A stopped task is left out; a PROVISIONING task already has its subnet.
+    expect(listed.truncated).toBe(false);
+    expect(listed.tasks).toHaveLength(102);
+    expect(listed.tasks[0]).toEqual({ taskArn: arn(1), subnetIds: ["subnet-05229d71b1e0b41ff"], createdAt: created });
+    expect(listed.tasks.slice(100)).toEqual([
+      { taskArn: arn(101), subnetIds: ["subnet-0aaaaaaaaaaaaaaaa"], createdAt: created },
+      { taskArn: arn(102), subnetIds: ["subnet-0965bcee41d455dba"], createdAt: created },
+    ]);
+  });
+
+  it("gives no subnet for a task whose attachment has no subnetId yet (a shape not seen from AWS, modelled for safety) or no attachment, and no creation time when ECS gives none", async () => {
+    const { client } = stub([
+      { taskArns: [arn(1), arn(2), arn(3)] },
+      {},
+      {
+        tasks: [
+          { taskArn: arn(1), lastStatus: "PROVISIONING", createdAt: created, attachments: [{ type: "ElasticNetworkInterface", status: "PRECREATED", details: [] }] },
+          { taskArn: arn(2), lastStatus: "PROVISIONING", createdAt: created },
+          { taskArn: arn(3), lastStatus: "PENDING", attachments: [eni("subnet-05229d71b1e0b41ff")] },
+        ],
+      },
+    ]);
+    const listed = await new EcsBuildTasks(client, "td", "sg").listClusterTasks();
+    expect(listed.tasks).toEqual([
+      { taskArn: arn(1), subnetIds: [], createdAt: created },
+      { taskArn: arn(2), subnetIds: [], createdAt: created },
+      { taskArn: arn(3), subnetIds: ["subnet-05229d71b1e0b41ff"] },
+    ]);
+  });
+
+  it("try 2: reads at most CLUSTER_LIST_MAX_PAGES pages per status and says the list was cut", async () => {
+    const pages = (prefix: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({ taskArns: [arn(prefix + i)], nextToken: `t-${prefix + i}` }));
+    // RUNNING: endless pages; PENDING: one page.
+    const { client, sent } = stub([...pages(1, CLUSTER_LIST_MAX_PAGES), { taskArns: [arn(500)] }, { tasks: [] }]);
+    const listed = await new EcsBuildTasks(client, "td", "sg").listClusterTasks();
+    const lists = sent.filter((command) => command instanceof ListTasksCommand).map((command) => command.input as { desiredStatus: string });
+    expect(lists.filter((input) => input.desiredStatus === "RUNNING")).toHaveLength(CLUSTER_LIST_MAX_PAGES);
+    expect(lists.filter((input) => input.desiredStatus === "PENDING")).toHaveLength(1);
+    expect(listed.truncated).toBe(true);
+    // Nothing is cut when the last page has no next token.
+    const whole = stub([...pages(1, CLUSTER_LIST_MAX_PAGES - 1), { taskArns: [arn(99)] }, { taskArns: [] }, { tasks: [] }]);
+    expect((await new EcsBuildTasks(whole.client, "td", "sg").listClusterTasks()).truncated).toBe(false);
+  });
+
+  it("asks nothing more when the cluster has no task, and lets a refused ListTasks through to the check", async () => {
+    const empty = stub([{ taskArns: [] }, {}]);
+    expect(await new EcsBuildTasks(empty.client, "td", "sg").listClusterTasks()).toEqual({ tasks: [], truncated: false });
+    expect(empty.sent).toHaveLength(2);
+    const denied = stub([Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
+    await expect(new EcsBuildTasks(denied.client, "td", "sg").listClusterTasks()).rejects.toMatchObject({ name: "AccessDeniedException" });
+  });
+
+  it("stops a task with the given reason, or the launcher's own by default", async () => {
+    const { client, sent } = stub([{}, {}]);
+    const tasks = new EcsBuildTasks(client, "td", "sg");
+    await tasks.stop(arn(1), "ssd-workshop: outside the build subnets");
+    await tasks.stop(arn(2));
+    expect(sent.every((command) => command instanceof StopTaskCommand)).toBe(true);
+    expect(sent.map((command) => command.input)).toEqual([
+      { cluster: "ssd-workshop-builds", task: arn(1), reason: "ssd-workshop: outside the build subnets" },
+      { cluster: "ssd-workshop-builds", task: arn(2), reason: "Stopped by the build launcher" },
+    ]);
   });
 });
 
