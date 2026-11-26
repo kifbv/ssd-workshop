@@ -21,9 +21,12 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import {
   DescribeTasksCommand,
+  ListTasksCommand,
   RunTaskCommand,
   StopTaskCommand,
   type DescribeTasksCommandOutput,
+  type DesiredStatus,
+  type ListTasksCommandOutput,
   type RunTaskCommandOutput,
   type StopTaskCommandOutput,
 } from "@aws-sdk/client-ecs";
@@ -69,6 +72,7 @@ import type {
   ApprovedSpec,
   ChangeInput,
   BuildTasks,
+  ClusterTask,
   ClaimResult,
   DeadLetter,
   DeadLetters,
@@ -660,6 +664,7 @@ export interface TaskSender {
   send(command: RunTaskCommand, options?: { abortSignal?: AbortSignal }): Promise<RunTaskCommandOutput>;
   send(command: DescribeTasksCommand): Promise<DescribeTasksCommandOutput>;
   send(command: StopTaskCommand): Promise<StopTaskCommandOutput>;
+  send(command: ListTasksCommand): Promise<ListTasksCommandOutput>;
 }
 
 /**
@@ -731,8 +736,40 @@ export class EcsBuildTasks implements BuildTasks {
     return states;
   }
 
-  async stop(taskArn: string): Promise<void> {
-    await this.client.send(new StopTaskCommand({ cluster: BUILDS_CLUSTER_NAME, task: taskArn, reason: "Stopped by the build launcher" }));
+  async stop(taskArn: string, reason = "Stopped by the build launcher"): Promise<void> {
+    await this.client.send(new StopTaskCommand({ cluster: BUILDS_CLUSTER_NAME, task: taskArn, reason }));
+  }
+
+  /**
+   * Ticket 3.14: the builds cluster's tasks (ListTasks of desired status RUNNING, then PENDING, every page; each task
+   * once), described 100 at a time, with the `subnetId` of each network interface attachment. A task already STOPPED, or
+   * one ECS no longer knows, is left out. ListTasks needs `ecs:ListTasks` (Resource `*`, condition `ecs:cluster`).
+   */
+  async listClusterTasks(): Promise<ClusterTask[]> {
+    const seen = new Set<string>();
+    for (const desiredStatus of ["RUNNING", "PENDING"] satisfies DesiredStatus[]) {
+      let nextToken: string | undefined;
+      do {
+        const answer = await this.client.send(
+          new ListTasksCommand({ cluster: BUILDS_CLUSTER_NAME, desiredStatus, maxResults: 100, ...(nextToken === undefined ? {} : { nextToken }) }),
+        );
+        for (const arn of answer.taskArns ?? []) seen.add(arn);
+        nextToken = answer.nextToken;
+      } while (nextToken !== undefined);
+    }
+    const arns = [...seen];
+    const listed: ClusterTask[] = [];
+    for (let i = 0; i < arns.length; i += 100) {
+      const answer = await this.client.send(new DescribeTasksCommand({ cluster: BUILDS_CLUSTER_NAME, tasks: arns.slice(i, i + 100) }));
+      for (const task of answer.tasks ?? []) {
+        if (task.taskArn === undefined || task.lastStatus === "STOPPED") continue;
+        const subnetIds = (task.attachments ?? []).flatMap((attachment) =>
+          (attachment.details ?? []).flatMap((detail) => (detail.name === "subnetId" && detail.value !== undefined ? [detail.value] : [])),
+        );
+        listed.push({ taskArn: task.taskArn, subnetIds });
+      }
+    }
+    return listed;
   }
 }
 

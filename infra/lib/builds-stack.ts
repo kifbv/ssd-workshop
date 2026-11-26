@@ -459,6 +459,12 @@ export class BuildsStack extends Stack {
       new PolicyStatement({ effect: Effect.ALLOW, actions: ["ecs:TagResource"], resources: [buildTasks], conditions: { StringEquals: { "ecs:CreateAction": "RunTask" } } }),
     );
     launcher.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["ecs:DescribeTasks", "ecs:StopTask"], resources: [buildTasks] }));
+    // Ticket 3.14: the minute check lists the builds cluster's tasks to stop any outside the build subnets. ListTasks has
+    // no task resource (only container-instance), so Resource `*` with the cluster as the condition (`ecs:cluster` is
+    // listed on ListTasks in the Service Authorization Reference). The boundary allows it in `AccountWideServiceCalls` (Franck, 2026-11-26).
+    launcher.addToRolePolicy(
+      new PolicyStatement({ effect: Effect.ALLOW, actions: ["ecs:ListTasks"], resources: ["*"], conditions: { ArnEquals: { "ecs:cluster": this.cluster.clusterArn } } }),
+    );
     launcher.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,

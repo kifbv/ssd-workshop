@@ -11,7 +11,7 @@ import {
   type QueryCommandInput,
   type UpdateItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
-import { DescribeTasksCommand, RunTaskCommand, type DescribeTasksCommandInput, type RunTaskCommandInput } from "@aws-sdk/client-ecs";
+import { DescribeTasksCommand, ListTasksCommand, RunTaskCommand, StopTaskCommand, type DescribeTasksCommandInput, type RunTaskCommandInput } from "@aws-sdk/client-ecs";
 import { ChangeMessageVisibilityCommand } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
 import {
@@ -613,6 +613,79 @@ describe("the builder's task (criterion 2)", () => {
     expect(states.get(`${ARN}9`)).toEqual({ stopped: true });
     expect((sent[1]?.input as DescribeTasksCommandInput).cluster).toBe("ssd-workshop-builds");
     expect(sent[1]).toBeInstanceOf(DescribeTasksCommand);
+  });
+});
+
+describe("the builds cluster's tasks (ticket 3.14)", () => {
+  const hex = (n: number): string => n.toString(16).padStart(32, "0");
+  const arn = (n: number): string => `arn:aws:ecs:eu-central-1:360206963848:task/ssd-workshop-builds/${hex(n)}`;
+  const eni = (...subnets: string[]) => ({
+    type: "ElasticNetworkInterface",
+    details: [{ name: "networkInterfaceId", value: "eni-0123" }, ...subnets.map((value) => ({ name: "subnetId", value })), { name: "privateIPv4Address", value: "10.0.0.1" }],
+  });
+
+  it("lists RUNNING then PENDING tasks of the builds cluster page by page, describes them 100 at a time and reads each one's subnets", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => arn(i + 1));
+    const page2 = [arn(101), arn(102)];
+    const pending = [arn(102), arn(103)];
+    const described = (arns: string[], subnet: (n: number) => string[]) => ({
+      tasks: arns.map((taskArn) => ({ taskArn, lastStatus: "RUNNING", attachments: [eni(...subnet(Number.parseInt(taskArn.slice(-32), 16)))] })),
+    });
+    const { client, sent } = stub([
+      { taskArns: page1, nextToken: "t-1" },
+      { taskArns: page2 },
+      { taskArns: pending },
+      described(page1, () => ["subnet-05229d71b1e0b41ff"]),
+      {
+        tasks: [
+          { taskArn: arn(101), lastStatus: "RUNNING", attachments: [eni("subnet-0aaaaaaaaaaaaaaaa")] },
+          { taskArn: arn(102), lastStatus: "PROVISIONING", attachments: [] },
+          { taskArn: arn(103), lastStatus: "STOPPED", attachments: [eni("subnet-0aaaaaaaaaaaaaaaa")] },
+        ],
+        failures: [{ arn: arn(104), reason: "MISSING" }],
+      },
+    ]);
+    const tasks = new EcsBuildTasks(client, "td", "sg");
+    const listed = await tasks.listClusterTasks();
+    expect(sent.slice(0, 3).every((command) => command instanceof ListTasksCommand)).toBe(true);
+    expect(sent.slice(0, 3).map((command) => command.input)).toEqual([
+      { cluster: "ssd-workshop-builds", desiredStatus: "RUNNING", maxResults: 100 },
+      { cluster: "ssd-workshop-builds", desiredStatus: "RUNNING", maxResults: 100, nextToken: "t-1" },
+      { cluster: "ssd-workshop-builds", desiredStatus: "PENDING", maxResults: 100 },
+    ]);
+    // Each task once (102 was in both lists), in batches of at most 100.
+    expect(sent.slice(3).every((command) => command instanceof DescribeTasksCommand)).toBe(true);
+    const batches = sent.slice(3).map((command) => command.input as DescribeTasksCommandInput);
+    expect(batches.map((input) => input.cluster)).toEqual(["ssd-workshop-builds", "ssd-workshop-builds"]);
+    expect(batches.map((input) => input.tasks)).toEqual([page1, [arn(101), arn(102), arn(103)]]);
+    expect(sent).toHaveLength(5);
+    // A stopped task is left out; a task without a network interface yet has no subnet.
+    expect(listed).toHaveLength(102);
+    expect(listed[0]).toEqual({ taskArn: arn(1), subnetIds: ["subnet-05229d71b1e0b41ff"] });
+    expect(listed.slice(100)).toEqual([
+      { taskArn: arn(101), subnetIds: ["subnet-0aaaaaaaaaaaaaaaa"] },
+      { taskArn: arn(102), subnetIds: [] },
+    ]);
+  });
+
+  it("asks nothing more when the cluster has no task, and lets a refused ListTasks through to the check", async () => {
+    const empty = stub([{ taskArns: [] }, {}]);
+    expect(await new EcsBuildTasks(empty.client, "td", "sg").listClusterTasks()).toEqual([]);
+    expect(empty.sent).toHaveLength(2);
+    const denied = stub([Object.assign(new Error("denied"), { name: "AccessDeniedException" })]);
+    await expect(new EcsBuildTasks(denied.client, "td", "sg").listClusterTasks()).rejects.toMatchObject({ name: "AccessDeniedException" });
+  });
+
+  it("stops a task with the given reason, or the launcher's own by default", async () => {
+    const { client, sent } = stub([{}, {}]);
+    const tasks = new EcsBuildTasks(client, "td", "sg");
+    await tasks.stop(arn(1), "ssd-workshop: outside the build subnets");
+    await tasks.stop(arn(2));
+    expect(sent.every((command) => command instanceof StopTaskCommand)).toBe(true);
+    expect(sent.map((command) => command.input)).toEqual([
+      { cluster: "ssd-workshop-builds", task: arn(1), reason: "ssd-workshop: outside the build subnets" },
+      { cluster: "ssd-workshop-builds", task: arn(2), reason: "Stopped by the build launcher" },
+    ]);
   });
 });
 

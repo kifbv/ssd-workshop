@@ -63,6 +63,13 @@
  * (`BUILD_RETRIES`); the check puts that failed build, or that build stuck `building` for over STUCK_BUILD_MS (then it
  * stops its task), back in the queue at a new place and launches it like the Stop's builds. The change count is untouched.
  *
+ * Ticket 3.14 (auto-stop outside the build subnets, Franck's choice "Add it to the minute check", 2026-11-26): IAM cannot
+ * pin RunTask to subnets (accepted risk 1), so after the watched builds the check lists every task of the builds cluster
+ * (RUNNING and PENDING) and stops each one whose network interface is not entirely in BUILDS_SUBNET_IDS, or has no subnet
+ * yet, with the reason OUTSIDE_STOP_REASON, logging one `outside-task` line with only the task's id. A stray watched build
+ * is not failed here: its task is stopped, and the next minute's check fails it like any stopped task. A refused list
+ * (AccessDenied until Franck applies the boundary with `ecs:ListTasks`) is logged once and the check goes on.
+ *
  * Logs: one JSON line per launch or check, with an outcome, counts and an error name; never a token, nickname, build id,
  * repository name or error message.
  */
@@ -87,6 +94,7 @@ import {
   ACCOUNT,
   BUILD_TASK_MAX_MS,
   BUILDS_CLUSTER_NAME,
+  BUILDS_SUBNET_IDS,
   HANDED_OVER_GRACE_MS,
   LAUNCH_UNSTARTED_MS,
   QUEUE_SEEN_MS,
@@ -331,12 +339,21 @@ export interface TaskStart {
   attemptId: string;
 }
 
+/** Ticket 3.14: a task of the builds cluster that has not stopped, with the subnets of its network interface (none yet: empty). */
+export interface ClusterTask {
+  taskArn: string;
+  subnetIds: string[];
+}
+
 export interface BuildTasks {
   /** Starts the builder for the build (`startedBy` the build id); the token goes in the container's override. */
   start(start: TaskStart, signal?: AbortSignal): Promise<{ taskArn: string } | { failure: string }>;
   /** The state of each task; a task ECS no longer knows counts as stopped. */
   describe(taskArns: readonly string[]): Promise<Map<string, TaskState>>;
-  stop(taskArn: string): Promise<void>;
+  /** Stops a task of the builds cluster, with `reason` (default: the launcher's own). */
+  stop(taskArn: string, reason?: string): Promise<void>;
+  /** Ticket 3.14: every task of the builds cluster whose desired status is RUNNING or PENDING, except those already stopped. */
+  listClusterTasks(): Promise<ClusterTask[]>;
 }
 
 export interface DeadLetter {
@@ -376,9 +393,17 @@ export type LaunchOutcome = "started" | "invalid" | "duplicate" | "ignored" | "f
  */
 export type SpecReadOutcome = "read" | "resent" | "skipped" | "invalid";
 
+/**
+ * Ticket 3.14, one `outside-task` line: `stopped` (a task outside the build subnets was stopped), `stop-failed` (StopTask
+ * refused it: the next minute tries again), `list-failed` (the cluster's tasks could not be listed, once per check).
+ */
+export type OutsideTaskOutcome = "stopped" | "stop-failed" | "list-failed";
+
 export interface LauncherLogEntry {
-  event: "launcher" | "build-check" | "spec-read";
-  outcome: LaunchOutcome | SpecReadOutcome | "checked" | "error";
+  event: "launcher" | "build-check" | "spec-read" | "outside-task";
+  outcome: LaunchOutcome | SpecReadOutcome | OutsideTaskOutcome | "checked" | "error";
+  /** Ticket 3.14: the stopped task's id (the last part of its ARN), never its ARN, overrides or anything it carries. */
+  task?: string;
   /** Spec read (ticket 3.9): what was found (`found`, `too-large`, ...), never the text. */
   read?: RepositoryRead["kind"];
   error?: string;
@@ -397,6 +422,8 @@ export interface LauncherLogEntry {
   relaunched?: number;
   /** Check (ticket 3.10): builds a facilitator's Retry put back in the queue. */
   retried?: number;
+  /** Check (ticket 3.14): tasks stopped because they ran outside the build subnets. */
+  outside?: number;
   durationMs: number;
 }
 
@@ -505,6 +532,8 @@ export const QUEUED_DEAD_REASON = "The build could not be started after several 
 /** Try 2: a build that waited in the line longer than QUEUE_WAIT_MAX_MS. */
 export const QUEUE_TIMEOUT_REASON = "The build waited too long in the queue and did not start. Your facilitator can restart it.";
 export const DEPLOY_DEAD_REASON = "The app could not be published because of a problem on the workshop's side.";
+/** Ticket 3.14: StopTask's reason for a task outside the build subnets (shown in the ECS console and in CloudTrail). */
+export const OUTSIDE_STOP_REASON = "ssd-workshop: outside the build subnets";
 
 /** The build id of a launch message: exactly `{"buildId": "<id>"}`, else undefined. */
 export function parseLaunchMessage(body: string | undefined): string | undefined {
@@ -709,6 +738,39 @@ async function drain(queue: DeadLetters, handle: (body: string | undefined) => P
  */
 const BUILD_TASK_ARN = new RegExp(`^arn:aws:ecs:${REGION}:${ACCOUNT}:task/${BUILDS_CLUSTER_NAME}/[0-9a-f]{32}$`);
 
+/** The task id: the last part of a builds-cluster task ARN (BUILD_TASK_ARN). */
+const taskIdOf = (taskArn: string): string => taskArn.slice(taskArn.lastIndexOf("/") + 1);
+
+/**
+ * Ticket 3.14: stops every task of the builds cluster not entirely in the build subnets (or with no subnet), and answers
+ * how many it stopped. Never throws: a refused list is logged once (`list-failed`), a refused stop with the task's id.
+ */
+async function stopOutsideTasks(deps: CheckDeps, started: number): Promise<number> {
+  const durationMs = (): number => Math.max(0, deps.now().getTime() - started);
+  const buildSubnets: readonly string[] = BUILDS_SUBNET_IDS;
+  let tasks: ClusterTask[];
+  try {
+    tasks = await deps.tasks.listClusterTasks();
+  } catch (error) {
+    deps.log({ event: "outside-task", outcome: "list-failed", error: errorName(error), durationMs: durationMs() });
+    return 0;
+  }
+  let outside = 0;
+  for (const task of tasks) {
+    // ECS answers only this cluster's tasks; anything else is never acted on.
+    if (!BUILD_TASK_ARN.test(task.taskArn)) continue;
+    if (task.subnetIds.length > 0 && task.subnetIds.every((subnet) => buildSubnets.includes(subnet))) continue;
+    try {
+      await deps.tasks.stop(task.taskArn, OUTSIDE_STOP_REASON);
+      outside += 1;
+      deps.log({ event: "outside-task", outcome: "stopped", task: taskIdOf(task.taskArn), durationMs: durationMs() });
+    } catch (error) {
+      deps.log({ event: "outside-task", outcome: "stop-failed", task: taskIdOf(task.taskArn), error: errorName(error), durationMs: durationMs() });
+    }
+  }
+  return outside;
+}
+
 /** The stuck-build check. Every write is conditional, so two checks at once (or a check racing a launch) are harmless. */
 export async function runCheck(deps: CheckDeps): Promise<void> {
   const started = deps.now().getTime();
@@ -724,6 +786,7 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
   let requeued = 0;
   let relaunched = 0;
   let retried = 0;
+  let outside = 0;
   try {
     const settings = await deps.records.readSettings();
     /**
@@ -802,6 +865,8 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
         stopped += 1;
       }
     }
+    // Ticket 3.14: tasks outside the build subnets (a watched build's included: the next minute fails it as stopped).
+    outside = await stopOutsideTasks(deps, started);
     // Ticket 3.10: the facilitators' Retry requests. Only this role may stop a build task and launch a build, so the
     // facilitator function only asks; here a failed build goes back to the queue, and a build stuck `building` for over
     // STUCK_BUILD_MS without having handed its commit over goes back too (one conditional write, its slot freed), then its
@@ -936,10 +1001,11 @@ export async function runCheck(deps: CheckDeps): Promise<void> {
       requeued,
       relaunched,
       retried,
+      outside,
       durationMs: Math.max(0, deps.now().getTime() - started),
     });
     // eslint-disable-next-line preserve-caught-error -- no cause, as above
     throw new Error("check failed");
   }
-  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, requeued, relaunched, retried, durationMs: Math.max(0, deps.now().getTime() - started) });
+  deps.log({ event: "build-check", outcome: "checked", failed, stopped, deadLetters, freed, strays, repaired, forced, unqueued, requeued, relaunched, retried, outside, durationMs: Math.max(0, deps.now().getTime() - started) });
 }
