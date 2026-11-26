@@ -75,6 +75,9 @@ import {
   WAF_MEDIA_WRITE_RATE_LIMIT,
   WAF_MEDIA_WRITE_RATE_METHODS,
   WAF_MEDIA_PATH_TRANSFORMATIONS,
+  WAF_MEDIA_PREFLIGHT_RATE_LIMIT,
+  WAF_MEDIA_PREFLIGHT_RATE_METHOD,
+  WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
   WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
@@ -302,7 +305,7 @@ export class EdgeStack extends Stack {
     const webAcl = new CfnWebACL(this, "WebAcl", {
       name: WEB_ACL_NAME,
       scope: "CLOUDFRONT",
-      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX}, ${WAF_MEDIA_PATH_PREFIX} and media uploads, media writes need a Bearer token`,
+      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX}, ${WAF_MEDIA_PATH_PREFIX} and media uploads and preflights, media writes need a Bearer token`,
       defaultAction: { allow: {} },
       customResponseBodies: {
         [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY },
@@ -463,6 +466,59 @@ export class EdgeStack extends Stack {
             },
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_WRITE_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.18 (after the access review of try 3): preflights per address, so one address cannot hold the
+        // preflight route's shared throttle at 429 for every app (see WAF_MEDIA_PREFLIGHT_RATE_LIMIT).
+        {
+          name: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
+          priority: 4,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_BLOCK_STATUS,
+                customResponseBodyKey: WAF_MEDIA_WRITE_RATE_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_MEDIA_PREFLIGHT_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { method: {} },
+                        positionalConstraint: "EXACTLY",
+                        searchString: WAF_MEDIA_PREFLIGHT_RATE_METHOD,
+                        textTransformations: [{ priority: 0, type: "NONE" }],
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_MEDIA_API_PREFIX,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "CONTAINS",
+                        searchString: WAF_MEDIA_API_SEGMENT,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME, sampledRequestsEnabled: true },
         },
       ],
     });

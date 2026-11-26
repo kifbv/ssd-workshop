@@ -9,7 +9,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v3` (v1 and v2 retained until Franck deletes them, tickets 2.14 and 3.24) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`; from ticket 3.18 `/app-media/*` from the media bucket through Origin Access Control `ssd-workshop-app-media` with headers policy `ssd-workshop-app-media-v1`, a second WAF rate rule on `/app-media/*` (3,000 per address in 5 minutes), a third rule answering a media `PUT`/`DELETE` without a Bearer token with 401, and a fourth limiting media uploads to 150 per address in 5 minutes), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v3` (v1 and v2 retained until Franck deletes them, tickets 2.14 and 3.24) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`; from ticket 3.18 `/app-media/*` from the media bucket through Origin Access Control `ssd-workshop-app-media` with headers policy `ssd-workshop-app-media-v1`, a second WAF rate rule on `/app-media/*` (3,000 per address in 5 minutes), a third rule answering a media `PUT`/`DELETE` without a Bearer token with 401, a fourth limiting media uploads and deletes to 150 per address in 5 minutes, and a fifth limiting media preflights (`OPTIONS`) to 300 per address in 5 minutes), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out), later more (from ticket 3.18 `ssd-workshop-api-app-media` for `PUT`, `DELETE` and `OPTIONS /api/apps/{nickname}/media/{id}`, 512 MB, 25 s), bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), from ticket 3.18 the private `ssd-workshop-app-media-<account>` bucket (only the media function's role may write files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-alerts` | us-east-1 | ticket 3.13: Cost Anomaly Detection, monitor `ssd-workshop-cost` on the cost allocation tag `project=ssd-workshop` and daily email subscription `ssd-workshop-cost-alerts` to the address in SSM `/ssd-workshop/alert-email`; see "Safety nets (ticket 3.13)" | inline template (`LegacyStackSynthesizer`) |
@@ -645,11 +645,12 @@ sequenceDiagram
   C->>B: GetObject (origin access control ssd-workshop-app-media)
 ```
 
-Before merging (Franck): the edge stack adds three WAF rules to `ssd-workshop-edge` (`ssd-workshop-media-rate`: 3,000
+Before merging (Franck): the edge stack adds four WAF rules to `ssd-workshop-edge` (`ssd-workshop-media-rate`: 3,000
 requests to `/app-media/*` per address in 5 minutes; `ssd-workshop-media-auth`: a media `PUT`/`DELETE` without
-`Authorization: Bearer ...`, in any case, gets WAF's 401; `ssd-workshop-media-write-rate`: more than 150 media `PUT`s and `DELETE`s together
-per address in 5 minutes get WAF's 429 "Too many uploads from this address. Please wait a few minutes and try
-again."). That is a `wafv2:UpdateWebACL`, which the deploy role already holds through
+`Authorization: Bearer ...`, in any case, gets WAF's 401; `ssd-workshop-media-write-rate`: more than 150 media `PUT`s
+and `DELETE`s together per address in 5 minutes get WAF's 429 "Too many uploads from this address. Please wait a few
+minutes and try again."; `ssd-workshop-media-preflight-rate`: more than 300 media `OPTIONS` preflights per address in
+5 minutes get the same 429; $1 a month a rule). That is a `wafv2:UpdateWebACL`, which the deploy role already holds through
 the standalone policy `ssd-workshop-deploy-safety-nets` from ticket 3.13 (statement `WafManageWorkshopAcl`, on
 `global/webacl/ssd-workshop-*/*`): no access-stack change is needed; only confirm that policy is still attached to the
 deploy role, or the edge stack's deploy fails and rolls back. Everything else (bucket, origin access control, headers
@@ -747,6 +748,15 @@ newid() { head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
    curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' --data-binary 'x' \
      "https://workshop.rankly.games/api//apps/<nick>/media/$(newid)"
    # expect: WAF's 401 (or a 404 that never reaches the media function: no line in its log group)
+   ```
+
+   Preflights per address (rule 5; same caution about the address): 350 preflights turn from the function's 204 to
+   WAF's 429 a little after the 300th:
+
+   ```sh
+   for i in $(seq 350); do curl -sS -o /dev/null -w '%{http_code}\n' -X OPTIONS -H 'origin: null' \
+     -H 'access-control-request-method: PUT' "$API/$(newid)"; done | sort | uniq -c
+   # expect: about 300 x 204, the rest 429 (with access-control-allow-origin: * and the "Too many uploads" body)
    ```
 
    Downloads (`/app-media/...`) and the data API from the same address still answer as before. Not verified until this

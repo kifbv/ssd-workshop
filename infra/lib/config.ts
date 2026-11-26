@@ -832,19 +832,20 @@ export const WAF_MEDIA_AUTH_BODY_KEY = "sign-in-to-save";
 /** The media API's own 401 answer (platform APP_SIGN_IN_TEXTS.signInToSave; a synth test keeps them equal). */
 export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "Sign in to the workshop to save in this app." });
 /**
- * Ticket 3.18 try 3: per address, at most WAF_MEDIA_WRITE_RATE_LIMIT media uploads (`PUT /api/apps/<nickname>/media/<id>`)
- * in WAF_RATE_WINDOW_SECONDS (priority 3, after the junk filter), then 429 with its own body and the CORS header. The
- * junk filter lets a made-up `Bearer x` through, and the upload route's throttle (APP_MEDIA_UPLOAD_THROTTLE, 2/s) is
- * shared by every app: without this rule one address could keep it at 429 for everyone. 150 per 5 minutes is 0.5/s, so
- * filling the throttle now takes at least 4 addresses. A room behind one venue address shares the 150 (~3 photos each
- * for 45 people in 5 minutes); please veto.
+ * Ticket 3.18 try 3: per address, at most WAF_MEDIA_WRITE_RATE_LIMIT media uploads and deletes together (`PUT` and
+ * `DELETE /api/apps/<nickname>/media/<id>`, WAF_MEDIA_WRITE_RATE_METHODS) in WAF_RATE_WINDOW_SECONDS (priority 3, after
+ * the junk filter), then 429 with its own body and the CORS header. The junk filter lets a made-up `Bearer x` through,
+ * and the upload and delete routes' throttles (APP_MEDIA_UPLOAD_THROTTLE, 2/s; APP_MEDIA_DELETE_THROTTLE, 10/s) are
+ * shared by every app: without this rule one address could keep them at 429 for everyone. 150 per 5 minutes is 0.5/s,
+ * so filling the upload throttle now takes at least 4 addresses. A room behind one venue address shares the 150 (~3
+ * photos each for 45 people in 5 minutes); please veto.
  */
 export const WAF_MEDIA_WRITE_RATE_RULE_NAME = `${PREFIX}-media-write-rate`;
 export const WAF_MEDIA_WRITE_RATE_LIMIT = 150;
 /**
  * Ticket 3.18 (access review of try 3): the per-address rule counts uploads AND deletes (the delete route's throttle,
- * 10/s, is shared by every app too). Preflights are not counted (each upload sends one, so counting them would halve a
- * room's uploads); the preflight route's throttle is raised above what one address may send under the 3.13 rule instead.
+ * 10/s, is shared by every app too). Preflights are not counted here (each upload sends one, so counting them would
+ * halve a room's uploads); they get their own per-address rule (WAF_MEDIA_PREFLIGHT_RATE_LIMIT).
  */
 export const WAF_MEDIA_WRITE_RATE_METHODS = ["PUT", "DELETE"] as const;
 /**
@@ -857,6 +858,19 @@ export const WAF_MEDIA_PATH_TRANSFORMATIONS = [
 ];
 export const WAF_MEDIA_WRITE_RATE_BODY_KEY = "too-many-uploads";
 export const WAF_MEDIA_WRITE_RATE_BODY = JSON.stringify({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
+/**
+ * Ticket 3.18 (after the access review of try 3): per address, at most WAF_MEDIA_PREFLIGHT_RATE_LIMIT media preflights
+ * (`OPTIONS /api/apps/<nickname>/media/<id>`, same path matches as WAF_MEDIA_WRITE_RATE_RULE_NAME) in
+ * WAF_RATE_WINDOW_SECONDS (priority 4), then 429 with the CORS header and WAF_MEDIA_WRITE_RATE_BODY (same body key).
+ * The preflight route's throttle (APP_MEDIA_PREFLIGHT_THROTTLE, 20/s) is shared by every app, and the 3.13 rule lets one
+ * address send 50/s: without this rule one address could hold every app's preflights at 429. A per-address rule rather
+ * than a higher throttle, since a higher throttle raises the cost at the cap. 300 per 5 minutes is 1/s, so filling the
+ * 20/s throttle takes ~20 addresses; a room behind one venue address sends one preflight per upload (at most 150 per 5
+ * minutes under rule 3), far below 300. $1 a month; please veto.
+ */
+export const WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME = `${PREFIX}-media-preflight-rate`;
+export const WAF_MEDIA_PREFLIGHT_RATE_LIMIT = 300;
+export const WAF_MEDIA_PREFLIGHT_RATE_METHOD = "OPTIONS";
 /**
  * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
  * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would

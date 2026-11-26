@@ -155,11 +155,16 @@ import {
   WAF_MEDIA_AUTH_RULE_NAME,
   WAF_MEDIA_AUTH_STATUS,
   WAF_MEDIA_PATH_PREFIX,
+  WAF_MEDIA_PATH_TRANSFORMATIONS,
+  WAF_MEDIA_PREFLIGHT_RATE_LIMIT,
+  WAF_MEDIA_PREFLIGHT_RATE_METHOD,
+  WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
   WAF_MEDIA_RATE_LIMIT,
   WAF_MEDIA_RATE_RULE_NAME,
   WAF_MEDIA_WRITE_RATE_BODY,
   WAF_MEDIA_WRITE_RATE_BODY_KEY,
   WAF_MEDIA_WRITE_RATE_LIMIT,
+  WAF_MEDIA_WRITE_RATE_METHODS,
   WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
@@ -2255,7 +2260,7 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     expect(stage?.Properties?.RouteSettings).toEqual({
       [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 2, ThrottlingBurstLimit: 10 },
       [`DELETE ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
-      [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 60, ThrottlingBurstLimit: 120 },
+      [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
       "POST /api/sign-in/code": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       "POST /api/sign-in/verify": { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
       [`PUT ${APP_DATA_PATH}`]: { ThrottlingRateLimit: 30, ThrottlingBurstLimit: 60 },
@@ -3690,7 +3695,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(resource.Properties?.Description).toMatch(/^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+[a-zA-Z0-9+=:#@/\-,.]{1,256}$/);
   });
 
-  it("has exactly four rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401; try 3: at most 150 uploads per address in 5 minutes", () => {
+  it("has exactly five rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401; try 3: at most 150 uploads and deletes per address in 5 minutes; after its access review: at most 300 media preflights per address in 5 minutes", () => {
     const rules = acl()[2].Properties?.Rules as Record<string, unknown>[];
     expect(rules).toEqual([
       {
@@ -3813,12 +3818,68 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
         },
         VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_WRITE_RATE_RULE_NAME, SampledRequestsEnabled: true },
       },
+      {
+        Name: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
+        Priority: 4,
+        Action: {
+          Block: {
+            CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: WAF_MEDIA_WRITE_RATE_BODY_KEY, ResponseHeaders: [{ Name: "access-control-allow-origin", Value: "*" }] },
+          },
+        },
+        Statement: {
+          RateBasedStatement: {
+            Limit: 300,
+            EvaluationWindowSec: 300,
+            AggregateKeyType: "IP",
+            ScopeDownStatement: {
+              AndStatement: {
+                Statements: [
+                  { ByteMatchStatement: { FieldToMatch: { Method: {} }, PositionalConstraint: "EXACTLY", SearchString: "OPTIONS", TextTransformations: [{ Priority: 0, Type: "NONE" }] } },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
+                  },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "CONTAINS", SearchString: "/media/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
+                  },
+                ],
+              },
+            },
+          },
+        },
+        VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME, SampledRequestsEnabled: true },
+      },
     ]);
     // Try 3: one address (a made-up `Bearer x` passes the junk filter) can no longer hold the shared 2/s upload
     // throttle at 429 for every app: 150 per 5 minutes is 0.5/s, so filling the throttle takes at least 4 addresses.
     expect(WAF_MEDIA_WRITE_RATE_RULE_NAME).toBe("ssd-workshop-media-write-rate");
     expect(WAF_MEDIA_WRITE_RATE_LIMIT).toBe(150);
     expect(WAF_MEDIA_WRITE_RATE_LIMIT / WAF_RATE_WINDOW_SECONDS).toBeLessThan(APP_MEDIA_UPLOAD_THROTTLE.rateLimit / 3);
+    // After the access review of try 3: preflights get their own per-address rule (300 per 5 minutes, 1/s), and the
+    // preflight throttle stays 20/s (a higher throttle would raise the cost at the cap).
+    expect(WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME).toBe("ssd-workshop-media-preflight-rate");
+    expect(WAF_MEDIA_PREFLIGHT_RATE_LIMIT).toBe(300);
+    expect(WAF_MEDIA_PREFLIGHT_RATE_METHOD).toBe("OPTIONS");
+    expect(WAF_MEDIA_WRITE_RATE_METHODS).toEqual(["PUT", "DELETE"]);
+    expect(WAF_MEDIA_PATH_TRANSFORMATIONS).toEqual([{ priority: 0, type: "URL_DECODE" }, { priority: 1, type: "NORMALIZE_PATH" }]);
+    // A room behind one venue address sends one preflight per upload: at most rule 3's 150 in the window, far below 300.
+    expect(WAF_MEDIA_PREFLIGHT_RATE_LIMIT).toBeGreaterThanOrEqual(2 * WAF_MEDIA_WRITE_RATE_LIMIT);
+    // Every shared media route throttle (upload, delete, preflight) takes at least 3 addresses to fill: the per-address
+    // WAF limit covering that method, per second, is below a third of the throttle's rate.
+    const perAddressLimit = (method: string): number => {
+      const limits = [
+        ...((WAF_MEDIA_WRITE_RATE_METHODS as readonly string[]).includes(method) ? [WAF_MEDIA_WRITE_RATE_LIMIT] : []),
+        ...(method === WAF_MEDIA_PREFLIGHT_RATE_METHOD ? [WAF_MEDIA_PREFLIGHT_RATE_LIMIT] : []),
+      ];
+      expect(limits, method).not.toHaveLength(0);
+      return Math.min(...limits);
+    };
+    for (const [method, throttle] of [
+      ["PUT", APP_MEDIA_UPLOAD_THROTTLE],
+      ["DELETE", APP_MEDIA_DELETE_THROTTLE],
+      ["OPTIONS", APP_MEDIA_PREFLIGHT_THROTTLE],
+    ] as const) {
+      expect(perAddressLimit(method) / WAF_RATE_WINDOW_SECONDS, method).toBeLessThan(throttle.rateLimit / 3);
+    }
     expect(JSON.parse(WAF_MEDIA_WRITE_RATE_BODY)).toEqual({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
     expect(WAF_MEDIA_AUTH_RULE_NAME).toBe("ssd-workshop-media-auth");
     // The same answer as the media API's own 401 (workshop-data.js shows `message`).
@@ -4078,9 +4139,9 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     // Try 2 (cost, accepted by Franck 2026-11-26): 2/s, burst 10.
     expect(APP_MEDIA_UPLOAD_THROTTLE).toEqual({ rateLimit: 2, burstLimit: 10 });
     expect(APP_MEDIA_DELETE_THROTTLE).toEqual({ rateLimit: 10, burstLimit: 20 });
-    expect(APP_MEDIA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 60, burstLimit: 120 });
-    // Access review of 3.18 try 3: one address may send WAF_API_RATE_LIMIT per window; the shared preflight route must take more.
-    expect(APP_MEDIA_PREFLIGHT_THROTTLE.rateLimit).toBeGreaterThan(WAF_API_RATE_LIMIT / WAF_RATE_WINDOW_SECONDS);
+    // Not raised (a higher throttle raises the cost at the cap): WAF's per-address preflight rule keeps one address
+    // from holding it at 429 (the WAF test checks the ratio).
+    expect(APP_MEDIA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
     for (const routeKey of keys) {
       const routeId = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === routeKey)?.[0];
