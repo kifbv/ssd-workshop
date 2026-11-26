@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Facilitator dashboard · SSD Workshop</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/style.css" />
+    <!-- No inline scripts: the Content-Security-Policy allows scripts from this site only. -->
+    <script src="/facilitator/dashboard.js" defer></script>
+  </head>
+  <body class="dashboard">
+    <!-- Ticket 3.11: for facilitators and the admin; a participant sees one line and no data. -->
+    <main>
+      <header>
+        <h1>SSD Workshop</h1>
+        <p class="account"><a href="/">My workshop page</a></p>
+      </header>
+
+      <noscript><p class="card">This page needs JavaScript. Please turn it on and reload.</p></noscript>
+
+      <p id="dashboard-loading" class="card" role="status">Loading…</p>
+
+      <section id="dashboard-denied" class="card" hidden>
+        <p id="dashboard-denied-text"></p>
+      </section>
+
+      <section id="dashboard" aria-labelledby="dashboard-heading" hidden>
+        <h2 id="dashboard-heading">Facilitator dashboard</h2>
+        <p id="dashboard-stopped" class="paused-banner" role="status" hidden></p>
+
+        <div class="dashboard-filter">
+          <label for="group-filter">Group</label>
+          <select id="group-filter"></select>
+          <p id="dashboard-count" class="help"></p>
+        </div>
+
+        <p id="message-dashboard" class="message" role="status" aria-live="polite"></p>
+
+        <!-- Flagged messages first: one alert each, with Approve and Reject. -->
+        <section id="flags" aria-labelledby="flags-heading" hidden>
+          <h3 id="flags-heading">Flagged messages</h3>
+          <ul id="flag-list" class="flag-list"></ul>
+        </section>
+        <p id="flags-elsewhere" class="notice" hidden></p>
+        <p id="message-flags" class="message" role="status" aria-live="polite"></p>
+
+        <h3 id="rows-heading">Participants</h3>
+        <ul id="rows" class="rows" aria-labelledby="rows-heading"></ul>
+        <p id="rows-empty" class="help" hidden></p>
+      </section>
+    </main>
+  </body>
+</html>

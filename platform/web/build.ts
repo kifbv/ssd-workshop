@@ -1,5 +1,5 @@
 import { copyFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
 
@@ -10,11 +10,16 @@ export const WEB_SOURCE_DIR = fileURLToPath(new URL(".", import.meta.url));
  * Files published as they are, next to the built app.js. `404.html` (ticket 2.5) is the plain page CloudFront
  * shows for an address that does not exist (S3 answers a missing key with 403; the distribution turns it into
  * this page with status 404), under `/apps/*` and on the site alike: no script, no stylesheet.
+ * `facilitator/index.html` (ticket 3.11) is the facilitator dashboard at `/facilitator/` (the distribution's
+ * `ssd-workshop-site-index` function asks the bucket for `index.html` in that folder).
  */
-export const STATIC_FILES = ["index.html", "style.css", "404.html"] as const;
+export const STATIC_FILES = ["index.html", "style.css", "404.html", "facilitator/index.html"] as const;
 
-/** The scripts esbuild bundles: the page's own, and the diagram drawer (Mermaid, ticket 1.9), loaded only at step 2. */
-export const SCRIPTS = { "app.js": "main.ts", "diagram.js": "diagram.ts" } as const;
+/**
+ * The scripts esbuild bundles: the page's own, the diagram drawer (Mermaid, ticket 1.9), loaded only at step 2, and
+ * the facilitator dashboard's (ticket 3.11), loaded only by its page.
+ */
+export const SCRIPTS = { "app.js": "main.ts", "diagram.js": "diagram.ts", "facilitator/dashboard.js": "facilitator.ts" } as const;
 
 /**
  * Builds the site into `outDir`: the static files, `app.js` bundled by esbuild from src/main.ts, and
@@ -24,7 +29,10 @@ export const SCRIPTS = { "app.js": "main.ts", "diagram.js": "diagram.ts" } as co
  */
 export function buildWeb(outDir: string): string {
   mkdirSync(outDir, { recursive: true });
-  for (const file of STATIC_FILES) copyFileSync(join(WEB_SOURCE_DIR, file), join(outDir, file));
+  for (const file of STATIC_FILES) {
+    mkdirSync(dirname(join(outDir, file)), { recursive: true });
+    copyFileSync(join(WEB_SOURCE_DIR, file), join(outDir, file));
+  }
   for (const [outfile, entry] of Object.entries(SCRIPTS)) {
     buildSync({
       entryPoints: [join(WEB_SOURCE_DIR, "src", entry)],

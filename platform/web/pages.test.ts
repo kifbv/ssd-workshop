@@ -2173,14 +2173,19 @@ describe("ticket 3.5: the paused line on idle signed-in screens (status poll eve
 });
 
 describe("built site", () => {
-  it("holds only the page, its stylesheet, its two scripts and the 404 page, and the page has no inline script, style or handler", () => {
-    expect(readdirSync(dir).sort()).toEqual(["404.html", "app.js", "diagram.js", "index.html", "style.css"]);
+  it("holds only the page, its stylesheet, its two scripts, the 404 page and the facilitator dashboard (ticket 3.11), and no page has an inline script, style or handler", () => {
+    expect(readdirSync(dir).sort()).toEqual(["404.html", "app.js", "diagram.js", "facilitator", "index.html", "style.css"]);
+    expect(readdirSync(join(dir, "facilitator")).sort()).toEqual(["dashboard.js", "index.html"]);
     const html = readFileSync(join(dir, "index.html"), "utf8");
     expect(html).toContain('<script src="app.js" defer></script>');
-    expect(html).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/);
-    expect(html).not.toMatch(/<style/);
-    expect(html).not.toMatch(/\son[a-z]+=/i);
-    expect(html).not.toMatch(/\sstyle=/i);
+    const dashboard = readFileSync(join(dir, "facilitator", "index.html"), "utf8");
+    expect(dashboard).toContain('<script src="/facilitator/dashboard.js" defer></script>');
+    for (const page of [html, dashboard]) {
+      expect(page).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/);
+      expect(page).not.toMatch(/<style/);
+      expect(page).not.toMatch(/\son[a-z]+=/i);
+      expect(page).not.toMatch(/\sstyle=/i);
+    }
   });
 
   it("holds a plain 404 page (ticket 2.5 criterion 5): no script, no stylesheet, no inline style or handler, no email address", () => {

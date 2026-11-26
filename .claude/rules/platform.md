@@ -275,3 +275,9 @@ paths:
   facilitator asks of a build (Retry) is a request item the launcher's minute check acts on, never a StopTask or a
   launch-queue send from another role. A single-item write's failed condition is `ConditionalCheckFailedException`;
   the conversation store's `conditionFailed` only recognises a cancelled transaction.
+- A new page in a folder (ticket 3.11's `/facilitator/`) needs its files in `STATIC_FILES`/`SCRIPTS` under that folder
+  and a CloudFront behaviour running `ssd-workshop-site-index` (`infra/lib/site-index.js`: slash redirect, `index.html`
+  for a folder); S3 has no folder index and the default root object covers `/` only. Reference shared files from the
+  root (`/style.css`). A page that polls keeps its cards by a stable key and updates them in place, so an open panel or
+  a busy button survives the next read. In Playwright, an aborted request (`route.abort()`) logs
+  "Failed to load resource: net::ERR_FAILED", which the console check must expect.

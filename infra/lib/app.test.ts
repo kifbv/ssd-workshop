@@ -60,6 +60,7 @@ import {
   APPS_CONTENT_SECURITY_POLICY,
   APPS_HEADERS_POLICY_NAME,
   APPS_INDEX_FUNCTION_NAME,
+  SITE_INDEX_FUNCTION_NAME,
   DEPLOY_DLQ_NAME,
   DEPLOY_QUEUE_NAME,
   AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
@@ -129,7 +130,7 @@ import {
   DEPLOYER_MEMORY_MB,
   DEPLOYER_TIMEOUT_SECONDS,
 } from "./apps-stack.js";
-import { APPS_INDEX_FUNCTION_FILE, NOT_FOUND_CACHE_SECONDS } from "./edge-stack.js";
+import { APPS_INDEX_FUNCTION_FILE, NOT_FOUND_CACHE_SECONDS, SITE_INDEX_FUNCTION_FILE } from "./edge-stack.js";
 import {
   BUILD_CHECK_SCHEDULE,
   BUILD_QUEUE_MAX_RECEIVES,
@@ -557,13 +558,16 @@ describe("buckets (criterion 2)", () => {
     expect(deployment?.[1].Properties?.DestinationBucketName).toBeDefined();
   });
 
-  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), no TypeScript or tests (ticket 1.6)", () => {
+  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), the facilitator dashboard (ticket 3.11), no TypeScript or tests (ticket 1.6)", () => {
     // The built folder in the assembly, and the asset CDK staged from it (same content).
-    const site = ["404.html", "app.js", "diagram.js", "index.html", "style.css"];
+    const site = ["404.html", "app.js", "diagram.js", "facilitator", "index.html", "style.css"];
+    const dashboard = ["dashboard.js", "index.html"];
     expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(site);
+    expect(readdirSync(join(dir, WEB_BUILD_FOLDER, "facilitator")).sort()).toEqual(dashboard);
     const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")) && existsSync(join(dir, name, "style.css")));
     expect(staged).toHaveLength(1);
     expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(site);
+    expect(readdirSync(join(dir, staged[0] ?? "", "facilitator")).sort()).toEqual(dashboard);
   });
 });
 
@@ -653,8 +657,9 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
 
   it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
     const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
-    // /api/*, the data API's /api/apps/* (ticket 2.4) and the apps' /apps/* (ticket 2.5), in this order.
-    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*"]);
+    // /api/*, the data API's /api/apps/* (ticket 2.4), the apps' /apps/* (ticket 2.5) and the dashboard's /facilitator*
+    // (ticket 3.11), in this order.
+    expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*"]);
     const behaviour = apiBehaviour();
     expect(behaviour).toMatchObject({
       PathPattern: "/api/*",
@@ -685,8 +690,8 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
     for (const type of ["AWS::CloudFront::CachePolicy", "AWS::CloudFront::OriginRequestPolicy"]) {
       expect(ofType(type), type).toEqual([]);
     }
-    // The one CloudFront Function is the apps' (ticket 2.5), on /apps/* only.
-    expect(ofType("AWS::CloudFront::Function").map(([, , r]) => r.Properties?.Name)).toEqual([APPS_INDEX_FUNCTION_NAME]);
+    // The CloudFront Functions are the apps' (ticket 2.5), on /apps/* only, and the site's (ticket 3.11), on /facilitator* only.
+    expect(ofType("AWS::CloudFront::Function").map(([, , r]) => r.Properties?.Name).sort()).toEqual([APPS_INDEX_FUNCTION_NAME, SITE_INDEX_FUNCTION_NAME].sort());
     // The pages' headers policy (ticket 1.6), the data API's (ticket 2.4) and the apps' (ticket 2.5) are the
     // only custom CloudFront policies, and /api/* keeps the managed SecurityHeadersPolicy (asserted above).
     const custom = ofType("AWS::CloudFront::ResponseHeadersPolicy");
@@ -3270,7 +3275,7 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
     ofType("AWS::CloudFront::ResponseHeadersPolicy").find(
       ([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name === APPS_HEADERS_POLICY_NAME,
     );
-  const fn = () => ofType("AWS::CloudFront::Function")[0];
+  const fn = () => ofType("AWS::CloudFront::Function").find(([, , r]) => r.Properties?.Name === APPS_INDEX_FUNCTION_NAME);
 
   it("serves /apps/* from the apps bucket through the ssd-workshop-apps origin access control: GET and HEAD, HTTPS (redirect), managed CachingOptimized", () => {
     expect(behaviour()).toMatchObject({
@@ -3291,7 +3296,7 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
 
   it("keeps the API behaviours first: /apps/* cannot match an /api/ path", () => {
     const patterns = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).map((b) => b.PathPattern);
-    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*"]);
+    expect(patterns).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/facilitator*"]);
     const matches = (pattern: string, path: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(path);
     expect(matches("/apps/*", "/api/apps/ada/data/k")).toBe(false);
     expect(matches("/apps/*", "/apps/ada/index.html")).toBe(true);
@@ -3344,5 +3349,41 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
     const patterns = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).map((b) => String(b.PathPattern));
     expect(patterns.some((p) => p === "/404.html" || p === "/*" || p === "*")).toBe(false);
     expect(readdirSync(join(dir, WEB_BUILD_FOLDER))).toContain("404.html");
+  });
+});
+
+describe("CloudFront /facilitator* behaviour: the facilitator dashboard at /facilitator/ (ticket 3.11)", () => {
+  const distributionConfig = (): Record<string, unknown> =>
+    ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as Record<string, unknown>;
+  const behaviour = () => (distributionConfig().CacheBehaviors as Record<string, unknown>[]).find((b) => b.PathPattern === "/facilitator*");
+  const fn = () => ofType("AWS::CloudFront::Function").find(([, , r]) => r.Properties?.Name === SITE_INDEX_FUNCTION_NAME);
+
+  it("serves /facilitator* exactly like the pages (site bucket, CachingOptimized, the pages' CSP), plus the site-index function", () => {
+    const defaults = distributionConfig().DefaultCacheBehavior as Record<string, unknown>;
+    const { PathPattern, FunctionAssociations, ...rest } = behaviour() ?? {};
+    expect(PathPattern).toBe("/facilitator*");
+    expect(rest).toEqual(defaults);
+    expect(defaults.FunctionAssociations).toBeUndefined();
+    expect(FunctionAssociations).toEqual([{ EventType: "viewer-request", FunctionARN: { "Fn::GetAtt": [fn()?.[1], "FunctionARN"] } }]);
+    // One site origin for both (no second origin, no second origin access control).
+    expect((distributionConfig().Origins as unknown[]).length).toBe(3);
+  });
+
+  it("cannot match an /api/ or /apps/ path, and the dashboard's files are under it", () => {
+    const matches = (pattern: string, path: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(path);
+    for (const path of ["/api/facilitator/participants", "/apps/facilitator/", "/", "/app.js", "/style.css"]) expect(matches("/facilitator*", path), path).toBe(false);
+    for (const path of ["/facilitator", "/facilitator/", "/facilitator/dashboard.js"]) expect(matches("/facilitator*", path), path).toBe(true);
+  });
+
+  it("runs the function ssd-workshop-site-index (cloudfront-js-2.0) with the tested code, published, in the edge stack", () => {
+    const [stackName, , resource] = fn() ?? [];
+    expect(stackName).toBe(STACK_NAMES.edge);
+    expect(resource?.Properties).toMatchObject({
+      Name: SITE_INDEX_FUNCTION_NAME,
+      AutoPublish: true,
+      FunctionConfig: { Runtime: "cloudfront-js-2.0" },
+      FunctionCode: readFileSync(SITE_INDEX_FUNCTION_FILE, "utf8"),
+    });
+    expect(SITE_INDEX_FUNCTION_NAME).toBe("ssd-workshop-site-index");
   });
 });

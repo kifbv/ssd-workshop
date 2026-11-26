@@ -195,6 +195,8 @@ function showEmail(message?: string, tone: Tone = "info"): void {
 function showMe(me: Me): void {
   const screen = screenFor(me);
   nickname = me.nickname ?? "";
+  // Ticket 3.11: the dashboard link, for facilitators and the admin (the dashboard itself asks the API again).
+  byId("dashboard-link").hidden = me.role !== "facilitator" && me.role !== "admin";
   if (screen === "nickname") {
     stopPolling();
     clearMessage("nickname");
