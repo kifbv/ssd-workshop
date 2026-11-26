@@ -46,11 +46,11 @@ allows them and no new host is opened.
 
 - CHANGED, section 5 Security. Old: "Each app's stored data is limited to 1 MB and is visible to
   anyone with the app's URL (apps have no logins), which participants are told." New: "Each app may
-  store up to 10 MB of data and 500 MB of photos. Both are visible to anyone with the app's URL (apps
+  store up to 10 MB of data and 500 MB of photos and voice recordings. Both are visible to anyone with the app's URL (apps
   have no logins), which participants are told."
 - CHANGED, section 10 confirmation "Apps are static single-page apps with optional storage through
   the platform's data API, limited to 1 MB": "... through the platform's data API and photo store,
-  limited to 10 MB of data and 500 MB of photos per app ...".
+  limited to 10 MB of data and 500 MB of photos and voice recordings per app ...".
 - ADDED, section 4 item 1: "An app may take photos with the phone's camera or pick them from the
   phone, and keep them in the workshop's photo store; photos are shrunk and stripped of location
   data before they are kept."
@@ -213,7 +213,7 @@ Acceptance criteria (each starts as FAIL):
 
 ## Questions for Franck
 
-1. Approve the spec delta above (10 MB data, 500 MB of photos per app, photos stripped of location data). Suggested: yes.
+1. Approve the spec delta above (10 MB data, 500 MB of photos and voice recordings per app, photos stripped of location data). Suggested: yes.
 2. Limits: 4 MB per photo after shrinking (2,560 px long side), 500 MB and 2,000 photos per app, 500 MB uploaded per app per day; data 10 MB per app, 350 KB per value, 500 keys, 50 MB written per day. Suggested: yes. Normal cost: 30 apps full is 15 GB, about $0.40 a month in S3.
 3. Abuse cost (Stop-and-ask 3). Uploads are capped by the daily budget (30 apps x 500 MB a day is at most ~$11 a month of extra S3 storage after a month of attack). Downloads are not: CloudFront serves cached photos with no throttle, and a 1 MB photo fetched in a loop costs about $0.085 per 1,000 fetches, so a sustained download flood could cost far more than $50 a month (the same exposure the site's files have today, but 50 to 100 times more bytes per request). Suggested: extend the existing WAF per-address rate rule (3.13) to `/app-media/*` (no new service, ~$0.60 per million requests) and keep the $20 Budgets alert and Cost Anomaly email; accept the remaining risk of a distributed flood.
 4. Photo content is not checked by any AI (text is, by the guardrail). Someone could put an offensive or private photo on a public app. Suggested: accept for the workshop; facilitators can wipe an app with `npm run participant -- reset`; Clarify warns about people and confidential papers (3.20).
