@@ -1,5 +1,5 @@
 {
-  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v2). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example.",
+  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v3). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example. Ticket 3.16: a spec written in French (with the participant's latest message, `participantText`, sent along for the language) must fail with reasons that each name one of `languageWords` (French) and end with the problem in the agreed form, e.g. \"(outside service)\".",
   "examples": [
     {
       "name": "fitness tracker (example)",
@@ -149,6 +149,36 @@
         "schedule"
       ],
       "spec": "# Trip Splitter\n\n```mermaid\nflowchart TD\n  trip[Trip] -->|add an expense| add[Add an expense]\n  add -->|saves| expenses[(Expenses)]\n  expenses -->|balances| trip\n```\n\n## What it does\nSplits the costs of a team trip. People add what they paid, and every night at midnight a server program recalculates who owes whom, even when nobody has the app open.\n\n## Screens\n- Trip: who paid what and the balances.\n- Add an expense: who paid, what for and how much.\n\n## Data it keeps\n- Expenses: payer, description and amount.\n- Balances: what each person owes, recalculated every night."
+    },
+    {
+      "name": "plant reminders sent by email, in French",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "(outside service)"
+      ],
+      "languageWords": [
+        "votre",
+        "vos",
+        "vous"
+      ],
+      "participantText": "Oui, c'est bon pour moi, l'e-mail du matin est le plus important.",
+      "spec": "# Rappels de plantes\n\n```mermaid\nflowchart TD\n  plants[Mes plantes] -->|ajouter| add[Ajouter une plante]\n  add -->|enregistre| list[(Plantes)]\n  list -->|à arroser| reminders[Rappels]\n```\n\n## What it does\nUne liste des plantes du bureau avec la fréquence d'arrosage de chacune. Chaque matin, l'appli envoie un e-mail à l'équipe avec la liste des plantes à arroser ce jour-là.\n\n## Screens\n- Mes plantes : chaque plante et la date du dernier arrosage.\n- Ajouter une plante : nom et nombre de jours entre deux arrosages.\n\n## Data it keeps\n- Plantes : nom, nombre de jours entre deux arrosages et date du dernier arrosage."
+    },
+    {
+      "name": "expense splitter with a nightly program, in French",
+      "category": "server",
+      "expected": "not-ready",
+      "keywords": [
+        "(server)"
+      ],
+      "languageWords": [
+        "votre",
+        "vos",
+        "vous"
+      ],
+      "participantText": "Parfait, on garde le calcul de nuit.",
+      "spec": "# Partage des dépenses\n\n```mermaid\nflowchart TD\n  home[Accueil] -->|ajouter| add[Ajouter une dépense]\n  add -->|enregistre| exp[(Dépenses)]\n  exp -->|soldes| home\n```\n\n## What it does\nUne appli pour partager les dépenses d'un week-end entre amis. Chaque nuit, un programme tourne sur notre propre ordinateur pour recalculer les soldes de tout le monde, même quand personne n'ouvre l'appli.\n\n## Screens\n- Accueil : les soldes de chacun.\n- Ajouter une dépense : qui a payé, combien et pour quoi.\n\n## Data it keeps\n- Dépenses : qui a payé, le montant et la description."
     }
   ]
 }

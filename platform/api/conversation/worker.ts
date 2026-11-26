@@ -41,7 +41,7 @@
 // Ticket 3.15: Rebuild with my edits stores EDIT_REQUEST marked `edit-spec` with the edited text; ./rebuild.ts runs it too.
 import { errorName } from "../sign-in/code-request.js";
 import { BUDGET_REPLY, budgetOf, mustHold, overBudget } from "../workshop/budget.js";
-import { changesUsedText } from "../workshop/texts.js";
+import { changesUsedText, EDIT_REQUEST, REBUILD_REQUEST } from "../workshop/texts.js";
 import { answerMessage } from "./answer.js";
 import { answerChange, CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY, CHANGE_READY_REPLY, changeNotReadyReply } from "./change.js";
 import { suggestChanges } from "./suggestions.js";
@@ -213,7 +213,7 @@ async function run(
       guardrail = { verdict: check.verdict, reason: check.reason, suggestion: check.suggestion, usage: check.usage };
       if (check.verdict === "decline") {
         finishing = true;
-        const applied = await finish({ kind: "declined", reply: declineReply(check.suggestion), guardrail });
+        const applied = await finish({ kind: "declined", reply: declineReply(check.suggestion, check.decline), guardrail });
         return { outcome: applied ? "declined" : "skipped", verdict: "decline" };
       }
       if (check.verdict === "flag") {
@@ -303,6 +303,22 @@ async function hold(job: AiJob, deps: WorkerDeps): Promise<Omit<WorkerLogEntry, 
   return { outcome: "held" };
 }
 
+/** The platform's own request texts (English whatever the participant writes): never a sample of their language. */
+const PLATFORM_REQUESTS: ReadonlySet<string> = new Set([READINESS_REQUEST, CHANGE_BUILD_REQUEST, WRITE_SPEC_REQUEST, REBUILD_REQUEST, EDIT_REQUEST]);
+
+/**
+ * Ticket 3.16: the participant's latest own message before this one (not a platform request), only to write the
+ * readiness reasons in their language. Undefined when there is none or the read fails (the spec's language is used).
+ */
+export async function participantLanguageSample(store: WorkerDeps["store"], participantId: string, messageId: string): Promise<string | undefined> {
+  try {
+    const history = await store.getHistory(participantId, messageId);
+    return history.map((h) => h.question).filter((q) => !PLATFORM_REQUESTS.has(q.trim()) && q.trim() !== "").at(-1);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The readiness request (ticket 2.7): the platform's own text, at the step only Approve spec stores messages at. */
 export function isReadinessRequest(message: Pick<StoredMessage, "step" | "text">): boolean {
   return message.step === "approved" && message.text === READINESS_REQUEST;
@@ -373,7 +389,7 @@ async function runReadiness(
     }
     const spec = await deps.store.getSpec(participantId, version);
     if (spec === undefined) throw Object.assign(new Error("the approved spec is missing"), { name: "MissingSpec" });
-    const check = await checkReadiness(deps.model, spec.text, signal);
+    const check = await checkReadiness(deps.model, spec.text, signal, await participantLanguageSample(deps.store, participantId, messageId));
     usage = check.usage;
     const answer = { prompt: message.text, modelId: deps.modelId, promptVersion: READINESS_PROMPT_VERSION, historyCount: 0, usage: check.usage };
     if (check.verdict === "unreadable") throw Object.assign(new Error("unreadable readiness answer"), { name: "UnreadableVerdict" });
@@ -488,7 +504,7 @@ async function runChangeBuild(
     }
     const spec = await deps.store.getSpec(participantId, version);
     if (spec === undefined) throw Object.assign(new Error("the proposed spec is missing"), { name: "MissingSpec" });
-    const check = await checkReadiness(deps.model, spec.text, signal);
+    const check = await checkReadiness(deps.model, spec.text, signal, await participantLanguageSample(deps.store, participantId, messageId));
     usage = check.usage;
     const answer = { prompt: message.text, modelId: deps.modelId, promptVersion: READINESS_PROMPT_VERSION, historyCount: 0, usage: check.usage };
     if (check.verdict === "unreadable") throw Object.assign(new Error("unreadable readiness answer"), { name: "UnreadableVerdict" });
