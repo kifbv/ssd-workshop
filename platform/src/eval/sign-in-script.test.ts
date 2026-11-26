@@ -29,10 +29,17 @@ describe("SIGN_IN_SCRIPT (the build eval's sign-in check)", () => {
     expect(await count('<a href="#" data-workshop-sign-in aria-label="Sign in to save">→</a>')).toEqual({ shown: 1, visible: 1 });
   });
 
-  it("does not count one inside a hidden parent, a display:none or visibility:hidden or transparent one, or its own hidden", async () => {
+  it("counts one in a section the app shows later (an ancestor's hidden attribute) as shown, not visible: nothing to press yet", async () => {
+    expect(await count(`<section hidden><div hidden><p>${BUTTON}</p></div></section>`)).toEqual({ shown: 1, visible: 0 });
+    expect(await page.locator("[data-eval-sign-in]").count()).toBe(0);
+  });
+
+  it("does not count one hidden by CSS (an ancestor's display:none without the hidden attribute, visibility:hidden, opacity 0, its own display:none) or by its own hidden", async () => {
     for (const body of [
-      `<section hidden><p>${BUTTON}</p></section>`,
       `<div style="display:none">${BUTTON}</div>`,
+      `<section hidden><div style="display:none">${BUTTON}</div></section>`,
+      `<section hidden style="opacity:0">${BUTTON}</section>`,
+      BUTTON.replace("data-workshop-sign-in", 'data-workshop-sign-in style="display:none"'),
       `<div style="visibility:hidden">${BUTTON}</div>`,
       `<div style="opacity:0">${BUTTON}</div>`,
       BUTTON.replace("data-workshop-sign-in", "data-workshop-sign-in hidden"),
