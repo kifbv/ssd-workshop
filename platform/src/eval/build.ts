@@ -9,10 +9,10 @@
 // session's proxy the agent gets that proxy for its fetches (`webProxyEnvironment`); the builder task never does.
 // Ticket 3.7: `evalChange` builds an example, then changes it with a change build (the live app on main, edited).
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { chromium, type Browser, type Route } from "playwright";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
@@ -238,6 +238,25 @@ async function checkPublished(browser: Browser, published: AppFile[], spec: stri
   };
 }
 
+/**
+ * Ticket 3.25 try 3: with `EVAL_DUMP_DIR` set (an absolute path), the files the deployer would publish are also written
+ * to a new folder under it, to look at a failed app afterwards (the example specs hold no personal data).
+ */
+async function dumpPublished(files: readonly AppFile[]): Promise<void> {
+  const root = process.env.EVAL_DUMP_DIR;
+  if (root === undefined || root === "") return;
+  if (!isAbsolute(root)) throw new Error("EVAL_DUMP_DIR must be an absolute path");
+  await mkdir(root, { recursive: true });
+  const folder = await mkdtemp(join(root, `app-${Date.now()}-`));
+  console.log(`     . dumped to ${folder}`);
+  for (const file of files) {
+    if (file.kind !== "file" || file.path.split("/").includes("..")) continue;
+    const path = join(folder, file.path);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, file.bytes);
+  }
+}
+
 /** A first build of `spec` in `world`: the repository starts as the launcher prepares it (template and spec). */
 async function firstBuild(world: EvalWorld, spec: string, browser: Browser): Promise<{ outcome: BuildEvalOutcome; commit?: string }> {
   const files = withSpec(await loadTemplateFiles(), spec);
@@ -247,6 +266,7 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser): Pro
   world.records.builds.set(BUILD_ID, { nickname: NICKNAME, participantId: PARTICIPANT, status: "building", attemptId });
   const run = await runEvalBuild(world, BUILD_ID, baseCommit, attemptId);
   if (run.published === undefined) return { outcome: run.outcome };
+  await dumpPublished(run.published);
   const checked = await checkPublished(browser, run.published, spec);
   return { outcome: { ...run.outcome, checkPassed: checked.checkPassed, consoleErrors: checked.consoleErrors, overflow: checked.overflow, missing: checked.missing, outsideHosts: checked.outsideHosts, signIn: checked.signIn }, ...(run.commit === undefined ? {} : { commit: run.commit }) };
 }
