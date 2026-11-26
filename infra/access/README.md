@@ -281,7 +281,7 @@ The workshop shares the rankly.games account with other projects. These are the 
 close (or that this spec needs open); Franck accepts each one by merging. Each has a check or a
 follow-up.
 
-1. **ECS network placement (narrowed in ticket 2.2, still open).** For `awsvpc` tasks and
+1. **ECS network placement (narrowed in ticket 2.2; since ticket 3.14 a build task outside the build subnets is stopped within about a minute; still open in IAM).** For `awsvpc` tasks and
    services, IAM has no tag key for the subnets and security groups a call names, only `ecs:subnet`
    by id, and per the AWS Service Authorization Reference
    (`servicereference.us-east-1.amazonaws.com/v1/ecs/ecs.json`, read 2026-11-24) `ecs:subnet` exists
@@ -289,6 +289,9 @@ follow-up.
    on RunTask/StartTask. `RunTask` and `StartTask` carry no subnet key, so no policy
    can pin them to subnets (a negated condition on the missing key would deny every `RunTask`; a
    `ForAnyValue` one would deny none).
+   Since ticket 3.14 the launcher's every-minute check lists the builds cluster's tasks (`ecs:ListTasks`,
+   boundary `AccountWideServiceCalls`) and stops any task with a subnet outside `BUILDS_SUBNET_IDS`, logging
+   its id (`outside-task`); a stray task can run for about a minute. Other clusters are not watched.
 
    ```mermaid
    flowchart LR
