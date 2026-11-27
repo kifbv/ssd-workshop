@@ -57,6 +57,18 @@ describe("checkAnswer", () => {
     expect(checkAnswer(read, { WHEN: "2026-01-02" })).toEqual({ values: { n: null, when: "2026-01-02", t: null } });
   });
 
+  it("keeps a field named __proto__, constructor or prototype as a field (try 2)", () => {
+    const tricky = { task: "read-photo" as const, mediaId: ID, fields: ["__proto__", "constructor", "prototype"].map((name) => ({ name, type: "text" as const })) };
+    const parsed = parseAppAiRequest({ task: "read-photo", photo: `/app-media/ada-42/${ID}`, fields: tricky.fields }, "ada-42");
+    expect(parsed).toEqual({ ok: true, request: tricky });
+    const answer = checkAnswer(tricky, { values: { f1: "a", f2: "b", f3: "c" } });
+    expect(JSON.parse(JSON.stringify(answer))).toEqual(JSON.parse('{"values":{"__proto__":"a","constructor":"b","prototype":"c"}}'));
+    expect(Object.keys((answer as { values: object }).values)).toEqual(["__proto__", "constructor", "prototype"]);
+    // A null value (nothing read) is kept too, never turned into the object's prototype.
+    const empty = checkAnswer(tricky, { values: { f2: "b" } });
+    expect(JSON.stringify(empty)).toBe('{"values":{"__proto__":null,"constructor":"b","prototype":null}}');
+  });
+
   it("gives money without a valid currency code as null currency", () => {
     const money = { task: "read-photo" as const, mediaId: ID, fields: [{ name: "total", type: "money" as const }] };
     expect(checkAnswer(money, { values: { f1: { amount: 9.99, currency: "€" } } })).toEqual({ values: { total: { amount: 9.99, currency: null } } });

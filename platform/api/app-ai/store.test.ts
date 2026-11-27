@@ -5,10 +5,10 @@ import { GetItemCommand, TransactWriteItemsCommand, UpdateItemCommand, type Tran
 import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { DeleteTranscriptionJobCommand, GetTranscriptionJobCommand, StartTranscriptionJobCommand } from "@aws-sdk/client-transcribe";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { APP_AI_LEADING_KEYS, APP_AI_MODEL_ID, APP_AI_READ_ATTRIBUTES, APP_AI_TRANSCRIPTION_JOB_PREFIX, APP_AI_TRANSCRIPTS_PREFIX, APP_AI_WRITE_ATTRIBUTES, APP_LIVE_READ_ATTRIBUTES } from "../../../infra/lib/config.js";
 import { MODELS } from "../settings.js";
-import { TRANSCRIPTS_PREFIX, transcriptionJobName, transcriptKey } from "./ai.js";
+import { S3_CALL_LIMIT_MS, TRANSCRIBE_CALL_LIMIT_MS, TRANSCRIPTS_PREFIX, transcriptionJobName, transcriptKey } from "./ai.js";
 import { MAX_OUTPUT_TOKENS } from "./budget.js";
 import { AwsTranscriber, BedrockAppAiModel, DynamoAppAiStore, S3MediaReader, TRANSCRIBE_LANGUAGES, type AppAiBucketSender, type AppAiSender, type TranscribeSender } from "./store.js";
 
@@ -57,10 +57,10 @@ const inLeadingKeys = (pk: string): boolean => APP_AI_LEADING_KEYS.some((pattern
 
 describe("DynamoAppAiStore", () => {
   it("reads the live marker's liveAt only, and the counters with consistent projected reads inside the IAM list", async () => {
-    const { client, sent } = stub<AppAiSender>([{ Item: { liveAt: { S: "x" } } }, { Item: { day: { S: TODAY }, costUsd: { N: "0.25" } } }, {}]);
+    const { client, sent } = stub<AppAiSender>([{ Item: { liveAt: { S: "x" } } }, { Item: { day: { S: TODAY }, costUsd: { N: "0.25" } } }, { Item: { day: { S: TODAY }, costUsd: { N: "0.5" } } }, {}]);
     const store = new DynamoAppAiStore(client, TABLE, () => NOW);
     expect(await store.isLive("Ada-42")).toBe(true);
-    expect(await store.getSpend("Ada-42")).toEqual({ app: { day: TODAY, usd: 0.25 }, all: { day: undefined, usd: 0 } });
+    expect(await store.getSpend("Ada-42", "Bob-Writer")).toEqual({ app: { day: TODAY, usd: 0.25 }, writer: { day: TODAY, usd: 0.5 }, all: { day: undefined, usd: 0 } });
     const live = check(sent[0]?.input as Part);
     expect(live.pk).toBe("APP#ada-42");
     for (const name of live.names) expect(APP_LIVE_READ_ATTRIBUTES as readonly string[]).toContain(name);
@@ -71,24 +71,29 @@ describe("DynamoAppAiStore", () => {
       expect(inLeadingKeys(pk), pk).toBe(true);
       for (const name of names) expect(APP_AI_READ_ATTRIBUTES as readonly string[]).toContain(name);
     }
-    expect(sent.slice(1).map((c) => check(c.input as Part).pk)).toEqual(["APPAI#ada-42", "APPAI_TOTAL"]);
+    expect(sent.slice(1).map((c) => check(c.input as Part).pk)).toEqual(["APPAI#ada-42", "APPAI_WRITER#bob-writer", "APPAI_TOTAL"]);
   });
 
   it("reads a counter with a day but no amount as broken (NaN, which the budget treats as spent)", async () => {
-    const { client } = stub<AppAiSender>([{ Item: { day: { S: TODAY } } }, { Item: { day: { S: TODAY }, costUsd: { N: "1" } } }]);
-    const spend = await new DynamoAppAiStore(client, TABLE).getSpend("ada-42");
+    const { client } = stub<AppAiSender>([{ Item: { day: { S: TODAY } } }, { Item: { day: { S: TODAY } } }, { Item: { day: { S: TODAY }, costUsd: { N: "1" } } }]);
+    const spend = await new DynamoAppAiStore(client, TABLE).getSpend("ada-42", "bob");
     expect(spend.app.usd).toBeNaN();
+    expect(spend.writer.usd).toBeNaN();
   });
 
   it("reserves in one transaction: add under today and the budget, or start today over an earlier day (only forward)", async () => {
     const { client, sent } = stub<AppAiSender>([{}]);
     const store = new DynamoAppAiStore(client, TABLE, () => NOW);
-    const result = await store.reserve("Ada-42", { app: { day: TODAY, usd: 0.5 }, all: { day: "2026-11-26", usd: 9 } }, TODAY, 0.0123456789);
+    const result = await store.reserve("Ada-42", "Bob-Writer", { app: { day: TODAY, usd: 0.5 }, writer: { day: TODAY, usd: 0.2 }, all: { day: "2026-11-26", usd: 9 } }, TODAY, 0.0123456789);
     expect(result).toBe("reserved");
     const items = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems;
-    expect(items).toHaveLength(2);
-    const [app, all] = items.map((item) => item.Update as Part);
-    for (const part of [app, all]) {
+    expect(items).toHaveLength(3);
+    const [app, writer, all] = items.map((item) => item.Update as Part);
+    expect([app, writer, all].map((part) => part?.Key?.["pk"]?.S)).toEqual(["APPAI#ada-42", "APPAI_WRITER#bob-writer", "APPAI_TOTAL"]);
+    // The writer's $1 (try 2) is in its own condition, with the same rules as the app's.
+    expect(writer?.ConditionExpression).toBe("#day = :today AND #costUsd < :budget");
+    expect(writer?.ExpressionAttributeValues?.[":budget"]?.N).toBe("1");
+    for (const part of [app, writer, all]) {
       const { pk, names } = check(part as Part);
       expect(inLeadingKeys(pk)).toBe(true);
       for (const name of names) expect(APP_AI_WRITE_ATTRIBUTES as readonly string[]).toContain(name);
@@ -104,24 +109,25 @@ describe("DynamoAppAiStore", () => {
 
   it("puts the workshop's $10 into the all-apps condition on a same-day add", async () => {
     const { client, sent } = stub<AppAiSender>([{}]);
-    await new DynamoAppAiStore(client, TABLE, () => NOW).reserve("ada-42", { app: { day: undefined, usd: 0 }, all: { day: TODAY, usd: 3 } }, TODAY, 0.01);
-    const all = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems[1]?.Update as Part;
+    await new DynamoAppAiStore(client, TABLE, () => NOW).reserve("ada-42", "bob", { app: { day: undefined, usd: 0 }, writer: { day: undefined, usd: 0 }, all: { day: TODAY, usd: 3 } }, TODAY, 0.01);
+    const all = (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems[2]?.Update as Part;
     expect(all.ExpressionAttributeValues?.[":budget"]?.N).toBe("10");
   });
 
   it("answers conflict to a failed condition or a TransactionConflict, and throws anything else", async () => {
-    for (const codes of [["ConditionalCheckFailed", "None"], ["None", "TransactionConflict"]]) {
+    for (const codes of [["ConditionalCheckFailed", "None", "None"], ["None", "ConditionalCheckFailed", "None"], ["None", "None", "TransactionConflict"]]) {
       const { client } = stub<AppAiSender>([cancelled(codes)]);
-      expect(await new DynamoAppAiStore(client, TABLE).reserve("ada-42", { app: { day: TODAY, usd: 0 }, all: { day: TODAY, usd: 0 } }, TODAY, 0.01)).toBe("conflict");
+      expect(await new DynamoAppAiStore(client, TABLE).reserve("ada-42", "bob", { app: { day: TODAY, usd: 0 }, writer: { day: TODAY, usd: 0 }, all: { day: TODAY, usd: 0 } }, TODAY, 0.01)).toBe("conflict");
     }
     const { client } = stub<AppAiSender>([named("ProvisionedThroughputExceededException")]);
-    await expect(new DynamoAppAiStore(client, TABLE).reserve("ada-42", { app: { day: TODAY, usd: 0 }, all: { day: TODAY, usd: 0 } }, TODAY, 0.01)).rejects.toThrow();
+    await expect(new DynamoAppAiStore(client, TABLE).reserve("ada-42", "bob", { app: { day: TODAY, usd: 0 }, writer: { day: TODAY, usd: 0 }, all: { day: TODAY, usd: 0 } }, TODAY, 0.01)).rejects.toThrow();
   });
 
   it("settles each counter only while it counts that day; a turned day is fine, another error is thrown", async () => {
-    const { client, sent } = stub<AppAiSender>([{}, named("ConditionalCheckFailedException")]);
-    await new DynamoAppAiStore(client, TABLE, () => NOW).settle("ada-42", TODAY, -0.004);
-    expect(sent).toHaveLength(2);
+    const { client, sent } = stub<AppAiSender>([{}, {}, named("ConditionalCheckFailedException")]);
+    await new DynamoAppAiStore(client, TABLE, () => NOW).settle("ada-42", "bob", TODAY, -0.004);
+    expect(sent).toHaveLength(3);
+    expect(sent.map((c) => check(c.input as Part).pk)).toEqual(["APPAI#ada-42", "APPAI_WRITER#bob", "APPAI_TOTAL"]);
     for (const command of sent) {
       expect(command).toBeInstanceOf(UpdateItemCommand);
       const part = command.input as Part;
@@ -131,16 +137,16 @@ describe("DynamoAppAiStore", () => {
       expect(part.ConditionExpression).toBe("#day = :today");
       expect(part.ExpressionAttributeValues?.[":delta"]?.N).toBe("-0.004");
     }
-    const failing = stub<AppAiSender>([{}, named("InternalServerError")]);
-    await expect(new DynamoAppAiStore(failing.client, TABLE).settle("ada-42", TODAY, 0.01)).rejects.toThrow();
+    const failing = stub<AppAiSender>([{}, named("InternalServerError"), {}]);
+    await expect(new DynamoAppAiStore(failing.client, TABLE).settle("ada-42", "bob", TODAY, 0.01)).rejects.toThrow();
     const none = stub<AppAiSender>([]);
-    await new DynamoAppAiStore(none.client, TABLE).settle("ada-42", TODAY, 0);
+    await new DynamoAppAiStore(none.client, TABLE).settle("ada-42", "bob", TODAY, 0);
     expect(none.sent).toEqual([]);
   });
 
   it("writes only items the transaction type allows (no Put, no Delete)", async () => {
     const { client, sent } = stub<AppAiSender>([{}]);
-    await new DynamoAppAiStore(client, TABLE).reserve("ada-42", { app: { day: undefined, usd: 0 }, all: { day: undefined, usd: 0 } }, TODAY, 0.01);
+    await new DynamoAppAiStore(client, TABLE).reserve("ada-42", "bob", { app: { day: undefined, usd: 0 }, writer: { day: undefined, usd: 0 }, all: { day: undefined, usd: 0 } }, TODAY, 0.01);
     expect(sent[0]).toBeInstanceOf(TransactWriteItemsCommand);
     for (const item of (sent[0]?.input as { TransactItems: TransactWriteItem[] }).TransactItems) expect(Object.keys(item)).toEqual(["Update"]);
   });
@@ -167,7 +173,7 @@ describe("BedrockAppAiModel", () => {
       { output: { message: { role: "assistant", content: [{ toolUse: { toolUseId: "1", name: "pick_tags", input: { tags: ["cat"] } } }] } }, usage: { inputTokens: 1700, outputTokens: 40 } },
     ]);
     const model = new BedrockAppAiModel(client, MODELS.appAi.modelId);
-    const answer = await model.answer({ system: "sys", text: "txt", photo: Buffer.from([0xff, 0xd8]), tool: { name: "pick_tags", description: "d", schema: { type: "object" } } });
+    const answer = await model.answer({ system: "sys", text: "txt", photo: Buffer.from([0xff, 0xd8]), tool: { name: "pick_tags", description: "d", schema: { type: "object" } }, timeoutMs: 20_000 });
     expect(answer).toEqual({ input: { tags: ["cat"] }, text: "", inputTokens: 1700, outputTokens: 40 });
     const input = sent[0]?.input as { modelId: string; messages: { content: Record<string, unknown>[] }[]; inferenceConfig: { maxTokens: number }; toolConfig: { toolChoice: unknown; tools: unknown[] } };
     expect(input.modelId).toBe("eu.anthropic.claude-haiku-4-5-20251001-v1:0");
@@ -227,18 +233,65 @@ describe("AwsTranscriber", () => {
     expect(t.sent[0]).toBeInstanceOf(GetTranscriptionJobCommand);
   });
 
-  it("reads the transcript text from the result file, and deletes the file, then the job", async () => {
+  it("reads the transcript text from the result file, and deletes the job, then the file; gone when the job was already deleted", async () => {
     const file = Buffer.from(JSON.stringify({ results: { transcripts: [{ transcript: "Bonjour tout le monde." }], items: [] } }));
-    const s3 = stub<AppAiBucketSender>([body(file), body(Buffer.from("not json")), named("NoSuchKey"), {}]);
-    const t = stub<TranscribeSender>([{}]);
-    const transcriber = new AwsTranscriber(t.client, s3.client, "bucket");
+    const order: string[] = [];
+    const s3 = stub<AppAiBucketSender>([body(file), body(Buffer.from("not json")), named("NoSuchKey"), {}, {}]);
+    const t = stub<TranscribeSender>([{}, named("NotFoundException"), named("ThrottlingException")]);
+    const logged = <T extends { send: (c: never) => unknown }>(client: T, label: string): T =>
+      ({ send: (command: never) => (order.push(label), client.send(command)) }) as unknown as T;
+    const transcriber = new AwsTranscriber(logged(t.client, "job"), logged(s3.client, "s3"), "bucket");
     expect(await transcriber.transcript(job.outputKey)).toBe("Bonjour tout le monde.");
     expect(await transcriber.transcript(job.outputKey)).toBeUndefined();
     expect(await transcriber.transcript(job.outputKey)).toBeUndefined();
-    await transcriber.cleanUp(job.name, job.outputKey);
+    order.length = 0;
+    expect(await transcriber.cleanUp(job.name, job.outputKey)).toBe("deleted");
+    expect(order).toEqual(["job", "s3"]);
     expect(s3.sent[3]).toBeInstanceOf(DeleteObjectCommand);
     expect(s3.sent[3]?.input).toEqual({ Bucket: "bucket", Key: job.outputKey });
     expect(t.sent[0]).toBeInstanceOf(DeleteTranscriptionJobCommand);
     expect(t.sent[0]?.input).toEqual({ TranscriptionJobName: job.name });
+    // Another request deleted the job first: still deletes the file, and says so.
+    expect(await transcriber.cleanUp(job.name, job.outputKey)).toBe("gone");
+    await expect(transcriber.cleanUp(job.name, job.outputKey)).rejects.toThrow("ThrottlingException");
+  });
+});
+
+describe("time limits (try 2)", () => {
+  /** A client whose calls never answer, recording the abort signal each call got. */
+  function hanging<T>(): { client: T; signals: (AbortSignal | undefined)[] } {
+    const signals: (AbortSignal | undefined)[] = [];
+    const client = { send: (_command: unknown, options?: { abortSignal?: AbortSignal }) => (signals.push(options?.abortSignal), new Promise(() => undefined)) } as unknown as T;
+    return { client, signals };
+  }
+
+  it("cuts off and aborts an S3 read at S3_CALL_LIMIT_MS, a Transcribe call at TRANSCRIBE_CALL_LIMIT_MS and the model at its timeoutMs", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const s3 = hanging<AppAiBucketSender>();
+      const read = new S3MediaReader(s3.client, "bucket").read("app-media/ada-42/x");
+      const readFailed = expect(read).rejects.toMatchObject({ name: "TimeoutError" });
+      await vi.advanceTimersByTimeAsync(S3_CALL_LIMIT_MS);
+      await readFailed;
+      expect(s3.signals[0]?.aborted).toBe(true);
+
+      const t = hanging<TranscribeSender>();
+      const status = new AwsTranscriber(t.client, s3.client, "bucket").status("ssd-workshop-app-ai-x");
+      const statusFailed = expect(status).rejects.toMatchObject({ name: "TimeoutError" });
+      await vi.advanceTimersByTimeAsync(TRANSCRIBE_CALL_LIMIT_MS);
+      await statusFailed;
+      expect(t.signals[0]?.aborted).toBe(true);
+
+      const bedrock = hanging<{ send(c: ConverseCommand): Promise<never> }>();
+      const answer = new BedrockAppAiModel(bedrock.client, MODELS.appAi.modelId).answer({ system: "s", text: "t", tool: { name: "x", description: "d", schema: { type: "object" } }, timeoutMs: 9_000 });
+      const answerFailed = expect(answer).rejects.toMatchObject({ name: "TimeoutError" });
+      await vi.advanceTimersByTimeAsync(8_999);
+      expect(bedrock.signals[0]?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await answerFailed;
+      expect(bedrock.signals[0]?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

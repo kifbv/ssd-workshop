@@ -3,7 +3,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
 import { TranscribeClient } from "@aws-sdk/client-transcribe";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { handleAppAiRequest, type AppAiDeps, type AppAiLogEntry } from "../app-ai/ai.js";
+import { handleAppAiRequest, MODEL_CALL_LIMIT_MS, S3_CALL_LIMIT_MS, TRANSCRIBE_CALL_LIMIT_MS, type AppAiDeps, type AppAiLogEntry } from "../app-ai/ai.js";
 import { AwsTranscriber, BedrockAppAiModel, DynamoAppAiStore, S3MediaReader } from "../app-ai/store.js";
 import { pauseBeforeUploadRetry } from "../app-media/media.js";
 import { DynamoAppTokenStore } from "../app-token/store.js";
@@ -17,13 +17,23 @@ import { APP_MEDIA_BUCKET_NAME, MODELS, REGION, TABLE_NAME } from "../settings.j
  */
 
 /**
- * One Bedrock attempt of at most 20 s (a Haiku call with a photo takes a few seconds), so a slow call ends inside the
- * function's timeout (APP_AI_TIMEOUT_SECONDS in infra/lib/api-stack.ts) and API Gateway's 30 s. A retry would bill twice.
+ * One Bedrock attempt (a retry would bill twice). The socket limits below are a backstop: the call itself is aborted at
+ * its `timeoutMs` (at most MODEL_CALL_LIMIT_MS, 20 s, and never past the request's deadline less one settlement), so it
+ * ends inside the function's timeout (APP_AI_TIMEOUT_SECONDS in infra/lib/api-stack.ts) and API Gateway's 30 s; the
+ * arithmetic is in ../app-ai/ai.ts.
  */
-export const BEDROCK_TIMEOUTS = { connectionTimeout: 1000, requestTimeout: 20_000 } as const;
+export const BEDROCK_TIMEOUTS = { connectionTimeout: 1000, requestTimeout: MODEL_CALL_LIMIT_MS } as const;
 
-/** S3 reads of up to 4 MB, as the media API's (handlers/app-media.ts S3_TIMEOUTS). */
-export const S3_TIMEOUTS = { connectionTimeout: 1000, requestTimeout: 8000 } as const;
+/**
+ * S3 (try 2): one attempt, 1 s to connect and 3 s of socket silence, each call raced and aborted at S3_CALL_LIMIT_MS
+ * (4 s, body included; a 4 MB read takes well under a second inside the region).
+ */
+export const S3_TIMEOUTS = { connectionTimeout: 1000, requestTimeout: S3_CALL_LIMIT_MS - 1000 } as const;
+export const S3_MAX_ATTEMPTS = 1;
+
+/** Transcribe (try 2): one attempt, each call raced and aborted at TRANSCRIBE_CALL_LIMIT_MS (3 s). */
+export const TRANSCRIBE_TIMEOUTS = { connectionTimeout: 1000, requestTimeout: TRANSCRIBE_CALL_LIMIT_MS - 1000 } as const;
+export const TRANSCRIBE_MAX_ATTEMPTS = 1;
 
 /** One JSON line per request: method, task, outcome, status, cost and the writer once the token passed. */
 export function logEntry(entry: AppAiLogEntry): void {
@@ -40,9 +50,9 @@ let live: ((event: HttpRequest) => Promise<HttpResponse>) | undefined;
 export async function handler(event: HttpRequest): Promise<HttpResponse> {
   if (live === undefined) {
     const table = new DynamoDBClient(clientSettings());
-    const s3 = new S3Client({ region: REGION, maxAttempts: 2, requestHandler: new NodeHttpHandler({ ...S3_TIMEOUTS }) });
+    const s3 = new S3Client({ region: REGION, maxAttempts: S3_MAX_ATTEMPTS, requestHandler: new NodeHttpHandler({ ...S3_TIMEOUTS }) });
     const bedrock = new BedrockRuntimeClient({ region: REGION, maxAttempts: 1, requestHandler: new NodeHttpHandler({ ...BEDROCK_TIMEOUTS }) });
-    const transcribe = new TranscribeClient(clientSettings());
+    const transcribe = new TranscribeClient({ region: REGION, maxAttempts: TRANSCRIBE_MAX_ATTEMPTS, requestHandler: new NodeHttpHandler({ ...TRANSCRIBE_TIMEOUTS }) });
     live = createHandler({
       store: new DynamoAppAiStore(table, TABLE_NAME),
       tokens: new DynamoAppTokenStore(table, TABLE_NAME),

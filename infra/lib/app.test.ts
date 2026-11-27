@@ -80,6 +80,7 @@ import {
   APP_AI_FOUNDATION_MODEL_ID,
   APP_AI_MODEL_ID,
   APP_AI_ROLE_ARN,
+  APP_AI_LEADING_KEYS,
   APP_AI_TRANSCRIPTS_PREFIX,
   WAF_AI_RATE_BODY,
   WAF_AI_RATE_BODY_KEY,
@@ -4359,7 +4360,7 @@ describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcript
     expect(f.logGroupId()).toBeDefined();
   });
 
-  it("criterion 9: WHEN npm run synth runs THEN the role may invoke only the Haiku 4.5 EU profile (and its foundation models), read only ssd-workshop-app-media, run only its own Transcribe jobs and update only its two day counters", () => {
+  it("criterion 9: WHEN npm run synth runs THEN the role may invoke only the Haiku 4.5 EU profile (and its foundation models), read only ssd-workshop-app-media, run only its own Transcribe jobs and update only its three day counters (app, writer, all apps)", () => {
     const table = f.tableArn();
     const media = (suffix: string) => `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/${suffix}`;
     expect(f.statements()).toEqual([
@@ -4386,7 +4387,7 @@ describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcript
         Action: "dynamodb:GetItem",
         Resource: table,
         Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPAI#*", "APPAI_TOTAL"] },
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPAI#*", "APPAI_WRITER#*", "APPAI_TOTAL"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "day", "costUsd"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
@@ -4396,7 +4397,7 @@ describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcript
         Action: "dynamodb:UpdateItem",
         Resource: table,
         Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPAI#*", "APPAI_TOTAL"] },
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPAI#*", "APPAI_WRITER#*", "APPAI_TOTAL"] },
           "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "day", "costUsd", "updatedAt"] },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
         },
@@ -4431,7 +4432,39 @@ describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcript
     const s3 = f.statements().filter((st) => JSON.stringify(st.Action).includes("s3:"));
     for (const st of s3) for (const resource of [st.Resource].flat()) expect(String(resource).startsWith(`arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/`), String(resource)).toBe(true);
     // The counters' partitions cannot overlap the live marker's, the data's, the media's or the tokens'.
-    for (const other of ["APP#ada", "APPDATA#ada", "APPMEDIA#ada", "APPTOKEN#x", "SETTINGS"]) for (const pattern of ["APPAI#*", "APPAI_TOTAL"]) expect(actionCovers(pattern, other), `${pattern} ${other}`).toBe(false);
+    for (const other of ["APP#ada", "APPDATA#ada", "APPMEDIA#ada", "APPTOKEN#x", "SETTINGS"]) for (const pattern of APP_AI_LEADING_KEYS) expect(actionCovers(pattern, other), `${pattern} ${other}`).toBe(false);
+    // Nor each other (try 2): the app's, the writer's and the all-apps counter are told apart by their patterns.
+    const examples: Record<string, string> = { "APPAI#*": "APPAI#ada", "APPAI_WRITER#*": "APPAI_WRITER#bob", APPAI_TOTAL: "APPAI_TOTAL" };
+    for (const pattern of APP_AI_LEADING_KEYS) for (const [owner, key] of Object.entries(examples)) expect(actionCovers(pattern, key), `${pattern} ${key}`).toBe(owner === pattern);
+  });
+
+  it("WHEN the synthesized stacks are inspected THEN no IAM policy but the AI role's names a transcribe: action (the boundary allows Transcribe on * to every bounded role)", () => {
+    const aiRole = JSON.stringify([{ Ref: f.roleEntry()?.[0] }]);
+    const samples = ["StartTranscriptionJob", "GetTranscriptionJob", "DeleteTranscriptionJob", "ListTranscriptionJobs", "StartStreamTranscription", "TagResource", "CreateVocabulary"].map((a) => `transcribe:${a}`);
+    const namesTranscribe = (st: Record<string, unknown>): boolean => {
+      if (st.Effect !== "Allow") return false;
+      if (st.NotAction !== undefined) return !([st.NotAction].flat() as string[]).some((g) => actionCovers(g, "transcribe:StartTranscriptionJob"));
+      return ([st.Action].flat() as string[]).some((g) => g.toLowerCase().startsWith("transcribe:") || samples.some((action) => actionCovers(g, action)));
+    };
+    const holders: string[] = [];
+    for (const [stack, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
+      for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
+        if (!namesTranscribe(st)) continue;
+        holders.push(`${stack}/${id}`);
+        expect(JSON.stringify(r.Properties?.Roles), `${stack}/${id}`).toBe(aiRole);
+        expect(r.Properties?.Users ?? r.Properties?.Groups, `${stack}/${id}`).toBeUndefined();
+      }
+    }
+    for (const [stack, id, role] of ofType("AWS::IAM::Role")) {
+      for (const inline of (role.Properties?.Policies ?? []) as { PolicyDocument: { Statement: Record<string, unknown>[] } }[]) {
+        expect(inline.PolicyDocument.Statement.some(namesTranscribe), `${stack}/${id}`).toBe(false);
+      }
+    }
+    expect(holders.length).toBeGreaterThan(0);
+    // The check itself: wildcards that would reach Transcribe are caught.
+    for (const action of ["*", "transcribe:*", "Transcribe:Get*", "t*:Start*"]) expect(namesTranscribe({ Effect: "Allow", Action: action }), action).toBe(true);
+    expect(namesTranscribe({ Effect: "Allow", NotAction: "s3:*" })).toBe(true);
+    expect(namesTranscribe({ Effect: "Allow", Action: ["s3:GetObject", "bedrock:InvokeModel"] })).toBe(false);
   });
 
   it("routes POST and OPTIONS /api/apps/{nickname}/ai to it (one permission for this API) and throttles them, after the routes exist", () => {

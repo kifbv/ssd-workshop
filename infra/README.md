@@ -822,14 +822,14 @@ in to save ("Sign in to save", then back to the app).
 sequenceDiagram
   participant A as App /apps/nick/ (sandboxed, has a write token)
   participant F as ssd-workshop-api-app-ai
-  participant T as ssd-workshop-data (SETTINGS, APPAI#nick, APPAI_TOTAL)
+  participant T as ssd-workshop-data (SETTINGS, APPAI#nick, APPAI_WRITER#writer, APPAI_TOTAL)
   participant B as Bucket ssd-workshop-app-media-<account>
   participant H as Bedrock: Claude Haiku 4.5 (EU profile)
   participant R as Amazon Transcribe
   A->>F: POST /api/apps/nick/ai {task, photo or text or recording} (Bearer token)
   F->>T: live? token? switch on and no Stop? (else 404 / 401 / 503)
   F->>F: one of 4 tasks, only its fields, within the limits, media of this app (else 400)
-  F->>T: both day budgets unspent? (else 429), reserve the most the call can cost
+  F->>T: app, writer and all-apps day budgets unspent? (else 429), reserve the most the call can cost
   alt tag-photo, read-photo, sort-text
     F->>B: GetObject app-media/nick/<id> (photo tasks)
     F->>H: Converse: photo + task + one forced tool
@@ -840,9 +840,9 @@ sequenceDiagram
     F->>B: GetObject the recording, count its packets (at most 5 min, charged up front)
     F->>R: StartTranscriptionJob ssd-workshop-app-ai-nick-<id>, language detected
     R->>B: reads the recording, writes transcripts/nick/<id>.json
-    F-->>A: 202 working (asks again with the same recording), then
-    F->>B: read and delete transcripts/nick/<id>.json
-    F->>R: DeleteTranscriptionJob
+    F-->>A: 202 working (asks again with the same recording: answered at once, no charge), then
+    F->>B: read transcripts/nick/<id>.json
+    F->>R: DeleteTranscriptionJob, then delete the file
     F-->>A: 200 {text, language}
   end
 ```
@@ -889,8 +889,9 @@ ai() { curl -sS -w '\n%{http_code}\n' -X POST -H 'origin: null' -H "authorizatio
 5. Refusals: another app's photo address (400 "...this app's own photos."), `"prompt":"hi"` added (400), no token
    (401, from the function: there is no WAF junk filter on this route).
 6. **Transcribe, French and English** (question 8's live eval): `ai "{\"task\":\"transcribe\",\"recording\":\"$FR\"}"`
-   answers 202 `{"status":"working",...}` or, within ~15 s, 200 `{"text":...,"language":"fr-FR"}`; repeat the same
-   command until 200 (each repeat is free). The text must be what was said. Same with `$EN` (`en-US`). Not verified
+   answers 202 `{"status":"working",...}` (the first request waits about 10 s at most) or 200
+   `{"text":...,"language":"fr-FR"}`; repeat the same command every few seconds until 200 (each repeat answers at once
+   and is free). The text must be what was said. Same with `$EN` (`en-US`). Not verified
    until this check: that Transcribe accepts the stored WebM, Ogg and MP4 files as they are, and that its write of the
    result under `transcripts/` passes (the media bucket's policy leaves `transcripts/` to identity policies, so it should).
    Then, signed in as `AWS_PROFILE=franck`:
@@ -900,18 +901,40 @@ ai() { curl -sS -w '\n%{http_code}\n' -X POST -H 'origin: null' -H "authorizatio
    aws transcribe list-transcription-jobs --job-name-contains ssd-workshop-app-ai --region eu-central-1   # expect: none
    ```
 
+   Leftovers: when an app starts a transcription and never asks again, its result file stays under `transcripts/`
+   until the lifecycle rule `ssd-workshop-transcripts-expiry` deletes it (1 day, plus S3's lifecycle delay), and the
+   job record (settings and status, no audio) stays in Transcribe until its own retention (90 days by default). Neither
+   is served. To clear them by hand: `aws transcribe delete-transcription-job --transcription-job-name <name>` and
+   `aws s3 rm s3://ssd-workshop-app-media-<account>/transcripts/ --recursive`.
+
 7. The counters: `aws dynamodb get-item --table-name ssd-workshop-data --key '{"pk":{"S":"APPAI_TOTAL"},"sk":{"S":"AI_USAGE"}}'`
-   (as `franck`) shows today's `day` and a `costUsd` of a few cents. Turn the switch off again if apps should not use AI yet.
+   (as `franck`) shows today's `day` and a `costUsd` of a few cents; the same with `APPAI_WRITER#<your nickname, lower
+   case>` shows the same amount (the per-writer counter). Turn the switch off again if apps should not use AI yet.
 
 ### Cost
 
 Each model call costs its tokens at Haiku 4.5's EU price ($1.10 in, $5.50 out per million): a receipt read is ~1,250
 tokens in and ~90 out, about $0.002 (live eval). A transcription costs $0.024 a minute (at least 15 s), at most $0.122
-for the longest recording. Both count against $1 per app and $10 for all apps each UTC day; at the cap every AI request
-answers 429 without calling anything. Worst case while the switch is on: ~$10.13 of AI a day (one reservation can pass
-the cap) plus the requests themselves (POST throttled at 5/s for all apps: at most ~430,000 a day, ~$1 of API Gateway,
-Lambda and DynamoDB at that rate), so ~$11 a day, ~$330 a month if apps hit the cap every day. Turn the switch off
-outside workshop days.
+for the longest recording. Both count against $1 per app, $1 per signed-in writer across all apps and $10 for all apps
+each UTC day; at a cap every AI request answers 429 without calling anything.
+
+Worst case while the switch is on (details and prices in `docs/decisions.md`, "(3.21) Cost"), with POST held at its
+5/s throttle (432,000 a day) and OPTIONS at 20/s (1.7 million a day):
+
+| Part | Per day |
+| --- | --- |
+| AI (the $10 cap plus one reservation) | $10.13 |
+| Lambda (each POST may read and walk a 4 MB file it then refuses, ~1 s at 512 MB; OPTIONS; requests) | $3.43 |
+| API Gateway (2.16 million requests) | $2.59 |
+| CloudFront requests and bodies to the origin | $2.73 |
+| WAF requests | $1.30 |
+| DynamoDB (at most 6 small reads per POST, the counters' writes) | $0.60 |
+| CloudWatch Logs, S3 reads | $0.53 |
+| **In all** | **~$21 (~$640 a month if held every day)** |
+
+About half of it is requests, not AI: filling the POST throttle with file-reading requests needs a signed-in
+participant's app write token and at least 10 addresses (the WAF rule allows 150 per 5 minutes per address). Without an
+attacker a workshop day costs cents plus what apps use (at most $10.13). Turn the switch off outside workshop days.
 
 ## Check after the apps deploy (ticket 2.5)
 

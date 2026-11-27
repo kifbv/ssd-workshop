@@ -409,7 +409,7 @@ export const APP_MEDIA_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
 /**
  * Ticket 3.21: the AI tasks for apps (`POST /api/apps/{nickname}/ai`), their own function and role. It reads the live
  * marker's `liveAt` (APP_LIVE_READ_ATTRIBUTES), app write tokens (APP_TOKEN_READ_ATTRIBUTES), the settings
- * (SETTINGS_READ_ATTRIBUTES) and, in `APPAI#*` and `APPAI_TOTAL` only, reads and updates the day counters (these names,
+ * (SETTINGS_READ_ATTRIBUTES) and, in `APPAI#*`, `APPAI_WRITER#*` (try 2) and `APPAI_TOTAL` only, reads and updates the day counters (these names,
  * conditions included). It invokes only Claude Haiku 4.5 through its EU profile, reads the media bucket's `app-media/`
  * and `transcripts/`, writes and deletes only `transcripts/`, and starts, reads and deletes only Transcribe jobs named
  * `ssd-workshop-*` in eu-central-1 whose results go to `transcripts/`.
@@ -420,8 +420,12 @@ export const APP_AI_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${APP_AI_
 export const APP_AI_ROLE_ARN_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/${APP_AI_FUNCTION_NAME}`;
 export const APP_AI_WRITE_ATTRIBUTES = ["pk", "sk", "type", "day", "costUsd", "updatedAt"] as const;
 export const APP_AI_READ_ATTRIBUTES = ["pk", "sk", "day", "costUsd"] as const;
-/** The two counters' partitions (`APPAI#*` never matches `APPAI_TOTAL`, nor `APP#*` any of them). */
-export const APP_AI_LEADING_KEYS = ["APPAI#*", "APPAI_TOTAL"] as const;
+/**
+ * The three counters' partitions: per app, per signed-in writer (try 2) and for all apps. `APPAI#*` matches neither
+ * `APPAI_WRITER#...` nor `APPAI_TOTAL` (the character after `APPAI` is `_`), `APPAI_WRITER#*` not `APPAI_TOTAL`, and `APP#*`
+ * none of them.
+ */
+export const APP_AI_LEADING_KEYS = ["APPAI#*", "APPAI_WRITER#*", "APPAI_TOTAL"] as const;
 /** The model of the AI tasks (question 7); must equal platform/api/settings.ts MODELS.appAi.modelId. */
 export const APP_AI_MODEL_ID = "eu.anthropic.claude-haiku-4-5-20251001-v1:0";
 /** The foundation model behind APP_AI_MODEL_ID (the EU profile routes to it in several EU regions). */
@@ -909,7 +913,8 @@ export const WAF_MEDIA_PREFLIGHT_RATE_METHOD = "OPTIONS";
  * (priority 5), then 429 with the CORS header and its own body. The AI route's throttles (APP_AI_THROTTLE, 5/s;
  * APP_AI_PREFLIGHT_THROTTLE, 20/s) are shared by every app: 150 per 5 minutes is 0.5/s, so filling the POST throttle
  * takes at least 10 addresses. A room behind one venue address shares the 150 (~3 AI tasks each for 45 people in 5
- * minutes; a transcription's 202 answers count too, one per 15 s at most). No new paid service: one more rule on the
+ * minutes; a transcription's 202 answers count too: since 3.21 try 2 a repeat answers at once, so the app should ask
+ * again every few seconds, not in a loop). No new paid service: one more rule on the
  * existing web ACL ($1 a month). Please veto.
  */
 export const WAF_AI_RATE_RULE_NAME = `${PREFIX}-ai-rate`;

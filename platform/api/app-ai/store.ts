@@ -2,12 +2,17 @@
 // only), Claude Haiku 4.5 on Bedrock and Amazon Transcribe. The rules live in ./ai.ts.
 //
 // The function's role (infra/lib/api-stack.ts) may read the live marker's `liveAt` (`APP#*`), app write tokens (3.24's
-// projected read), the settings (SETTINGS_READ_ATTRIBUTES) and `APPAI#*` / `APPAI_TOTAL`, and update only those two
-// counters, naming only APP_AI_WRITE_ATTRIBUTES; no call returns an item's attributes. In the bucket it may read
+// projected read), the settings (SETTINGS_READ_ATTRIBUTES) and `APPAI#*` / `APPAI_WRITER#*` / `APPAI_TOTAL`, and update
+// only those three counters, naming only APP_AI_WRITE_ATTRIBUTES; no call returns an item's attributes. In the bucket it may read
 // `app-media/` and `transcripts/` and write and delete only `transcripts/`; Transcribe: start, get and delete jobs named
 // `ssd-workshop-*` in eu-central-1, writing only to `transcripts/`.
 //
-// Items: `APPAI#<nickname>` / `AI_USAGE` and `APPAI_TOTAL` / `AI_USAGE`, each `day` (UTC, YYYY-MM-DD) and `costUsd`.
+// Items: `APPAI#<nickname>` / `AI_USAGE`, `APPAI_WRITER#<writer nickname>` / `AI_USAGE` (try 2) and `APPAI_TOTAL` /
+// `AI_USAGE`, each `day` (UTC, YYYY-MM-DD) and `costUsd`.
+//
+// Every SDK call is bounded (./ai.ts counts on it for its deadline): the table through clientSettings (2 attempts of 1 s
+// + 1.5 s), each S3, Transcribe and Bedrock call raced against its limit (S3_CALL_LIMIT_MS, TRANSCRIBE_CALL_LIMIT_MS,
+// the call's timeoutMs) and aborted at it, since a socket timeout alone does not bound a body that trickles in.
 import {
   GetItemCommand,
   TransactWriteItemsCommand,
@@ -31,12 +36,12 @@ import {
 } from "@aws-sdk/client-transcribe";
 import type { RecordingKind } from "../app-media/formats.js";
 import { MAX_MEDIA_FILE_BYTES } from "../app-media/media.js";
-import { appAiTotalKey, appAiUsageKey, appLiveKey, type ItemKey } from "../keys.js";
+import { appAiTotalKey, appAiUsageKey, appAiWriterKey, appLiveKey, type ItemKey } from "../keys.js";
 import type { DocumentType } from "@smithy/types";
 import type { WorkshopSettings } from "../workshop/settings.js";
 import { readSettings } from "../workshop/store.js";
-import type { AppAiModel, AppAiStore, MediaReader, ModelAnswer, ModelCall, Transcriber, TranscriptionStatus } from "./ai.js";
-import { ALL_APPS_AI_DAILY_BUDGET_USD, APP_AI_DAILY_BUDGET_USD, MAX_OUTPUT_TOKENS, type AiSpend, type DaySpend } from "./budget.js";
+import { S3_CALL_LIMIT_MS, TRANSCRIBE_CALL_LIMIT_MS, type AppAiModel, type AppAiStore, type MediaReader, type ModelAnswer, type ModelCall, type Transcriber, type TranscriptionStatus } from "./ai.js";
+import { ALL_APPS_AI_DAILY_BUDGET_USD, APP_AI_DAILY_BUDGET_USD, MAX_OUTPUT_TOKENS, WRITER_AI_DAILY_BUDGET_USD, type AiSpend, type DaySpend } from "./budget.js";
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
 export interface AppAiSender {
@@ -89,9 +94,9 @@ export class DynamoAppAiStore implements AppAiStore {
     return readSettings(this.client, this.tableName);
   }
 
-  async getSpend(nickname: string): Promise<AiSpend> {
-    const [app, all] = await Promise.all([this.get(appAiUsageKey(nickname), { ...COUNTER_NAMES }), this.get(appAiTotalKey(), { ...COUNTER_NAMES })]);
-    return { app: daySpend(app), all: daySpend(all) };
+  async getSpend(nickname: string, writer: string): Promise<AiSpend> {
+    const [app, mine, all] = await Promise.all([appAiUsageKey(nickname), appAiWriterKey(writer), appAiTotalKey()].map((key) => this.get(key, { ...COUNTER_NAMES })));
+    return { app: daySpend(app), writer: daySpend(mine), all: daySpend(all) };
   }
 
   /** One counter's update: add under today and the budget, or start today over an earlier day (only forward). */
@@ -117,13 +122,14 @@ export class DynamoAppAiStore implements AppAiStore {
         };
   }
 
-  async reserve(nickname: string, spend: AiSpend, today: string, costUsd: number): Promise<"reserved" | "conflict"> {
+  async reserve(nickname: string, writer: string, spend: AiSpend, today: string, costUsd: number): Promise<"reserved" | "conflict"> {
     const cost = round(costUsd);
     try {
       await this.client.send(
         new TransactWriteItemsCommand({
           TransactItems: [
             this.counterUpdate(appAiUsageKey(nickname), spend.app, today, cost, APP_AI_DAILY_BUDGET_USD, "app-ai-usage"),
+            this.counterUpdate(appAiWriterKey(writer), spend.writer, today, cost, WRITER_AI_DAILY_BUDGET_USD, "app-ai-writer"),
             this.counterUpdate(appAiTotalKey(), spend.all, today, cost, ALL_APPS_AI_DAILY_BUDGET_USD, "app-ai-total"),
           ],
         }),
@@ -135,13 +141,13 @@ export class DynamoAppAiStore implements AppAiStore {
     }
   }
 
-  async settle(nickname: string, today: string, deltaUsd: number): Promise<void> {
+  async settle(nickname: string, writer: string, today: string, deltaUsd: number): Promise<void> {
     const delta = round(deltaUsd);
     if (delta === 0) return;
     const nowIso = this.now().toISOString();
     // Each counter on its own: one whose day has turned since is left alone (its condition fails, and that is fine).
     const results = await Promise.allSettled(
-      [appAiUsageKey(nickname), appAiTotalKey()].map((key) =>
+      [appAiUsageKey(nickname), appAiWriterKey(writer), appAiTotalKey()].map((key) =>
         this.client.send(
           new UpdateItemCommand({
             TableName: this.tableName,
@@ -161,22 +167,41 @@ export class DynamoAppAiStore implements AppAiStore {
 
 /** The methods of S3Client the AI tasks use. */
 export interface AppAiBucketSender {
-  send(command: GetObjectCommand): Promise<GetObjectCommandOutput>;
-  send(command: DeleteObjectCommand): Promise<DeleteObjectCommandOutput>;
+  send(command: GetObjectCommand, options?: { abortSignal?: AbortSignal }): Promise<GetObjectCommandOutput>;
+  send(command: DeleteObjectCommand, options?: { abortSignal?: AbortSignal }): Promise<DeleteObjectCommandOutput>;
+}
+
+/** Runs `work` with an abort signal that fires after `ms`, and gives up (TimeoutError) at that time even if it does not stop. */
+export async function withinLimit<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(Object.assign(new Error("the call took too long"), { name: "TimeoutError" }));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work(controller.signal), limit]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** An object's bytes, or undefined when it is missing or larger than `max` (checked on the announced length first). */
-async function readObject(client: AppAiBucketSender, bucket: string, key: string, max: number): Promise<Buffer | undefined> {
-  let output: GetObjectCommandOutput;
-  try {
-    output = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-  } catch (error) {
-    if ((error as Error)?.name === "NoSuchKey" || (error as Error)?.name === "NotFound") return undefined;
-    throw error;
-  }
-  if (output.Body === undefined || (output.ContentLength ?? 0) > max) return undefined;
-  const bytes = Buffer.from(await output.Body.transformToByteArray());
-  return bytes.length > max ? undefined : bytes;
+function readObject(client: AppAiBucketSender, bucket: string, key: string, max: number): Promise<Buffer | undefined> {
+  return withinLimit(S3_CALL_LIMIT_MS, async (abortSignal) => {
+    let output: GetObjectCommandOutput;
+    try {
+      output = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal });
+    } catch (error) {
+      if ((error as Error)?.name === "NoSuchKey" || (error as Error)?.name === "NotFound") return undefined;
+      throw error;
+    }
+    if (output.Body === undefined || (output.ContentLength ?? 0) > max) return undefined;
+    const bytes = Buffer.from(await output.Body.transformToByteArray());
+    return bytes.length > max ? undefined : bytes;
+  });
 }
 
 export class S3MediaReader implements MediaReader {
@@ -192,10 +217,13 @@ export class S3MediaReader implements MediaReader {
 
 /** The one method of BedrockRuntimeClient the model uses. */
 export interface AppAiConverseSender {
-  send(command: ConverseCommand): Promise<ConverseCommandOutput>;
+  send(command: ConverseCommand, options?: { abortSignal?: AbortSignal }): Promise<ConverseCommandOutput>;
 }
 
-/** Claude Haiku 4.5 through the Converse API: the photo first, then the text, and one tool the model must call. */
+/**
+ * Claude Haiku 4.5 through the Converse API: the photo first, then the text, and one tool the model must call; the call
+ * is aborted (TimeoutError) after the call's `timeoutMs`, which ./ai.ts takes from the request's deadline.
+ */
 export class BedrockAppAiModel implements AppAiModel {
   constructor(
     private readonly client: AppAiConverseSender,
@@ -205,23 +233,22 @@ export class BedrockAppAiModel implements AppAiModel {
   }
 
   async answer(call: ModelCall): Promise<ModelAnswer> {
-    const output = await this.client.send(
-      new ConverseCommand({
-        modelId: this.modelId,
-        system: [{ text: call.system }],
-        messages: [
-          {
-            role: "user",
-            content: [...(call.photo === undefined ? [] : [{ image: { format: "jpeg" as const, source: { bytes: new Uint8Array(call.photo) } } }]), { text: call.text }],
-          },
-        ],
-        inferenceConfig: { maxTokens: MAX_OUTPUT_TOKENS, temperature: 0 },
-        toolConfig: {
-          tools: [{ toolSpec: { name: call.tool.name, description: call.tool.description, inputSchema: { json: call.tool.schema as DocumentType } as ToolInputSchema } }],
-          toolChoice: { tool: { name: call.tool.name } },
+    const command = new ConverseCommand({
+      modelId: this.modelId,
+      system: [{ text: call.system }],
+      messages: [
+        {
+          role: "user",
+          content: [...(call.photo === undefined ? [] : [{ image: { format: "jpeg" as const, source: { bytes: new Uint8Array(call.photo) } } }]), { text: call.text }],
         },
-      }),
-    );
+      ],
+      inferenceConfig: { maxTokens: MAX_OUTPUT_TOKENS, temperature: 0 },
+      toolConfig: {
+        tools: [{ toolSpec: { name: call.tool.name, description: call.tool.description, inputSchema: { json: call.tool.schema as DocumentType } as ToolInputSchema } }],
+        toolChoice: { tool: { name: call.tool.name } },
+      },
+    });
+    const output = await withinLimit(call.timeoutMs, (abortSignal) => this.client.send(command, { abortSignal }));
     const blocks = output.output?.message?.content ?? [];
     const use = blocks.find((block) => block.toolUse?.name === call.tool.name)?.toolUse;
     const text = blocks
@@ -234,9 +261,9 @@ export class BedrockAppAiModel implements AppAiModel {
 
 /** The methods of TranscribeClient the AI tasks use. */
 export interface TranscribeSender {
-  send(command: StartTranscriptionJobCommand): Promise<StartTranscriptionJobCommandOutput>;
-  send(command: GetTranscriptionJobCommand): Promise<GetTranscriptionJobCommandOutput>;
-  send(command: DeleteTranscriptionJobCommand): Promise<DeleteTranscriptionJobCommandOutput>;
+  send(command: StartTranscriptionJobCommand, options?: { abortSignal?: AbortSignal }): Promise<StartTranscriptionJobCommandOutput>;
+  send(command: GetTranscriptionJobCommand, options?: { abortSignal?: AbortSignal }): Promise<GetTranscriptionJobCommandOutput>;
+  send(command: DeleteTranscriptionJobCommand, options?: { abortSignal?: AbortSignal }): Promise<DeleteTranscriptionJobCommandOutput>;
 }
 
 /**
@@ -259,7 +286,7 @@ export class AwsTranscriber implements Transcriber {
   async status(jobName: string): Promise<TranscriptionStatus> {
     let output: GetTranscriptionJobCommandOutput;
     try {
-      output = await this.transcribe.send(new GetTranscriptionJobCommand({ TranscriptionJobName: jobName }));
+      output = await withinLimit(TRANSCRIBE_CALL_LIMIT_MS, (abortSignal) => this.transcribe.send(new GetTranscriptionJobCommand({ TranscriptionJobName: jobName }), { abortSignal }));
     } catch (error) {
       if (isNotFound(error)) return { state: "missing" };
       throw error;
@@ -273,17 +300,16 @@ export class AwsTranscriber implements Transcriber {
 
   async start(job: { name: string; mediaKey: string; format: RecordingKind; outputKey: string }): Promise<"started" | "exists"> {
     try {
-      await this.transcribe.send(
-        new StartTranscriptionJobCommand({
-          TranscriptionJobName: job.name,
-          Media: { MediaFileUri: `s3://${this.bucketName}/${job.mediaKey}` },
-          MediaFormat: job.format,
-          IdentifyLanguage: true,
-          LanguageOptions: TRANSCRIBE_LANGUAGES,
-          OutputBucketName: this.bucketName,
-          OutputKey: job.outputKey,
-        }),
-      );
+      const command = new StartTranscriptionJobCommand({
+        TranscriptionJobName: job.name,
+        Media: { MediaFileUri: `s3://${this.bucketName}/${job.mediaKey}` },
+        MediaFormat: job.format,
+        IdentifyLanguage: true,
+        LanguageOptions: TRANSCRIBE_LANGUAGES,
+        OutputBucketName: this.bucketName,
+        OutputKey: job.outputKey,
+      });
+      await withinLimit(TRANSCRIBE_CALL_LIMIT_MS, (abortSignal) => this.transcribe.send(command, { abortSignal }));
       return "started";
     } catch (error) {
       if ((error as Error)?.name === "ConflictException") return "exists";
@@ -303,12 +329,19 @@ export class AwsTranscriber implements Transcriber {
     }
   }
 
-  async cleanUp(jobName: string, outputKey: string): Promise<void> {
-    await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: outputKey }));
+  /**
+   * Deletes the job, then the result file (try 2: in this order, a request that finds the file gone finds the job gone
+   * too, so it knows another request read the text first); `gone` when the job was already deleted.
+   */
+  async cleanUp(jobName: string, outputKey: string): Promise<"deleted" | "gone"> {
+    let result: "deleted" | "gone" = "deleted";
     try {
-      await this.transcribe.send(new DeleteTranscriptionJobCommand({ TranscriptionJobName: jobName }));
+      await withinLimit(TRANSCRIBE_CALL_LIMIT_MS, (abortSignal) => this.transcribe.send(new DeleteTranscriptionJobCommand({ TranscriptionJobName: jobName }), { abortSignal }));
     } catch (error) {
       if (!isNotFound(error)) throw error;
+      result = "gone";
     }
+    await withinLimit(S3_CALL_LIMIT_MS, (abortSignal) => this.s3.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: outputKey }), { abortSignal }));
+    return result;
   }
 }

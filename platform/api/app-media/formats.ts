@@ -498,13 +498,48 @@ function oggSeconds(bytes: Buffer): number | undefined {
   return seconds;
 }
 
-// MP4: the largest of the declared lengths (mvhd and each track's mdhd, mvex's mehd; "unknown" all-ones values and
-// zeros are ignored) and the lengths the samples add up to: a plain file's sample tables (stts) and a fragmented
+// MP4: the largest of the declared lengths (mvhd, each track's tkhd and the sum of its edit list's segments (elst, ticket
+// 3.21 try 2: an edit can repeat or hold media, so playback can outlast the samples), each track's mdhd, mvex's mehd;
+// "unknown" all-ones values and zeros are ignored) and the lengths the samples add up to: a plain file's sample tables (stts) and a fragmented
 // file's fragments (MediaRecorder in Chromium and Safari writes `moof` + `mdat` pairs whose `trun` boxes list each
 // sample's duration, or leave it to `tfhd`'s or `trex`'s default), each from its `tfdt` start or the previous
 // fragment's end, in the track's own timescale (mdhd).
 function fullBoxVersion(bytes: Buffer, box: Box): number {
   return bytes[box.start] as number;
+}
+
+/** An unsigned duration field, or undefined when it is all ones ("unknown") or zero. */
+function declaredUnits(bytes: Buffer, at: number, length: number): number | undefined {
+  if (bytes.subarray(at, at + length).every((b) => b === 0xff)) return undefined;
+  const units = readUnsigned(bytes, at, length);
+  return units === 0 ? undefined : units;
+}
+
+/**
+ * A track's playback length in the movie's timescale as its header and edit list declare it (ticket 3.21 try 2): tkhd's
+ * duration, and the sum of the elst entries' segment durations. Null when a box is cut, its entry count runs past the
+ * box (checked before looping), or there are edits but no movie timescale to read them in.
+ */
+function trackHeaderUnits(bytes: Buffer, trak: Box, tkhd: Box, movieScale: number | undefined): { tkhd: number | undefined; edits: number } | null {
+  // tkhd: version and flags (4), creation and modification times (4 or 8 each), track_ID (4), reserved (4), duration (4 or 8).
+  const v1 = fullBoxVersion(bytes, tkhd) === 1;
+  const durationAt = tkhd.start + (v1 ? 28 : 20);
+  const length = v1 ? 8 : 4;
+  if (durationAt + length > tkhd.end) return null;
+  const header = declaredUnits(bytes, durationAt, length);
+  const edts = child(bytes, trak, "edts");
+  const elst = child(bytes, edts, "elst");
+  if (elst === undefined) return { tkhd: header, edits: 0 };
+  // elst: version and flags (4), entry count (4), then per entry: segment duration (4 or 8), media time (4 or 8), rate (4).
+  if (elst.start + 8 > elst.end) return null;
+  const elstV1 = fullBoxVersion(bytes, elst) === 1;
+  const entrySize = elstV1 ? 20 : 12;
+  const entries = bytes.readUInt32BE(elst.start + 4);
+  if (elst.start + 8 + entries * entrySize > elst.end) return null;
+  if (entries > 0 && movieScale === undefined) return null;
+  let edits = 0;
+  for (let i = 0; i < entries; i += 1) edits += declaredUnits(bytes, elst.start + 8 + i * entrySize, elstV1 ? 8 : 4) ?? 0;
+  return { tkhd: header, edits };
 }
 
 /** A version 0/1 full box's (timescale, duration) as mvhd and mdhd lay them out, or undefined when cut. */
@@ -543,6 +578,12 @@ function mp4Seconds(bytes: Buffer): number | undefined {
     if (idAt + 4 > tkhd.end || media === undefined) return false;
     trackScale.set(bytes.readUInt32BE(idAt), media.scale);
     consider(media.duration, media.scale);
+    const declared = trackHeaderUnits(bytes, trak, tkhd, movie?.scale);
+    if (declared === null) return false;
+    if (movie !== undefined) {
+      consider(declared.tkhd, movie.scale);
+      if (declared.edits > 0) consider(declared.edits, movie.scale);
+    }
     // A plain file's sample table: entry count, then (sample count, sample duration) pairs.
     const stts = child(bytes, child(bytes, child(bytes, mdia, "minf"), "stbl"), "stts");
     if (stts !== undefined && stts.start + 8 <= stts.end) {

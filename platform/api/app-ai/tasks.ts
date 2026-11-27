@@ -324,7 +324,8 @@ export function checkAnswer(request: Exclude<AppAiRequest, { task: "transcribe" 
   }
   // Some models put the fields at the top level instead of under `values`: both are read, asked names only.
   const values = isRecord(input["values"]) ? input["values"] : input;
-  const out: Record<string, FieldValue> = {};
+  // No prototype (try 2): a field the app named `__proto__` is kept as a field, never taken as the object's prototype.
+  const out = Object.create(null) as Record<string, FieldValue>;
   let found = false;
   for (const [i, field] of request.fields.entries()) {
     // By its schema key (f1, ...); a model that used the field's name instead is read too.

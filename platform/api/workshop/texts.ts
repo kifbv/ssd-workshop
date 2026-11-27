@@ -253,6 +253,8 @@ export const APP_AI_TEXTS = {
   switchedOff: "AI is switched off for apps right now.",
   /** This app's $1 for the UTC day is used (429, no AI call). */
   appBudget: "This app has used its AI allowance for today. AI tasks work again tomorrow.",
+  /** The signed-in writer's $1 for the UTC day, across all apps, is used (429, no AI call; ticket 3.21 try 2). */
+  writerBudget: "You have used today's AI allowance for apps. It starts again tomorrow.",
   /** All apps' $10 for the UTC day is used (429, no AI call). */
   workshopBudget: "The workshop's AI allowance for apps is used up for today. AI tasks work again tomorrow.",
   /** The model's answer had none of what was asked in a usable form (502). */
@@ -271,5 +273,7 @@ export const APP_AI_TEXTS = {
   /** transcribe: the job failed (the format, silence). */
   transcribeFailed: "The recording could not be turned into text.",
   conflict: "Many AI tasks were asked at the same moment. Please try again.",
+  /** The request ran out of time before the AI call could start (503, nothing charged; ticket 3.21 try 2). */
+  outOfTime: "The AI service is slow right now. Please try again in a moment.",
   failed: "The AI service had a problem. Please try again in a moment.",
 } as const;

@@ -85,19 +85,25 @@ function esds(rateIndex: number): Buffer {
 /** An `mp4a` sample entry whose own sample rate field says `entryRate` (16.16), holding this esds. */
 const mp4a = (entryRate: number, esdsBox: Buffer): Buffer => box("mp4a", Buffer.alloc(16), u16(1), u16(16), Buffer.alloc(4), u16(entryRate), u16(0), esdsBox);
 
-/** A plain MP4 of one AAC track: `count` samples in stsz, stts saying `sttsCount` samples of 1,024 at 48 kHz. */
-function plainAac(count: number, entry: Buffer, sttsCount = count): Buffer {
+/** A plain MP4 of one AAC track: `count` samples in stsz, stts saying `sttsCount` samples of 1,024 at 48 kHz (movie timescale 1,000). */
+function plainAac(count: number, entry: Buffer, sttsCount = count, trackHeader: Buffer = tkhd(1), edits: Buffer[] = []): Buffer {
   const stsd = box("stsd", Buffer.alloc(4), u32(1), entry);
   const stts = box("stts", Buffer.alloc(4), u32(1), u32(sttsCount), u32(1024));
   const stsz = box("stsz", Buffer.alloc(4), u32(10), u32(count));
   const trak = box(
     "trak",
-    tkhd(1),
+    trackHeader,
+    ...edits,
     box("mdia", timedBox("mdhd", 48_000, 0, 32), box("hdlr", Buffer.alloc(8), Buffer.from("soun"), Buffer.alloc(13)), box("minf", box("stbl", stsd, stts, stsz))),
   );
   const head = Buffer.concat([box("ftyp", Buffer.from("M4A "), u32(0)), box("moov", timedBox("mvhd", 1000, 0, 108), trak)]);
   return Buffer.concat([head, box("mdat", Buffer.alloc(count * 10))]);
 }
+/** A version 0 tkhd declaring `duration` (movie timescale). */
+const tkhdWithDuration = (track: number, duration: number): Buffer => box("tkhd", Buffer.alloc(12), u32(track), Buffer.alloc(4), u32(duration), Buffer.alloc(56));
+/** An edts whose version 0 elst lists these segment durations (movie timescale), each from media time 0 at rate 1; `count` may lie. */
+const edits = (segments: number[], count = segments.length): Buffer =>
+  box("edts", box("elst", Buffer.alloc(4), u32(count), ...segments.map((d) => Buffer.concat([u32(d), u32(0), u32(0x00010000)]))));
 
 /** A fragmented MP4/Opus: one fragment whose trun lists sizes and a data offset, its samples in the mdat right after. */
 function fragmentedOpus(samples: Buffer[], perSampleDuration = 960): Buffer {
@@ -184,6 +190,21 @@ describe("decodedSecondsBound (ticket 3.21)", () => {
     expect(decodedSecondsBound(plainAac(4688, mp4a(48_000, esds(3)), 10), "mp4")).toBeCloseTo(100, 0);
     // No esds: the rate cannot be read, the file is refused.
     expect(decodedSecondsBound(plainAac(10, box("mp4a", Buffer.alloc(28))), "mp4")).toBeUndefined();
+  });
+
+  it("WHEN a crafted MP4 declares more playback in its tkhd or edit list than its samples hold THEN the bound takes the declared length (try 2)", () => {
+    const samples = 469; // 469 x 1,024 at 48 kHz: ~10 s
+    expect(decodedSecondsBound(plainAac(samples, mp4a(48_000, esds(3))), "mp4")).toBeCloseTo(10, 0);
+    // tkhd says 400 s (movie timescale 1,000): over the 5-minute bound.
+    expect(recordingSeconds(plainAac(samples, mp4a(48_000, esds(3)), samples, tkhdWithDuration(1, 400_000)), "mp4")).toBeCloseTo(400);
+    expect(decodedSecondsBound(plainAac(samples, mp4a(48_000, esds(3)), samples, tkhdWithDuration(1, 400_000)), "mp4")).toBeCloseTo(400);
+    // An edit list that plays the same 10 s forty times: 400 s, whatever tkhd says.
+    const repeated = plainAac(samples, mp4a(48_000, esds(3)), samples, tkhd(1), [edits(Array.from({ length: 40 }, () => 10_000))]);
+    expect(decodedSecondsBound(repeated, "mp4")).toBeCloseTo(400);
+    // "Unknown" (all ones) and zero segments are ignored; a short edit list leaves the samples' length.
+    expect(decodedSecondsBound(plainAac(samples, mp4a(48_000, esds(3)), samples, tkhd(1), [edits([0xffffffff, 0, 2_000])]), "mp4")).toBeCloseTo(10, 0);
+    // An entry count past the box refuses the file (checked before looping, as every count).
+    expect(decodedSecondsBound(plainAac(samples, mp4a(48_000, esds(3)), samples, tkhd(1), [edits([10_000], 1_000_000)]), "mp4")).toBeUndefined();
   });
 
   it("WHEN a fragmented MP4/Opus lists sample sizes THEN each sample's own TOC byte counts", () => {

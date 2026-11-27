@@ -10,13 +10,20 @@ import {
   AI_PREFLIGHT_HEADERS,
   APP_AI_ROUTES,
   handleAppAiRequest,
-  TRANSCRIBE_WAIT_MS,
+  MIN_MODEL_CALL_MS,
+  MODEL_CALL_LIMIT_MS,
+  REQUEST_DEADLINE_MS,
+  TABLE_CALL_LIMIT_MS,
+  TRANSCRIBE_AFTER_DONE_MS,
+  TRANSCRIBE_CALL_LIMIT_MS,
+  TRANSCRIBE_LAST_POLL_MS,
+  TRANSCRIBE_POLL_MS,
   transcriptionJobName,
   transcriptKey,
   type AppAiLogEntry,
   type ModelAnswer,
 } from "./ai.js";
-import { ALL_APPS_AI_DAILY_BUDGET_USD, APP_AI_DAILY_BUDGET_USD, modelCost, modelReservation, transcribeCost } from "./budget.js";
+import { ALL_APPS_AI_DAILY_BUDGET_USD, APP_AI_DAILY_BUDGET_USD, modelCost, modelReservation, transcribeCost, WRITER_AI_DAILY_BUDGET_USD } from "./budget.js";
 import { FakeAppAiModel, FakeAppAiStore, FakeMediaReader, FakeTranscriber } from "./fakes.js";
 import { MAX_VALUE_CHARACTERS } from "./tasks.js";
 
@@ -440,6 +447,56 @@ describe("criterion 5: the app's $1 and the workshop's $10 per UTC day", () => {
     expect(store.all.usd).toBe(modelReservation({ task: "sort-text", text: SORT.text, categories: SORT.categories }));
   });
 
+  it("WHEN the signed-in writer's $1 for today is spent, across all apps THEN every task answers 429 with the writer's message and makes no Bedrock or Transcribe call (try 2)", async () => {
+    const { call, store, model, transcriber, media } = setup();
+    expect(WRITER_AI_DAILY_BUDGET_USD).toBe(1);
+    store.writers.set("bob", { day: TODAY, usd: 1 });
+    for (const body of [TAG, READ, SORT, TRANSCRIBE]) {
+      const answer = await call(post(body));
+      expect(answer.statusCode).toBe(429);
+      expect(message(answer)).toBe(APP_AI_TEXTS.writerBudget);
+      expect(message(answer)).toBe("You have used today's AI allowance for apps. It starts again tomorrow.");
+    }
+    // The same writer in another app: the same counter.
+    expect(message(await call(post(SORT, { nickname: OTHER })))).toBe(APP_AI_TEXTS.writerBudget);
+    expect(model.calls).toEqual([]);
+    expect(transcriber.calls.filter((c) => c.startsWith("start"))).toEqual([]);
+    expect(media.reads).toEqual([]);
+  });
+
+  it("counts a writer's calls in every app on one counter (by the lower-cased nickname), reserved and settled with the app's and all apps'", async () => {
+    const { call, store, model, logs } = setup();
+    model.next = tool({ categories: ["transport"] }, { inputTokens: 1000, outputTokens: 20 });
+    await call(post(SORT));
+    await call(post(SORT, { nickname: OTHER }));
+    const cost = modelCost(1000, 20);
+    expect(store.writers.get("bob")).toEqual({ day: TODAY, usd: 2 * cost });
+    expect(store.apps.get(NICK.toLowerCase())?.usd).toBe(cost);
+    expect(store.apps.get(OTHER.toLowerCase())?.usd).toBe(cost);
+    expect(store.all.usd).toBe(2 * cost);
+    expect(logs.at(-1)).toMatchObject({ writer: "Bob" });
+    // A refused call gives the writer's reservation back too.
+    model.failure = Object.assign(new Error("throttled"), { name: "ThrottlingException" });
+    await call(post(SORT));
+    expect(store.writers.get("bob")?.usd).toBe(2 * cost);
+  });
+
+  it("WHEN a writer's calls race at the edge of their $1 THEN it is passed by at most one reservation", async () => {
+    const { call, store, model } = setup();
+    store.writers.set("bob", { day: TODAY, usd: 0.995 });
+    model.next = tool({ categories: [] }, { inputTokens: 100, outputTokens: 10 });
+    const answers = await Promise.all([NICK, OTHER, NICK, OTHER].map((nickname) => call(post(SORT, { nickname }))));
+    expect(answers.filter((a) => a.statusCode === 200)).toHaveLength(1);
+    for (const answer of answers.filter((a) => a.statusCode !== 200)) expect([APP_AI_TEXTS.writerBudget, APP_AI_TEXTS.conflict]).toContain(message(answer));
+  });
+
+  it("WHEN the token's writer is not a nickname THEN 401 (its counter could not be keyed)", async () => {
+    const { call, store, model } = setup();
+    store.tokens.tokens.set(hashAppToken(tokenFor(NICK)), { app: NICK.toLowerCase(), nickname: "no#such", expiresAt: NOW.getTime() / 1000 + 86400 });
+    expect((await call(post(SORT))).statusCode).toBe(401);
+    expect(model.calls).toEqual([]);
+  });
+
   it("bounds every reservation above what the call can cost: 2,000 prompt tokens, a photo, the app's texts twice, 1,024 out", () => {
     const sort = modelReservation({ task: "sort-text", text: "a".repeat(2000), categories: Array.from({ length: 20 }, () => "c".repeat(50)) });
     const read = modelReservation({ task: "read-photo", mediaId: PHOTO_ID, fields: Array.from({ length: 12 }, () => ({ name: "n".repeat(50), type: "text" as const })) });
@@ -470,17 +527,65 @@ describe("criterion 7: transcribe through Amazon Transcribe, then sort-text", ()
     expect(logs.at(-1)).toMatchObject({ outcome: "transcribed", task: "transcribe", costUsd: transcribeCost(10) });
   });
 
-  it("WHEN the job outlasts one request THEN the answer is 202 working; asking again with the same recording adds no charge", async () => {
-    const { call, transcriber, store } = setup();
-    transcriber.looksToFinish = Math.ceil(TRANSCRIBE_WAIT_MS / 2000) + 3;
+  it("WHEN the job outlasts one request THEN the answer is 202 working; asking again joins the job at once (no wait, no charge) until the text comes", async () => {
+    const { call, transcriber, store, clock } = setup();
+    // The starting request polls at 2, 4, ..., 12 s (none starts after TRANSCRIBE_LAST_POLL_MS), then answers 202.
+    const polls = Math.floor(TRANSCRIBE_LAST_POLL_MS / TRANSCRIBE_POLL_MS) + 1;
+    expect(polls).toBe(6);
+    transcriber.looksToFinish = polls + 2;
     const first = await call(post(TRANSCRIBE));
     expect(first.statusCode).toBe(202);
     expect(bodyOf(first)).toEqual({ status: "working", message: APP_AI_TEXTS.working });
+    expect(transcriber.calls.filter((c) => c.startsWith("status"))).toHaveLength(1 + polls);
+    expect(clock.now - NOW.getTime()).toBe(polls * TRANSCRIBE_POLL_MS);
     const charged = store.all.usd;
-    const second = await call(post(TRANSCRIBE));
-    expect(second.statusCode).toBe(200);
+    expect(charged).toBe(transcribeCost(10));
+    // Each later request looks once and answers at once: the clock does not move, nothing is reserved.
+    const answers: number[] = [];
+    for (let i = 0; i < 4 && answers.at(-1) !== 200; i += 1) {
+      const before = { now: clock.now, calls: transcriber.calls.length, store: store.calls.length };
+      const answer = await call(post(TRANSCRIBE));
+      answers.push(answer.statusCode);
+      if (answer.statusCode === 202) {
+        expect(clock.now).toBe(before.now);
+        expect(transcriber.calls.slice(before.calls)).toEqual([`status ${transcriptionJobName(NICK, VOICE_ID)}`]);
+        expect(store.calls.slice(before.store)).not.toContain("getSpend");
+      }
+    }
+    expect(answers).toEqual([202, 202, 200]);
     expect(store.all.usd).toBe(charged);
     expect(transcriber.calls.filter((c) => c.startsWith("start"))).toHaveLength(1);
+  });
+
+  it("WHEN two requests both find the job done THEN the second does not fail after the first cleaned up: 202, ask again (try 2)", async () => {
+    const { call, transcriber } = setup();
+    const name = transcriptionJobName(NICK, VOICE_ID);
+    transcriber.jobs.set(name, { mediaKey: "", format: "webm", outputKey: transcriptKey(NICK, VOICE_ID), looksLeft: 0, outcome: "done" });
+    transcriber.results.set(transcriptKey(NICK, VOICE_ID), "hello");
+    // Both looked before either cleaned up: both saw the job done.
+    transcriber.status = async () => ({ state: "done", language: "en-US" });
+    expect((await call(post(TRANSCRIBE))).statusCode).toBe(200);
+    const second = await call(post(TRANSCRIBE));
+    expect(second.statusCode).toBe(202);
+    expect(bodyOf(second)).toEqual({ status: "working", message: APP_AI_TEXTS.working });
+    // A job done without its result file (not cleaned by anyone else) is a real failure: 502, and the job is deleted.
+    transcriber.jobs.set(name, { mediaKey: "", format: "webm", outputKey: transcriptKey(NICK, VOICE_ID), looksLeft: 0, outcome: "done" });
+    const broken = await call(post(TRANSCRIBE));
+    expect(broken.statusCode).toBe(502);
+    expect(transcriber.jobs.size).toBe(0);
+  });
+
+  it("WHEN the job vanishes while the starting request polls THEN 202 (another request read it), never 502", async () => {
+    const { call, transcriber } = setup();
+    transcriber.looksToFinish = 3;
+    const realStatus = transcriber.status.bind(transcriber);
+    let looks = 0;
+    transcriber.status = async (name) => {
+      looks += 1;
+      if (looks === 3) transcriber.jobs.delete(name);
+      return realStatus(name);
+    };
+    expect((await call(post(TRANSCRIBE))).statusCode).toBe(202);
   });
 
   it("WHEN the transcript is sorted next THEN sort-text gives its topics", async () => {
@@ -502,7 +607,7 @@ describe("criterion 7: transcribe through Amazon Transcribe, then sort-text", ()
     expect(store.all.usd).toBe(transcribeCost(10));
   });
 
-  it("WHEN Transcribe refuses to start THEN the charge goes back; WHEN the job already exists THEN it carries the charge", async () => {
+  it("WHEN Transcribe refuses to start THEN the charge goes back; WHEN the job already exists THEN it carries the charge and this request answers 202 at once", async () => {
     const { call, transcriber, store } = setup();
     transcriber.startFailure = Object.assign(new Error("x"), { name: "LimitExceededException" });
     expect((await call(post(TRANSCRIBE))).statusCode).toBe(500);
@@ -520,6 +625,10 @@ describe("criterion 7: transcribe through Amazon Transcribe, then sort-text", ()
       }
       return statusOnce(name);
     };
+    const joined = await call(post(TRANSCRIBE));
+    expect(joined.statusCode).toBe(202);
+    expect(store.all.usd).toBe(0);
+    expect(transcriber.calls.filter((c) => c.startsWith("status"))).toHaveLength(1);
     expect((await call(post(TRANSCRIBE))).statusCode).toBe(200);
     expect(store.all.usd).toBe(0);
   });
@@ -553,6 +662,71 @@ describe("criterion 7: transcribe through Amazon Transcribe, then sort-text", ()
     expect(store.all.usd).toBe(transcribeCost(10));
     // The longest recording: 5 minutes and the media API's 5 s margin, $0.122.
     expect(transcribeCost(305)).toBeCloseTo(0.122, 6);
+  });
+});
+
+describe("time: every paid step and what follows it fits before the deadline (try 2)", () => {
+  it("adds up: the deadline is under the function's 28 s, the last poll leaves one poll and the reading, a model call one settlement", () => {
+    expect(REQUEST_DEADLINE_MS).toBe(26_000);
+    expect(REQUEST_DEADLINE_MS).toBeLessThan(28_000);
+    expect(TRANSCRIBE_AFTER_DONE_MS).toBe(4_000 + 3_000 + 4_000);
+    expect(TRANSCRIBE_LAST_POLL_MS + TRANSCRIBE_POLL_MS + TRANSCRIBE_CALL_LIMIT_MS + TRANSCRIBE_AFTER_DONE_MS).toBe(REQUEST_DEADLINE_MS);
+    expect(TRANSCRIBE_LAST_POLL_MS).toBe(10_000);
+    // A model call started at once ends by 20 s; its settlement (one table call) by 25.5 s.
+    expect(MODEL_CALL_LIMIT_MS + TABLE_CALL_LIMIT_MS).toBeLessThanOrEqual(REQUEST_DEADLINE_MS);
+  });
+
+  it("gives the model at most 20 s, and never past the deadline less one settlement", async () => {
+    const { call, model, media, clock } = setup();
+    model.next = tool({ tags: ["cat"] });
+    await call(post(TAG));
+    expect(model.calls[0]?.timeoutMs).toBe(MODEL_CALL_LIMIT_MS);
+    const read = media.read.bind(media);
+    media.read = async (key) => {
+      clock.now += 5_000;
+      return read(key);
+    };
+    await call(post(TAG));
+    expect(model.calls[1]?.timeoutMs).toBe(REQUEST_DEADLINE_MS - 5_000 - TABLE_CALL_LIMIT_MS);
+  });
+
+  it("WHEN the free steps took so long that the model call would have under 8 s THEN 503, no Bedrock call, the reservation goes back", async () => {
+    const { call, model, media, clock, store, logs } = setup();
+    const read = media.read.bind(media);
+    media.read = async (key) => {
+      clock.now += REQUEST_DEADLINE_MS - TABLE_CALL_LIMIT_MS - MIN_MODEL_CALL_MS + 1;
+      return read(key);
+    };
+    const answer = await call(post(TAG));
+    expect(answer.statusCode).toBe(503);
+    expect(message(answer)).toBe(APP_AI_TEXTS.outOfTime);
+    expect(model.calls).toEqual([]);
+    expect(store.calls).toContain("reserve");
+    expect(store.all.usd).toBe(0);
+    expect(logs.at(-1)).toMatchObject({ outcome: "out-of-time", status: 503 });
+  });
+
+  it("WHEN a Transcribe start and its refund would not fit THEN 503 and no job; WHEN the reading would not fit THEN 202", async () => {
+    const { call, transcriber, media, clock, store } = setup();
+    const read = media.read.bind(media);
+    media.read = async (key) => {
+      clock.now += REQUEST_DEADLINE_MS - TRANSCRIBE_CALL_LIMIT_MS - TABLE_CALL_LIMIT_MS + 1;
+      return read(key);
+    };
+    expect((await call(post(TRANSCRIBE))).statusCode).toBe(503);
+    expect(transcriber.calls.filter((c) => c.startsWith("start"))).toEqual([]);
+    expect(store.all.usd).toBe(0);
+    // A finished job found late in a request: asked again rather than read past the deadline.
+    const name = transcriptionJobName(NICK, VOICE_ID);
+    transcriber.jobs.set(name, { mediaKey: "", format: "webm", outputKey: transcriptKey(NICK, VOICE_ID), looksLeft: 0, outcome: "done" });
+    transcriber.results.set(transcriptKey(NICK, VOICE_ID), "hello");
+    const status = transcriber.status.bind(transcriber);
+    transcriber.status = async (job) => {
+      clock.now += REQUEST_DEADLINE_MS - TRANSCRIBE_AFTER_DONE_MS + 1;
+      return status(job);
+    };
+    expect((await call(post(TRANSCRIBE))).statusCode).toBe(202);
+    expect(transcriber.results.size).toBe(1);
   });
 });
 

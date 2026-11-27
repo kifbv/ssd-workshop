@@ -4,7 +4,7 @@
 // right. The scoring is pure and unit tested (app-ai.test.ts); runAppAiSuite calls Bedrock.
 import type { Browser } from "playwright";
 import { modelCost } from "../../api/app-ai/budget.js";
-import type { AppAiModel } from "../../api/app-ai/ai.js";
+import { MODEL_CALL_LIMIT_MS, type AppAiModel } from "../../api/app-ai/ai.js";
 import { checkAnswer, modelTask, type AppAiRequest, type TaskAnswer } from "../../api/app-ai/tasks.js";
 import { inspectMedia } from "../../api/app-media/formats.js";
 
@@ -123,7 +123,7 @@ export async function readReceipt(model: AppAiModel, receipt: ReceiptCase, photo
   if (found?.kind !== "jpeg") return { receipt, pass: false, detail: "the photo is not a JPEG the media API keeps", inputTokens: 0, outputTokens: 0, costUsd: 0 };
   const request: Extract<AppAiRequest, { task: "read-photo" }> = { task: "read-photo", mediaId: "EvalReceipt00000000000", fields: RECEIPT_FIELDS.map((f) => ({ ...f })) };
   const task = modelTask(request);
-  const reply = await model.answer({ system: task.system, text: task.text, tool: task.tool, photo: found.photo });
+  const reply = await model.answer({ system: task.system, text: task.text, tool: task.tool, photo: found.photo, timeoutMs: MODEL_CALL_LIMIT_MS });
   const answer = checkAnswer(request, reply.input);
   return { receipt, answer, ...scoreReceipt(receipt, answer), inputTokens: reply.inputTokens, outputTokens: reply.outputTokens, costUsd: modelCost(reply.inputTokens, reply.outputTokens) };
 }

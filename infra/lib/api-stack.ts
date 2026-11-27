@@ -148,8 +148,11 @@ export const APP_AI_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
 export const APP_AI_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
 export const APP_AI_MEMORY_MB = 512;
 /**
- * 28 s, under API Gateway's 30 s: a 4 MB photo read (S3, 1 s + 8 s per attempt), one Bedrock attempt of at most 20 s
- * (platform/api/handlers/app-ai.ts), or a Transcribe wait of 15 s (TRANSCRIBE_WAIT_MS) and its reads.
+ * 28 s, under API Gateway's 30 s (try 2): every paid step and what follows it ends by REQUEST_DEADLINE_MS (26 s) after
+ * the request started (platform/api/app-ai/ai.ts): a model call is aborted at the deadline less one settlement (5.5 s) and
+ * starts only with 8 s for it; the request that starts a Transcribe job polls only while one poll (2 s + 3 s) and the
+ * reading and clean-up (4 s + 3 s + 4 s) still fit; every S3 and Transcribe call is one attempt aborted at 4 s and 3 s,
+ * every table call 2 attempts of 1 s + 1.5 s. The 2 s left cover the log line.
  */
 export const APP_AI_TIMEOUT_SECONDS = 28;
 
@@ -915,8 +918,8 @@ export class ApiStack extends Stack {
     });
 
     // Ticket 3.21: the AI tasks for apps, reachable by anyone with an app's address, running only with an app write
-    // token, the admin's switch on and both day budgets unspent. It reads the live marker, app write tokens and the
-    // settings (projected), reads and updates only the two day counters (`APPAI#*`, `APPAI_TOTAL`), invokes only Haiku
+    // token, the admin's switch on and the three day budgets unspent. It reads the live marker, app write tokens and the
+    // settings (projected), reads and updates only the three day counters (`APPAI#*`, `APPAI_WRITER#*`, `APPAI_TOTAL`), invokes only Haiku
     // 4.5 through its EU profile, reads the media bucket's files and results, writes and deletes only results under
     // `transcripts/` (the bucket's policy refuses every other writer there), and runs only its own Transcribe jobs.
     const appAi = workshopFunction(this, "AppAi", APP_AI_FUNCTION_NAME, "app-ai.ts", APP_AI_MEMORY_MB, APP_AI_TIMEOUT_SECONDS);

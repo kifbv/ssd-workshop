@@ -1,12 +1,13 @@
 // In-memory stand-ins for the AI tasks' table access, media bucket, Bedrock model and Amazon Transcribe (ticket 3.21),
 // for its tests (not bundled: no handler imports them). The store follows DynamoAppAiStore's conditions: a reservation
-// adds to both day counters only while each still counts the day it was read with and is under its budget, a counter of
+// adds to the three day counters (app, writer, all apps) only while each still counts the day it was read with and is
+// under its budget, a counter of
 // an earlier day starting again at 0; a settlement adds only to counters that still count that day. Each call is atomic
 // here, so DynamoDB's TransactionConflict does not happen (the store's own tests check the expressions).
 import { FakeAppTokenStore } from "../app-token/fakes.js";
 import { DEFAULT_SETTINGS, type WorkshopSettings } from "../workshop/settings.js";
 import type { AppAiModel, AppAiStore, MediaReader, ModelAnswer, ModelCall, Transcriber, TranscriptionStatus } from "./ai.js";
-import { ALL_APPS_AI_DAILY_BUDGET_USD, APP_AI_DAILY_BUDGET_USD, type AiSpend, type DaySpend } from "./budget.js";
+import { ALL_APPS_AI_DAILY_BUDGET_USD, APP_AI_DAILY_BUDGET_USD, WRITER_AI_DAILY_BUDGET_USD, type AiSpend, type DaySpend } from "./budget.js";
 import type { RecordingKind } from "../app-media/formats.js";
 
 const round = (usd: number): number => Math.round(usd * 1e8) / 1e8;
@@ -17,6 +18,8 @@ export class FakeAppAiStore implements AppAiStore {
   settings: WorkshopSettings = { ...DEFAULT_SETTINGS, appAiEnabled: true };
   /** Day counters by lower-cased nickname. */
   readonly apps = new Map<string, DaySpend>();
+  /** Day counters by lower-cased writer nickname (try 2). */
+  readonly writers = new Map<string, DaySpend>();
   all: DaySpend = { day: undefined, usd: 0 };
   readonly tokens = new FakeAppTokenStore();
   readonly calls: string[] = [];
@@ -41,27 +44,30 @@ export class FakeAppAiStore implements AppAiStore {
     return { ...this.settings };
   }
 
-  async getSpend(nickname: string): Promise<AiSpend> {
+  async getSpend(nickname: string, writer: string): Promise<AiSpend> {
     this.check("getSpend");
-    return { app: { ...(this.apps.get(nickname.toLowerCase()) ?? { day: undefined, usd: 0 }) }, all: { ...this.all } };
+    const none: DaySpend = { day: undefined, usd: 0 };
+    return { app: { ...(this.apps.get(nickname.toLowerCase()) ?? none) }, writer: { ...(this.writers.get(writer.toLowerCase()) ?? none) }, all: { ...this.all } };
   }
 
-  async reserve(nickname: string, spend: AiSpend, today: string, costUsd: number): Promise<"reserved" | "conflict"> {
+  async reserve(nickname: string, writer: string, spend: AiSpend, today: string, costUsd: number): Promise<"reserved" | "conflict"> {
     this.check("reserve");
     this.beforeReserve?.();
     const app = this.apps.get(nickname.toLowerCase()) ?? { day: undefined, usd: 0 };
+    const mine = this.writers.get(writer.toLowerCase()) ?? { day: undefined, usd: 0 };
     // As DynamoAppAiStore: a counter read as today's adds only while it is still today's and under its budget; one
     // read as an earlier day's starts again only while it still counts an earlier day (or none).
     const fits = (now: DaySpend, read: DaySpend, cap: number): boolean =>
       read.day === today ? now.day === today && now.usd < cap : now.day === undefined || now.day < today;
-    if (!fits(app, spend.app, APP_AI_DAILY_BUDGET_USD) || !fits(this.all, spend.all, ALL_APPS_AI_DAILY_BUDGET_USD)) return "conflict";
+    if (!fits(app, spend.app, APP_AI_DAILY_BUDGET_USD) || !fits(mine, spend.writer, WRITER_AI_DAILY_BUDGET_USD) || !fits(this.all, spend.all, ALL_APPS_AI_DAILY_BUDGET_USD)) return "conflict";
     const add = (now: DaySpend): DaySpend => ({ day: today, usd: round((now.day === today ? now.usd : 0) + costUsd) });
     this.apps.set(nickname.toLowerCase(), add(app));
+    this.writers.set(writer.toLowerCase(), add(mine));
     this.all = add(this.all);
     return "reserved";
   }
 
-  async settle(nickname: string, today: string, deltaUsd: number): Promise<void> {
+  async settle(nickname: string, writer: string, today: string, deltaUsd: number): Promise<void> {
     this.check("settle");
     if (this.settleFailure !== undefined) {
       const failure = this.settleFailure;
@@ -70,6 +76,8 @@ export class FakeAppAiStore implements AppAiStore {
     }
     const app = this.apps.get(nickname.toLowerCase());
     if (app?.day === today) this.apps.set(nickname.toLowerCase(), { day: today, usd: round(app.usd + deltaUsd) });
+    const mine = this.writers.get(writer.toLowerCase());
+    if (mine?.day === today) this.writers.set(writer.toLowerCase(), { day: today, usd: round(mine.usd + deltaUsd) });
     if (this.all.day === today) this.all = { day: today, usd: round(this.all.usd + deltaUsd) };
   }
 }
@@ -155,9 +163,11 @@ export class FakeTranscriber implements Transcriber {
     return this.results.get(outputKey);
   }
 
-  async cleanUp(jobName: string, outputKey: string): Promise<void> {
+  /** As AwsTranscriber: the job, then the file; `gone` when the job was not there. */
+  async cleanUp(jobName: string, outputKey: string): Promise<"deleted" | "gone"> {
     this.calls.push(`cleanUp ${jobName}`);
+    const existed = this.jobs.delete(jobName);
     this.results.delete(outputKey);
-    this.jobs.delete(jobName);
+    return existed ? "deleted" : "gone";
   }
 }

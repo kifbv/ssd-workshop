@@ -1,5 +1,5 @@
-// The AI tasks' budgets (ticket 3.21, question 7): each UTC day, at most $1 of AI per app and $10 for all apps
-// together, kept apart from every participant's own $5 (ticket 3.3). Pure: what a call may cost at most (reserved
+// The AI tasks' budgets (ticket 3.21, question 7): each UTC day, at most $1 of AI per app, $1 per signed-in writer
+// across all apps (try 2, owner's decision pending: WRITER_AI_DAILY_BUDGET_USD) and $10 for all apps together, kept apart from every participant's own $5 (ticket 3.3). Pure: what a call may cost at most (reserved
 // before it runs, so parallel calls cannot pass a budget by more than one call), what it did cost (tokens x Haiku 4.5's
 // EU price, or Amazon Transcribe's $0.024 a minute), and whether a budget is spent. The table side is ./store.ts.
 import { MAX_RECORDING_SECONDS, RECORDING_MARGIN_SECONDS } from "../app-media/media.js";
@@ -8,6 +8,12 @@ import { requestTextBytes, type AppAiRequest } from "./tasks.js";
 
 /** What one app may spend on AI tasks per UTC day (question 7: doubled to $1). */
 export const APP_AI_DAILY_BUDGET_USD = 1;
+/**
+ * What one signed-in writer (the nickname stored with the app write token) may spend on AI tasks per UTC day, across
+ * every app (ticket 3.21 try 2, the recommended option while the owner decides; one constant to change). Without it,
+ * one participant holding tokens for ten apps could use the whole $10 alone.
+ */
+export const WRITER_AI_DAILY_BUDGET_USD = 1;
 /** What all apps together may spend on AI tasks per UTC day (question 7: doubled to $10). */
 export const ALL_APPS_AI_DAILY_BUDGET_USD = 10;
 /** The model's answer is at most this many tokens (a tool call with up to 12 values of 200 characters fits). */
@@ -57,11 +63,14 @@ export interface DaySpend {
   usd: number;
 }
 
-/** The app's counter and the all-apps counter, as read. */
+/** The app's counter, the writer's counter and the all-apps counter, as read. */
 export interface AiSpend {
   app: DaySpend;
+  writer: DaySpend;
   all: DaySpend;
 }
+
+export type SpentBudget = "app-budget" | "writer-budget" | "workshop-budget";
 
 export const utcDay = (time: Date): string => time.toISOString().slice(0, 10);
 
@@ -71,9 +80,10 @@ export function spentToday(spend: DaySpend, today: string, budget: number): numb
   return Number.isFinite(spend.usd) && spend.usd >= 0 ? spend.usd : budget;
 }
 
-/** Which budget is spent (the app's first), or undefined when both have room. At or over a budget, no AI call runs. */
-export function spentBudget(spend: AiSpend, today: string): "app-budget" | "workshop-budget" | undefined {
+/** Which budget is spent (the app's, then the writer's, then all apps'), or undefined when all have room. At or over a budget, no AI call runs. */
+export function spentBudget(spend: AiSpend, today: string): SpentBudget | undefined {
   if (spentToday(spend.app, today, APP_AI_DAILY_BUDGET_USD) >= APP_AI_DAILY_BUDGET_USD) return "app-budget";
+  if (spentToday(spend.writer, today, WRITER_AI_DAILY_BUDGET_USD) >= WRITER_AI_DAILY_BUDGET_USD) return "writer-budget";
   if (spentToday(spend.all, today, ALL_APPS_AI_DAILY_BUDGET_USD) >= ALL_APPS_AI_DAILY_BUDGET_USD) return "workshop-budget";
   return undefined;
 }
