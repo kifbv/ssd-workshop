@@ -270,6 +270,38 @@ const SAVE_NEXT_TO_MEDIA = `((word) => {
 })`;
 
 /**
+ * Marks (`data-eval-open`) the tab, link or button that opens the screen holding the element marked `data-eval-media`,
+ * when that screen is hidden (apps hide screens until chosen): one whose `aria-controls`, `href` or `data-*` names an
+ * ancestor's id, else one whose text matches `words`. Returns whether one was marked. Run in the page.
+ */
+const OPENER_OF_MEDIA = `((words) => {
+  const media = document.querySelector("[data-eval-media]");
+  if (media === null) return false;
+  const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+  const area = media.closest("form, dialog, [role=dialog], [role=tabpanel], section, article") || media.parentElement || media;
+  if (seen(area)) return false;
+  const ids = [];
+  for (let el = media; el !== null; el = el.parentElement) if (el.id) ids.push(el.id);
+  const names = (el) => [el.getAttribute("aria-controls"), (el.getAttribute("href") || "").replace(/^#/, ""), ...Object.values(el.dataset)].filter(Boolean);
+  const openers = Array.from(document.querySelectorAll("button, [role=tab], a")).filter((el) => el !== media && !area.contains(el) && !el.hasAttribute("data-workshop-sign-in") && seen(el));
+  const pattern = new RegExp(words, "i");
+  const opener = openers.find((el) => names(el).some((name) => ids.some((id) => id === name || id === "screen-" + name || id === name + "-screen"))) ||
+    openers.find((el) => pattern.test(el.textContent || ""));
+  if (opener === undefined) return false;
+  opener.setAttribute("data-eval-open", "");
+  return true;
+})`;
+
+/** Opens the screen holding the marked media element when it is hidden (OPENER_OF_MEDIA), with a real click. */
+async function openMediaScreen(page: Page, kind: MediaCase): Promise<void> {
+  const words = kind === "photo" ? "add|take|new|upload|photo" : "record|new|add";
+  if (await page.evaluate<boolean>(`${OPENER_OF_MEDIA}(${JSON.stringify(words)})`)) {
+    await page.click("[data-eval-open]", { timeout: 5_000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+  }
+}
+
+/**
  * Ticket 3.19: a media case, signed in (the app opened with a write token, as after the workshop's sign-in): finds the
  * photo button (a file input accepting images) or the Record button, picks the sample photo there (or, in the phone's
  * recorder that recordVoice() opens where Chromium refuses the microphone in the sandbox, the sample recording), presses
@@ -297,14 +329,17 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
         return true;
       })()`);
       if (check.button) {
-        // The photo screen may be hidden until chosen: setInputFiles needs no visible input.
+        // The photo screen may be hidden until chosen (live eval run 1): open it as a visitor would.
+        await openMediaScreen(page, kind);
         await page.setInputFiles("[data-eval-media]", { name: "drawing.jpg", mimeType: "image/jpeg", buffer: samples.photo });
       }
     } else {
       check.button = await page.evaluate<boolean>(`(() => {
         const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
         const reads = (el) => /record/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || ""));
-        const buttons = Array.from(document.querySelectorAll("button, [role=button]")).filter(reads);
+        // The button that records, not a tab or link that opens the Record screen (live eval run 1: a "Record" tab).
+        const opens = (el) => el.getAttribute("role") === "tab" || el.hasAttribute("aria-controls") || el.closest("nav, [role=tablist]") !== null;
+        const buttons = Array.from(document.querySelectorAll("button, [role=button]")).filter((el) => reads(el) && !opens(el));
         const button = buttons.find(seen) || buttons[0];
         if (button === undefined) return false;
         button.setAttribute("data-eval-media", "");
@@ -312,13 +347,7 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
       })()`);
       if (check.button) {
         // A Record button on a screen the app shows later: open the tab or button that names the screen first.
-        if (!(await page.locator("[data-eval-media]").isVisible())) {
-          await page.evaluate(`(() => {
-            const opener = Array.from(document.querySelectorAll("button, [role=tab], a")).find((el) => /record/i.test(el.textContent || "") && !el.hasAttribute("data-eval-media"));
-            if (opener) opener.click();
-          })()`);
-          await page.waitForTimeout(300);
-        }
+        await openMediaScreen(page, kind);
         const chooser = page.waitForEvent("filechooser", { timeout: 8_000 }).catch(() => undefined);
         await page.click("[data-eval-media]", { timeout: 5_000 }).catch(() => undefined);
         const picker = await chooser;
@@ -346,7 +375,14 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
       const shownScript = kind === "photo"
         ? `Array.from(document.querySelectorAll("img")).some((el) => ${addresses}.includes(el.src))`
         : `Array.from(document.querySelectorAll("audio, audio source")).some((el) => ${addresses}.includes(el.src))`;
-      check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
+      check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 3_000);
+      if (!check.shown) {
+        // Some apps draw the list again only when its screen is opened (live eval run 1): open the app afresh, as the
+        // next visitor would, and look again (the in-memory workshop keeps what was saved).
+        await page.goto("about:blank");
+        await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+        check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
+      }
     }
     const labels = [...visitorLabels, ...(await page.evaluate<string[]>(LABELS_SCRIPT)), ...(await page.evaluate<string[]>(`Array.from(document.querySelectorAll("option, [placeholder]")).map((el) => el.textContent + " " + (el.getAttribute("placeholder") || ""))`))];
     check.missingWords = MEDIA_WORDS[kind].filter((word) => !labels.some((label) => label.toLowerCase().includes(word)));

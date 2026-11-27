@@ -79,8 +79,46 @@ describe("the build eval's media check (exerciseMedia)", () => {
     expect(mediaProblem(check)).toBeUndefined();
   }, 60_000);
 
+  it("WHEN the photo form is on a screen opened by a tab (live eval run 1: the Save button was hidden until then) THEN the check opens it first", async () => {
+    const tabbed = GALLERY.map((f) => {
+      const text = new TextDecoder().decode(f.bytes);
+      if (f.path === "index.html") {
+        return file("index.html", text.replace('<section><h2>Add a photo</h2>', '<button type="button" role="tab" id="open-add" aria-controls="screen-add">Add a photo</button><section id="screen-add" hidden><h2>Add a photo</h2>'));
+      }
+      if (f.path === "app.js") return file("app.js", `${text}\ndocument.getElementById("open-add").addEventListener("click", () => { document.getElementById("screen-add").hidden = false; });`);
+      return f;
+    });
+    expect(new TextDecoder().decode(tabbed[0]?.bytes)).toContain('id="screen-add" hidden');
+    const check = await exerciseMedia(browser, tabbed, "photo", []);
+    expect(check).toEqual({ kind: "photo", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
+  }, 60_000);
+
   it("WHEN a voice app's Record button opens the phone's recorder and the recording is kept and played THEN the check passes", async () => {
     const files = VOICE.map((f) => (f.path === "app.js" ? file("app.js", new TextDecoder().decode(f.bytes).replace("/*KEEP*/", 'await workshopData.set("voice-v1", [{ voice: address, topic: "Ideas" }]);')) : f));
+    const check = await exerciseMedia(browser, files, "voice", []);
+    expect(check).toEqual({ kind: "voice", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
+  }, 60_000);
+
+  it("WHEN the Record button sits on a screen opened by a \"Record\" tab and the list is drawn only when the app opens (live eval run 1) THEN the check presses the real button and looks again after a reload", async () => {
+    const files = app(
+      `<h1>Voice Notes</h1><nav role="tablist"><button type="button" role="tab" aria-controls="screen-record" id="tab-record">Record</button></nav>
+      <section id="screen-messages"><h2>Messages</h2><label for="t">Topic</label><select id="t"><option>All</option></select><ul id="list"></ul></section>
+      <section id="screen-record" hidden><h2>Record</h2><button id="record" type="button">Record</button>
+      <p><button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button></p></section>`,
+      `document.getElementById("tab-record").addEventListener("click", () => { document.getElementById("screen-record").hidden = false; });
+      let recording = null;
+      document.getElementById("record").addEventListener("click", async () => {
+        if (recording !== null) { recording.stop(); return; }
+        try {
+          recording = await workshopData.recordVoice();
+          const address = await recording.done;
+          await workshopData.set("voice-v1", [{ voice: address, topic: "Ideas" }]);
+        } catch (error) { statusText.textContent = error.message; } finally { recording = null; }
+      });
+      workshopData.get("voice-v1").then((notes) => {
+        for (const note of notes || []) { const audio = document.createElement("audio"); audio.controls = true; audio.preload = "none"; audio.src = note.voice; document.getElementById("list").append(audio); }
+      }, (error) => { statusText.textContent = error.message; });`,
+    );
     const check = await exerciseMedia(browser, files, "voice", []);
     expect(check).toEqual({ kind: "voice", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
   }, 60_000);
