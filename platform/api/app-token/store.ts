@@ -4,11 +4,14 @@
 // and `kind` (projection required). The conversation function (the build routes) reads `APPEDIT#*` items' `secret`,
 // `secretHash` and `nickname` (projected), puts and updates `APPEDIT#*` and puts `APPTOKEN#*` items with the names
 // below only, deletes in `APPTOKEN#*`, and checks the builder's profile's `role` (ConditionCheckItem in `PARTICIPANT#*`).
-// The reset and the allow-list removal run with the owner's own credentials. No call returns old or new items.
+// The reset and the allow-list removal run with the owner's own credentials. No Lambda call returns old or new items;
+// only the owner's delete, after lost races, reads back the per-app item it deleted (ALL_OLD), never printed.
 import {
+  DeleteItemCommand,
   GetItemCommand,
   TransactWriteItemsCommand,
   type AttributeValue,
+  type DeleteItemCommandOutput,
   type GetItemCommandOutput,
   type TransactWriteItemsCommandOutput,
 } from "@aws-sdk/client-dynamodb";
@@ -19,6 +22,7 @@ import { EDIT_KIND, type AppTokenReader, type EditLink, type EditLinkStore, type
 export interface AppTokenSender {
   send(command: GetItemCommand): Promise<GetItemCommandOutput>;
   send(command: TransactWriteItemsCommand): Promise<TransactWriteItemsCommandOutput>;
+  send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
 }
 
 /**
@@ -27,7 +31,10 @@ export interface AppTokenSender {
  */
 export const REMOVED_ROLE = "removed";
 
-/** A delete reads the link again when it was renewed meanwhile, this many times in all. */
+/**
+ * A delete reads the link again when it was renewed meanwhile, this many times in all, then deletes the per-app item
+ * whatever its hash (access review try 1, L2: parallel renewals must never stop a reset).
+ */
 export const DELETE_ATTEMPTS = 3;
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -186,7 +193,10 @@ export class DynamoAppTokenStore implements AppTokenReader, EditLinkStore {
 
   /**
    * Deletes the lookup item and the per-app item together, the latter only while its hash is the one read (a renewal
-   * in between is read and deleted on the next pass).
+   * in between is read and deleted on the next pass). After DELETE_ATTEMPTS lost races it never gives up: the per-app
+   * item goes whatever its hash (a renewal after that fails its condition), then the lookup item of the hash it held;
+   * a second such pass catches a link made between the two (a make needs the per-app item gone). A link made after
+   * that is a new one, made after this delete (a removed profile's make is refused; reset deletes again at its end).
    */
   async deleteEditLink(app: string): Promise<boolean> {
     for (let attempt = 0; attempt < DELETE_ATTEMPTS; attempt += 1) {
@@ -214,6 +224,16 @@ export class DynamoAppTokenStore implements AppTokenReader, EditLinkStore {
         if (!isConditionFailure(error)) throw error;
       }
     }
-    throw new Error("edit link kept changing during its delete");
+    await this.deleteWhateverHash(app);
+    await this.deleteWhateverHash(app);
+    return true;
+  }
+
+  /** Deletes the per-app item unconditionally, then the lookup item of the hash it held (the owner's credentials only). */
+  private async deleteWhateverHash(app: string): Promise<void> {
+    const output = await this.client.send(new DeleteItemCommand({ TableName: this.tableName, Key: keyOf(appEditKey(app)), ReturnValues: "ALL_OLD" }));
+    const hash = output.Attributes?.["secretHash"]?.S;
+    if (hash === undefined || !/^[0-9a-f]{64}$/.test(hash)) return;
+    await this.client.send(new DeleteItemCommand({ TableName: this.tableName, Key: keyOf(appTokenKey(hash)) }));
   }
 }

@@ -7,7 +7,7 @@ import { APP_TOKEN_PATTERN, hashAppToken } from "../app-token/token.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { SESSION_COOKIE } from "../session/session.js";
 import { APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
-import { BUILD_ROUTE, EDIT_LINK_ROUTE, handleConversationRequest, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
+import { BUILD_ROUTE, EDIT_LINK_ROUTE, MESSAGES, handleConversationRequest, type ConversationDeps, type ConversationLogEntry } from "./conversation.js";
 import { FakeConversationTable, FakeQueue } from "./fakes.js";
 
 const NOW = new Date("2026-11-27T10:00:00.000Z");
@@ -166,11 +166,16 @@ describe("criterion 4: New edit link", () => {
   });
 
   it("refuses a body that is not JSON (415, so a plain form on another site cannot press it) or not an object (400), changing nothing", async () => {
-    const { call } = setup();
+    const { call, logs } = setup();
     const url = json(await call(getBuild(ADA)))["editUrl"];
     expect((await call(renew(ADA, "text/plain"))).statusCode).toBe(415);
     expect((await call(renew(ADA, "application/x-www-form-urlencoded"))).statusCode).toBe(415);
-    expect((await call(renew(ADA, "application/json", "[1]"))).statusCode).toBe(400);
+    const notObject = await call(renew(ADA, "application/json", "[1]"));
+    expect(notObject.statusCode).toBe(400);
+    // Its own reason (not the rebuild route's), logged as an invalid request of the edit-link route.
+    expect(json(notObject)).toEqual({ message: MESSAGES["invalid-edit-link"] });
+    expect(MESSAGES["invalid-edit-link"]).not.toBe(MESSAGES["invalid-rebuild"]);
+    expect(logs.at(-1)).toEqual({ event: "conversation", route: "edit-link", outcome: "invalid-request" });
     expect(json(await call(getBuild(ADA)))["editUrl"]).toBe(url);
   });
 

@@ -117,6 +117,7 @@ export const MESSAGES = {
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
   "invalid-change": "Send a JSON body with the version of the proposed change.",
   "invalid-rebuild": "Send a JSON body (it may be empty: {}).",
+  "invalid-edit-link": "Send a JSON body (it may be empty: {}) to make a new edit link.",
   "invalid-edit": "Send a JSON body with the version of your live spec and the edited text.",
   "edit-empty": PHASE_3_TEXTS.editEmpty,
   "too-long": PHASE_3_TEXTS.editTooLong,
@@ -207,6 +208,7 @@ const refused = (reason: keyof typeof MESSAGES, status: number): Result => {
     reason === "invalid-approve" ||
     reason === "invalid-change" ||
     reason === "invalid-rebuild" ||
+    reason === "invalid-edit-link" ||
     reason === "invalid-edit" ||
     reason === "edit-empty";
   return {
@@ -644,7 +646,7 @@ async function ownLink(store: EditLinkStore, nickname: string): Promise<EditLink
  */
 async function newEditLink(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
   if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
-  if (readJsonObject(request) === undefined) return refused("invalid-rebuild", 400);
+  if (readJsonObject(request) === undefined) return refused("invalid-edit-link", 400);
   const notLive: Result = { outcome: "not-live", response: jsonResponse(404, { message: APP_EDIT_LINK_TEXTS.notLive, reason: "not-live" }) };
   if (participant.nickname === undefined || !NICKNAME_PATTERN.test(participant.nickname)) return notLive;
   const renewed = await renewEditLink(deps.editLinks, participant.id, participant.nickname, deps.randomBytes, deps.now());
