@@ -1,6 +1,6 @@
 import { DeleteItemCommand, GetItemCommand, TransactWriteItemsCommand, type AttributeValue } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import { APP_LIVE_READ_ATTRIBUTES, PARTICIPANT_NICK_PUT_ATTRIBUTES, PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES, SESSION_ALLOW_READ_ATTRIBUTES } from "../../../infra/lib/config.js";
+import { PARTICIPANT_NICK_PUT_ATTRIBUTES, PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES, SESSION_ALLOW_READ_ATTRIBUTES } from "../../../infra/lib/config.js";
 import { DynamoParticipantStore, type ParticipantSender } from "./store.js";
 
 type Sent = GetItemCommand | DeleteItemCommand | TransactWriteItemsCommand;
@@ -175,36 +175,5 @@ describe("DynamoParticipantStore", () => {
     expect(names(put?.Put).length).toBeGreaterThan(0);
     for (const name of names(put?.Put)) expect(PARTICIPANT_NICK_PUT_ATTRIBUTES).toContain(name);
     for (const name of names(update?.Update)) expect(PARTICIPANT_PROFILE_UPDATE_ATTRIBUTES).toContain(name);
-  });
-});
-
-describe("DynamoParticipantStore: app tokens (ticket 3.24)", () => {
-  it("reads an app's live marker consistently, `liveAt` only (in APP_LIVE_READ_ATTRIBUTES)", async () => {
-    const { client, sent } = stubClient([{ Item: { liveAt: { S: "2026-11-26T10:00:00.000Z" } } }, {}, { Item: { pk: { S: "APP#ada" } } }]);
-    const store = new DynamoParticipantStore(client, TABLE);
-    await expect(store.isAppLive("Ada")).resolves.toBe(true);
-    await expect(store.isAppLive("Ada")).resolves.toBe(false);
-    await expect(store.isAppLive("Ada")).resolves.toBe(false);
-    const input = (sent[0] as GetItemCommand).input;
-    expect(input).toEqual({
-      TableName: TABLE,
-      Key: { pk: { S: "APP#ada" }, sk: { S: "LIVE" } },
-      ConsistentRead: true,
-      ProjectionExpression: "#liveAt",
-      ExpressionAttributeNames: { "#liveAt": "liveAt" },
-    });
-    for (const name of Object.values(input.ExpressionAttributeNames ?? {})) expect(APP_LIVE_READ_ATTRIBUTES).toContain(name);
-    // Try 3: the IAM list names the key too, as every read list does.
-    expect(APP_LIVE_READ_ATTRIBUTES).toEqual(["pk", "sk", "liveAt"]);
-  });
-
-  it("makes and revokes tokens through the token store (APPTOKEN# and TOKENS# items)", async () => {
-    const { client, sent } = stubClient([{}, {}, {}]);
-    const store = new DynamoParticipantStore(client, TABLE);
-    await expect(store.createAppToken("p-1", "c".repeat(64), "b".repeat(64), { app: "ada", nickname: "Bob", expiresAt: 2 }, 1)).resolves.toBe("saved");
-    await expect(store.revokeAppTokens("p-1")).resolves.toBe(0);
-    expect((sent[1] as TransactWriteItemsCommand).input.TransactItems?.[0]?.Put?.Item?.["pk"]).toEqual({ S: `APPTOKEN#${"b".repeat(64)}` });
-    expect((sent[1] as TransactWriteItemsCommand).input.TransactItems?.[2]?.ConditionCheck?.Key).toEqual({ pk: { S: `SESSION#${"c".repeat(64)}` }, sk: { S: "SESSION" } });
-    expect((sent[2] as GetItemCommand).input.Key).toEqual({ pk: { S: "TOKENS#p-1" }, sk: { S: "TOKENS" } });
   });
 });

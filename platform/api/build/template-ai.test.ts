@@ -24,7 +24,7 @@ import { jpegOfSize, webmOfSize } from "../app-media/fixtures.js";
 import { mediaKey } from "../app-media/media.js";
 import { hashAppToken } from "../app-token/token.js";
 import type { HttpRequest } from "../http.js";
-import { APP_AI_TEXTS, APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { APP_AI_TEXTS, APP_EDIT_LINK_TEXTS, APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 
 const CLIENT = readFileSync(fileURLToPath(new URL("../../../templates/basic/workshop-data.js", import.meta.url)), "utf8");
 const AGENTS = readFileSync(fileURLToPath(new URL("../../../templates/basic/AGENTS.md", import.meta.url)), "utf8");
@@ -219,7 +219,7 @@ afterAll(async () => {
 beforeEach(async () => {
   store = new FakeAppAiStore();
   store.live.add(NICKNAME);
-  store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", expiresAt: Math.floor(Date.now() / 1000) + 86400 });
+  store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", kind: "edit" });
   media = new FakeMediaReader();
   media.objects.set(mediaKey(NICKNAME, PHOTO_ID), jpegOfSize(200_000));
   media.objects.set(mediaKey(NICKNAME, VOICE_ID), webmOfSize(50_000, ["A_OPUS"], "webm", 10));
@@ -519,7 +519,8 @@ describe("criterion 2: a refusal carries the route's message, and the app shows 
     expect(await page.locator("[data-workshop-sign-in]").isHidden()).toBe(true);
     store.tokens.tokens.clear();
     await page.click("#suggest");
-    await expect.poll(statusText).toBe(APP_SIGN_IN_TEXTS.signInToSave);
+    // The server's own 401 text since ticket 3.26 (the template shows it as it comes).
+    await expect.poll(statusText).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
     expect(calls.map((call) => call.status)).toEqual([401]);
     expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
 

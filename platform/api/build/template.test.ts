@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
-import { APP_DATA_MESSAGES } from "../app-data/data.js";
+import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, NAMESPACE_ADDRESSES, checkApp, readAppFolder } from "./check.js";
 import { selfSignedCertificate } from "./test-certificate.js";
 
@@ -27,7 +27,8 @@ const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods
 /** Ticket 3.25: the app write token the fake API accepts (as the hand-off gives it), and the 401 text of the real API. */
 const TOKEN = Buffer.alloc(32, 9).toString("base64url");
 const HAND_OFF = `#wt=${TOKEN}`;
-const SIGN_IN_TO_SAVE = APP_DATA_MESSAGES.signInToSave;
+// The template's own text until ticket 3.28 changes workshop-data.js (the API now answers "This link is view only.").
+const SIGN_IN_TO_SAVE = APP_SIGN_IN_TEXTS.signInToSave;
 /** Chromium logs every 401 answer itself (a visitor's save): only that line is expected then. */
 const LOGGED_401 = "Failed to load resource: the server responded with a status of 401";
 

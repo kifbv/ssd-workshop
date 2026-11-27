@@ -41,7 +41,7 @@ import type { HttpRequest, HttpResponse } from "../http.js";
 import { checkNickname } from "../participant/participant.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { WorkshopSettings } from "../workshop/settings.js";
-import { APP_AI_TEXTS, APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { APP_AI_TEXTS, APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 import { BEDROCK_MAX_IMAGE_BYTES, MAX_TRANSCRIBE_SECONDS, modelCost, modelReservation, spentBudget, transcribeCost, utcDay, type AiSpend, type SpentBudget } from "./budget.js";
 import { checkAnswer, jsonFromText, MAX_REQUEST_BYTES, MAX_TEXT_CHARACTERS, modelTask, oneLine, parseAppAiRequest, type AnswerTool, type AppAiRequest, type AppAiTask } from "./tasks.js";
 
@@ -428,9 +428,9 @@ async function route(request: HttpRequest, method: AppAiMethod | "other", deps: 
   if (method === "OPTIONS") return { outcome: "preflight", response: { statusCode: 204, headers: { ...AI_PREFLIGHT_HEADERS } } };
   const nickname = request.pathParameters?.["nickname"];
   if (typeof nickname !== "string" || checkNickname(nickname) !== "ok" || !(await deps.store.isLive(nickname))) return refuse(404, "not-found", "Not found.");
-  const write = await checkAppWrite(request, nickname, deps.tokens, deps.now());
+  const write = await checkAppWrite(request, nickname, deps.tokens);
   // The writer's nickname keys its own day counter: one that is not a nickname (it cannot be, by 3.24) is refused.
-  if (!write.ok || checkNickname(write.writer) === "rules") return refuse(401, "unauthorized", APP_SIGN_IN_TEXTS.signInToSave);
+  if (!write.ok || checkNickname(write.writer) === "rules") return refuse(401, "unauthorized", APP_EDIT_LINK_TEXTS.viewOnly);
   seen.writer = write.writer;
   const caller: Caller = { nickname, writer: write.writer, startedAt };
   const settings = await deps.store.getSettings();

@@ -217,6 +217,15 @@ export function capErrorText(name: keyof typeof CAP_RANGES): string {
 }
 
 /**
+ * Ticket 3.26: saving in apps needs the app's edit link. The 401 of every app write route (data, media, AI tasks) and of
+ * the WAF's media rule, which apps show their visitors. `notLive`: "New edit link" before the app is live.
+ */
+export const APP_EDIT_LINK_TEXTS = {
+  viewOnly: "This link is view only.",
+  notLive: "Your app is not live yet: its edit link comes once it is.",
+} as const;
+
+/**
  * Ticket 3.24: saving in apps needs the workshop's sign-in. The data API's 401 (and 3.18's and 3.21's), and the lines of
  * the hand-off page `/app-sign-in` and its token route. Button labels stay in the web code.
  */

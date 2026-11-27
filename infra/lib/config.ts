@@ -349,29 +349,26 @@ export const APP_DATA_FUNCTION_NAME = `${PREFIX}-api-app-data`;
 export const APP_DATA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "updatedBy", "writeDay", "writtenBytes", "sizes"] as const;
 
 /**
- * App write tokens (ticket 3.24, platform/api/app-token/). The data function reads in `APPTOKEN#*` only these names
- * (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES) and nothing else of the partition. Every list
- * below names `pk` and `sk` too (try 3): IAM may count the key among a request's `dynamodb:Attributes`
- * (.claude/rules/infra.md), as every other list of this file does.
+ * Edit links (ticket 3.26, platform/api/app-token/; the lookup items keep 3.24's `APPTOKEN#<hash>` key). The data, media
+ * and AI functions read in `APPTOKEN#*` only these names (GetItem with a projection, `dynamodb:Select`
+ * SPECIFIC_ATTRIBUTES) and nothing else of the partition, and nothing at all in `APPEDIT#*` (the secrets). Every list
+ * below names `pk` and `sk` too: IAM may count the key among a request's `dynamodb:Attributes` (.claude/rules/infra.md).
  */
-export const APP_TOKEN_READ_ATTRIBUTES = ["pk", "sk", "app", "nickname", "expiresAt"] as const;
-/** The names the participant function may put in `APPTOKEN#*` (a new token item, conditions included). */
-export const APP_TOKEN_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", "createdAt", "expiresAt"] as const;
+export const APP_TOKEN_READ_ATTRIBUTES = ["pk", "sk", "app", "nickname", "kind"] as const;
+/** The names the conversation function may put in `APPTOKEN#*` (an edit link's lookup item, conditions included). */
+export const APP_EDIT_TOKEN_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", "kind", "createdAt"] as const;
+/** What the conversation function reads of an app's edit link in `APPEDIT#*` (GetItem with a projection). */
+export const APP_EDIT_READ_ATTRIBUTES = ["pk", "sk", "secret", "secretHash", "nickname"] as const;
+/** The names the conversation function may put in `APPEDIT#*` (a new edit link, only if absent). */
+export const APP_EDIT_PUT_ATTRIBUTES = ["pk", "sk", "type", "app", "nickname", "secret", "secretHash", "createdAt"] as const;
+/** The names the conversation function may update in `APPEDIT#*` ("New edit link", conditional on the old hash). */
+export const APP_EDIT_UPDATE_ATTRIBUTES = ["pk", "sk", "secret", "secretHash", "updatedAt"] as const;
 /**
- * The names the participant function may name in `TOKENS#*` (a participant's token list: its update, conditions
- * included). `version` (ticket 3.24 try 2) rises with every change, and every create and revocation is conditional on it.
+ * What the edit link transactions' ConditionCheck names in `PARTICIPANT#*`: that the builder's profile exists and is
+ * not marked removed from the allow-list (`role`, written by `npm run allowlist -- remove`).
  */
-export const APP_TOKEN_LIST_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "tokens", "expiresAt", "version"] as const;
-/** What the participant function reads of a token list (GetItem with a projection). */
-export const APP_TOKEN_LIST_READ_ATTRIBUTES = ["pk", "sk", "tokens", "version"] as const;
-/** What the token create transaction's ConditionCheck names in `SESSION#*`: that the caller's session still exists. */
-export const APP_TOKEN_SESSION_CHECK_ATTRIBUTES = ["pk", "sk"] as const;
-/**
- * What the token create transaction's second ConditionCheck names in `PARTICIPANT#*` (try 3, access review L1): that the
- * caller's profile exists and is not marked removed from the allow-list (`role`, written by `npm run allowlist -- remove`).
- */
-export const APP_TOKEN_PROFILE_CHECK_ATTRIBUTES = ["pk", "sk", "role"] as const;
-/** What the participant function reads of an app's live marker in `APP#*` (the token route answers only for a live app). */
+export const APP_EDIT_PROFILE_CHECK_ATTRIBUTES = ["pk", "sk", "role"] as const;
+/** What the media and AI functions read of an app's live marker in `APP#*` (the participant function's read went in 3.26). */
 export const APP_LIVE_READ_ATTRIBUTES = ["pk", "sk", "liveAt"] as const;
 
 /**
@@ -864,9 +861,9 @@ export const WAF_MEDIA_AUTH_METHODS = ["PUT", "DELETE"] as const;
 /** Compared after a LOWERCASE transformation (try 3), as checkAppWrite reads the scheme in any case. */
 export const WAF_BEARER_PREFIX = "bearer ";
 export const WAF_MEDIA_AUTH_STATUS = 401;
-export const WAF_MEDIA_AUTH_BODY_KEY = "sign-in-to-save";
-/** The media API's own 401 answer (platform APP_SIGN_IN_TEXTS.signInToSave; a synth test keeps them equal). */
-export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "Sign in to the workshop to save in this app." });
+export const WAF_MEDIA_AUTH_BODY_KEY = "view-only";
+/** The media API's own 401 answer (platform APP_EDIT_LINK_TEXTS.viewOnly, ticket 3.26; a synth test keeps them equal). */
+export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "This link is view only." });
 /**
  * Ticket 3.18 try 3: per address, at most WAF_MEDIA_WRITE_RATE_LIMIT media uploads and deletes together (`PUT` and
  * `DELETE /api/apps/<nickname>/media/<id>`, WAF_MEDIA_WRITE_RATE_METHODS) in WAF_RATE_WINDOW_SECONDS (priority 3, after

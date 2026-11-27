@@ -15,7 +15,7 @@ import {
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
 import { DynamoAppTokenStore, REMOVED_ROLE as REMOVED_PROFILE_ROLE } from "../../api/app-token/store.js";
-import type { AppTokenWriter } from "../../api/app-token/token.js";
+import type { EditLinkStore } from "../../api/app-token/token.js";
 import { allowListKey, participantKey } from "../../api/keys.js";
 import type { Role } from "../../api/types.js";
 import type { GroupRole } from "./logic.js";
@@ -46,16 +46,16 @@ export interface AllowListStore {
   exists(email: string): Promise<boolean>;
   /**
    * Deletes this address's entry (`removed` false when there was none). A linked profile gets the role REMOVED_ROLE
-   * (ticket 3.10), and the linked participant's app write tokens are revoked (ticket 3.24: `revokedTokens`, how many
-   * were listed); nothing else is touched.
+   * (ticket 3.10), and the edit link of the linked participant's app is deleted (ticket 3.26: `editLinkDeleted`);
+   * nothing else is touched.
    */
   remove(email: string): Promise<RemoveResult>;
 }
 
 export interface RemoveResult {
   removed: boolean;
-  /** App write tokens of the linked participant that were ended (0 without a link). */
-  revokedTokens: number;
+  /** Ticket 3.26: whether the linked participant's app had an edit link, now deleted (false without a link). */
+  editLinkDeleted: boolean;
 }
 
 /** The one method of DynamoDBClient this store uses, so tests can stub it. */
@@ -72,13 +72,13 @@ const isConditionFailed = (error: unknown): boolean =>
   error instanceof ConditionalCheckFailedException || (error as { name?: unknown } | null)?.name === "ConditionalCheckFailedException";
 
 export class DynamoAllowListStore implements AllowListStore {
-  private readonly tokens: Pick<AppTokenWriter, "revokeAppTokens">;
+  private readonly tokens: Pick<EditLinkStore, "deleteEditLink">;
 
   constructor(
     private readonly client: DynamoSender,
     private readonly tableName: string,
     private readonly now: () => Date = () => new Date(),
-    tokens?: Pick<AppTokenWriter, "revokeAppTokens">,
+    tokens?: Pick<EditLinkStore, "deleteEditLink">,
   ) {
     this.tokens = tokens ?? new DynamoAppTokenStore(client, tableName);
   }
@@ -129,6 +129,21 @@ export class DynamoAllowListStore implements AllowListStore {
       }),
     );
     return output.Item?.["participantId"]?.S;
+  }
+
+  /** Ticket 3.26: the linked profile's nickname (its app's name), if it has chosen one; read only, never printed. */
+  private async profileNickname(participantId: string): Promise<string | undefined> {
+    const output = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: { pk: str(participantKey(participantId).pk), sk: str(participantKey(participantId).sk) },
+        ProjectionExpression: "#nickname",
+        ExpressionAttributeNames: { "#nickname": "nickname" },
+        ConsistentRead: true,
+      }),
+    );
+    const nickname = output.Item?.["nickname"]?.S;
+    return nickname !== undefined && /^[A-Za-z0-9-]{3,20}$/.test(nickname) ? nickname : undefined;
   }
 
   /** Copies group and role (or only the role) to an existing profile; a profile not created yet is left to the sign-in. */
@@ -192,14 +207,16 @@ export class DynamoAllowListStore implements AllowListStore {
     // Read the link before the entry goes (the delete itself returns no old values). The participant id is the only
     // thing read, never printed; the address itself is only the key.
     const participantId = await this.linkedParticipant(email);
-    // Profile and tokens first: if the delete then fails, a second `remove` still finds the entry (and its link) and
-    // finishes; the other order would leave a person off the list but still on the dashboard, or holding app write
-    // tokens, with nothing left to rerun.
-    let revokedTokens = 0;
+    // Profile and edit link first: if the delete then fails, a second `remove` still finds the entry (and its link) and
+    // finishes; the other order would leave a person off the list but still on the dashboard, or with a working edit
+    // link, with nothing left to rerun.
+    let editLinkDeleted = false;
     if (participantId !== undefined) {
       await this.updateProfile(participantId, { role: REMOVED_ROLE });
-      // Ticket 3.24: their app write tokens stop at once (sign-out's revocation, through the token list, no Scan).
-      revokedTokens = await this.tokens.revokeAppTokens(participantId);
+      // Ticket 3.26: their app's edit link stops at once. The profile is marked first, and making or renewing a link
+      // checks that mark in its own transaction, so none can be made after this delete.
+      const nickname = await this.profileNickname(participantId);
+      if (nickname !== undefined) editLinkDeleted = await this.tokens.deleteEditLink(nickname);
     }
     try {
       // The condition tells "removed" from "there was none" without returning the old item.
@@ -211,9 +228,9 @@ export class DynamoAllowListStore implements AllowListStore {
         }),
       );
     } catch (error) {
-      if (isConditionFailed(error)) return { removed: false, revokedTokens };
+      if (isConditionFailed(error)) return { removed: false, editLinkDeleted };
       throw error;
     }
-    return { removed: true, revokedTokens };
+    return { removed: true, editLinkDeleted };
   }
 }

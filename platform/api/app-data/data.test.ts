@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { FakeAppDataStore } from "./fakes.js";
-import { hashAppToken } from "../app-token/token.js";
+import { hashAppToken, renewEditLink } from "../app-token/token.js";
 import {
   APP_DATA_MESSAGES,
   APP_DATA_ROUTES,
@@ -39,8 +39,8 @@ const tokenFor = (nickname: string): string => Buffer.from(`${nickname.toLowerCa
 function setup(live: string[] = [NICK]) {
   const store = new FakeAppDataStore();
   for (const nickname of live) store.live.add(nickname.toLowerCase());
-  store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 3 * 86400 });
-  for (const nickname of live) store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 3 * 86400 });
+  store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", kind: "edit" });
+  for (const nickname of live) store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", kind: "edit" });
   const logs: AppDataLogEntry[] = [];
   const clock = { now: NOW };
   let pauses = 0;
@@ -767,10 +767,10 @@ describe("logs", () => {
   });
 });
 
-describe("ticket 3.24: writes need an app write token, reads stay public", () => {
-  const SIGN_IN = "Sign in to the workshop to save in this app.";
+describe("ticket 3.24 (3.26: edit secrets): writes need the app's edit secret, reads stay public", () => {
+  const SIGN_IN = "This link is view only.";
 
-  it("criterion 1: WHEN a visitor without a token sends PUT or DELETE THEN the API answers 401 'Sign in to the workshop to save in this app.' and stores nothing, while GET still answers the value", async () => {
+  it("ticket 3.26 criterion 2: WHEN a visitor without a secret sends PUT or DELETE THEN the API answers 401 'This link is view only.' and stores nothing, while GET still answers the value", async () => {
     const { call, store, logs } = setup();
     await call(put("score", 42));
     const before = snapshot(store);
@@ -781,7 +781,7 @@ describe("ticket 3.24: writes need an app write token, reads stay public", () =>
       expect(response.headers).toMatchObject(CORS_HEADERS);
       expect(response.headers?.["access-control-allow-credentials"]).toBeUndefined();
     }
-    expect(APP_DATA_MESSAGES.signInToSave).toBe(SIGN_IN);
+    expect(APP_DATA_MESSAGES.viewOnly).toBe(SIGN_IN);
     expect(snapshot(store)).toBe(before);
     // Refused before the totals or the value are read: only the live markers.
     expect(store.reads).toEqual(["live", "live"]);
@@ -816,15 +816,12 @@ describe("ticket 3.24: writes need an app write token, reads stay public", () =>
     expect((await call(put("score", 2, { nickname: "ADA-42", token: tokenFor(NICK) }))).statusCode).toBe(204);
   });
 
-  it("criterion 4 (expiry): a token at or past its expiry answers 401, one second before it still writes", async () => {
-    const { call, store, clock } = setup();
-    store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 12 * 3600 });
-    clock.now = new Date(NOW.getTime() + 12 * 3600 * 1000 - 1000);
-    expect((await call(put("score", 1, { token: WRITE_TOKEN }))).statusCode).toBe(204);
-    clock.now = new Date(NOW.getTime() + 12 * 3600 * 1000);
+  it("ticket 3.26: a 3.24 per-person token still in the table (no kind) answers 401 and stores nothing", async () => {
+    const { call, store } = setup();
+    store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob" });
     expect((await call(put("score", 2, { token: WRITE_TOKEN }))).statusCode).toBe(401);
     expect((await call(request("DELETE", "score", { token: WRITE_TOKEN }))).statusCode).toBe(401);
-    expect(store.values.get("ada-42/score")?.json).toBe("1");
+    expect(store.values.size).toBe(0);
   });
 
   it("criterion 5: WHEN a write succeeds THEN the value records updatedBy = the writer's nickname, and GET ...?info=1 answers {value, updatedBy, updatedAt}", async () => {
@@ -917,13 +914,11 @@ describe("ticket 3.24: writes need an app write token, reads stay public", () =>
       expect((await call(whoami(tokenFor("grace"), { nickname: "grace" }))).statusCode).toBe(200);
     });
 
-    it("WHEN the token has expired or was revoked (sign-out, reset) THEN it answers 401", async () => {
-      const { call, store, clock } = setup();
-      store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 60 });
+    it("WHEN the secret is a 3.24 token (no kind) or was deleted (New edit link, reset) THEN it answers 401", async () => {
+      const { call, store } = setup();
       expect((await call(whoami(WRITE_TOKEN))).statusCode).toBe(200);
-      clock.now = new Date(NOW.getTime() + 60 * 1000);
+      store.tokens.tokens.set(hashAppToken(WRITE_TOKEN), { app: NICK.toLowerCase(), nickname: "Bob" });
       expect((await call(whoami(WRITE_TOKEN))).statusCode).toBe(401);
-      clock.now = NOW;
       store.tokens.tokens.delete(hashAppToken(WRITE_TOKEN));
       expect((await call(whoami(WRITE_TOKEN))).statusCode).toBe(401);
     });
@@ -951,5 +946,66 @@ describe("ticket 3.24: writes need an app write token, reads stay public", () =>
     store.tokens.failure = Object.assign(new Error(`down ${tokenFor(NICK)}`), { name: "InternalServerError" });
     expect((await call(put("score", 1))).statusCode).toBe(500);
     expect(logs.at(-1)).toEqual({ event: "app-data", method: "PUT", outcome: "failed", status: 500, error: "InternalServerError" });
+  });
+});
+
+describe("ticket 3.26: the app's edit link", () => {
+  const SECRET = Buffer.alloc(32, 21).toString("base64url");
+  const GRACE_SECRET = Buffer.alloc(32, 22).toString("base64url");
+
+  function linked() {
+    const s = setup([NICK, "grace"]);
+    s.store.tokens.tokens.clear();
+    s.store.tokens.addEditLink(NICK, NICK, SECRET);
+    s.store.tokens.addEditLink("grace", "Grace", GRACE_SECRET);
+    return s;
+  }
+
+  it("criterion 1: WHEN PUT, DELETE or ?whoami=1 carries the app's edit secret THEN it is accepted and the writer is the app's builder", async () => {
+    const { call, store, logs } = linked();
+    expect((await call(put("score", 3, { token: SECRET }))).statusCode).toBe(204);
+    expect(store.values.get("ada-42/score")).toMatchObject({ updatedBy: NICK });
+    const who = await call({ ...request("GET", "score", { token: SECRET }), queryStringParameters: { whoami: "1" } });
+    expect(JSON.parse(who.body ?? "")).toEqual({ nickname: NICK });
+    const info = await call({ ...request("GET", "score"), queryStringParameters: { info: "1" } });
+    expect(JSON.parse(info.body ?? "")).toMatchObject({ value: 3, updatedBy: NICK });
+    expect((await call(request("DELETE", "score", { token: SECRET }))).statusCode).toBe(204);
+    expect(store.values.has("ada-42/score")).toBe(false);
+    expect(logs.filter((l) => l.method !== "GET").map((l) => [l.method, l.outcome, l.writer])).toEqual([
+      ["PUT", "saved", NICK],
+      ["DELETE", "deleted", NICK],
+    ]);
+  });
+
+  it("criterion 2: WHEN a write carries no secret, another app's secret, or an old secret replaced by New edit link THEN 401 'This link is view only.', nothing stored, GET still answers", async () => {
+    const { call, store } = linked();
+    expect((await call(put("score", 1, { token: SECRET }))).statusCode).toBe(204);
+    const renewed = await renewEditLink(store.tokens, "p-ada", NICK, (n) => Buffer.alloc(n, 23), NOW);
+    if (!renewed.ok) throw new Error("not renewed");
+    const before = snapshot(store);
+    const refused = [
+      await call(put("score", 2, { token: null })),
+      await call(request("DELETE", "score", { token: null })),
+      await call(put("score", 2, { token: GRACE_SECRET })),
+      await call(request("DELETE", "score", { token: GRACE_SECRET })),
+      await call(put("score", 2, { token: SECRET })),
+      await call(request("DELETE", "score", { token: SECRET })),
+    ];
+    for (const answer of refused) expect([answer.statusCode, JSON.parse(answer.body ?? "")]).toEqual([401, { message: "This link is view only." }]);
+    expect(APP_DATA_MESSAGES.viewOnly).toBe("This link is view only.");
+    expect(snapshot(store)).toBe(before);
+    const read = await call(request("GET", "score"));
+    expect([read.statusCode, read.body]).toEqual([200, "1"]);
+    // The new secret writes at once.
+    expect((await call(put("score", 4, { token: renewed.link.secret }))).statusCode).toBe(204);
+  });
+
+  it("criterion 6 (data API part): no log line holds the secret or its hash, accepted or refused", async () => {
+    const { call, logs } = linked();
+    await call(put("score", 1, { token: SECRET }));
+    await call(put("score", 1, { token: GRACE_SECRET }));
+    await call({ ...request("GET", "score", { token: SECRET }), queryStringParameters: { whoami: "1" } });
+    const text = JSON.stringify(logs);
+    for (const secret of [SECRET, hashAppToken(SECRET), GRACE_SECRET, hashAppToken(GRACE_SECRET)]) expect(text).not.toContain(secret);
   });
 });

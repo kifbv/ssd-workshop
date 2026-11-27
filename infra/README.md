@@ -487,6 +487,36 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$U"
 # expect: 204
 ```
 
+## Check after the edit links deploy (ticket 3.26)
+
+```mermaid
+sequenceDiagram
+  participant B as Builder (signed in, step 4)
+  participant C as ssd-workshop-api-conversation
+  participant A as /apps/nick/#edit=secret (sandboxed)
+  participant D as data, media and AI functions
+  B->>C: GET /api/build (session cookie)
+  C-->>B: {..., appUrl, editUrl} (secret kept at APPEDIT#nick, lookup APPTOKEN#sha256)
+  B->>A: open editUrl (link or QR code)
+  A->>D: PUT/DELETE/upload/AI with Authorization: Bearer secret
+  D-->>A: 2xx as the builder, or 401 "This link is view only."
+```
+
+The 3.24 per-person tokens stop at this deploy (their items are refused: no `kind`), and `POST /api/app-tokens` answers
+404 (`/app-sign-in/` still calls it until ticket 3.27). Merge 3.28 with this ticket, or right after, then run
+`AWS_PROFILE=franck npm run -s apps -- refresh` once. No credentials needed:
+
+```sh
+U=https://workshop.rankly.games/api/apps/<nick>/data/sign-in-check
+curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' --data '1' "$U"
+# expect: 401 {"message":"This link is view only."}
+curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' "https://workshop.rankly.games/api/apps/<nick>/media/AbCdEfGhIjKlMnOpQrStUv"
+# expect: 401 {"message":"This link is view only."} (the WAF's answer, no bearer)
+```
+
+Then, signed in as a builder whose app is live: step 4's `GET /api/build` (browser dev tools) answers `editUrl`; a
+`PUT` with `authorization: Bearer <the part after #edit=>` answers 204, and `?info=1` shows the builder as `updatedBy`.
+
 ## Check after the sign-in-to-save deploy (ticket 3.24)
 
 ```mermaid

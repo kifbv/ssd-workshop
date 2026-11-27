@@ -36,7 +36,7 @@ function setup(step: "clarify" | "spec" = "clarify") {
   let counter = 0;
   const workerLogs: WorkerLogEntry[] = [];
   const logs: ConversationLogEntry[] = [];
-  const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
+  const deps: ConversationDeps = { sessions: table, store: table, editLinks: table.appTokens, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
   const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, held: queue, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
   const run = (job: AiJob) => processJob(parseJob(jobBody(job)), workerDeps);
   /** Delivers the jobs the conversation queued. */

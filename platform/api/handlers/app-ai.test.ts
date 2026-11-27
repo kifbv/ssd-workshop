@@ -36,7 +36,7 @@ describe("ticket 3.21: the AI function's logs", () => {
     const transcriber = new FakeTranscriber();
     transcriber.transcriptText = "SPOKENMARKER words";
     store.live.add(NICK.toLowerCase());
-    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", expiresAt: Date.parse("2026-11-28T10:00:00.000Z") / 1000 });
+    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", kind: "edit" });
     media.objects.set(mediaKey(NICK, PHOTO), jpegOfSize(20_000));
     media.objects.set(mediaKey(NICK, VOICE), webmOfSize(30_000));
     model.next = { input: { values: { f1: "SHOPMARKER" } }, text: "", inputTokens: 1000, outputTokens: 20 };

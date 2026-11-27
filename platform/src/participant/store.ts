@@ -32,8 +32,8 @@ export interface ParticipantResetStore extends ResetStore {
   listAppMedia(nickname: string): Promise<string[]>;
   /** Deletes the given sort keys of the app's media partition. */
   deleteAppMedia(nickname: string, sortKeys: readonly string[]): Promise<void>;
-  /** Ticket 3.24: deletes every app write token of the participant and their list; returns how many were listed. */
-  revokeAppTokens(participantId: string): Promise<number>;
+  /** Ticket 3.26: deletes the app's edit link and its lookup item; true when there was one. */
+  deleteEditLink(nickname: string): Promise<boolean>;
 }
 
 /** The methods of DynamoDBClient this store uses, so tests can stub it. */
@@ -57,8 +57,8 @@ export class DynamoParticipantResetStore extends DynamoResetStore implements Par
     super(client, table, sleep);
   }
 
-  revokeAppTokens(participantId: string): Promise<number> {
-    return new DynamoAppTokenStore(this.client, this.table).revokeAppTokens(participantId);
+  deleteEditLink(nickname: string): Promise<boolean> {
+    return new DynamoAppTokenStore(this.client, this.table).deleteEditLink(nickname);
   }
 
   listAppData(nickname: string): Promise<string[]> {

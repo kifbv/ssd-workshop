@@ -22,7 +22,7 @@ import { CORS_HEADERS, retryPauseMs } from "../app-data/data.js";
 import { checkNickname } from "../participant/participant.js";
 import { SITE_DOMAIN } from "../settings.js";
 import { errorName } from "../sign-in/code-request.js";
-import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 import { inspectMedia, MEDIA_CONTENT_TYPES, recordingSeconds, stripRecordingMetadata, type MediaKind } from "./formats.js";
 
 export const APP_MEDIA_PATH = "/api/apps/{nickname}/media/{id}";
@@ -101,7 +101,7 @@ const JSON_ANSWER_HEADERS = { "content-type": "application/json", "cache-control
 /** The plain reasons apps show their visitors (workshop-data.js shows `message`). */
 export const APP_MEDIA_MESSAGES = {
   notFound: "Not found.",
-  signInToSave: APP_SIGN_IN_TEXTS.signInToSave,
+  viewOnly: APP_EDIT_LINK_TEXTS.viewOnly,
   badId: "A photo or recording id has 22 letters, digits, dashes or underscores.",
   noBody: "Send the photo or recording as the request's body.",
   fileTooBig: "This file is too big: a photo or recording can be at most 4 MB.",
@@ -357,8 +357,8 @@ async function route(request: HttpRequest, method: AppMediaMethod | "other", dep
   if (typeof nickname !== "string" || checkNickname(nickname) !== "ok") return notFound();
   if (!(await deps.store.isLive(nickname))) return notFound();
   if (typeof id !== "string" || !MEDIA_ID_PATTERN.test(id)) return refuse(400, "bad-id", APP_MEDIA_MESSAGES.badId);
-  const write = await checkAppWrite(request, nickname, deps.tokens, deps.now());
-  if (!write.ok) return refuse(401, "unauthorized", APP_MEDIA_MESSAGES.signInToSave);
+  const write = await checkAppWrite(request, nickname, deps.tokens);
+  if (!write.ok) return refuse(401, "unauthorized", APP_MEDIA_MESSAGES.viewOnly);
   seen.writer = write.writer;
   return method === "PUT" ? putMedia(request, nickname, id, write.writer, deps) : deleteMedia(nickname, id, deps);
 }

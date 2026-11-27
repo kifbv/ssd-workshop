@@ -128,7 +128,7 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
 
   beforeEach(async () => {
     store = new FakeAppDataStore();
-    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", kind: "edit" });
     seen = [];
     logs = [];
     context = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -226,10 +226,10 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
     expect(seen.some((s) => s.path === `${DATA_PREFIX}whoami`)).toBe(false);
     const message = await page.evaluate<string>(`workshopData.set("presses", 6).then(() => "stored", (error) => error.message)`);
-    expect(message).toBe(APP_DATA_MESSAGES.signInToSave);
+    expect(message).toBe(APP_DATA_MESSAGES.viewOnly);
     // Ticket 3.25: the template's own button, pressed by a visitor, shows the same reason and saves nothing.
     await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => page.locator("#status").textContent()).toBe(APP_DATA_MESSAGES.signInToSave);
+    await expect.poll(() => page.locator("#status").textContent()).toBe(APP_DATA_MESSAGES.viewOnly);
     expect(store.values.get(`${NICKNAME}/presses`)?.json).toBe("5");
     expect(seen.filter((s) => s.method === "PUT").map((s) => s.status)).toEqual([401, 401]);
     expect(seen.find((s) => s.method === "PUT")).toMatchObject({ status: 401, allowOrigin: "*", allowCredentials: undefined });
@@ -257,7 +257,7 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     });
     store.live.add(NICKNAME);
     // Another app's token, then an unknown one: both well formed, neither for this app.
-    store.tokens.tokens.set(hashAppToken(Buffer.alloc(32, 6).toString("base64url")), { app: "other-app", nickname: "Eve", expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+    store.tokens.tokens.set(hashAppToken(Buffer.alloc(32, 6).toString("base64url")), { app: "other-app", nickname: "Eve", kind: "edit" });
     for (const token of [Buffer.alloc(32, 6).toString("base64url"), Buffer.alloc(32, 7).toString("base64url")]) {
       await openApp("0", `#wt=${token}`);
       expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();

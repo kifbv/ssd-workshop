@@ -22,6 +22,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { APP_MEDIA_CONTENT_SECURITY_POLICY, APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
 import { inspectMedia, MEDIA_CONTENT_TYPES, recordingSeconds } from "../app-media/formats.js";
 import { APP_MEDIA_MESSAGES, MAX_MEDIA_FILE_BYTES, MEDIA_ID_PATTERN } from "../app-media/media.js";
+import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
 
 const CLIENT = readFileSync(fileURLToPath(new URL("../../../templates/basic/workshop-data.js", import.meta.url)), "utf8");
 /** The app under test is served sandboxed; `mic-nick` is the same app without the sandbox (a page allowed the microphone). */
@@ -179,7 +180,7 @@ beforeAll(async () => {
       }
       if (app !== undefined && path === `/api/apps/${app}/data/whoami`) {
         if (request.method === "OPTIONS") return json(204, "");
-        if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: APP_MEDIA_MESSAGES.signInToSave });
+        if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: APP_SIGN_IN_TEXTS.signInToSave });
         return json(200, { nickname: "Bob" });
       }
       const media = /^\/api\/apps\/([a-z-]+)\/media\/([^/]+)$/.exec(path);
@@ -210,7 +211,7 @@ beforeAll(async () => {
           } else json(status, value);
         };
         if (!MEDIA_ID_PATTERN.test(id)) return answer(400, { message: APP_MEDIA_MESSAGES.badId });
-        if (request.headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { message: APP_MEDIA_MESSAGES.signInToSave });
+        if (request.headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { message: APP_SIGN_IN_TEXTS.signInToSave });
         if (request.method === "DELETE") {
           stored.delete(id);
           return answer(204, null);
@@ -488,10 +489,10 @@ describe("savePhoto (ticket 3.19)", () => {
     await openApp("");
     expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
     await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: await picture("image/jpeg", 64, 48) });
-    await expect.poll(statusText).toBe(APP_MEDIA_MESSAGES.signInToSave);
+    await expect.poll(statusText).toBe(APP_SIGN_IN_TEXTS.signInToSave);
     await page.click("#record");
     await expect.poll(() => page.evaluate<unknown>("window.usedMicrophone")).toBeUndefined();
-    expect(await statusText()).toBe(APP_MEDIA_MESSAGES.signInToSave);
+    expect(await statusText()).toBe(APP_SIGN_IN_TEXTS.signInToSave);
     expect(calls).toEqual([]);
     expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
     expect(errors).toEqual([]);
@@ -501,9 +502,9 @@ describe("savePhoto (ticket 3.19)", () => {
     allowed.push(LOGGED(401));
     await openApp();
     expect(await page.locator("[data-workshop-sign-in]").isHidden()).toBe(true);
-    refuseNext = { status: 401, message: APP_MEDIA_MESSAGES.signInToSave };
+    refuseNext = { status: 401, message: APP_SIGN_IN_TEXTS.signInToSave };
     await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: await picture("image/jpeg", 64, 48) });
-    await expect.poll(statusText).toBe(APP_MEDIA_MESSAGES.signInToSave);
+    await expect.poll(statusText).toBe(APP_SIGN_IN_TEXTS.signInToSave);
     expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
     expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
     expect(errors).toEqual([]);

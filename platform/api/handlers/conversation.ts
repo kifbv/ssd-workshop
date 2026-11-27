@@ -5,6 +5,7 @@ import { clientSettings } from "../aws.js";
 import { handleConversationRequest, type ConversationDeps, type ConversationLogEntry } from "../conversation/conversation.js";
 import { SqsMessageQueue } from "../conversation/queue.js";
 import { DynamoConversationStore } from "../conversation/store.js";
+import { DynamoAppTokenStore } from "../app-token/store.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { DynamoParticipantStore } from "../participant/store.js";
 import { AI_QUEUE_URL, TABLE_NAME } from "../settings.js";
@@ -34,6 +35,7 @@ export async function handler(event: HttpRequest): Promise<HttpResponse> {
       sessions: new DynamoParticipantStore(dynamo, TABLE_NAME),
       store: new DynamoConversationStore(dynamo, TABLE_NAME),
       queue: new SqsMessageQueue(new SQSClient(clientSettings()), AI_QUEUE_URL),
+      editLinks: new DynamoAppTokenStore(dynamo, TABLE_NAME),
       now: () => new Date(),
       randomBytes,
       log: logEntry,

@@ -173,17 +173,21 @@ export const appAiWriterKey = (writer: string): ItemKey => ({ pk: `APPAI_WRITER#
 export const appAiTotalKey = (): ItemKey => ({ pk: "APPAI_TOTAL", sk: "AI_USAGE" });
 
 /**
- * An app write token (ticket 3.24), by the SHA-256 (hex) of the token: `APPTOKEN#<hash>` / `TOKEN`. Its own partition
- * prefix: IAM's `APP#*` and `APPDATA#*` never match `APPTOKEN#...` (the character after `APP` is `T`), and `APPTOKEN#*`
- * never matches `TOKENS#...`.
+ * An edit link's lookup item (ticket 3.26; 3.24's app write tokens used the same key), by the SHA-256 (hex) of the
+ * secret: `APPTOKEN#<hash>` / `TOKEN`. Its own partition prefix: IAM's `APP#*` and `APPDATA#*` never match
+ * `APPTOKEN#...` (the character after `APP` is `T`), nor `APPEDIT#*`.
  */
 export const appTokenKey = (tokenHash: string): ItemKey => {
   if (!/^[0-9a-f]{64}$/.test(tokenHash)) throw new Error("token hash is not 64 hex digits");
   return { pk: `APPTOKEN#${tokenHash}`, sk: "TOKEN" };
 };
 
-/** One participant's app write tokens (ticket 3.24): a map hash -> expiry, so sign-out and a reset can delete them all. */
-export const appTokenListKey = (participantId: string): ItemKey => ({ pk: `TOKENS#${checkId("participant id", participantId)}`, sk: "TOKENS" });
+/**
+ * An app's edit link (ticket 3.26): `APPEDIT#<lower-cased nickname>` / `EDIT`, holding the secret (so step 4 can show it
+ * again), its hash and the builder's nickname. Its own prefix: `APP#*`, `APPDATA#*`, `APPMEDIA#*`, `APPAI#*` and
+ * `APPTOKEN#*` never match `APPEDIT#...`, so only a role granted `APPEDIT#*` (the conversation function) reads it.
+ */
+export const appEditKey = (nickname: string): ItemKey => ({ pk: `APPEDIT#${checkId("nickname", nickname).toLowerCase()}`, sk: "EDIT" });
 
 /**
  * The workshop's settings (ticket 3.2): one item, `SETTINGS` / `SETTINGS`, holding the admin's caps and the global

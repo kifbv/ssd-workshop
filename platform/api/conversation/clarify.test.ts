@@ -44,6 +44,7 @@ function setup() {
   const deps: ConversationDeps = {
     sessions: table,
     store: table,
+    editLinks: table.appTokens,
     queue,
     now: () => clock,
     randomBytes: (n) => Buffer.alloc(n, ++counter),

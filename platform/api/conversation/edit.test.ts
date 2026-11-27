@@ -74,7 +74,7 @@ function setup(options: { used?: number; firstStatus?: "live" | "failed" | "buil
   let counter = 0;
   const logs: unknown[] = [];
   const workerLogs: WorkerLogEntry[] = [];
-  const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
+  const deps: ConversationDeps = { sessions: table, store: table, editLinks: table.appTokens, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
   const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, held: queue, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
   const aiDelivered: string[] = [];
   /** Runs the AI worker on every job its queue holds, in order. */

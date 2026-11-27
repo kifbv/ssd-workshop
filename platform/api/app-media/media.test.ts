@@ -3,8 +3,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { HttpRequest, HttpResponse } from "../http.js";
-import { hashAppToken } from "../app-token/token.js";
-import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { hashAppToken, renewEditLink } from "../app-token/token.js";
+import { APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 import { FakeAppMediaStore, FakeMediaBucket } from "./fakes.js";
 import { exifWithGps, fragmentedMp4, jpegOfSize, mp4OfSize, mp4TitleBox, oggOfSize, PNG_SIGNATURE, webmOfSize } from "./fixtures.js";
 import {
@@ -37,7 +37,7 @@ function setup(live: string[] = [NICK, "Bob-7"]) {
   const bucket = new FakeMediaBucket();
   for (const nickname of live) {
     store.live.add(nickname.toLowerCase());
-    store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 2 * 86400 });
+    store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", kind: "edit" });
   }
   const logs: AppMediaLogEntry[] = [];
   const clock = { now: NOW };
@@ -374,17 +374,18 @@ describe("criterion 6: no live app, no token", () => {
       expect(store.calls).toEqual([]);
     });
 
-    it(`ticket 3.24 rule: ${method} without a token, or with another app's, a malformed, unknown or expired one, answers 401 without touching the bucket`, async () => {
-      const { call, store, bucket, clock } = setup();
+    it(`ticket 3.24 rule (3.26 text): ${method} without a secret, or with another app's, a malformed, unknown or 3.24 per-person one, answers 401 without touching the bucket`, async () => {
+      const { call, store, bucket } = setup();
       store.records.set(`ada-42/${ID}`, { bytes: 10, status: "stored", createdAt: "x", contentType: "image/jpeg", uploadedBy: "Bob" });
       const body = method === "PUT" ? jpegOfSize(1000) : undefined;
       const withBody = body === undefined ? {} : { body };
       for (const token of [null, tokenFor("Bob-7"), "short", Buffer.alloc(32, 1).toString("base64url")]) {
         const answer = await call(request(method, { token, ...withBody }));
         expect(answer.statusCode, String(token)).toBe(401);
-        expect(message(answer)).toBe(APP_SIGN_IN_TEXTS.signInToSave);
+        expect(message(answer)).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
       }
-      clock.now = new Date(NOW.getTime() + 3 * 86400 * 1000);
+      // A 3.24 per-person token still in the table (no kind).
+      store.tokens.tokens.set(hashAppToken(tokenFor(NICK)), { app: NICK.toLowerCase(), nickname: "Bob" });
       expect((await call(request(method, withBody))).statusCode).toBe(401);
       expect(bucket.calls).toEqual([]);
       expect(store.records.size).toBe(1);
@@ -519,5 +520,55 @@ describe("try 3: the messages are listed for veto", () => {
     const line = decisions.split("\n").find((l) => l.startsWith("- **(3.18) Messages"));
     expect(line).toBeDefined();
     for (const text of Object.values(APP_MEDIA_MESSAGES)) expect(line, text).toContain(`"${text}"`);
+  });
+});
+
+describe("ticket 3.26: the app's edit link", () => {
+  const SECRET = Buffer.alloc(32, 31).toString("base64url");
+  const BOB_SECRET = Buffer.alloc(32, 32).toString("base64url");
+
+  function linked() {
+    const s = setup();
+    s.store.tokens.tokens.clear();
+    s.store.tokens.addEditLink(NICK, NICK, SECRET);
+    s.store.tokens.addEditLink("Bob-7", "Bob-7", BOB_SECRET);
+    return s;
+  }
+
+  it("criterion 1: WHEN PUT or DELETE carries the app's edit secret THEN it is accepted and the uploader is the app's builder", async () => {
+    const { call, store, logs } = linked();
+    expect((await call(put(jpegOfSize(1000), { token: SECRET }))).statusCode).toBe(201);
+    expect(store.records.get(`ada-42/${ID}`)).toMatchObject({ status: "stored", uploadedBy: NICK });
+    expect((await call(del({ token: SECRET }))).statusCode).toBe(204);
+    expect(logs.map((l) => [l.method, l.status, l.writer])).toEqual([
+      ["PUT", 201, NICK],
+      ["DELETE", 204, NICK],
+    ]);
+  });
+
+  it("criterion 2: WHEN PUT or DELETE carries no secret, another app's, or an old one replaced by New edit link THEN 401 'This link is view only.' and nothing is stored or deleted", async () => {
+    const { call, store, bucket } = linked();
+    expect((await call(put(jpegOfSize(1000), { token: SECRET }))).statusCode).toBe(201);
+    const renewed = await renewEditLink(store.tokens, "p-ada", NICK, (n) => Buffer.alloc(n, 33), NOW);
+    if (!renewed.ok) throw new Error("not renewed");
+    const records = JSON.stringify([...store.records]);
+    const objects = bucket.objects.size;
+    for (const token of [null, BOB_SECRET, SECRET]) {
+      for (const request of [put(jpegOfSize(1000), { token, id: id(2) }), del({ token })]) {
+        const answer = await call(request);
+        expect([answer.statusCode, message(answer)], String(token)).toEqual([401, "This link is view only."]);
+      }
+    }
+    expect(JSON.stringify([...store.records])).toBe(records);
+    expect(bucket.objects.size).toBe(objects);
+    expect((await call(put(jpegOfSize(1000), { token: renewed.link.secret, id: id(3) }))).statusCode).toBe(201);
+  });
+
+  it("criterion 6 (media API part): no log line holds the secret or its hash", async () => {
+    const { call, logs } = linked();
+    await call(put(jpegOfSize(1000), { token: SECRET }));
+    await call(put(jpegOfSize(1000), { token: BOB_SECRET, id: id(4) }));
+    const text = JSON.stringify(logs);
+    for (const secret of [SECRET, hashAppToken(SECRET), BOB_SECRET, hashAppToken(BOB_SECRET)]) expect(text).not.toContain(secret);
   });
 });

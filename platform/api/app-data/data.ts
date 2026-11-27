@@ -1,7 +1,7 @@
 // The data API for participants' apps (ticket 2.4): `GET`, `PUT` and `DELETE
 // /api/apps/{nickname}/data/{key}`, JSON values that anyone with the app's address may read. Since ticket 3.24 a
-// write (`PUT`, `DELETE`) needs an app write token for this app (`Authorization: Bearer <token>`, ../app-token/),
-// which only a participant signed in to the workshop can get, and each value records its writer's nickname
+// write (`PUT`, `DELETE`) needs a secret for this app (`Authorization: Bearer <secret>`, ../app-token/): since 3.26 the
+// app's edit secret, which its builder gets on the workshop page, and each value records its writer's nickname (the builder)
 // (`updatedBy`; `GET ...?info=1` answers `{value, updatedBy, updatedAt}`). Since ticket 3.25 try 2, `GET ...?whoami=1` with
 // the token answers `{nickname}`, the token's writer (401 without a valid token for this app). Apps run sandboxed (opaque origin), so
 // every answer carries `Access-Control-Allow-Origin: *` (never with credentials), and `OPTIONS` answers the preflight
@@ -14,7 +14,7 @@ import { isJsonContentType, UNSUPPORTED_MEDIA_TYPE_MESSAGE, type HttpRequest, ty
 import { checkAppWrite, type AppTokenReader } from "../app-token/token.js";
 import { checkNickname } from "../participant/participant.js";
 import { errorName } from "../sign-in/code-request.js";
-import { APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 
 export const APP_DATA_PATH = "/api/apps/{nickname}/data/{key}";
 export const APP_DATA_METHODS = ["GET", "PUT", "DELETE", "OPTIONS"] as const;
@@ -81,8 +81,8 @@ const EMPTY_ANSWER_HEADERS = { "cache-control": "no-store", ...CORS_HEADERS } as
 /** The plain reasons apps show their visitors (workshop-data.js shows `message`). */
 export const APP_DATA_MESSAGES = {
   notFound: "Not found.",
-  /** Ticket 3.24: a write without a valid token for this app (none, unknown, revoked, expired or another app's). */
-  signInToSave: APP_SIGN_IN_TEXTS.signInToSave,
+  /** Ticket 3.26: a write without this app's edit secret (none, unknown, replaced, a 3.24 token, or another app's). */
+  viewOnly: APP_EDIT_LINK_TEXTS.viewOnly,
   badKey: "A key has 1 to 64 letters, digits, dashes or underscores.",
   badJson: "Send the value as JSON.",
   tooDeep: "This value is nested too deeply: lists and objects can go at most 100 levels deep.",
@@ -380,8 +380,8 @@ async function route(request: HttpRequest, method: AppDataMethod | "other", deps
   if (method === "GET" && request.queryStringParameters?.["whoami"] === "1") {
     // Ticket 3.25 try 2: who the app's visitor saves as (workshop-data.js's whoAmI()), from the token itself, never from
     // the address. The same check as a write, but nothing is written, counted or read beyond the live marker and the token.
-    const who = await checkAppWrite(request, nickname, deps.tokens, deps.now());
-    if (!who.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.signInToSave);
+    const who = await checkAppWrite(request, nickname, deps.tokens);
+    if (!who.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.viewOnly);
     return { outcome: "whoami", response: json(200, JSON.stringify({ nickname: who.writer })) };
   }
   if (method === "GET") {
@@ -396,8 +396,8 @@ async function route(request: HttpRequest, method: AppDataMethod | "other", deps
     return { outcome: "read", response: json(200, body), bytes: Buffer.byteLength(value, "utf8") };
   }
   // Ticket 3.24: every write needs a valid token for this app, checked before the body is read.
-  const write = await checkAppWrite(request, nickname, deps.tokens, deps.now());
-  if (!write.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.signInToSave);
+  const write = await checkAppWrite(request, nickname, deps.tokens);
+  if (!write.ok) return refuse(401, "unauthorized", APP_DATA_MESSAGES.viewOnly);
   seen.writer = write.writer;
   return method === "PUT" ? putValue(request, nickname, key, write.writer, deps) : deleteValue(nickname, key, deps);
 }
