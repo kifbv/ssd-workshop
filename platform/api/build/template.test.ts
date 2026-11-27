@@ -478,6 +478,160 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(errors).toEqual([]);
   });
 
+  // Sign-in fix (2026-11-27, a live app): the app's only sign-in button sat in a form on a hidden detail screen, while the
+  // list screen's Add buttons also saved; a refused save there showed no way to sign in.
+  const SCREENS_APP: Record<string, string> = {
+    "index.html": `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="workshop-data.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Movies</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <section id="list" class="screen">
+        <h1>Movies</h1>
+        <p>Casablanca <button id="add" type="button">Add</button> <button id="open" type="button">Details</button></p>
+      </section>
+      <section id="detail" class="screen hidden">
+        <form id="form">
+          <label>Title <input name="title"></label>
+          <button type="submit">Save</button>
+          <p><button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button></p>
+        </form>
+      </section>
+      <p id="status" role="status"></p>
+    </main>
+  </body>
+</html>
+`,
+    "style.css": ".screen.hidden { display: none; }\n",
+    "app.js": `"use strict";
+document.addEventListener("DOMContentLoaded", () => {
+  const status = document.getElementById("status");
+  const save = async () => {
+    try { await workshopData.set("movies", ["Casablanca"]); status.textContent = "Saved."; } catch (error) { status.textContent = error.message; }
+  };
+  document.getElementById("add").addEventListener("click", save);
+  document.getElementById("open").addEventListener("click", () => {
+    document.getElementById("list").classList.add("hidden");
+    document.getElementById("detail").classList.remove("hidden");
+  });
+  document.getElementById("form").addEventListener("submit", (event) => { event.preventDefault(); save(); });
+});
+`,
+  };
+
+  /** Serves SCREENS_APP with every file routed (workshop-data.js from the template): none comes from the loopback server. */
+  const openScreensApp = async (hash = ""): Promise<void> => {
+    await serveApp({ ...SCREENS_APP, "workshop-data.js": readFileSync(join(TEMPLATE_DIR, "workshop-data.js"), "utf8") });
+    await page.goto("about:blank");
+    await page.goto(`${origin}${APP_PATH}${hash}`);
+    await page.getByRole("button", { name: "Add" }).waitFor();
+  };
+
+  /** The floating sign-in button workshop-data.js adds at the end of the body (the app's own sits inside its form). */
+  const floating = () => page.locator("body > [data-workshop-sign-in]");
+
+  it("sign-in fix: WHEN the page's only sign-in element sits on a hidden screen and a save is refused with 401 THEN a floating Sign in to save button shows and opens the workshop's sign-in in a new tab", async () => {
+    allow401();
+    await openScreensApp();
+    // Before any save: only the app's own element, on its hidden screen.
+    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(1);
+    await page.getByRole("button", { name: "Add" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
+    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[undefined, 401]]);
+    // The app's own element is on a hidden screen, so the one button a visitor can find is the floating one.
+    const button = page.getByRole("button", { name: "Sign in to save" });
+    expect(await button.isVisible()).toBe(true);
+    expect(await floating().count()).toBe(1);
+    expect(await page.evaluate<string>(`getComputedStyle(document.querySelector("body > [data-workshop-sign-in]")).position`)).toBe("fixed");
+    // A second refusal reuses it.
+    await page.getByRole("button", { name: "Add" }).click();
+    await expect.poll(() => calls.filter((call) => call.method === "PUT").length).toBe(2);
+    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(2);
+    const popup = page.waitForEvent("popup");
+    await button.click();
+    await (await popup).waitForURL(`${origin}/app-sign-in/?app=${NICKNAME}`);
+    expect(store.has("movies")).toBe(false);
+    // No CSP refusal of the button's look and no other console error.
+    expect(errors).toEqual([]);
+  });
+
+  it("sign-in fix: WHEN the browser has no checkVisibility THEN the layout check still finds the hidden screen's element unseen and the shown one seen", async () => {
+    allow401();
+    await page.addInitScript(`delete Element.prototype.checkVisibility;`);
+    await openScreensApp();
+    expect(await page.evaluate<string>("typeof document.body.checkVisibility")).toBe("undefined");
+    await page.getByRole("button", { name: "Add" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
+    expect(await floating().isVisible()).toBe(true);
+    await openScreensApp();
+    await page.getByRole("button", { name: "Details" }).click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
+    expect(await floating().count()).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it("sign-in fix: WHEN a visitor without a pass asks for something that needs the sign-in and no sign-in element is visible THEN the floating button shows and nothing is sent", async () => {
+    const sent: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET") sent.push(`${request.method()} ${request.url()}`);
+    });
+    await openScreensApp();
+    const outcome = await page.evaluate<string[]>(`Promise.all([
+      workshopData.ai.sortText("Milk and bread", ["Food", "Drink"]).then(() => "sorted", (error) => error.message),
+      workshopData.deleteMedia(location.origin + "/app-media/${NICKNAME}/" + "A".repeat(22)).then(() => "deleted", (error) => error.message),
+    ])`);
+    expect(outcome).toEqual([SIGN_IN_TO_SAVE, SIGN_IN_TO_SAVE]);
+    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
+    expect(await floating().count()).toBe(1);
+    expect(sent).toEqual([]);
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("sign-in fix: WHEN a visible sign-in element already exists THEN no floating button is added", async () => {
+    allow401();
+    // The template: its sign-in button shows right after the Press button.
+    await openApp("0");
+    await page.getByRole("button", { name: "Press" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
+    expect(await page.evaluate<string>("workshopData.ai.sortText('Milk', ['Food']).catch((error) => error.message)")).toBe(SIGN_IN_TO_SAVE);
+    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(1);
+    // The screens app with its detail screen open: its own button shows by the form, so none is added.
+    await openScreensApp();
+    await page.getByRole("button", { name: "Details" }).click();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
+    expect(await page.locator("form [data-workshop-sign-in]").isVisible()).toBe(true);
+    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(1);
+    expect(errors).toEqual([]);
+  });
+
+  it("sign-in fix: WHEN the visitor is signed in (hand-off) THEN no floating button shows, and once the sign-in is refused it shows", async () => {
+    allow401();
+    await openScreensApp(HAND_OFF);
+    await page.getByRole("button", { name: "Add" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
+    expect(await floating().count()).toBe(0);
+    // The token ends (signed out elsewhere): the next refused save shows the floating button.
+    await page.unroute("**/api/apps/**");
+    await page.route("**/api/apps/**", (route) =>
+      route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) }),
+    );
+    await page.getByRole("button", { name: "Add" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
+    expect(await floating().isVisible()).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
   it("ticket 3.25 criterion 2: WHEN it opens with #wt=<token> THEN the token is gone from the address at once, saves carry the token, and whoAmI() gives the nickname", async () => {
     // What the address holds when the page's scripts have run (DOMContentLoaded comes after the deferred scripts).
     await page.addInitScript(`document.addEventListener("DOMContentLoaded", () => { window.addressAtLoad = location.href; });`);

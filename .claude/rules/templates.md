@@ -112,3 +112,10 @@ paths:
   the visitor types got AI tag suggestions): say in the rule what a spec without it keeps ("stays a plain field"), and
   make the build eval fail the other cases when they use it (`callsAi`). A check that reads the page right after a write
   was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.
+- An app may hide the screen that holds its only sign-in button while another screen saves (live, 2026-11-27): "the page
+  has a sign-in element" is not "the visitor can see one". `workshop-data.js` checks visibility at the refusal
+  (`checkVisibility` with `visibilityProperty`/`opacityProperty`, else `getClientRects().length > 0`), and Playwright's
+  `getByRole` skips elements on a `display: none` screen, so a test of the floating button finds it by role while the
+  app's own one stays out of the tree. A test page with its own `index.html` routes every file, `workshop-data.js` too
+  (`openScreensApp` in `template.test.ts`), and a test of the fallback deletes `Element.prototype.checkVisibility` in an
+  init script.

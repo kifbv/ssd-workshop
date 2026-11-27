@@ -116,7 +116,9 @@ shell and no package manager. You cannot run or preview the app, so check your w
 6. Saving needs the workshop's sign-in (reading does not). Every app works read-only for visitors:
    - Everything the app shows loads and works without sign-in. Never save when the page opens or on
      a timer; save only when the visitor does something (presses a button, sends a form).
-   - Where saving happens (by each form or button that saves), put the sign-in button in `index.html`:
+   - Where saving happens (by every form or button that saves, on every screen that saves: a list whose
+     items have Add or Save buttons too, not only a form on another screen; one just after such a list is
+     enough), put the sign-in button in `index.html`:
      `<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>`, on a
      line of its own just after the form or the saving button (never inside a row of fields or
      buttons, which it could make wider than the screen).

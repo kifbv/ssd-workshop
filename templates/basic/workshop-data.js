@@ -31,7 +31,8 @@
 // Anyone can read. Saving needs the workshop's own sign-in: give the element that offers it (a button or a link
 // reading "Sign in to save", next to where the app saves) the attribute data-workshop-sign-in. This file shows such
 // elements to visitors who are not signed in, hides them once they are, and opens the sign-in in a new tab when one is
-// pressed. A save refused for lack of sign-in shows them again (or a button of its own when the page has none).
+// pressed. A save refused for lack of sign-in shows them again, and a floating button of its own when none of them
+// can be seen (none on the page, or only on another screen): put one by every form or button that saves, on every screen.
 "use strict";
 
 (function () {
@@ -148,10 +149,16 @@
     return signInAddress;
   }
 
-  // Shows the sign-in elements to a visitor who is not signed in to save, and hides them once signed in.
+  // The floating sign-in button this file adds (made once, then reused), or null while there is none.
+  let ownButton = null;
+
+  // Shows the sign-in elements to a visitor who is not signed in to save, and hides them once signed in. The floating
+  // button is shown only by signedOut(), when no other sign-in element can be seen.
   function showSignIn() {
     const signedIn = pass !== null;
+    if (ownButton !== null && signedIn) ownButton.hidden = true;
     for (const element of document.querySelectorAll(SIGN_IN)) {
+      if (element === ownButton) continue;
       if (element.textContent.trim() === "" && element.getAttribute("aria-label") === null) element.textContent = SIGN_IN_TEXT;
       if (element.tagName === "A" && signInAddress !== null) {
         element.href = signInAddress;
@@ -162,8 +169,19 @@
     }
   }
 
-  // A page with no sign-in element (an app made before saving needed sign-in) gets one of its own, at the bottom.
+  // Whether a visitor can see the element: laid out (not display: none, itself or through an ancestor such as a hidden
+  // screen), not visibility: hidden and not transparent. Browsers without checkVisibility get the layout check only.
+  function canBeSeen(element) {
+    if (typeof element.checkVisibility === "function") {
+      return element.checkVisibility({ visibilityProperty: true, opacityProperty: true });
+    }
+    return element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== "hidden";
+  }
+
+  // The floating button for a visitor who sees no sign-in element: one for an app made before saving needed sign-in,
+  // or one whose sign-in button sits on another screen than the one that saved. Made once, at the bottom right.
   function addSignInButton() {
+    if (ownButton !== null) return ownButton;
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = SIGN_IN_TEXT;
@@ -181,14 +199,21 @@
     look.background = "#2f5bd3";
     look.color = "#ffffff";
     look.boxShadow = "0 2px 8px rgba(0, 0, 0, 0.3)";
+    ownButton = button;
     document.body.append(button);
+    return button;
   }
 
+  // A save, upload, delete or AI call refused for lack of sign-in: show the page's sign-in elements, and the floating
+  // button when none of them can be seen where the visitor is.
   function signedOut() {
     pass = null;
     nickname = null;
-    if (document.querySelector(SIGN_IN) === null) addSignInButton();
     showSignIn();
+    for (const element of document.querySelectorAll(SIGN_IN)) {
+      if (element !== ownButton && canBeSeen(element)) return;
+    }
+    addSignInButton().hidden = false;
   }
 
   // Any sign-in element opens the workshop's sign-in page in a new tab (links too, wherever they point).
