@@ -8,8 +8,8 @@ import { readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppFile } from "../../api/build/check.js";
-import { exerciseEditLink, launchBrowser } from "./build.js";
-import { editLinkProblem, FILL_AND_MARK_SAVE_SCRIPT, SAVING_CONTROLS_SCRIPT, SCREEN_OPENERS_SCRIPT } from "./logic.js";
+import { exerciseEditLink, launchBrowser, withoutOutsideFailures } from "./build.js";
+import { editLinkProblem, FILL_AND_MARK_SAVE_SCRIPT, SAVING_CONTROLS_SCRIPT, SCREEN_OPENERS_SCRIPT, SEARCH_BUTTON_SCRIPT } from "./logic.js";
 
 describe("the edit-link check's scripts", () => {
   let browser: Browser;
@@ -65,6 +65,15 @@ describe("the edit-link check's scripts", () => {
     expect(await page.locator('[data-eval-opener="0"]').textContent()).toBe("Watchlist");
     expect(await page.locator('[data-eval-opener="1"]').textContent()).toBe("+ Add a film");
     expect(await page.locator('[data-eval-opener="2"]').count()).toBe(0);
+  });
+
+  it("SEARCH_BUTTON_SCRIPT marks the visible Search button, never a screen tab holding \"find\" (live eval run 1)", async () => {
+    await page.setContent('<!doctype html><nav role="tablist"><button role="tab" aria-controls="f">Find a film</button></nav><button hidden>Search</button><button>Search</button>');
+    expect(await page.evaluate<boolean>(`${SEARCH_BUTTON_SCRIPT}(${JSON.stringify(["Find a film"])})`)).toBe(true);
+    expect(await page.locator("[data-eval-search]").count()).toBe(1);
+    expect(await page.locator("[data-eval-search]").getAttribute("role")).toBeNull();
+    await page.setContent('<!doctype html><nav role="tablist"><button role="tab">Find a film</button></nav>');
+    expect(await page.evaluate<boolean>(`${SEARCH_BUTTON_SCRIPT}(${JSON.stringify(["Find a film"])})`)).toBe(false);
   });
 
   it("FILL_AND_MARK_SAVE_SCRIPT fills empty visible fields within their limits and marks Save before Add", async () => {
@@ -203,10 +212,50 @@ describe("exerciseEditLink (the build eval's edit-link check) on hand-written ap
     expect(editLinkProblem(check)).toMatch(/^saves when the page opens \(1 write\(s\) before anyone did anything\); .*"This link is view only\."/);
   }, 60_000);
 
+  it("WHEN the app shows its Add button only after a search (a film found first) THEN the check searches, adds and passes", async () => {
+    const files: AppFile[] = [
+      file(
+        "index.html",
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><script src="workshop-data.js"></script><title>Film Finder</title><link rel="icon" href="data:,"><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head><body>
+        <h1>Film Finder</h1><nav role="tablist"><button role="tab" aria-controls="find" type="button">Find a film</button></nav>
+        <section id="find"><div class="edit-only"><label for="q">Title</label><input id="q"><button id="go" type="button">Search</button></div>
+        <div id="result" hidden><h2 id="found"></h2><button id="add" class="edit-only" type="button">Add to watchlist</button></div></section>
+        <p id="status" role="status"></p></body></html>`,
+      ),
+      file("style.css", STYLE),
+      file(
+        "app.js",
+        `"use strict";
+        if (!workshopData.canSave()) document.body.classList.add("view-only");
+        document.getElementById("go").addEventListener("click", () => {
+          document.getElementById("found").textContent = document.getElementById("q").value;
+          document.getElementById("result").hidden = false;
+        });
+        document.getElementById("add").addEventListener("click", async () => {
+          try { await workshopData.set("films-v1", [document.getElementById("found").textContent]); } catch (e) { document.getElementById("status").textContent = e.message; }
+        });`,
+      ),
+      file("workshop-data.js", CLIENT),
+    ];
+    const check = await exerciseEditLink(browser, files, ["Find a film"], true);
+    expect(check.saved).toBe(true);
+    expect(editLinkProblem(check)).toBeUndefined();
+  }, 60_000);
+
   it("WHEN pressing the app's saving button saves nothing THEN the check fails; a media or AI case is not asked to save here", async () => {
     const check = await exerciseEditLink(browser, watchlist({ noSave: true }), SCREENS, true);
     expect(check.saved).toBe(false);
     expect(editLinkProblem(check)).toBe("no saving control (Save, Add, photo or Record button) with the edit link; with the edit link, filling the fields and pressing Save or Add saved nothing");
     expect((await exerciseEditLink(browser, watchlist(), SCREENS, false)).saved).toBeUndefined();
   }, 60_000);
+});
+
+describe("withoutOutsideFailures (ticket 3.28, live eval run 2)", () => {
+  it("drops an outside service's CORS line and one ERR_FAILED line per failed outside request, keeping the app's own errors", () => {
+    const cors = "Access to fetch at 'https://en.wikipedia.org/api/rest_v1/page/summary/Casablanca' from origin 'null' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.";
+    const own = "Access to fetch at 'https://workshop.test/api/apps/eval-app/data/x' from origin 'null' has been blocked by CORS policy: ...";
+    const failed = "Failed to load resource: net::ERR_FAILED";
+    expect(withoutOutsideFailures([cors, failed, "Uncaught TypeError: x is not a function", own, failed], 1)).toEqual(["Uncaught TypeError: x is not a function", own, failed]);
+    expect(withoutOutsideFailures([failed], 0)).toEqual([failed]);
+  });
 });

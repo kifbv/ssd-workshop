@@ -41,6 +41,7 @@ import { RECEIPT_CASES, receiptPhoto } from "./app-ai.js";
 import {
   AI_HELPER,
   FILL_AND_MARK_SAVE_SCRIPT,
+  SEARCH_BUTTON_SCRIPT,
   MEDIA_FILTER,
   missingScreens,
   SAVING_CONTROLS_SCRIPT,
@@ -270,6 +271,23 @@ async function aroundScreens(page: Page, screens: readonly string[], look: () =>
 }
 
 /**
+ * Ticket 3.28: console errors without those an outside service's failure causes: Chromium's CORS line for an https
+ * address of another site, and as many "net::ERR_FAILED" lines as requests to other sites failed.
+ */
+export function withoutOutsideFailures(errors: readonly string[], outsideFailures: number): string[] {
+  let failures = outsideFailures;
+  return errors.filter((line) => {
+    const cors = /^Access to fetch at 'https:\/\/([^/']+)\//.exec(line);
+    if (cors !== null && `https://${cors[1] ?? ""}` !== EVAL_ORIGIN) return false;
+    if (failures > 0 && line.startsWith("Failed to load resource: net::ERR_FAILED")) {
+      failures -= 1;
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Ticket 3.28: the edit-link check (EditLinkCheck in ./logic.ts). With the edit link: canSave(), writes before anything
  * was done, the saving controls on every screen, sideways scroll and console errors, and (when `tryToSave`: not a media
  * or AI case, whose own pass saves) a save: on each screen in turn, the fields filled and Save or Add pressed, until the
@@ -291,6 +309,12 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
     visitorRefused: false,
   };
   const stored = () => api.writes.some((w) => w.method === "PUT" && w.status === 204 && w.path.startsWith(`/api/apps/${NICKNAME}/data/`));
+  // The eval's searches reach real outside services (live eval run 2: Wikipedia answered the session's shared address
+  // 429 without CORS): those failures are the service's, not the app's, and Chromium logs them as console errors.
+  let outsideFailures = 0;
+  editor.page.on("requestfailed", (request) => {
+    if (new URL(request.url()).origin !== EVAL_ORIGIN) outsideFailures += 1;
+  });
   try {
     const page = editor.page;
     await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/${EDIT_LINK}`, { waitUntil: "load" });
@@ -311,9 +335,8 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
       await pressSave();
       if (stored()) return;
       // An app that finds an item before adding it (a film by its title): search, wait for the answer, then add.
-      const search = page.locator("button, input[type=submit]").filter({ hasText: /search|find|look up/i }).first();
-      if ((await search.count()) > 0 && (await search.isVisible())) {
-        await search.click({ timeout: 5_000 }).catch(() => undefined);
+      if (await page.evaluate<boolean>(`${SEARCH_BUTTON_SCRIPT}(${JSON.stringify(screens)})`)) {
+        await page.click("[data-eval-search]", { timeout: 5_000 }).catch(() => undefined);
         await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
         await page.waitForTimeout(1_000);
         await pressSave();
@@ -323,6 +346,7 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
   } finally {
     await editor.context.close();
   }
+  check.editorErrors = withoutOutsideFailures(editor.errors, outsideFailures);
   // Without the edit link, on what was saved (so a list's items show with their own buttons).
   const visitor = await evalPage(browser);
   const visitorApi = await routeApp(visitor.page, files, undefined);

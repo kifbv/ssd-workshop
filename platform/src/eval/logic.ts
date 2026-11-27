@@ -869,6 +869,25 @@ export const FILL_AND_MARK_SAVE_SCRIPT = `((screens) => {
   return true;
 })`;
 
+/**
+ * Ticket 3.28: marks (`data-eval-search`) the visible button that searches (Search, Find, Look up), never a screen tab
+ * (live eval run 1: the "Find a film" tab was pressed instead of the Search button). Returns whether one was marked.
+ */
+export const SEARCH_BUTTON_SCRIPT = `((screens) => {
+  const seen = (el) => {
+    const box = el.getBoundingClientRect();
+    return el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && box.width > 0 && box.height > 0;
+  };
+  const norm = (text) => text.replace(/\\s+/g, " ").trim().toLowerCase();
+  const tab = (el) => el.getAttribute("role") === "tab" || el.closest("nav, [role=tablist]") !== null || el.hasAttribute("aria-controls") || screens.some((name) => norm(el.textContent || "") === norm(name));
+  document.querySelectorAll("[data-eval-search]").forEach((el) => el.removeAttribute("data-eval-search"));
+  const said = (el) => (el.textContent || "") + " " + (el.value || "") + " " + (el.getAttribute("aria-label") || "");
+  const button = Array.from(document.querySelectorAll("button, input[type=submit], [role=button]")).find((el) => !el.disabled && !tab(el) && seen(el) && /search|find|look up/i.test(said(el)));
+  if (button === undefined) return false;
+  button.setAttribute("data-eval-search", "");
+  return true;
+})`;
+
 /** The edit-link problems of a published app, if any (ticket 3.28). */
 export function editLinkProblem(check: EditLinkCheck): string | undefined {
   const problems: string[] = [];
