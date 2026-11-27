@@ -237,6 +237,14 @@ export const STEP_FOUR_LINK_TEXTS = {
   copied: "View-only link copied. People who open it can look, not save.",
 } as const;
 
+/**
+ * Ticket 3.27 try 2: the edit link's visible text: the app's plain address and " (edit link)", never the secret
+ * (screens are projected in a workshop). The secret stays in the link's `href` and the QR code only.
+ */
+export function editLinkText(plainAddress: string): string {
+  return `${plainAddress} (edit link)`;
+}
+
 /** Ticket 3.27: when the browser would not copy, the view-only link to copy by hand. */
 export function copyFailedText(viewUrl: string): string {
   return `Copying did not work here. Your view-only link is ${viewUrl}`;

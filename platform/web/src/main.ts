@@ -57,6 +57,7 @@ import {
   changeBuildFailedText,
   changeBuildingText,
   copyFailedText,
+  editLinkText,
   PHASE_3_TEXTS,
   proposalVersionText,
   STEP_FOUR_LINK_TEXTS,
@@ -125,6 +126,7 @@ function show(name: ScreenName, focusId?: string): void {
   if (name !== "build") stopBuildPolling();
   if (name !== "live") stopSuggestionsReread();
   current = name;
+  if (name === "email") forgetLiveLinks();
   for (const section of document.querySelectorAll<HTMLElement>("[data-screen]")) {
     section.hidden = section.id !== `screen-${name}`;
   }
@@ -736,14 +738,18 @@ let editLinkRound = 0;
  * storage, no console, no request but the workshop API's.
  */
 function renderLiveLinks(appUrl: string | undefined, editUrl: string | undefined): void {
+  const before = liveLinks.editUrl ?? liveLinks.appUrl;
   liveLinks = { appUrl, editUrl };
   const shown = editUrl ?? appUrl;
   const link = byId<HTMLAnchorElement>("live-link");
   const code = byId("live-qr-code");
   if (shown !== undefined) {
     link.href = shown;
-    if (link.textContent !== shown) code.replaceChildren(qrSvg(shown, editUrl === undefined ? `QR code for ${shown}` : STEP_FOUR_LINK_TEXTS.qrLabel));
-    link.textContent = shown;
+    if (shown !== before || code.childElementCount === 0) {
+      code.replaceChildren(qrSvg(shown, editUrl === undefined ? `QR code for ${shown}` : STEP_FOUR_LINK_TEXTS.qrLabel));
+    }
+    // Try 2: the visible text never shows the secret (screens are projected): the plain address and "(edit link)".
+    link.textContent = editUrl === undefined ? shown : editLinkText(editUrl.split("#")[0] ?? "");
   } else {
     code.replaceChildren();
     link.removeAttribute("href");
@@ -756,6 +762,16 @@ function renderLiveLinks(appUrl: string | undefined, editUrl: string | undefined
   byId("live-link-actions").hidden = appUrl === undefined;
   byId("new-edit-link").hidden = editUrl === undefined;
   if (editUrl === undefined) byId("new-edit-link-confirm").hidden = true;
+}
+
+/**
+ * Ticket 3.27 try 2: on the way to the sign-in screen the edit link leaves the page: the hidden step 4 would otherwise
+ * keep the secret in the link and the QR code after signing out.
+ */
+function forgetLiveLinks(): void {
+  renderLiveLinks(undefined, undefined);
+  byId("new-edit-link-confirm").hidden = true;
+  byId("live-link-message").textContent = "";
 }
 
 function sayLink(message: string, tone: Tone): void {

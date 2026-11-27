@@ -668,6 +668,8 @@ On a phone signed in to the workshop (with a nickname):
 
 ## Right after the sign-in-in-apps deploy (ticket 3.25): refresh the live apps
 
+(Historical: since tickets 3.26 and 3.27 apps save with the edit link (`#edit=`), per-person sign-in to save and `/app-sign-in/` are gone; the steps below no longer apply as written.)
+
 ```mermaid
 flowchart LR
   f["Franck: npm run apps -- refresh"] -->|"scan APP# LIVE markers"| db[(ssd-workshop-data)]
@@ -711,6 +713,8 @@ Rights: the command needs Franck's `dynamodb:Scan` on `ssd-workshop-data` and `s
 refused both (access stack), so it never runs from a session.
 
 ## After the floating sign-in fix deploy: refresh the live apps
+
+(Historical: since tickets 3.26 and 3.27 apps save with the edit link (`#edit=`), per-person sign-in to save and `/app-sign-in/` are gone; the steps below no longer apply as written.)
 
 ```mermaid
 flowchart LR
@@ -773,8 +777,9 @@ pixels plus "rotate 90") would then show sideways. 3.19's `savePhoto()` draws th
 applies the orientation, so photos uploaded by the template are upright; only a photo sent straight from a camera file
 (as in step 2 below) may show turned.
 
-You need a live app `<nick>`, a write token `$T` for it (as in the 3.24 check: open `/app-sign-in/?app=<nick>`, press
-Continue, copy the `#wt=` value from the address), a photo `photo.jpg` (any phone photo up to 4 MB, ideally one with
+You need a live app `<nick>`, its edit secret `$T` (since 3.27: the part after `#edit=` in step 4's edit link; the
+link's text does not show it, so copy the link's address (long press or right click, "Copy link") or read `editUrl` from
+`GET /api/build` in the browser's dev tools), a photo `photo.jpg` (any phone photo up to 4 MB, ideally one with
 location data) and a voice recording `voice.m4a` or `voice.webm` (a phone's voice memo, up to 4 MB). Bodies go as
 `application/octet-stream` (not verified until this check: which content types API Gateway base64-encodes; a text type
 would garble the bytes and answer 415).

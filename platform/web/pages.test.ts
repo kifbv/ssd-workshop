@@ -1214,6 +1214,8 @@ const EDIT_URL = `${APP_URL}#edit=${SECRET_1}`;
 const EDIT_URL_2 = `${APP_URL}#edit=${SECRET_2}`;
 /** The edit link's QR code as screen readers hear it (not its address: that holds the secret). */
 const EDIT_QR_NAME = "QR code of your app's edit link";
+/** Ticket 3.27 try 2: the edit link's visible text (and name): the plain address, never the secret (screens are projected). */
+const EDIT_LINK_TEXT = `${APP_URL} (edit link)`;
 type FeedEvent = Record<string, string>;
 const stepEvent = (step: string): FeedEvent => ({ kind: "step", step, at: "2026-11-25T10:00:00.000Z" });
 const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-11-25T10:00:01.000Z" });
@@ -1437,7 +1439,7 @@ describe("step 3: Build (ticket 2.10)", () => {
     expect(await screen("build").isVisible()).toBe(false);
     expect(await page.locator("#live-heading").textContent()).toBe("Step 4: Live");
     expect(await screen("live").textContent()).toContain("Your app is live");
-    const link = page.getByRole("link", { name: EDIT_URL });
+    const link = page.getByRole("link", { name: EDIT_LINK_TEXT });
     expect(await link.getAttribute("href")).toBe(EDIT_URL);
     await expectNoSideScroll();
     // No more polls.
@@ -1527,7 +1529,7 @@ async function expectLiveScreen(): Promise<void> {
   expect(await page.locator("#live-heading").textContent()).toBe("Step 4: Live");
   expect(await screen("live").textContent()).toContain("Your app is live");
   // Ticket 3.27: the link and the QR code hold the edit link.
-  const address = page.getByRole("link", { name: EDIT_URL });
+  const address = page.getByRole("link", { name: EDIT_LINK_TEXT });
   expect(await address.getAttribute("href")).toBe(EDIT_URL);
   expect(await address.getAttribute("target")).toBe("_blank");
   expect(await address.getAttribute("rel")).toBe("noopener noreferrer");
@@ -1631,15 +1633,18 @@ async function openLiveWithEditLink(): Promise<{ api: ReturnType<typeof fakeBuil
   return { api, calls, requests };
 }
 
-/** The secret is only in step 4's link (href and text) and its QR code: not in the title, storage, any other text or any request. */
+/**
+ * The secret is only in step 4's link's `href` and its QR code (try 2: not in the link's text, screens are projected):
+ * not in the title, storage, any text, any other attribute or any request.
+ */
 async function expectSecretOnlyInLink(secret: string, requests: { url: string; body: string }[]): Promise<void> {
   const seen = await page.evaluate((s) => {
-    const link = document.getElementById("live-link");
-    const others = [...document.querySelectorAll("*")].filter((e) => e !== link).flatMap((e) => [...e.attributes].map((a) => a.value)).filter((v) => v.includes(s));
+    const holders = [...document.querySelectorAll("*")].flatMap((e) => [...e.attributes].filter((a) => a.value.includes(s)).map((a) => `${e.id || e.tagName}[${a.name}]`));
     const storage = [...Object.values(localStorage), ...Object.values(sessionStorage)].filter((v) => v.includes(s));
-    return { title: document.title.includes(s), text: document.body.innerText.split(s).length - 1, others, storage, address: location.href.includes(s) };
+    const text = (document.body.textContent ?? "").includes(s) || document.body.innerText.includes(s);
+    return { title: document.title.includes(s), text, holders, storage, address: location.href.includes(s) };
   }, secret);
-  expect(seen).toEqual({ title: false, text: 1, others: [], storage: [], address: false });
+  expect(seen).toEqual({ title: false, text: false, holders: ["live-link[href]"], storage: [], address: false });
   for (const request of requests) {
     if (request.url.includes(secret) || request.body.includes(secret)) throw new Error(`a request holds the secret: ${new URL(request.url).pathname}`);
   }
@@ -1651,7 +1656,7 @@ describe("step 4: the edit link (ticket 3.27)", () => {
   it("criterion 1: WHEN the builder reaches step 4 THEN the link and the QR code both hold editUrl, and decoding the QR gives exactly that address", async () => {
     const { requests } = await openLiveWithEditLink();
     expect(await page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL);
-    expect(await page.locator("#live-link").textContent()).toBe(EDIT_URL);
+    expect(await page.locator("#live-link").textContent()).toBe(EDIT_LINK_TEXT);
     expect(await decodeQrOnScreen()).toBe(EDIT_URL);
     expect(await page.locator("#live-link-label").textContent()).toBe("Open your app with its edit link:");
     expect(await page.locator("#live-edit-note").isVisible()).toBe(true);
@@ -1681,7 +1686,7 @@ describe("step 4: the edit link (ticket 3.27)", () => {
     expect(api.state.renewals).toBe(1);
     const renew = calls.filter((c) => c.path === "/api/build/edit-link");
     expect(renew).toEqual([{ method: "POST", path: "/api/build/edit-link", search: "", contentType: "application/json", body: {} }]);
-    expect(await page.locator("#live-link").textContent()).toBe(EDIT_URL_2);
+    expect(await page.locator("#live-link").textContent()).toBe(EDIT_LINK_TEXT);
     expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
     expect(await page.getByRole("img", { name: EDIT_QR_NAME }).isVisible()).toBe(true);
     expect(await page.locator("#live-link-message").textContent()).toBe("Your new edit link is ready. The old link and QR code no longer save.");
@@ -1714,6 +1719,80 @@ describe("step 4: the edit link (ticket 3.27)", () => {
     await expect.poll(() => page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
     expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
     expect(await page.locator("#live-link-message").textContent()).toBe(MESSAGES.failed);
+  }, 30_000);
+
+  it("WHEN a build read sent before New edit link answers late with the old link THEN the link and the QR code keep the new secret (editLinkRound)", async () => {
+    const { api } = await openLiveWithEditLink();
+    // Rebuild from my repository answering 404 makes the page read GET /api/build again: that read is held open.
+    api.handlers["POST /api/conversation/change/rebuild"] = () => ({ status: 404, body: {} });
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let held: (() => void) | undefined;
+    const arrived = new Promise<void>((resolve) => (held = resolve));
+    let holding = true;
+    await page.route("**/api/build", async (route: Route) => {
+      if (!holding || route.request().method() !== "GET") return route.fallback();
+      holding = false;
+      // The answer as the server made it then: the old link.
+      const old = must(api.handlers["GET /api/build"])({ method: "GET", path: "/api/build", search: "", contentType: undefined, body: null });
+      expect((old.body as { editUrl?: string }).editUrl).toBe(EDIT_URL);
+      held?.();
+      await released;
+      await route.fulfill({ status: old.status, contentType: "application/json", body: JSON.stringify(old.body) });
+    });
+    await page.locator("#rebuild-fold summary").click();
+    await page.getByRole("button", { name: "Rebuild from my repository" }).click();
+    await arrived;
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
+    // The old answer arrives now; the page handles it (Rebuild's button is no longer busy).
+    const late = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/build");
+    release();
+    await late;
+    await expect.poll(() => page.locator("#rebuild-button").getAttribute("aria-busy")).toBe(null);
+    await expect.poll(() => api.state.polls).toBeGreaterThanOrEqual(1);
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
+    expect(await page.content()).not.toContain(SECRET_1);
+  }, 30_000);
+
+  /** Step 4's edit link is gone from the whole page: no secret in any attribute or text, no QR code, no message. */
+  async function expectNoEditLinkLeft(): Promise<void> {
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+    for (const secret of [SECRET_1, SECRET_2]) {
+      const left = await page.evaluate((s) => {
+        const attributes = [...document.querySelectorAll("*")].flatMap((e) => [...e.attributes].filter((a) => a.value.includes(s)).map((a) => `${e.id || e.tagName}[${a.name}]`));
+        return { attributes, text: (document.body.textContent ?? "").includes(s), html: document.documentElement.outerHTML.includes(s) };
+      }, secret);
+      expect(left).toEqual({ attributes: [], text: false, html: false });
+    }
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(null);
+    expect(await page.locator("#live-link").textContent()).toBe("");
+    expect(await page.locator("#live-qr-code").evaluate((e) => e.childElementCount)).toBe(0);
+    expect(await page.locator("#live-link-message").textContent()).toBe("");
+    expect(await page.locator("#new-edit-link-confirm").isHidden()).toBe(true);
+  }
+
+  it("WHEN the builder signs out from step 4 THEN the page holds no edit link anywhere (link, QR code, message)", async () => {
+    const { api } = await openLiveWithEditLink();
+    api.handlers["POST /api/sign-out"] = () => ({ status: 200, body: { message: "You're signed out." } });
+    // A message under the buttons, to see it go too.
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link-message").textContent()).toBe("Your new edit link is ready. The old link and QR code no longer save.");
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expectNoEditLinkLeft();
+  }, 30_000);
+
+  it("WHEN New edit link finds the session ended (401) THEN the sign-in screen shows and the page holds no edit link anywhere", async () => {
+    const { api } = await openLiveWithEditLink();
+    api.state.renewAnswer = { status: 401, body: { message: "Please sign in." } };
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expectNoEditLinkLeft();
+    expect(await page.locator("#message-email").textContent()).toBe(MESSAGES.signedOut);
   }, 30_000);
 
   it("criterion 3: WHEN the builder presses Copy view-only link THEN the copied address has no fragment", async () => {
@@ -2056,7 +2135,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     await buildPollAfter(2000);
     await expect.poll(() => screen("live").isVisible()).toBe(true);
     await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
-    expect(await page.getByRole("link", { name: EDIT_URL }).getAttribute("href")).toBe(EDIT_URL);
+    expect(await page.getByRole("link", { name: EDIT_LINK_TEXT }).getAttribute("href")).toBe(EDIT_URL);
     expect(await page.locator("#proposal").isVisible()).toBe(false);
     expect(await suggestionButtons()).toEqual(SUGGESTIONS);
     expect(await page.locator("#suggestions").isVisible()).toBe(true);
@@ -2156,7 +2235,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     expect(await page.locator("#suggestions").isVisible()).toBe(false);
     expect(await page.locator("#proposal").isVisible()).toBe(false);
     // The app itself stays: its address and QR code.
-    expect(await page.getByRole("link", { name: EDIT_URL }).isVisible()).toBe(true);
+    expect(await page.getByRole("link", { name: EDIT_LINK_TEXT }).isVisible()).toBe(true);
     await expectNoSideScroll();
 
     // A page that still had the box (the fifth change built from another tab): the 409 says so, then the box goes.
@@ -2189,7 +2268,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     expect(await page.locator("#live-failed-text").textContent()).toBe(changeBuildFailedText(2));
     expect(await page.locator("#live-failed-reasons li").allTextContents()).toEqual(["app.js, line 3: <b>an outside address</b>"]);
     expect(await page.locator("#live-failed b").count()).toBe(0);
-    expect(await page.getByRole("link", { name: EDIT_URL }).getAttribute("href")).toBe(EDIT_URL);
+    expect(await page.getByRole("link", { name: EDIT_LINK_TEXT }).getAttribute("href")).toBe(EDIT_URL);
     await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
     expect(await page.locator("#live-chat-form").isVisible()).toBe(true);
     await expectNoSideScroll();
