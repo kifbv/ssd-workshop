@@ -11,7 +11,9 @@ import { notReadyReasonsList } from "./readiness.js";
 import { checkSpec, extractSpec, SPEC_FORMAT_AND_RULES } from "./spec.js";
 
 // Ticket 3.20 (change-v3): only the shared spec rules changed (photos and voice messages, never videos).
-export const CHANGE_PROMPT_VERSION = "change-v3";
+// Ticket 3.23 (change-v4): the shared spec rules learned the workshop's four AI tasks, and the list of what cannot be built
+// names any other AI.
+export const CHANGE_PROMPT_VERSION = "change-v4";
 /** A whole spec (about 300 words and the diagram), a few sentences and the list. */
 export const CHANGE_MAX_TOKENS = 3500;
 /** At most this many "What changes" lines are kept, each cut to CHANGE_LINE_CHARS characters on one line. */
@@ -48,7 +50,7 @@ How to reply:
 - The list of what changes compares the new spec with the live spec: one to five short lines, each starting with "- " and at most 15 words, in plain words for the participant, for example "- Adds a weekly chart to the home screen". Never list something that stays the same.
 - Keep each change small: if they ask for several big things at once, make the first one and suggest sending the others one at a time after it is built.
 - When they ask a question (what, why, how, explain), answer it in plain language in no more than about 120 words, without a spec or a list: nothing changes.
-- If a change would make the app too big for a small single-page app, or needs something the workshop cannot build (a login or accounts, payments, a service that needs a key, an account or money, sending emails, texts or notifications, a server or programs running in the background), suggest a simpler version and ask whether that is fine, without a spec or a list.
+- If a change would make the app too big for a small single-page app, or needs something the workshop cannot build (a login or accounts, payments, a service that needs a key, an account or money, sending emails, texts or notifications, AI other than the workshop's four AI tasks (a chat, writing texts, answering free questions), a server or programs running in the background), suggest a simpler version and ask whether that is fine, without a spec or a list.
 - Small details they leave open (units, sorting, wording, colours) get sensible defaults; mention a default only when it matters.
 
 ${SPEC_FORMAT_AND_RULES}

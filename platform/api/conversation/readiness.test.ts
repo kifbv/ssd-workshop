@@ -155,24 +155,24 @@ describe("parseReadinessAnswer", () => {
   });
 
   it("lets a spec read from a free public service that needs no key, and still refuses keys, accounts, sending and AI (readiness-v2, ticket 2.14)", () => {
-    expect(READINESS_PROMPT_VERSION).toBe("readiness-v5");
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v6");
     expect(READINESS_SYSTEM_PROMPT).toContain("information read from a free public service that needs no key and no account");
     for (const service of ["Wikipedia", "Open Library", "Open-Meteo", "Frankfurter", "TVMaze", "REST Countries"]) expect(READINESS_SYSTEM_PROMPT).toContain(service);
     expect(READINESS_SYSTEM_PROMPT).toContain(
-      "outside service: a service that needs a key, a password, an account or a sign-in with another site, or that costs money; sending anything out: emails, text messages, push notifications or other notifications, sharing to social media; AI or chat services; importing from other apps",
+      "outside service: a service that needs a key, a password, an account or a sign-in with another site, or that costs money; sending anything out: emails, text messages, push notifications or other notifications, sharing to social media; AI other than the workshop's four AI tasks above",
     );
     expect(READINESS_SYSTEM_PROMPT).not.toContain("anything from another website or service");
   });
 
   it("states the data API's room as 10 MB per app (readiness-v4, ticket 3.17)", () => {
-    expect(READINESS_PROMPT_VERSION).toBe("readiness-v5");
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v6");
     expect(READINESS_SYSTEM_PROMPT).toContain("kept by the workshop's own small storage service: up to 10 MB per app, shared by everyone");
     expect(READINESS_SYSTEM_PROMPT).not.toContain("1 MB");
     expect(READINESS_SYSTEM_PROMPT).toContain("when one part of the spec has two problems, write two reasons, one bracket each");
   });
 
   it("knows apps take, keep and show photos and voice messages, and still refuses videos as a server (readiness-v5, ticket 3.20)", () => {
-    expect(READINESS_PROMPT_VERSION).toBe("readiness-v5");
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v6");
     expect(READINESS_SYSTEM_PROMPT).toContain("photos taken with the phone's camera or picked from the phone, and voice messages recorded with the phone (up to 5 minutes each)");
     expect(READINESS_SYSTEM_PROMPT).toContain("up to 500 MB of photos and voice messages per app");
     expect(READINESS_SYSTEM_PROMPT).toContain("everyone who opens the app's address can see the photos and hear the recordings");
@@ -183,6 +183,33 @@ describe("parseReadinessAnswer", () => {
     expect(READINESS_SYSTEM_PROMPT).toContain("files other than photos and voice messages");
     expect(READINESS_SYSTEM_PROMPT).not.toContain("uploads of large files or videos");
     expect(READINESS_SYSTEM_PROMPT).toContain("a spec that keeps its data, photos or voice messages in the app");
+  });
+
+  it("knows the workshop's four AI tasks and refuses every other AI as an outside service (readiness-v6, ticket 3.23)", () => {
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v6");
+    expect(READINESS_SYSTEM_PROMPT).toContain(
+      "the workshop's AI, for four tasks only: suggest tags for a photo, read named fields from a photo (for example the shop, date and total of a receipt, or the text of a label), sort a text into categories, and turn a voice recording into text",
+    );
+    // The 3.22 rule (shown for the visitor to accept), the 3.24 sign-in and the admin switch.
+    expect(READINESS_SYSTEM_PROMPT).toContain("shown to the person, who keeps or changes it before it is saved");
+    expect(READINESS_SYSTEM_PROMPT).toContain("AI tasks need the workshop's own sign-in, like saving, and the workshop can switch them off");
+    expect(READINESS_SYSTEM_PROMPT).toContain("the app still works without them");
+    // Answer 7's CHANGED rule: "AI or chat services" became "AI other than these tasks".
+    expect(READINESS_SYSTEM_PROMPT).not.toContain("AI or chat services");
+    expect(READINESS_SYSTEM_PROMPT).toContain(
+      "AI other than the workshop's four AI tasks above: a chat or chatbot, answering free questions, writing or rewriting texts, reading business cards or other people's contact details from a photo",
+    );
+    // Do not invent problems: a spec silent on the AI being off is not an open question.
+    expect(READINESS_SYSTEM_PROMPT).toContain("A spec that does not say what happens when the AI is not available is not an open question");
+    expect(READINESS_SYSTEM_PROMPT).toContain("uses the workshop's AI only for these four tasks");
+    // Run 1 (e1232d8) let a business-card reader through as a fields-from-a-photo task: named as the exception.
+    expect(READINESS_SYSTEM_PROMPT).toContain("Business cards are the exception to reading fields from a photo: a spec whose AI reads a business card, or people's names, phone numbers or email addresses from a photo, is not ready (outside service)");
+    // Try 1's reason said to type the contacts in by hand, which the 3.16 guardrail declines (other people's contact
+    // details): the reason must suggest a version that keeps none.
+    expect(READINESS_SYSTEM_PROMPT).toContain(
+      "its reason suggests a version that keeps no contact details (for example the companies met and notes about each meeting, without names, phone numbers, email addresses or photos of the cards), never typing the contacts in",
+    );
+    expect(READINESS_SYSTEM_PROMPT).not.toContain("typing them in by hand");
   });
 
   it("asks for reasons in the participant's language, each ending with the problem's English word in brackets (readiness-v3, ticket 3.16)", () => {

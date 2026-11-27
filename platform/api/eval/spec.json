@@ -1,5 +1,5 @@
 {
-  "description": "Step 2 (Spec) examples (ticket 1.9): `npm run eval -- spec` sends each one to the real answer call with the spec system prompt. A new-spec example must give a spec with a title, the sections \"What it does\", \"Screens\" and \"Data it keeps\", and one Mermaid flowchart that Mermaid parses and draws (in Chromium, with the page's own diagram.js), naming the keywords; a keeps-spec example (a question) must be answered without a new spec. Ticket 3.20: an app that keeps photos (a drawing gallery) or voice messages (a team board) gets a spec of the same shape naming them.",
+  "description": "Step 2 (Spec) examples (ticket 1.9): `npm run eval -- spec` sends each one to the real answer call with the spec system prompt. A new-spec example must give a spec with a title, the sections \"What it does\", \"Screens\" and \"Data it keeps\", and one Mermaid flowchart that Mermaid parses and draws (in Chromium, with the page's own diagram.js), naming the keywords; a keeps-spec example (a question) must be answered without a new spec. Ticket 3.20: an app that keeps photos (a drawing gallery) or voice messages (a team board) gets a spec of the same shape naming them. Ticket 3.23: an app whose participant agreed that the workshop's AI suggests tags gets a spec naming the suggestion.",
   "examples": [
     {
       "name": "fitness tracker: first spec",
@@ -160,6 +160,26 @@
       "keywords": [
         "record",
         "topic"
+      ]
+    },
+    {
+      "name": "sketch wall with suggested tags: first spec",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "I'd like a wall where my team posts photos of their sketches, each with tags, so we can find them later.",
+          "answer": "A shared wall of your team's sketches, each photographed with the phone and given tags. Anyone with the app's link can see the photos, so it is best not to photograph people or confidential papers.\n1. Who adds sketches: only you, or the whole team?\n2. Should the AI suggest tags for each photo, which you can keep or change?\n3. Besides the photo and its tags, what should each sketch keep?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "The whole team. Yes, the AI should suggest tags, and we keep or change them. Keep the date too. Leave out comments.",
+          "answer": "A team wall of sketch photos: the AI suggests tags right after a photo is taken, the person keeps or changes them, and each sketch keeps its date. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        }
+      ],
+      "text": "Please write my spec.",
+      "keywords": [
+        "photo",
+        "suggest",
+        "tag"
       ]
     }
   ]

@@ -20,7 +20,9 @@
 
 // Ticket 3.20 (spec-v3): the shared rules say apps take or pick photos and record voice messages, kept by the workshop
 // (up to 500 MB per app, beside 10 MB of other information, seen by everyone with the link), never videos.
-export const SPEC_PROMPT_VERSION = "spec-v3";
+// Ticket 3.23 (spec-v4): the shared rules let the app use the workshop's four AI tasks when the participant wants them,
+// as suggestions the person keeps or changes, typed by hand when the AI is not available; no other AI.
+export const SPEC_PROMPT_VERSION = "spec-v4";
 
 /** The sections every spec has, in this order (criterion 1). */
 export const SPEC_SECTIONS = ["What it does", "Screens", "Data it keeps"] as const;
@@ -40,7 +42,7 @@ export const DEFAULT_SPEC_ANSWER = "Here is your spec. Ask me anything about it,
 
 /**
  * The spec's format and rules, shared by the step 2 prompt and the change prompt (ticket 3.6, ./change.ts), so both
- * write the same shape (a change here moves both versions: `spec-v3` and `change-v3`, ticket 3.20).
+ * write the same shape (a change here moves both versions: `spec-v4` and `change-v4`, ticket 3.23).
  */
 export const SPEC_FORMAT_AND_RULES = `The spec goes between a line that is exactly <spec> and a line that is exactly </spec>, in this format:
 <spec>
@@ -71,6 +73,7 @@ Rules for the spec:
 - Plain English for people who are not developers: no technical words (database, API, framework, server). About 300 words at most.
 - The app may show information from a free public service that needs no key (for example summaries and pictures from Wikipedia, film posters included, books and covers from Open Library, weather from Open-Meteo, exchange rates from Frankfurter, TV shows from TVMaze, facts about countries from REST Countries). When it does, name the information and its source in plain words where the app uses it (for example "movie posters and summaries from Wikipedia"), and say that the app shows a friendly message when the source does not answer. Never write web addresses, keys or technical words about it. Never use a service that needs a key, an account or a sign-in, or that costs money, and never send emails, texts or notifications.
 - The app may take photos with the phone's camera or pick them from the phone, and record voice messages with the phone (up to 5 minutes each). The workshop keeps them with the app (up to 500 MB of photos and voice messages per app, beside up to 10 MB of other information), and everyone with the app's link can see and hear them. When the app keeps photos or voice messages, say so in "Data it keeps" with the details kept with each one (for example "- Drawings: the photo, its tags and the day it was added"), and say in "Screens" where they are taken or recorded. Never videos.
+- The app may use the workshop's AI for four tasks only, and only when the participant asked for it or agreed to it: suggest tags for a photo, read named fields from a photo (for example a receipt's shop, date and total, or a label's text), sort a text into categories, and turn a voice recording into text. When it does, say in "What it does" what the workshop's AI suggests and when (for example "right after the photo is saved, the workshop's AI suggests tags"), that the person keeps or changes the suggestion before it is saved, and that when the AI is not available, the person types it. Never use the AI for anything else: no chat, no writing texts, no answering free questions, no reading business cards or other people's contact details.
 - Never invent personal data about real people, and never write code.`;
 
 export const SPEC_SYSTEM_PROMPT = `You are the friendly guide of a one-day workshop in which non-developers turn an idea into a small single-page web app. This is step 2, Spec: you write a short spec of the participant's app from the conversation so far, then explain it and change it as often as they like. When they are happy they press the "Approve spec" button, and the app is then built from the spec. The workshop builds and hosts the app; never discuss servers, hosting, programming languages, frameworks or code.

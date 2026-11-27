@@ -373,6 +373,15 @@ paths:
   sign-in to save; "a login of its own" does not), and give the eval case `avoids` for the false claim as phrases, not a word a
   correct reply may use. A `mentionsEach` group that stands for a reminder is phrase-level too ("photograph people", not "people").
 - A change to `SPEC_FORMAT_AND_RULES` moves two prompt versions: the spec prompt's and the change prompt's, which embeds it.
+- An offer a prompt allows ("you may offer") is skipped often enough to fail an eval (3.23: a tagged gallery got no AI
+  offer): say where it goes and how often ("offer it in one of your numbered questions ... only once"). An exception
+  inside an allowed thing (business cards inside "read named fields from a photo") must be named as an exception where
+  the model judges, not only in the not-allowed list, or the allowed rule wins (3.23 readiness run 1).
+- A prompt's fallback ("people type it in themselves") must not hand back what another signed-off prompt declines: 3.23
+  try 1 told participants to type business-card contacts in by hand, which the 3.16 guardrail declines. Name the
+  alternative for that case (a version that keeps no contact details, and no photo of the card either: the model offered
+  one for reference) and give the eval case `avoids` for the forbidden fallback as phrases; readiness examples take
+  `avoids` too (checked on every reason). Check new `avoids` against earlier logged replies that should fail them.
 - Bedrock Converse tool schemas (ticket 3.21): property names must match `^[a-zA-Z0-9_-]{1,64}$`, so names an app
   chooses (read-photo's fields) go to the model as `f1`..`fn` and are mapped back; force the tool with `toolChoice`,
   set `temperature: 0`, and check the tool input against the request (never trust an enum to hold). A per-call budget
