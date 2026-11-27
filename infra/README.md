@@ -889,7 +889,7 @@ ai() { curl -sS -w '\n%{http_code}\n' -X POST -H 'origin: null' -H "authorizatio
 5. Refusals: another app's photo address (400 "...this app's own photos."), `"prompt":"hi"` added (400), no token
    (401, from the function: there is no WAF junk filter on this route).
 6. **Transcribe, French and English** (question 8's live eval): `ai "{\"task\":\"transcribe\",\"recording\":\"$FR\"}"`
-   answers 202 `{"status":"working",...}` (the first request waits about 10 s at most) or 200
+   answers 202 `{"status":"working",...}` (the first request waits up to ~15 s while it polls, up to ~26 s when it then reads the result) or 200
    `{"text":...,"language":"fr-FR"}`; repeat the same command every few seconds until 200 (each repeat answers at once
    and is free). The text must be what was said. Same with `$EN` (`en-US`). Not verified
    until this check: that Transcribe accepts the stored WebM, Ogg and MP4 files as they are, and that its write of the
@@ -918,23 +918,34 @@ tokens in and ~90 out, about $0.002 (live eval). A transcription costs $0.024 a 
 for the longest recording. Both count against $1 per app, $1 per signed-in writer across all apps and $10 for all apps
 each UTC day; at a cap every AI request answers 429 without calling anything.
 
-Worst case while the switch is on (details and prices in `docs/decisions.md`, "(3.21) Cost"), with POST held at its
-5/s throttle (432,000 a day) and OPTIONS at 20/s (1.7 million a day):
+Worst case while the switch is on (details, prices and assumptions in `docs/decisions.md`, "(3.21) Cost"; **awaiting
+Franck's acceptance**), with POST held at its 2/s throttle (172,800 a day) and OPTIONS at 10/s (864,000 a day), since
+try 3; try 2's 5/s and 20/s (432,000 and 1.7 million a day) for comparison:
 
-| Part | Per day |
-| --- | --- |
-| AI (the $10 cap plus one reservation) | $10.13 |
-| Lambda (each POST may read and walk a 4 MB file it then refuses, ~1 s at 512 MB; OPTIONS; requests) | $3.43 |
-| API Gateway (2.16 million requests) | $2.59 |
-| CloudFront requests and bodies to the origin | $2.73 |
-| WAF requests | $1.30 |
-| DynamoDB (at most 6 small reads per POST, the counters' writes) | $0.60 |
-| CloudWatch Logs, S3 reads | $0.53 |
-| **In all** | **~$21 (~$640 a month if held every day)** |
+| Part | Per day (2/s, 10/s) | Per day (5/s, 20/s) |
+| --- | --- | --- |
+| AI (the $10 cap plus one reservation) | $10.13 | $10.13 |
+| Lambda (each POST may read and walk a 4 MB file it then refuses, ~1 s at 512 MB; OPTIONS; requests) | $1.41 | $3.42 |
+| Lambda, the paid calls' own run time (~16,700 cheapest model calls of up to ~5 s; ~1,700 transcriptions of up to 26 s would be $0.29) | $0.55 | $0.55 |
+| API Gateway | $1.24 | $2.59 |
+| CloudFront requests, bodies to the origin, answers to viewers | $1.34 | $2.82 |
+| WAF requests | $0.62 | $1.30 |
+| DynamoDB (at most 6 small reads per POST, the counters' writes, lost races) | $0.35 | $0.60 |
+| CloudWatch Logs (~0.55 KB per invocation: the function's line plus Lambda's START, END and REPORT lines) | $0.34 | $0.71 |
+| S3 reads | $0.07 | $0.19 |
+| **In all** | **~$16 (~$490 a month if held every day)** | **~$22 (~$680 a month)** |
 
-About half of it is requests, not AI: filling the POST throttle with file-reading requests needs a signed-in
-participant's app write token and at least 10 addresses (the WAF rule allows 150 per 5 minutes per address). Without an
+About $6 of the tightened figure is requests, not AI: filling the POST throttle with file-reading requests needs a
+signed-in participant's app write token and at least 4 addresses (the WAF rule allows 150 per 5 minutes per address).
+Only if Bedrock itself answered every cheap call in ~20 s would the paid calls' run time reach ~$2.94 a day. Without an
 attacker a workshop day costs cents plus what apps use (at most $10.13). Turn the switch off outside workshop days.
+
+- Transcribe jobs carry no `project=ssd-workshop` tag, so their spend is invisible to the Cost Anomaly monitor
+  `ssd-workshop-cost`; only the account's $20 Budgets alert (and the app counters' $10 a day) see it
+  (`docs/decisions.md`, "(3.21) Transcribe jobs are not tagged").
+- The deploy role (`s3:*` on `ssd-workshop-*` buckets) and Claude sessions (bucket reads) can reach `transcripts/`,
+  which the media bucket's write deny leaves to identity policies (`docs/decisions.md`, "(3.21) Who else can reach
+  `transcripts/`").
 
 ## Check after the apps deploy (ticket 2.5)
 

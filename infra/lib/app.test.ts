@@ -2290,8 +2290,8 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     // Every route setting of the stage, exactly: the sign-in routes', the data API's, (ticket 3.18) the media API's and
     // (ticket 3.21) the AI tasks'.
     expect(stage?.Properties?.RouteSettings).toEqual({
-      [`POST ${APP_AI_PATH}`]: { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
-      [`OPTIONS ${APP_AI_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
+      [`POST ${APP_AI_PATH}`]: { ThrottlingRateLimit: 2, ThrottlingBurstLimit: 10 },
+      [`OPTIONS ${APP_AI_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
       [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 2, ThrottlingBurstLimit: 10 },
       [`DELETE ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
       [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
@@ -3919,7 +3919,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
         VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_AI_RATE_RULE_NAME, SampledRequestsEnabled: true },
       },
     ]);
-    // Ticket 3.21: the AI route's shared throttles (POST 5/s, OPTIONS 20/s) take at least 3 addresses to fill (10 and 40).
+    // Ticket 3.21: the AI route's shared throttles (POST 2/s, OPTIONS 10/s since try 3) take at least 3 addresses to fill (4 and 20).
     expect(WAF_AI_RATE_RULE_NAME).toBe("ssd-workshop-ai-rate");
     expect(WAF_AI_RATE_LIMIT).toBe(150);
     expect([...WAF_AI_RATE_METHODS]).toEqual(["POST", "OPTIONS"]);
@@ -4474,8 +4474,9 @@ describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcript
       expect(JSON.stringify(integration?.IntegrationUri)).toContain(f.fnEntry()?.[0] ?? "?");
     }
     expect(f.permissions()).toHaveLength(1);
-    expect(APP_AI_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 10 });
-    expect(APP_AI_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    // Try 3: tightened from POST 5/s and OPTIONS 20/s (worst case ~$22 a day down to the figure in decisions.md).
+    expect(APP_AI_THROTTLE).toEqual({ rateLimit: 2, burstLimit: 10 });
+    expect(APP_AI_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 10, burstLimit: 20 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
     for (const method of ["POST", "OPTIONS"]) {
       const routeId = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === `${method} ${APP_AI_PATH}`)?.[0];

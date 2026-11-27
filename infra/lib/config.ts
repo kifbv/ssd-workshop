@@ -910,9 +910,9 @@ export const WAF_MEDIA_PREFLIGHT_RATE_METHOD = "OPTIONS";
 /**
  * Ticket 3.21: per address, at most WAF_AI_RATE_LIMIT requests to the AI tasks (`POST` and `OPTIONS
  * /api/apps/<nickname>/ai`, counted together; same path transformations as the media rules) in WAF_RATE_WINDOW_SECONDS
- * (priority 5), then 429 with the CORS header and its own body. The AI route's throttles (APP_AI_THROTTLE, 5/s;
- * APP_AI_PREFLIGHT_THROTTLE, 20/s) are shared by every app: 150 per 5 minutes is 0.5/s, so filling the POST throttle
- * takes at least 10 addresses. A room behind one venue address shares the 150 (~3 AI tasks each for 45 people in 5
+ * (priority 5), then 429 with the CORS header and its own body. The AI route's throttles (APP_AI_THROTTLE, 2/s;
+ * APP_AI_PREFLIGHT_THROTTLE, 10/s, since 3.21 try 3) are shared by every app: 150 per 5 minutes is 0.5/s, so filling
+ * the POST throttle takes at least 4 addresses and the OPTIONS throttle at least 20. A room behind one venue address shares the 150 (~3 AI tasks each for 45 people in 5
  * minutes; a transcription's 202 answers count too: since 3.21 try 2 a repeat answers at once, so the app should ask
  * again every few seconds, not in a loop). No new paid service: one more rule on the
  * existing web ACL ($1 a month). Please veto.

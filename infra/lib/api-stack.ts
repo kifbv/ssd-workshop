@@ -141,11 +141,12 @@ export const APP_MEDIA_TIMEOUT_SECONDS = 25;
 /**
  * Route throttles for the AI tasks (ticket 3.21), for all apps together (please veto). The budgets ($1 per app, $10 for
  * all apps a day) cap what the AI costs; the throttles cap the requests and the functions running at once (a call may
- * run up to APP_AI_TIMEOUT_SECONDS): POST 5/s (burst 10) lets a room of 45 tag a photo each within ~10 s, OPTIONS as for
- * the data API.
+ * run up to APP_AI_TIMEOUT_SECONDS). Try 3 (owner's decision pending, built as the recommended option): POST 2/s (burst
+ * 10) and OPTIONS 10/s (burst 20), down from 5/s and 20/s, which more than halves the worst-case cost of requests at the
+ * cap (docs/decisions.md "(3.21) Cost"); a room of 45 still tags a photo each within ~20 s (the first 10 at once).
  */
-export const APP_AI_THROTTLE = { rateLimit: 5, burstLimit: 10 } as const;
-export const APP_AI_PREFLIGHT_THROTTLE = { rateLimit: 20, burstLimit: 40 } as const;
+export const APP_AI_THROTTLE = { rateLimit: 2, burstLimit: 10 } as const;
+export const APP_AI_PREFLIGHT_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
 export const APP_AI_MEMORY_MB = 512;
 /**
  * 28 s, under API Gateway's 30 s (try 2): every paid step and what follows it ends by REQUEST_DEADLINE_MS (26 s) after
