@@ -816,6 +816,137 @@ in to save ("Sign in to save", then back to the app).
    well, the next step is a follow-up ticket (for example a small recorder page outside the sandbox), not a change to
    the apps' sandbox.
 
+## AI tasks for apps (ticket 3.21)
+
+```mermaid
+sequenceDiagram
+  participant A as App /apps/nick/ (sandboxed, has a write token)
+  participant F as ssd-workshop-api-app-ai
+  participant T as ssd-workshop-data (SETTINGS, APPAI#nick, APPAI_WRITER#writer, APPAI_TOTAL)
+  participant B as Bucket ssd-workshop-app-media-<account>
+  participant H as Bedrock: Claude Haiku 4.5 (EU profile)
+  participant R as Amazon Transcribe
+  A->>F: POST /api/apps/nick/ai {task, photo or text or recording} (Bearer token)
+  F->>T: live? token? switch on and no Stop? (else 404 / 401 / 503)
+  F->>F: one of 4 tasks, only its fields, within the limits, media of this app (else 400)
+  F->>T: app, writer and all-apps day budgets unspent? (else 429), reserve the most the call can cost
+  alt tag-photo, read-photo, sort-text
+    F->>B: GetObject app-media/nick/<id> (photo tasks)
+    F->>H: Converse: photo + task + one forced tool
+    H-->>F: tool input
+    F->>T: correct the counters to what the call cost
+    F-->>A: 200 {tags} / {values} / {categories}, or 502 "The AI could not read this."
+  else transcribe
+    F->>B: GetObject the recording, count its packets (at most 5 min, charged up front)
+    F->>R: StartTranscriptionJob ssd-workshop-app-ai-nick-<id>, language detected
+    R->>B: reads the recording, writes transcripts/nick/<id>.json
+    F-->>A: 202 working (asks again with the same recording: answered at once, no charge), then
+    F->>B: read transcripts/nick/<id>.json
+    F->>R: DeleteTranscriptionJob, then delete the file
+    F-->>A: 200 {text, language}
+  end
+```
+
+### Before merging (Franck)
+
+1. **Apply the access stack** (`infra/access/access-stack.yaml`, as before): the boundary gains a `Transcribe` statement
+   (only `transcribe:StartTranscriptionJob`, `GetTranscriptionJob` and `DeleteTranscriptionJob`, only in
+   eu-central-1). To make room under the 6,144-character limit (now 6,131), `GitHubKeyForTheLauncherOnly` uses one
+   `ArnNotLike` `role*/ssd-workshop-builds-launcher` value instead of two ARNs (same effect, look-alikes tested), and
+   `SendCodes` drops `ses:SendRawEmail` (no workshop code sends raw email). The deploy policies are unchanged: the deploy
+   creates no Transcribe resource. Until the boundary is applied, `transcribe` answers 500 (AccessDenied, logged by name)
+   and the three model tasks still work.
+2. **WAF:** the edge stack adds a sixth rule, `ssd-workshop-ai-rate` (more than 150 AI requests, `POST` and `OPTIONS`
+   together, per address in 5 minutes get a 429 "Too many AI requests from this address. Please wait a few minutes and
+   try again.", $1 a month). As for 3.18, the deploy role holds `wafv2:UpdateWebACL` through the standalone policy
+   `ssd-workshop-deploy-safety-nets`: confirm it is still attached.
+3. **CloudFront:** the `/api/apps/*` response headers policy moves to `ssd-workshop-app-data-v3` (adds `POST`); v2 stays
+   retained for you to delete after the deploy, like v1.
+4. The switch "Apps may use AI" starts **off**: nothing changes for apps until you turn it on in the dashboard's
+   Workshop controls.
+
+### Live check (after the deploy and the access stack)
+
+You need a live app `<nick>`, a write token `$T` for it (as in the 3.24 check), and, uploaded through the media API
+(3.18 check), a receipt photo `$PHOTO` (its `/app-media/<nick>/<id>` address) and two short voice recordings, one in
+French `$FR` and one in English `$EN` (a phone's voice memo, 10 to 30 seconds, addresses as for the photo).
+
+```sh
+NICK=<nick>
+API=https://workshop.rankly.games/api/apps/$NICK/ai
+ai() { curl -sS -w '\n%{http_code}\n' -X POST -H 'origin: null' -H "authorization: Bearer $T" -H 'content-type: application/json' --data "$1" "$API"; }
+```
+
+1. Switch off (the default): `ai '{"task":"sort-text","text":"The bus was late","categories":["transport","food"]}'`
+   answers 503 "AI is switched off for apps right now." and the function's log shows outcome `switched-off`, no cost.
+2. Turn "Apps may use AI" on in the dashboard; the line beside it reads "Apps may use AI tasks now ...".
+3. `ai "{\"task\":\"read-photo\",\"photo\":\"$PHOTO\",\"fields\":[{\"name\":\"shop\",\"type\":\"text\"},{\"name\":\"date\",\"type\":\"date\"},{\"name\":\"total\",\"type\":\"money\"}]}"`
+   answers 200 `{"values":{"shop":...,"date":"YYYY-MM-DD","total":{"amount":...,"currency":"EUR"}}}` matching the receipt.
+4. `ai "{\"task\":\"tag-photo\",\"photo\":\"$PHOTO\"}"` answers up to 5 suggested tags; with `"tags":["receipt","cat"]`
+   only tags from that list. `ai '{"task":"sort-text","text":"The bus was late","categories":["transport","food"]}'`
+   answers `{"categories":["transport"]}` (not verified live before this check: the tag and sort tools' `enum`
+   schemas on Bedrock; the read-photo eval proved the other shapes).
+5. Refusals: another app's photo address (400 "...this app's own photos."), `"prompt":"hi"` added (400), no token
+   (401, from the function: there is no WAF junk filter on this route).
+6. **Transcribe, French and English** (question 8's live eval): `ai "{\"task\":\"transcribe\",\"recording\":\"$FR\"}"`
+   answers 202 `{"status":"working",...}` (the first request waits up to ~15 s while it polls, up to ~26 s when it then reads the result) or 200
+   `{"text":...,"language":"fr-FR"}`; repeat the same command every few seconds until 200 (each repeat answers at once
+   and is free). The text must be what was said. Same with `$EN` (`en-US`). Not verified
+   until this check: that Transcribe accepts the stored WebM, Ogg and MP4 files as they are, and that its write of the
+   result under `transcripts/` passes (the media bucket's policy leaves `transcripts/` to identity policies, so it should).
+   Then, signed in as `AWS_PROFILE=franck`:
+
+   ```sh
+   aws s3 ls s3://ssd-workshop-app-media-<account>/transcripts/ --recursive      # expect: nothing (deleted after reading)
+   aws transcribe list-transcription-jobs --job-name-contains ssd-workshop-app-ai --region eu-central-1   # expect: none
+   ```
+
+   Leftovers: when an app starts a transcription and never asks again, its result file stays under `transcripts/`
+   until the lifecycle rule `ssd-workshop-transcripts-expiry` deletes it (1 day, plus S3's lifecycle delay), and the
+   job record (settings and status, no audio) stays in Transcribe until its own retention (90 days by default). Neither
+   is served. To clear them by hand: `aws transcribe delete-transcription-job --transcription-job-name <name>` and
+   `aws s3 rm s3://ssd-workshop-app-media-<account>/transcripts/ --recursive`.
+
+7. The counters: `aws dynamodb get-item --table-name ssd-workshop-data --key '{"pk":{"S":"APPAI_TOTAL"},"sk":{"S":"AI_USAGE"}}'`
+   (as `franck`) shows today's `day` and a `costUsd` of a few cents; the same with `APPAI_WRITER#<your nickname, lower
+   case>` shows the same amount (the per-writer counter). Turn the switch off again if apps should not use AI yet.
+
+### Cost
+
+Each model call costs its tokens at Haiku 4.5's EU price ($1.10 in, $5.50 out per million): a receipt read is ~1,250
+tokens in and ~90 out, about $0.002 (live eval). A transcription costs $0.024 a minute (at least 15 s), at most $0.122
+for the longest recording. Both count against $1 per app, $1 per signed-in writer across all apps and $10 for all apps
+each UTC day; at a cap every AI request answers 429 without calling anything.
+
+Worst case while the switch is on (details, prices and assumptions in `docs/decisions.md`, "(3.21) Cost"; **accepted by
+Franck 2026-11-27 05:25 UTC**), with POST held at its 2/s throttle (172,800 a day) and OPTIONS at 10/s (864,000 a day), since
+try 3; try 2's 5/s and 20/s (432,000 and 1.7 million a day) for comparison:
+
+| Part | Per day (2/s, 10/s) | Per day (5/s, 20/s) |
+| --- | --- | --- |
+| AI (the $10 cap plus one reservation) | $10.13 | $10.13 |
+| Lambda (each POST may read and walk a 4 MB file it then refuses, ~1 s at 512 MB; OPTIONS; requests) | $1.41 | $3.42 |
+| Lambda, the paid calls' own run time (~16,700 cheapest model calls of up to ~5 s; ~1,700 transcriptions of up to 26 s would be $0.29) | $0.55 | $0.55 |
+| API Gateway | $1.24 | $2.59 |
+| CloudFront requests, bodies to the origin, answers to viewers | $1.34 | $2.82 |
+| WAF requests | $0.62 | $1.30 |
+| DynamoDB (at most 6 small reads per POST, the counters' writes, lost races) | $0.35 | $0.60 |
+| CloudWatch Logs (~0.55 KB per invocation: the function's line plus Lambda's START, END and REPORT lines) | $0.34 | $0.71 |
+| S3 reads | $0.07 | $0.19 |
+| **In all** | **~$16 (~$490 a month if held every day)** | **~$22 (~$680 a month)** |
+
+About $6 of the tightened figure is requests, not AI: filling the POST throttle with file-reading requests needs a
+signed-in participant's app write token and at least 4 addresses (the WAF rule allows 150 per 5 minutes per address).
+Only if Bedrock itself answered every cheap call in ~20 s would the paid calls' run time reach ~$2.94 a day. Without an
+attacker a workshop day costs cents plus what apps use (at most $10.13). Turn the switch off outside workshop days.
+
+- Transcribe jobs carry no `project=ssd-workshop` tag, so their spend is invisible to the Cost Anomaly monitor
+  `ssd-workshop-cost`; only the account's $20 Budgets alert (and the app counters' $10 a day) see it
+  (`docs/decisions.md`, "(3.21) Transcribe jobs are not tagged").
+- The deploy role (`s3:*` on `ssd-workshop-*` buckets) and Claude sessions (bucket reads) can reach `transcripts/`,
+  which the media bucket's write deny leaves to identity policies (`docs/decisions.md`, "(3.21) Who else can reach
+  `transcripts/`").
+
 ## Check after the apps deploy (ticket 2.5)
 
 ```mermaid

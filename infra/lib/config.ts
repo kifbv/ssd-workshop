@@ -104,9 +104,11 @@ export const PAGES_HEADERS_POLICY_NAME = `${PREFIX}-pages-v${PAGES_HEADERS_POLIC
  * SecurityHeadersPolicy's headers plus `Access-Control-Allow-Origin: *`, so that answers API Gateway or
  * CloudFront make themselves (a throttle's 429) are readable by sandboxed apps too. Created, never
  * updated, like the pages' policy: a change bumps this version. v2 (ticket 3.24): `authorization` is an allowed
- * header (app write tokens); v1 stays retained for Franck to delete.
+ * header (app write tokens); v1 stays retained for Franck to delete. v3 (ticket 3.21): `POST` is an allowed method (the
+ * AI tasks' `POST /api/apps/{nickname}/ai`: with `originOverride`, the policy's list replaces the function's own in the
+ * preflight's answer); v2 stays retained for Franck to delete.
  */
-export const APP_DATA_HEADERS_POLICY_VERSION = 2;
+export const APP_DATA_HEADERS_POLICY_VERSION = 3;
 export const APP_DATA_HEADERS_POLICY_NAME = `${PREFIX}-app-data-v${APP_DATA_HEADERS_POLICY_VERSION}`;
 /**
  * Content-Security-Policy of the pages: scripts, styles, connections and images from the site
@@ -235,6 +237,9 @@ export const SETTINGS_UPDATE_ATTRIBUTES = [
   "stopped",
   "stoppedAt",
   "resumedAt",
+  // Ticket 3.21: the switch "Apps may use AI" and when it last changed.
+  "appAiEnabled",
+  "appAiChangedAt",
 ] as const;
 
 /**
@@ -243,7 +248,7 @@ export const SETTINGS_UPDATE_ATTRIBUTES = [
  * launcher's queued time limit, `resumedAt`). `readSettings` in platform/api/workshop/store.ts projects exactly these
  * (tested).
  */
-export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"] as const;
+export const SETTINGS_READ_ATTRIBUTES = ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt", "appAiEnabled"] as const;
 
 /**
  * Ticket 3.10: Lambda function, role and log group of the facilitator routes (`/api/facilitator/...`: the dashboard's
@@ -400,6 +405,37 @@ export const APP_MEDIA_PATH_PATTERN = "/app-media/*";
 export const APP_MEDIA_HEADERS_POLICY_VERSION = 1;
 export const APP_MEDIA_HEADERS_POLICY_NAME = `${PREFIX}-app-media-v${APP_MEDIA_HEADERS_POLICY_VERSION}`;
 export const APP_MEDIA_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
+
+/**
+ * Ticket 3.21: the AI tasks for apps (`POST /api/apps/{nickname}/ai`), their own function and role. It reads the live
+ * marker's `liveAt` (APP_LIVE_READ_ATTRIBUTES), app write tokens (APP_TOKEN_READ_ATTRIBUTES), the settings
+ * (SETTINGS_READ_ATTRIBUTES) and, in `APPAI#*`, `APPAI_WRITER#*` (try 2) and `APPAI_TOTAL` only, reads and updates the day counters (these names,
+ * conditions included). It invokes only Claude Haiku 4.5 through its EU profile, reads the media bucket's `app-media/`
+ * and `transcripts/`, writes and deletes only `transcripts/`, and starts, reads and deletes only Transcribe jobs named
+ * `ssd-workshop-*` in eu-central-1 whose results go to `transcripts/`.
+ */
+export const APP_AI_FUNCTION_NAME = `${PREFIX}-api-app-ai`;
+export const APP_AI_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${APP_AI_FUNCTION_NAME}`;
+/** The same role without its path: the media bucket's policy names both forms. */
+export const APP_AI_ROLE_ARN_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/${APP_AI_FUNCTION_NAME}`;
+export const APP_AI_WRITE_ATTRIBUTES = ["pk", "sk", "type", "day", "costUsd", "updatedAt"] as const;
+export const APP_AI_READ_ATTRIBUTES = ["pk", "sk", "day", "costUsd"] as const;
+/**
+ * The three counters' partitions: per app, per signed-in writer (try 2) and for all apps. `APPAI#*` matches neither
+ * `APPAI_WRITER#...` nor `APPAI_TOTAL` (the character after `APPAI` is `_`), `APPAI_WRITER#*` not `APPAI_TOTAL`, and `APP#*`
+ * none of them.
+ */
+export const APP_AI_LEADING_KEYS = ["APPAI#*", "APPAI_WRITER#*", "APPAI_TOTAL"] as const;
+/** The model of the AI tasks (question 7); must equal platform/api/settings.ts MODELS.appAi.modelId. */
+export const APP_AI_MODEL_ID = "eu.anthropic.claude-haiku-4-5-20251001-v1:0";
+/** The foundation model behind APP_AI_MODEL_ID (the EU profile routes to it in several EU regions). */
+export const APP_AI_FOUNDATION_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0";
+/** Where Amazon Transcribe writes results in the media bucket (never served: CloudFront maps only `/app-media/*`). */
+export const APP_AI_TRANSCRIPTS_PREFIX = "transcripts/";
+/** Transcribe jobs are named `ssd-workshop-app-ai-<nickname>-<id>` (platform/api/app-ai/ai.ts transcriptionJobName). */
+export const APP_AI_TRANSCRIPTION_JOB_PREFIX = `${PREFIX}-app-ai-`;
+/** A result left behind (a request that never came back) expires after a day. */
+export const APP_AI_TRANSCRIPTS_EXPIRY_DAYS = 1;
 
 /**
  * Apps hosting and the deployer (ticket 2.5, stack `ssd-workshop-apps`). The bucket name holds the account,
@@ -871,6 +907,22 @@ export const WAF_MEDIA_WRITE_RATE_BODY = JSON.stringify({ message: "Too many upl
 export const WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME = `${PREFIX}-media-preflight-rate`;
 export const WAF_MEDIA_PREFLIGHT_RATE_LIMIT = 300;
 export const WAF_MEDIA_PREFLIGHT_RATE_METHOD = "OPTIONS";
+/**
+ * Ticket 3.21: per address, at most WAF_AI_RATE_LIMIT requests to the AI tasks (`POST` and `OPTIONS
+ * /api/apps/<nickname>/ai`, counted together; same path transformations as the media rules) in WAF_RATE_WINDOW_SECONDS
+ * (priority 5), then 429 with the CORS header and its own body. The AI route's throttles (APP_AI_THROTTLE, 2/s;
+ * APP_AI_PREFLIGHT_THROTTLE, 10/s, since 3.21 try 3) are shared by every app: 150 per 5 minutes is 0.5/s, so filling
+ * the POST throttle takes at least 4 addresses and the OPTIONS throttle at least 20. A room behind one venue address shares the 150 (~3 AI tasks each for 45 people in 5
+ * minutes; a transcription's 202 answers count too: since 3.21 try 2 a repeat answers at once, so the app should ask
+ * again every few seconds, not in a loop). No new paid service: one more rule on the
+ * existing web ACL ($1 a month). Please veto.
+ */
+export const WAF_AI_RATE_RULE_NAME = `${PREFIX}-ai-rate`;
+export const WAF_AI_RATE_LIMIT = 150;
+export const WAF_AI_RATE_METHODS = ["POST", "OPTIONS"] as const;
+export const WAF_AI_PATH_SUFFIX = "/ai";
+export const WAF_AI_RATE_BODY_KEY = "too-many-ai-requests";
+export const WAF_AI_RATE_BODY = JSON.stringify({ message: "Too many AI requests from this address. Please wait a few minutes and try again." });
 /**
  * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
  * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would

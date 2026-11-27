@@ -301,7 +301,7 @@ describe("DynamoConversationStore", () => {
     ]);
     expect(inputs.every((i) => i.ConsistentRead === true && i.TableName === TABLE)).toBe(true);
     expect(inputs.map((i) => Object.values(i.ExpressionAttributeNames ?? {}))).toEqual([
-      ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
+      ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt", "appAiEnabled"],
       // Ticket 3.6: also the change requests used (compared with the cap before a change is taken or built).
       // Ticket 3.10: and a facilitator's Pause (the worker holds a paused participant's jobs).
       ["extraBudget", "changeRequestsUsed", "paused"],

@@ -589,8 +589,8 @@ const SETTINGS = "/api/admin/settings";
 function fakeAdminApi() {
   const api = fakeFacilitatorApi(room(), { role: "admin", group: "staff" });
   const caps = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15 };
-  const admin = { caps, failSwitch: undefined as "applied" | "lost" | undefined, settingsReads: 0 };
-  const body = () => ({ status: 200, body: { ...admin.caps, stopped: api.state.stopped } });
+  const admin = { caps, failSwitch: undefined as "applied" | "lost" | undefined, settingsReads: 0, appAiEnabled: false };
+  const body = () => ({ status: 200, body: { ...admin.caps, stopped: api.state.stopped, appAiEnabled: admin.appAiEnabled } });
   const ranges = { aiBudgetUsd: [0, 50, false], changeRequestsPerPerson: [0, 20, true], buildsAtOnce: [1, 30, true] } as const;
   const switchTo = (stopped: boolean): Reply => {
     const failing = admin.failSwitch;
@@ -618,6 +618,15 @@ function fakeAdminApi() {
     },
     "POST /api/admin/stop": () => switchTo(true),
     "POST /api/admin/resume": () => switchTo(false),
+    // Ticket 3.21: the switch "Apps may use AI" (`failSwitch` applies to it too).
+    "PUT /api/admin/app-ai": (call: Call) => {
+      const sent = JSON.parse(call.body ?? "{}") as Record<string, unknown>;
+      if (typeof sent["enabled"] !== "boolean") return { status: 400, body: { message: "Send enabled: true or false, as JSON." } };
+      const failing = admin.failSwitch;
+      admin.failSwitch = undefined;
+      if (failing !== "lost") admin.appAiEnabled = sent["enabled"];
+      return failing === undefined ? body() : { status: 500, body: { message: "Something went wrong. Please try again." } };
+    },
   } satisfies Record<string, Handler>);
   return { ...api, admin };
 }
@@ -822,6 +831,57 @@ describe("admin controls on the dashboard (ticket 3.12)", () => {
     await expect.poll(() => page.locator("#message-stop").textContent()).toBe(ADMIN_TEXTS.switchUnknown);
     expect(await page.locator("#message-stop").getAttribute("data-tone")).toBe("error");
   });
+});
+
+describe("the switch \"Apps may use AI\" (ticket 3.21)", () => {
+  it("WHEN the admin opens the dashboard THEN the switch shows off by default, and turning it on and off calls PUT /api/admin/app-ai", async () => {
+    const api = fakeAdminApi();
+    const calls = await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    const box = page.getByLabel("Apps may use AI");
+    expect(await box.isChecked()).toBe(false);
+    expect(await page.locator("#app-ai-state").textContent()).toBe(ADMIN_TEXTS.appAiOff);
+    await box.check();
+    await expect.poll(() => page.locator("#app-ai-state").textContent()).toBe(ADMIN_TEXTS.appAiOn);
+    expect(api.admin.appAiEnabled).toBe(true);
+    await box.uncheck();
+    await expect.poll(() => page.locator("#app-ai-state").textContent()).toBe(ADMIN_TEXTS.appAiOff);
+    const puts = calls.filter((c) => c.path === "/api/admin/app-ai");
+    expect(puts.map((c) => [c.method, c.contentType, c.body])).toEqual([
+      ["PUT", "application/json", JSON.stringify({ enabled: true })],
+      ["PUT", "application/json", JSON.stringify({ enabled: false })],
+    ]);
+    await expectNoSideScroll();
+  });
+
+  it("says the global Stop holds the AI tasks off while the switch is on, and follows Stop and Resume", async () => {
+    const api = fakeAdminApi();
+    api.admin.appAiEnabled = true;
+    await mockApi(api.handlers);
+    await openDashboard();
+    await expectAdmin();
+    expect(await page.locator("#app-ai-state").textContent()).toBe(ADMIN_TEXTS.appAiOn);
+    api.state.stopped = true;
+    await listAfter(5_000);
+    expect(await page.locator("#app-ai-state").textContent()).toBe(ADMIN_TEXTS.appAiStopped);
+    expect(await page.getByLabel("Apps may use AI").isChecked()).toBe(true);
+  });
+
+  for (const failing of ["applied", "lost"] as const) {
+    it(`reads the settings again after a 500 (switch ${failing}) and shows the true state`, async () => {
+      const api = fakeAdminApi();
+      await mockApi(api.handlers);
+      await openDashboard();
+      await expectAdmin();
+      api.admin.failSwitch = failing;
+      await page.getByLabel("Apps may use AI").check();
+      await expect.poll(() => page.locator("#message-app-ai").textContent()).toBe(ADMIN_TEXTS.appAiFailed);
+      const on = failing === "applied";
+      expect(await page.getByLabel("Apps may use AI").isChecked()).toBe(on);
+      expect(await page.locator("#app-ai-state").textContent()).toBe(on ? ADMIN_TEXTS.appAiOn : ADMIN_TEXTS.appAiOff);
+    });
+  }
 });
 
 describe("admin screenshot (ticket 3.12)", () => {

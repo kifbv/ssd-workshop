@@ -26,6 +26,8 @@ export interface SettingsStore {
    * missing; leaves the caps as they are.
    */
   setStopped(stopped: boolean, nowIso: string): Promise<void>;
+  /** Ticket 3.21: turns the switch "Apps may use AI" on or off (noting `appAiChangedAt`), creating the item when missing. */
+  setAppAi(enabled: boolean, nowIso: string): Promise<void>;
 }
 
 const str = (value: string): AttributeValue => ({ S: value });
@@ -46,13 +48,14 @@ export async function readSettings(client: { send(command: GetItemCommand): Prom
       TableName: tableName,
       Key: key(),
       ConsistentRead: true,
-      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped, #resumedAt",
+      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped, #resumedAt, #appAiEnabled",
       ExpressionAttributeNames: {
         "#aiBudgetUsd": "aiBudgetUsd",
         "#changeRequestsPerPerson": "changeRequestsPerPerson",
         "#buildsAtOnce": "buildsAtOnce",
         "#stopped": "stopped",
         "#resumedAt": "resumedAt",
+        "#appAiEnabled": "appAiEnabled",
       },
     }),
   );
@@ -105,6 +108,19 @@ export class DynamoSettingsStore implements SettingsStore {
         UpdateExpression: `SET #type = :type, #stopped = :stopped, #${at} = :now, #updatedAt = :now`,
         ExpressionAttributeNames: { "#type": "type", "#stopped": "stopped", [`#${at}`]: at, "#updatedAt": "updatedAt" },
         ExpressionAttributeValues: { ":type": str("settings"), ":stopped": { BOOL: stopped }, ":now": str(nowIso) },
+      }),
+    );
+  }
+
+  async setAppAi(enabled: boolean, nowIso: string): Promise<void> {
+    // One UpdateItem of the switch and its time only (the caps and Stop keep their values); nothing comes back.
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.tableName,
+        Key: key(),
+        UpdateExpression: "SET #type = :type, #appAiEnabled = :enabled, #appAiChangedAt = :now, #updatedAt = :now",
+        ExpressionAttributeNames: { "#type": "type", "#appAiEnabled": "appAiEnabled", "#appAiChangedAt": "appAiChangedAt", "#updatedAt": "updatedAt" },
+        ExpressionAttributeValues: { ":type": str("settings"), ":enabled": { BOOL: enabled }, ":now": str(nowIso) },
       }),
     );
   }

@@ -20,6 +20,14 @@ import {
   AI_WORKER_BUILD_UPDATE_ATTRIBUTES,
   AI_WORKER_UPDATE_ATTRIBUTES,
   API_NAME,
+  APP_AI_FOUNDATION_MODEL_ID,
+  APP_AI_FUNCTION_NAME,
+  APP_AI_LEADING_KEYS,
+  APP_AI_MODEL_ID,
+  APP_AI_READ_ATTRIBUTES,
+  APP_AI_TRANSCRIPTION_JOB_PREFIX,
+  APP_AI_TRANSCRIPTS_PREFIX,
+  APP_AI_WRITE_ATTRIBUTES,
   APP_DATA_FUNCTION_NAME,
   APP_DATA_WRITE_ATTRIBUTES,
   APP_LIVE_READ_ATTRIBUTES,
@@ -130,6 +138,25 @@ export const APP_MEDIA_MEMORY_MB = 512;
  */
 export const APP_MEDIA_TIMEOUT_SECONDS = 25;
 
+/**
+ * Route throttles for the AI tasks (ticket 3.21), for all apps together (please veto). The budgets ($1 per app, $10 for
+ * all apps a day) cap what the AI costs; the throttles cap the requests and the functions running at once (a call may
+ * run up to APP_AI_TIMEOUT_SECONDS). Try 3 (chosen by Franck 2026-11-27): POST 2/s (burst
+ * 10) and OPTIONS 10/s (burst 20), down from 5/s and 20/s, which more than halves the worst-case cost of requests at the
+ * cap (docs/decisions.md "(3.21) Cost"); a room of 45 still tags a photo each within ~20 s (the first 10 at once).
+ */
+export const APP_AI_THROTTLE = { rateLimit: 2, burstLimit: 10 } as const;
+export const APP_AI_PREFLIGHT_THROTTLE = { rateLimit: 10, burstLimit: 20 } as const;
+export const APP_AI_MEMORY_MB = 512;
+/**
+ * 28 s, under API Gateway's 30 s (try 2): every paid step and what follows it ends by REQUEST_DEADLINE_MS (26 s) after
+ * the request started (platform/api/app-ai/ai.ts): a model call is aborted at the deadline less one settlement (5.5 s) and
+ * starts only with 8 s for it; the request that starts a Transcribe job polls only while one poll (2 s + 3 s) and the
+ * reading and clean-up (4 s + 3 s + 4 s) still fit; every S3 and Transcribe call is one attempt aborted at 4 s and 3 s,
+ * every table call 2 attempts of 1 s + 1.5 s. The 2 s left cover the log line.
+ */
+export const APP_AI_TIMEOUT_SECONDS = 28;
+
 /** The protected participant routes (ticket 1.5), all served by one function behind one session check. */
 export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
@@ -147,6 +174,8 @@ export const ADMIN_ROUTES = [
   { path: "/api/admin/settings", method: HttpMethod.PUT },
   { path: "/api/admin/stop", method: HttpMethod.POST },
   { path: "/api/admin/resume", method: HttpMethod.POST },
+  // Ticket 3.21: the switch "Apps may use AI".
+  { path: "/api/admin/app-ai", method: HttpMethod.PUT },
 ] as const;
 
 /**
@@ -197,6 +226,10 @@ export const APP_DATA_METHODS = [HttpMethod.GET, HttpMethod.PUT, HttpMethod.DELE
 export const APP_MEDIA_PATH = "/api/apps/{nickname}/media/{id}";
 export const APP_MEDIA_METHODS = [HttpMethod.PUT, HttpMethod.DELETE, HttpMethod.OPTIONS] as const;
 
+/** The AI tasks for apps (ticket 3.21), one function; `OPTIONS` is its own route, as for the data API. */
+export const APP_AI_PATH = "/api/apps/{nickname}/ai";
+export const APP_AI_METHODS = [HttpMethod.POST, HttpMethod.OPTIONS] as const;
+
 /**
  * The AI worker's timeout (ticket 1.7): a guardrail call and an answer of up to 2000 tokens fit with
  * room; the AI calls are cut off 30 s before it, so the outcome is always stored.
@@ -219,6 +252,15 @@ export const BEDROCK_INVOKE_RESOURCES = [
   `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/${MODEL_ID}`,
   `arn:aws:bedrock:eu-*::foundation-model/${FOUNDATION_MODEL_ID}`,
 ] as const;
+
+/** The model the AI tasks for apps may call (ticket 3.21): Haiku 4.5's EU profile and the foundation model behind it. */
+export const APP_AI_BEDROCK_INVOKE_RESOURCES = [
+  `arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/${APP_AI_MODEL_ID}`,
+  `arn:aws:bedrock:eu-*::foundation-model/${APP_AI_FOUNDATION_MODEL_ID}`,
+] as const;
+
+/** The Transcribe jobs the AI function may read and delete (ticket 3.21): its own names, in eu-central-1. */
+export const APP_AI_TRANSCRIPTION_JOBS = `arn:aws:transcribe:${REGION}:${ACCOUNT}:transcription-job/${APP_AI_TRANSCRIPTION_JOB_PREFIX}*`;
 
 /** The launch queue (builds stack, ticket 2.7), named by its fixed ARN: the AI worker is its one sender. */
 export const BUILD_QUEUE_ARN = `arn:aws:sqs:${REGION}:${ACCOUNT}:${BUILD_QUEUE_NAME}`;
@@ -876,6 +918,80 @@ export class ApiStack extends Stack {
       integration: new HttpLambdaIntegration("AppMediaIntegration", appMedia, { scopePermissionToRoute: false }),
     });
 
+    // Ticket 3.21: the AI tasks for apps, reachable by anyone with an app's address, running only with an app write
+    // token, the admin's switch on and the three day budgets unspent. It reads the live marker, app write tokens and the
+    // settings (projected), reads and updates only the three day counters (`APPAI#*`, `APPAI_WRITER#*`, `APPAI_TOTAL`), invokes only Haiku
+    // 4.5 through its EU profile, reads the media bucket's files and results, writes and deletes only results under
+    // `transcripts/` (the bucket's policy refuses every other writer there), and runs only its own Transcribe jobs.
+    const appAi = workshopFunction(this, "AppAi", APP_AI_FUNCTION_NAME, "app-ai.ts", APP_AI_MEMORY_MB, APP_AI_TIMEOUT_SECONDS);
+    appAi.addToRolePolicy(projectedRead("APP#*", APP_LIVE_READ_ATTRIBUTES));
+    appAi.addToRolePolicy(projectedRead("APPTOKEN#*", APP_TOKEN_READ_ATTRIBUTES));
+    addSettingsReadRights(appAi, this.table);
+    appAi.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [...APP_AI_LEADING_KEYS] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_AI_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    appAi.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [...APP_AI_LEADING_KEYS] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_AI_WRITE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": [...ATTRIBUTE_LIMITED_RETURN_VALUES] },
+        },
+      }),
+    );
+    appAi.addToRolePolicy(new PolicyStatement({ effect: Effect.ALLOW, actions: ["bedrock:InvokeModel"], resources: [...APP_AI_BEDROCK_INVOKE_RESOURCES] }));
+    appAi.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:GetObject"],
+        resources: [`arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/${APP_MEDIA_KEY_PREFIX}*`, `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/${APP_AI_TRANSCRIPTS_PREFIX}*`],
+      }),
+    );
+    appAi.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["s3:PutObject", "s3:DeleteObject"],
+        resources: [`arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/${APP_AI_TRANSCRIPTS_PREFIX}*`],
+      }),
+    );
+    // StartTranscriptionJob names no resource (Service Authorization Reference): Resource "*", limited to the media
+    // bucket's `transcripts/` as its output. Transcribe reads the file and writes the result with this role's rights.
+    appAi.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["transcribe:StartTranscriptionJob"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "aws:RequestedRegion": REGION, "transcribe:OutputBucketName": APP_MEDIA_BUCKET_NAME },
+          StringLike: { "transcribe:OutputKey": `${APP_AI_TRANSCRIPTS_PREFIX}*` },
+        },
+      }),
+    );
+    appAi.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["transcribe:GetTranscriptionJob", "transcribe:DeleteTranscriptionJob"],
+        resources: [APP_AI_TRANSCRIPTION_JOBS],
+      }),
+    );
+    const appAiRoutes = this.api.addRoutes({
+      path: APP_AI_PATH,
+      methods: [...APP_AI_METHODS],
+      integration: new HttpLambdaIntegration("AppAiIntegration", appAi, { scopePermissionToRoute: false }),
+    });
+
     // Route-level throttles (L1 RouteSettings; the L2 stage has no per-route option). A route must
     // exist before the stage names it. No reserved concurrency: it takes from the account-wide pool.
     const cfnStage = stage.node.defaultChild as CfnStage;
@@ -910,7 +1026,17 @@ export class ApiStack extends Stack {
         ThrottlingBurstLimit: throttle.burstLimit,
       });
     }
-    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes, ...appDataRoutes, ...appMediaRoutes]) cfnStage.node.addDependency(route);
+    const appAiThrottles = [
+      [HttpMethod.POST, APP_AI_THROTTLE],
+      [HttpMethod.OPTIONS, APP_AI_PREFLIGHT_THROTTLE],
+    ] as const;
+    for (const [method, throttle] of appAiThrottles) {
+      cfnStage.addPropertyOverride(`RouteSettings.${method} ${APP_AI_PATH}`, {
+        ThrottlingRateLimit: throttle.rateLimit,
+        ThrottlingBurstLimit: throttle.burstLimit,
+      });
+    }
+    for (const route of [...signInCodeRoutes, ...signInVerifyRoutes, ...appDataRoutes, ...appMediaRoutes, ...appAiRoutes]) cfnStage.node.addDependency(route);
 
     new CfnOutput(this, "ApiEndpoint", {
       description: "The API's own endpoint (https://<api id>.execute-api.<region>.amazonaws.com)",

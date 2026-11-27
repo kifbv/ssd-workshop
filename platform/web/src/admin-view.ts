@@ -8,6 +8,8 @@ import { messageOf, type ApiAnswer } from "./flow.js";
 export const SETTINGS_PATH = "/api/admin/settings";
 export const STOP_PATH = "/api/admin/stop";
 export const RESUME_PATH = "/api/admin/resume";
+/** Ticket 3.21: the switch "Apps may use AI" (`PUT {"enabled": true|false}`). */
+export const APP_AI_PATH = "/api/admin/app-ai";
 
 /** The three caps, in the order the page shows them (the API's field names). */
 export const CAP_FIELDS = ["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce"] as const;
@@ -18,6 +20,8 @@ export interface AdminSettings {
   changeRequestsPerPerson: number;
   buildsAtOnce: number;
   stopped: boolean;
+  /** Ticket 3.21: "Apps may use AI" (off unless the API says it is on). */
+  appAiEnabled: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -28,7 +32,7 @@ export function parseSettings(body: unknown): AdminSettings | undefined {
   if (!isRecord(body)) return undefined;
   const { aiBudgetUsd, changeRequestsPerPerson, buildsAtOnce, stopped } = body;
   if (!isNumber(aiBudgetUsd) || !isNumber(changeRequestsPerPerson) || !isNumber(buildsAtOnce) || typeof stopped !== "boolean") return undefined;
-  return { aiBudgetUsd, changeRequestsPerPerson, buildsAtOnce, stopped };
+  return { aiBudgetUsd, changeRequestsPerPerson, buildsAtOnce, stopped, appAiEnabled: body["appAiEnabled"] === true };
 }
 
 /** How a field shows a cap: the budget with two decimals ("5.00"), the counts as whole numbers. */
@@ -97,7 +101,7 @@ export type SwitchResult =
    */
   | { kind: "reread" };
 
-/** `POST /api/admin/stop` and `POST /api/admin/resume`. */
+/** `POST /api/admin/stop` and `POST /api/admin/resume`; since 3.21 also `PUT /api/admin/app-ai` (same answers). */
 export function switchResult(answer: ApiAnswer): SwitchResult {
   if (answer.status === 401) return { kind: "signed-out" };
   if (answer.status === 404) return { kind: "not-admin" };
@@ -107,3 +111,10 @@ export function switchResult(answer: ApiAnswer): SwitchResult {
 
 /** The state line under the Stop button. */
 export const stateText = (stopped: boolean): string => (stopped ? ADMIN_TEXTS.workshopPaused : ADMIN_TEXTS.workshopRunning);
+
+/**
+ * The state line beside "Apps may use AI" (ticket 3.21): on, off, or on but held off by the global Stop (the AI route
+ * answers 503 while either is the case).
+ */
+export const appAiText = (settings: Pick<AdminSettings, "appAiEnabled" | "stopped">): string =>
+  !settings.appAiEnabled ? ADMIN_TEXTS.appAiOff : settings.stopped ? ADMIN_TEXTS.appAiStopped : ADMIN_TEXTS.appAiOn;

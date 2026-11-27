@@ -373,3 +373,31 @@ paths:
   sign-in to save; "a login of its own" does not), and give the eval case `avoids` for the false claim as phrases, not a word a
   correct reply may use. A `mentionsEach` group that stands for a reminder is phrase-level too ("photograph people", not "people").
 - A change to `SPEC_FORMAT_AND_RULES` moves two prompt versions: the spec prompt's and the change prompt's, which embeds it.
+- Bedrock Converse tool schemas (ticket 3.21): property names must match `^[a-zA-Z0-9_-]{1,64}$`, so names an app
+  chooses (read-photo's fields) go to the model as `f1`..`fn` and are mapped back; force the tool with `toolChoice`,
+  set `temperature: 0`, and check the tool input against the request (never trust an enum to hold). A per-call budget
+  reserves the worst case before the call (prompt bound + image bound + text, `maxTokens` out) and settles to the real
+  tokens after; give it back only for errors Bedrock never bills, and use one attempt (`maxAttempts: 1`), since a retry
+  bills twice.
+- A service billed per minute (Transcribe) is charged before the call on the length measured from the file's own
+  timing (`app-media/formats.ts`), bounded by the recording limit, never on what the client says; an async job is
+  named after the media id so a repeat request joins it instead of paying again.
+  Give a start's charge back only on errors that prove nothing started (refused: invalid, quota, access); after a
+  time-out, abort, network error or 5xx the job may exist, so ask its status once and refund only when it is missing
+  (3.21 try 3, `UNSTARTED_TRANSCRIBE_ERRORS`), leaving time for that call in the start's deadline check.
+  A request that joins a running job answers 202 at once (ticket 3.21 try 2): only the request that paid may wait, or
+  free requests buy Lambda time. Clean up a finished job's record before its result file, so a second reader that finds
+  the file gone also finds the job gone and answers "ask again" instead of failing.
+- A function whose paid call may run long (3.21's Bedrock, Transcribe polls) takes a deadline from the request's start
+  under its timeout and starts a paid step only when it and everything after it (settlement, clean-up) fit; bound every
+  SDK call (one attempt, and race S3 bodies and the paid call against an `AbortController` limit, `withinLimit` in
+  `app-ai/store.ts`: `requestTimeout` is a socket idle limit, not a total), and write the arithmetic next to the
+  constants with a test that adds them up.
+- A spend cap per person across apps keys its counter by the token's writer (`APPAI_WRITER#<nickname>`, 3.21 try 2) in
+  the same transaction as the other counters; a new counter partition needs the role's `LeadingKeys` and a synth test
+  that the patterns cannot match each other.
+- An object keyed by names a stranger chooses (read-photo's fields) is `Object.create(null)`: `out["__proto__"] = x`
+  on `{}` sets the prototype and the field is lost (3.21 try 2).
+- An MP4's declared playback includes `tkhd` and the edit list (`elst` segment durations, which can repeat media), not
+  only `mvhd`/`mdhd`: take the largest of all declared lengths and the counted samples (3.21 try 2).
+

@@ -156,6 +156,23 @@ export const appMediaKey = (nickname: string, id: string): ItemKey => ({ pk: app
 export const appMediaUsageKey = (nickname: string): ItemKey => ({ pk: appMediaPk(nickname), sk: "MEDIA_USAGE" });
 
 /**
+ * An app's AI spend for the UTC day (ticket 3.21): `APPAI#<lower-cased nickname>` / `AI_USAGE` (day, costUsd). Its own
+ * prefix: IAM's `APP#*`, `APPDATA#*`, `APPMEDIA#*` and `APPTOKEN#*` never match `APPAI#...`, so only the AI function's
+ * role may move it.
+ */
+export const appAiUsageKey = (nickname: string): ItemKey => ({ pk: `APPAI#${checkId("nickname", nickname).toLowerCase()}`, sk: "AI_USAGE" });
+
+/**
+ * A signed-in writer's AI spend for the UTC day across all apps (ticket 3.21 try 2): `APPAI_WRITER#<lower-cased writer
+ * nickname>` / `AI_USAGE` (day, costUsd). `APPAI#*` never matches it (the character after `APPAI` is `_`), nor does
+ * `APPAI_TOTAL`.
+ */
+export const appAiWriterKey = (writer: string): ItemKey => ({ pk: `APPAI_WRITER#${checkId("writer nickname", writer).toLowerCase()}`, sk: "AI_USAGE" });
+
+/** All apps' AI spend for the UTC day (ticket 3.21): `APPAI_TOTAL` / `AI_USAGE`, which `APPAI#*` does not match. */
+export const appAiTotalKey = (): ItemKey => ({ pk: "APPAI_TOTAL", sk: "AI_USAGE" });
+
+/**
  * An app write token (ticket 3.24), by the SHA-256 (hex) of the token: `APPTOKEN#<hash>` / `TOKEN`. Its own partition
  * prefix: IAM's `APP#*` and `APPDATA#*` never match `APPTOKEN#...` (the character after `APP` is `T`), and `APPTOKEN#*`
  * never matches `TOKENS#...`.

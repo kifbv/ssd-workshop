@@ -14,7 +14,7 @@ const VALID = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15 };
 
 describe("workshop settings (ticket 3.2)", () => {
   it("defaults to $5, 5 change requests, 15 builds at once and Stop off", () => {
-    expect(DEFAULT_SETTINGS).toEqual({ aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false });
+    expect(DEFAULT_SETTINGS).toEqual({ aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false, appAiEnabled: false });
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true);
     expect(CAP_NAMES).toEqual(["aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce"]);
   });
@@ -27,7 +27,11 @@ describe("workshop settings (ticket 3.2)", () => {
       changeRequestsPerPerson: 0,
       buildsAtOnce: 3,
       stopped: true,
+      appAiEnabled: false,
     });
+    // Ticket 3.21: the switch "Apps may use AI" reads on only from a true boolean.
+    expect(settingsFromItem({ appAiEnabled: { BOOL: true } }).appAiEnabled).toBe(true);
+    expect(settingsFromItem({ appAiEnabled: { S: "true" } }).appAiEnabled).toBe(false);
     expect(settingsFromItem({ aiBudgetUsd: { N: "51" }, changeRequestsPerPerson: { N: "2.5" }, buildsAtOnce: { N: "0" }, stopped: { S: "true" } })).toEqual(DEFAULT_SETTINGS);
     expect(settingsFromItem({ aiBudgetUsd: { S: "7" }, buildsAtOnce: { N: "x" } })).toEqual(DEFAULT_SETTINGS);
   });

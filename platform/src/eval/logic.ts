@@ -10,7 +10,7 @@ import type { ReadinessVerdict } from "../../api/conversation/readiness.js";
 import { checkSpec, extractSpec, parseSpec } from "../../api/conversation/spec.js";
 import type { GuardrailVerdict, TokenUsage } from "../../api/types.js";
 
-export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build", "suggestions", "change"] as const;
+export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build", "suggestions", "change", "app-ai"] as const;
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
@@ -55,6 +55,9 @@ Suites:
                no console error and nothing scrolling sideways, show the new spec's title and screens and every
                screen of the previous spec, and be one commit "Change 1: ..." holding the new SPEC.md; prints the
                duration, tokens and cost of each step (about $0.50 in all)
+  app-ai       ticket 3.21: the AI task read-photo on two synthetic receipts (made-up shops, drawn in Chromium,
+               stored as the media API would), through Claude Haiku 4.5's EU profile with the route's prompt, tool
+               and answer check: shop, date and total must come back right (about $0.01)
 
 Calls Claude on Bedrock with your own AWS credentials (up to a few cents per example; build about $1 per spec).`;
 

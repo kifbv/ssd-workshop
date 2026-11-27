@@ -8,6 +8,8 @@ import {
   ADMIN_ROUTES,
   BAD_SETTINGS_MESSAGE,
   handleAdminRequest,
+  APP_AI_ROUTE,
+  BAD_APP_AI_MESSAGE,
   RESUME_ROUTE,
   SETTINGS_GET_ROUTE,
   SETTINGS_PUT_ROUTE,
@@ -46,7 +48,7 @@ const json = (body: string | undefined): unknown => JSON.parse(body ?? "");
 
 describe("admin settings routes (ticket 3.2)", () => {
   it("serves exactly GET and PUT /api/admin/settings, and (ticket 3.5) POST /api/admin/stop and /api/admin/resume", () => {
-    expect([...ADMIN_ROUTES]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings", "POST /api/admin/stop", "POST /api/admin/resume"]);
+    expect([...ADMIN_ROUTES]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings", "POST /api/admin/stop", "POST /api/admin/resume", "PUT /api/admin/app-ai"]);
   });
 
   it("WHEN no SETTINGS item exists THEN the admin reads the defaults $5, 5 and 15 with Stop off", async () => {
@@ -54,7 +56,7 @@ describe("admin settings routes (ticket 3.2)", () => {
     const res = await handleAdminRequest(get("admin"), deps);
     expect(res.statusCode).toBe(200);
     expect(res.headers).toMatchObject({ "content-type": "application/json", "cache-control": "no-store" });
-    expect(json(res.body)).toEqual({ aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false });
+    expect(json(res.body)).toEqual({ aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false, appAiEnabled: false });
     expect(logs).toEqual([{ event: "admin", route: "settings-get", outcome: "ok" }]);
   });
 
@@ -62,10 +64,10 @@ describe("admin settings routes (ticket 3.2)", () => {
     const { deps, settings, logs } = setup();
     const res = await handleAdminRequest(put(VALID, "admin"), deps);
     expect(res.statusCode).toBe(200);
-    expect(json(res.body)).toEqual({ ...VALID, stopped: false });
+    expect(json(res.body)).toEqual({ ...VALID, stopped: false, appAiEnabled: false });
     expect(settings.writes).toBe(1);
     expect(settings.item?.["updatedAt"]).toEqual({ S: NOW.toISOString() });
-    expect(json((await handleAdminRequest(get("admin"), deps)).body)).toEqual({ ...VALID, stopped: false });
+    expect(json((await handleAdminRequest(get("admin"), deps)).body)).toEqual({ ...VALID, stopped: false, appAiEnabled: false });
     expect(logs[0]).toEqual({ event: "admin", route: "settings-put", outcome: "saved" });
   });
 
@@ -73,7 +75,7 @@ describe("admin settings routes (ticket 3.2)", () => {
     const { deps, settings } = setup();
     settings.item = { stopped: { BOOL: true } };
     const res = await handleAdminRequest(put(VALID, "admin"), deps);
-    expect(json(res.body)).toEqual({ ...VALID, stopped: true });
+    expect(json(res.body)).toEqual({ ...VALID, stopped: true, appAiEnabled: false });
     // A `stopped` in the body is ignored: Stop has its own routes (ticket 3.5).
     await handleAdminRequest(put({ ...VALID, stopped: false }, "admin"), deps);
     expect(settings.item["stopped"]).toEqual({ BOOL: true });
@@ -182,13 +184,13 @@ describe("global Stop and Resume (ticket 3.5)", () => {
     settings.item = { aiBudgetUsd: { N: "8" } };
     const stopped = await handleAdminRequest(post(STOP_ROUTE, "admin"), deps);
     expect(stopped.statusCode).toBe(200);
-    expect(json(stopped.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: true });
+    expect(json(stopped.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: true, appAiEnabled: false });
     expect(settings.item).toMatchObject({ stopped: { BOOL: true }, stoppedAt: { S: NOW.toISOString() }, aiBudgetUsd: { N: "8" } });
     // Pressed twice: still on, no harm.
     expect((await handleAdminRequest(post(STOP_ROUTE, "admin"), deps)).statusCode).toBe(200);
     const resumed = await handleAdminRequest(post(RESUME_ROUTE, "admin"), deps);
     expect(resumed.statusCode).toBe(200);
-    expect(json(resumed.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false });
+    expect(json(resumed.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false, appAiEnabled: false });
     expect(settings.item).toMatchObject({ stopped: { BOOL: false }, resumedAt: { S: NOW.toISOString() } });
     expect(logs.map((l) => [l.route, l.outcome])).toEqual([
       ["stop", "stopped"],
@@ -197,7 +199,7 @@ describe("global Stop and Resume (ticket 3.5)", () => {
     ]);
     // Caps saved while stopped keep Stop on.
     await handleAdminRequest(post(STOP_ROUTE, "admin"), deps);
-    expect(json((await handleAdminRequest(put(VALID, "admin"), deps)).body)).toEqual({ ...VALID, stopped: true });
+    expect(json((await handleAdminRequest(put(VALID, "admin"), deps)).body)).toEqual({ ...VALID, stopped: true, appAiEnabled: false });
   });
 
   it("criterion 5: WHEN a non-admin calls Stop or Resume THEN the answer is 404 and nothing changes", async () => {
@@ -222,5 +224,52 @@ describe("global Stop and Resume (ticket 3.5)", () => {
     settings.failure = Object.assign(new Error("secret detail"), { name: "InternalServerError" });
     expect((await handleAdminRequest(post(RESUME_ROUTE, "admin"), deps)).statusCode).toBe(500);
     expect(logs.at(-1)).toEqual({ event: "admin", route: "resume", outcome: "failed", error: "InternalServerError" });
+  });
+});
+
+describe("the switch Apps may use AI (ticket 3.21)", () => {
+  const appAi = (body: unknown, role?: Role, contentType = "application/json"): HttpRequest => ({
+    routeKey: APP_AI_ROUTE,
+    headers: { "content-type": contentType },
+    body: JSON.stringify(body),
+    ...(role ? { cookies: cookie(role) } : {}),
+  });
+
+  it("WHEN no SETTINGS item exists THEN the switch reads off (off by default)", async () => {
+    const { deps } = setup();
+    expect(json((await handleAdminRequest(get("admin"), deps)).body)).toMatchObject({ appAiEnabled: false });
+  });
+
+  it("WHEN the admin turns it on THEN it is stored with its time, the caps and Stop stay, and off again turns it off", async () => {
+    const { deps, settings, logs } = setup();
+    settings.item = { aiBudgetUsd: { N: "8" }, stopped: { BOOL: true } };
+    const on = await handleAdminRequest(appAi({ enabled: true }, "admin"), deps);
+    expect(on.statusCode).toBe(200);
+    expect(json(on.body)).toEqual({ aiBudgetUsd: 8, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: true, appAiEnabled: true });
+    expect(settings.item["appAiChangedAt"]).toEqual({ S: NOW.toISOString() });
+    const off = await handleAdminRequest(appAi({ enabled: false }, "admin"), deps);
+    expect(json(off.body)).toMatchObject({ stopped: true, appAiEnabled: false });
+    expect(logs.map((l) => [l.route, l.outcome])).toEqual([
+      ["app-ai", "app-ai-on"],
+      ["app-ai", "app-ai-off"],
+    ]);
+  });
+
+  it("WHEN the body is not {enabled: true|false} THEN 400 and nothing is stored; not JSON is 415", async () => {
+    const { deps, settings } = setup();
+    for (const body of [{}, { enabled: "yes" }, { enabled: 1 }, null, []]) {
+      const res = await handleAdminRequest(appAi(body, "admin"), deps);
+      expect(res.statusCode).toBe(400);
+      expect(json(res.body)).toEqual({ message: BAD_APP_AI_MESSAGE });
+    }
+    expect((await handleAdminRequest(appAi({ enabled: true }, "admin", "text/plain"), deps)).statusCode).toBe(415);
+    expect(settings.writes).toBe(0);
+  });
+
+  it("WHEN a participant or facilitator flips it THEN 404 and nothing changes; without a session 401", async () => {
+    const { deps, settings } = setup();
+    for (const role of ["participant", "facilitator"] as const) expect((await handleAdminRequest(appAi({ enabled: true }, role), deps)).statusCode).toBe(404);
+    expect((await handleAdminRequest(appAi({ enabled: true }), deps)).statusCode).toBe(401);
+    expect(settings.writes).toBe(0);
   });
 });

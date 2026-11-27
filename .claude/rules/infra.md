@@ -275,7 +275,7 @@ paths:
 - A deny "for every role but X" in the boundary (ticket 2.9 try 2): `ArnNotLike` `aws:PrincipalArn`
   `arn:aws:iam::<account>:role*/<name>` covers X with and without its path in one value (a role name is unique in
   an account), half the size of listing both forms; test look-alikes (`x-<name>`, `<name>x`, `<name>-execution`). The
-  boundary is close to 6,144 characters (5,978 after 2.9's access review; `-deploy-read` 5,155 and `-ec2` 4,405 after the 2.9 follow-up): check the size test
+  boundary is close to 6,144 characters (6,131 after 3.21's Transcribe statement; 5,978 after 2.9's access review; `-deploy-read` 5,155 and `-ec2` 4,405 after the 2.9 follow-up): check the size test
   before adding to it. Every role such a deny lets through by name is then a target to borrow: deny the Claude user everything but reads on it (and on the
   functions that run as it) in `NoLauncherForSessions` (ticket 2.9 try 3), or a
   session passes it to its own task or function. `role*/<name>` works only in a condition: IAM rejects it in a
@@ -348,3 +348,14 @@ paths:
   least 3 addresses to fill), and match paths after
   `URL_DECODE` then `NORMALIZE_PATH`, or `/api//apps/...` skips a `STARTS_WITH "/api/apps/"` match.
 - A WAF web ACL's `Description` must match `^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+...$` (no `;`, no quotes): `cdk synth` prints only a warning (F3031) and the deploy would fail; the synth test checks it (ticket 3.18 try 2).
+- Amazon Transcribe (ticket 3.21): `StartTranscriptionJob` has no resource type in the Service Authorization Reference,
+  so it is granted on `Resource "*"` and limited by conditions (`aws:RequestedRegion`, `transcribe:OutputBucketName`,
+  `transcribe:OutputKey` `transcripts/*`); `Get`/`DeleteTranscriptionJob` take `transcription-job/ssd-workshop-*`.
+  Passing `Tags` on Start may need `transcribe:TagResource`: jobs stay untagged and are deleted after reading. Transcribe
+  writes the result with the caller's rights (forward access sessions), so a bucket policy deny on that prefix would
+  refuse it: leave the result prefix to identity policies (`NotResource`) and check live that the result arrives.
+  The boundary's Transcribe statement is on `Resource "*"` for every bounded role, so the synth test fails when any IAM
+  policy but the AI role's names a `transcribe:` action (or a wildcard or `NotAction` reaching one, ticket 3.21 try 2).
+- A CloudFront response headers policy with CORS `originOverride: true` replaces the function's
+  `Access-Control-Allow-Methods` too: a route with a new method (3.21's POST) needs it in the policy's list and a new
+  policy version, or browsers refuse the preflight.

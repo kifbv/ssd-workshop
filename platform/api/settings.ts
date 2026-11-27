@@ -51,7 +51,19 @@ export interface ModelSetting {
  */
 export const MODELS = {
   build: { modelId: MODEL_ID, price: { input: 3.3, output: 16.5, cacheRead: 0.33, cacheWrite: 4.125 } },
+  /**
+   * Ticket 3.21: the AI tasks for apps (tag a photo, read fields from a photo, sort a text): Claude Haiku 4.5 through the
+   * EU geographic profile, list prices ($1 in, $5 out, cache reads $0.10, 5-minute cache writes $1.25) plus Bedrock's 10%.
+   */
+  appAi: { modelId: "eu.anthropic.claude-haiku-4-5-20251001-v1:0", price: { input: 1.1, output: 5.5, cacheRead: 0.11, cacheWrite: 1.375 } },
 } as const satisfies Record<string, ModelSetting>;
+
+/**
+ * Ticket 3.21 (question 8): Amazon Transcribe batch jobs for the AI task `transcribe`, in eu-central-1: $0.024 a minute
+ * (standard tier T1), billed per second with a 15-second minimum per job.
+ */
+export const TRANSCRIBE_PRICE_PER_MINUTE = 0.024;
+export const TRANSCRIBE_MINIMUM_SECONDS = 15;
 
 /** The queue that hands a stored message to the AI worker (ticket 1.7); it carries ids only. */
 export const AI_QUEUE_NAME = "ssd-workshop-ai-messages";

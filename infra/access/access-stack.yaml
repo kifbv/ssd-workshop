@@ -84,7 +84,7 @@ Resources:
               - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.anthropic.*
           - Sid: SendCodes
             Effect: Allow
-            Action: [ses:SendEmail, ses:SendRawEmail]
+            Action: ses:SendEmail
             Resource:
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/ssd-workshop@rankly.games
               - !Sub arn:aws:ses:*:${AWS::AccountId}:identity/rankly.games
@@ -116,10 +116,7 @@ Resources:
             Action: secretsmanager:GetSecretValue
             Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:ssd-workshop-github-*
             Condition:
-              ArnNotEquals:
-                aws:PrincipalArn:
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop/ssd-workshop-builds-launcher
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/ssd-workshop-builds-launcher
+              ArnNotLike: {aws:PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role*/ssd-workshop-builds-launcher"}
           # RunTask with tags (or propagateTags) is also authorized as TagResource on the new task.
           - Sid: TagBuildsOnStart
             Effect: Allow
@@ -171,6 +168,14 @@ Resources:
             Effect: Allow
             Action: [ecr:GetAuthorizationToken, xray:PutTraceSegments, ecs:ListTasks]
             Resource: "*"
+          # Ticket 3.21: the AI tasks' Transcribe jobs, in this region only (the AI function's role names its jobs and
+          # output: transcripts/ of the media bucket).
+          - Sid: Transcribe
+            Effect: Allow
+            Action: [transcribe:StartTranscriptionJob, transcribe:GetTranscriptionJob, transcribe:DeleteTranscriptionJob]
+            Resource: "*"
+            Condition:
+              StringEquals: {aws:RequestedRegion: !Sub "${AWS::Region}"}
           - Sid: WorkshopMetrics
             Effect: Allow
             Action: cloudwatch:PutMetricData

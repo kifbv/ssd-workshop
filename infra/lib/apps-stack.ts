@@ -9,7 +9,10 @@ import type { Construct } from "constructs";
 import { slotReleaseStatements, workshopFunction } from "./api-stack.js";
 import {
   ACCOUNT,
+  APP_AI_TRANSCRIPTS_EXPIRY_DAYS,
+  APP_AI_TRANSCRIPTS_PREFIX,
   APP_MEDIA_BUCKET_NAME,
+  APP_MEDIA_KEY_PREFIX,
   APP_MEDIA_ROLE_ARN,
   APP_MEDIA_ROLE_ARN_WITHOUT_PATH,
   APPS_BUCKET_NAME,
@@ -133,25 +136,32 @@ export class AppsStack extends Stack {
       objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
       // Participants' photos and recordings: kept when the stack is deleted (reset removes an app's media).
       removalPolicy: RemovalPolicy.RETAIN,
+      // Ticket 3.21: Amazon Transcribe's results, deleted once read; one left behind (an app that never asked again)
+      // expires after a day.
+      lifecycleRules: [{ id: "ssd-workshop-transcripts-expiry", prefix: APP_AI_TRANSCRIPTS_PREFIX, expiration: Duration.days(APP_AI_TRANSCRIPTS_EXPIRY_DAYS) }],
     });
+    // The distribution reads only the served files (`app-media/`, ticket 3.21 narrowed it): never Transcribe's results.
     this.mediaBucket.addToResourcePolicy(
       new PolicyStatement({
         sid: "CloudFrontReadOnly",
         actions: ["s3:GetObject"],
         principals: [new ServicePrincipal("cloudfront.amazonaws.com")],
-        resources: [this.mediaBucket.arnForObjects("*")],
+        resources: [this.mediaBucket.arnForObjects(`${APP_MEDIA_KEY_PREFIX}*`)],
         conditions: { StringEquals: { "AWS:SourceAccount": ACCOUNT, "AWS:SourceArn": DISTRIBUTION_ARN } },
       }),
     );
     // Only the media function stores files: nobody else (the deploy role and the Claude user included) can plant a
-    // file that the workshop's address would then serve.
+    // file that the workshop's address would then serve. Ticket 3.21: except under `transcripts/` (never served), where
+    // Amazon Transcribe writes results for the AI function; there only identity policies decide (the AI function's
+    // role alone is granted it, synth test), since whether Transcribe's write presents that role as `aws:PrincipalArn`
+    // is not verified.
     this.mediaBucket.addToResourcePolicy(
       new PolicyStatement({
         sid: "OnlyTheMediaFunctionWrites",
         effect: Effect.DENY,
         actions: [...APP_MEDIA_OBJECT_WRITE_ACTIONS],
         principals: [new AnyPrincipal()],
-        resources: [this.mediaBucket.arnForObjects("*")],
+        notResources: [this.mediaBucket.arnForObjects(`${APP_AI_TRANSCRIPTS_PREFIX}*`)],
         conditions: { ArnNotEquals: { "aws:PrincipalArn": [APP_MEDIA_ROLE_ARN, APP_MEDIA_ROLE_ARN_WITHOUT_PATH] } },
       }),
     );

@@ -14,6 +14,8 @@ import { addUsage, BedrockModel, usageOf } from "../../api/conversation/model.js
 import { suggestChanges } from "../../api/conversation/suggestions.js";
 import { MODEL_ID, MODELS, REGION, type ModelSetting } from "../../api/settings.js";
 import { proxyFromEnv, redactError } from "../smoke/logic.js";
+import { BedrockAppAiModel } from "../../api/app-ai/store.js";
+import { formatReceiptResult, formatReceiptSummary, readReceipt, RECEIPT_CASES, receiptPhoto, type ReceiptResult } from "./app-ai.js";
 import { evalBuild, evalChange, launchBrowser } from "./build.js";
 import { openDiagramChecker } from "./diagram.js";
 import {
@@ -128,6 +130,26 @@ async function runChangeSuite(changeModel: BedrockModel): Promise<number> {
   }
 }
 
+/** The app-ai suite (ticket 3.21): read-photo on the synthetic receipts. */
+async function runAppAiSuite(model: BedrockAppAiModel): Promise<number> {
+  console.log(`Model: ${MODELS.appAi.modelId} (${REGION}), ${RECEIPT_CASES.length} synthetic receipts`);
+  const browser = await launchBrowser();
+  try {
+    const results: ReceiptResult[] = [];
+    for (const [i, receipt] of RECEIPT_CASES.entries()) {
+      const photo = await receiptPhoto(browser, receipt);
+      console.log(`     . ${receipt.name}: JPEG of ${photo.length} bytes`);
+      const result = await readReceipt(model, receipt, photo);
+      results.push(result);
+      console.log(formatReceiptResult(result, i));
+    }
+    for (const line of formatReceiptSummary(results)) console.log(line);
+    return exitCode(results);
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main(): Promise<number> {
   const parsed = parseEvalArgs(process.argv.slice(2));
   if ("error" in parsed) {
@@ -146,6 +168,7 @@ async function main(): Promise<number> {
   });
   const model = new BedrockModel(client, MODEL_ID);
   if (parsed.suite === "change") return runChangeSuite(model);
+  if (parsed.suite === "app-ai") return runAppAiSuite(new BedrockAppAiModel(client, MODELS.appAi.modelId));
   if (parsed.suite === "suggestions") {
     // The workshop's example specs (the readiness file's "example" category), as the live specs of built apps.
     const all = parseReadinessExamples(readFileSync(examplesFile("readiness"), "utf8"));

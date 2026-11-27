@@ -19,17 +19,23 @@ export interface WorkshopSettings {
    * waiting builds run into the queued time limit.
    */
   resumedAt?: string;
+  /**
+   * Ticket 3.21: the admin's switch "Apps may use AI" (off by default and when missing or malformed). The AI tasks for
+   * apps run only while it is on and `stopped` is off.
+   */
+  appAiEnabled: boolean;
 }
 
 /** The three caps the admin changes with `PUT /api/admin/settings` (Stop has its own routes, ticket 3.5). */
-export type WorkshopCaps = Omit<WorkshopSettings, "stopped" | "resumedAt">;
+export type WorkshopCaps = Omit<WorkshopSettings, "stopped" | "resumedAt" | "appAiEnabled">;
 
-/** What every reader gets when the item, or one of its values, is missing: $5, 5 changes, 15 builds, Stop off. */
+/** What every reader gets when the item, or one of its values, is missing: $5, 5 changes, 15 builds, Stop off, apps' AI off. */
 export const DEFAULT_SETTINGS: Readonly<WorkshopSettings> = Object.freeze({
   aiBudgetUsd: 5,
   changeRequestsPerPerson: 5,
   buildsAtOnce: 15,
   stopped: false,
+  appAiEnabled: false,
 });
 
 /** The allowed range of each cap (inclusive); the counts are whole numbers. */
@@ -87,6 +93,7 @@ export function settingsFromItem(item: Record<string, AttributeValue> | undefine
     changeRequestsPerPerson: cap("changeRequestsPerPerson"),
     buildsAtOnce: cap("buildsAtOnce"),
     stopped: item?.["stopped"]?.BOOL === true,
+    appAiEnabled: item?.["appAiEnabled"]?.BOOL === true,
     ...(resumedAt === undefined ? {} : { resumedAt }),
   };
 }
