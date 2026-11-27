@@ -112,7 +112,7 @@
       "name": "team chatbot: steered to answers people write",
       "check": "first-reply",
       "text": "A chatbot on our team page that answers colleagues' questions about our holiday rules.",
-      "mentionsEach": [["questions and answers", "question and answer", "frequently asked", "FAQ", "list of answers", "answers people write", "answers that people write", "answers you write", "answers that you write", "answers your team writes", "answers written", "written answers", "write the answers", "write answers", "type the answers", "answers typed", "answers you type", "answers people type", "answer in writing", "answers in writing", "written out", "message board"]],
+      "mentionsEach": [["questions and answers", "question and answer", "frequently asked", "FAQ", "list of answers", "answers people write", "answers that people write", "answers you write", "answers that you write", "answers your team writes", "answers written", "written answers", "write the answers", "write answers", "type the answers", "answers typed", "answers you type", "answers people type", "answer in writing", "answers in writing", "written out", "message board", "Q&A", "post answers", "posts answers", "post the answers", "posts the answers", "answers are already written", "answers already written"]],
       "avoids": ["server", "API", "the chatbot can", "the chatbot will", "the AI can answer", "the AI will answer", "AI answers"]
     },
     {

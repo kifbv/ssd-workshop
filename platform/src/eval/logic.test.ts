@@ -907,6 +907,13 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     expect(scoreClarify(chatbot, { text: steer("A page of questions and answers, and the AI can answer the rest."), offersSpec: false }).detail).toContain("says what it should not");
     // Run 1's correct steer: rules written out, questions answered in writing on a message board.
     expect(scoreClarify(chatbot, { text: steer("The rules are written out and colleagues post questions anyone can answer in writing, like a small message board."), offersSpec: false }).pass).toBe(true);
+    // Try 2's runs 5 and 6 (4bf9adb): correct steers the first list missed.
+    for (const line of [
+      "Instead, I can suggest a simple Q&A board where colleagues post questions and team members post answers, all visible on the page.",
+      "But a great alternative is a page where the answers are already written, and colleagues can browse or search them.",
+    ]) {
+      expect(scoreClarify(chatbot, { text: steer(line), offersSpec: false }).pass, line).toBe(true);
+    }
     expect(scoreClarify(chatbot, { text: steer("A page about holidays."), offersSpec: false }).detail).toContain("never mentions (questions and answers");
   });
 
