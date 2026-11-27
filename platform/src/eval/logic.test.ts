@@ -773,18 +773,34 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     expect(gallery.mentionsEach).toEqual([
       ["anyone", "everyone", "everybody", "whoever"],
       ["link", "address"],
-      ["people", "person", "faces", "someone"],
+      ["photograph people", "photographing people", "photos of people", "photo of people", "pictures of people", "picture of people", "photograph anyone", "photograph someone", "people's faces", "faces of people"],
       ["confidential", "private", "sensitive", "secret"],
     ]);
     expect(gallery.atMostOnce).toEqual(["confidential"]);
-    // A personal gallery needs no sign-in: the first live run said it did (clarify-v6 then forbade it).
-    expect(gallery.avoids).toEqual(expect.arrayContaining(["sign-in", "sign in"]));
+    // A personal gallery needs no login of its own: the first live run said it needed "a sign-in or private account".
+    // Only that claim is avoided: the workshop's own sign-in to save (3.24) may be named.
+    expect(gallery.avoids).toEqual(expect.arrayContaining(["needs a sign-in", "private account", "separate from others"]));
+    expect(gallery.avoids).not.toContain("sign-in");
+    const reminder = "Anyone with the app's link can see the photos, so it is best not to photograph people or confidential papers.";
+    const reply = (extra: string): string => `A gallery of your drawings. ${reminder}${extra}\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(gallery, { text: reply(""), offersSpec: false }).pass).toBe(true);
+    expect(scoreClarify(gallery, { text: reply(" Saving uses the workshop's own sign-in, already built in."), offersSpec: false }).pass).toBe(true);
+    // The first live run's reply: the false claim fails, even with the reminder.
+    expect(scoreClarify(gallery, { text: reply(" This app needs a sign-in or private account to keep your drawings separate from others."), offersSpec: false }).detail)
+      .toContain("says what it should not");
+    // "people" alone, outside the reminder, is not the reminder.
+    const noReminder = `A gallery of your drawings. Anyone with the link can share it with other people; keep the link private, nothing confidential.\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(gallery, { text: noReminder, offersSpec: false }).detail).toContain("never mentions (photograph people");
     const later = must(examples.find((e) => e.name === "photo reminder not repeated"));
     expect(later.check).toBe("answers-question");
     expect(later.history.some((h) => /confidential papers/.test(h.answer))).toBe(true);
     expect(later.avoids).toEqual(expect.arrayContaining(["confidential", "photograph people", "photos of people"]));
     const french = must(examples.find((e) => e.name === "photo idea in French"));
     expect(french.mentionsEach?.length).toBe(4);
+    const frenchReminder = "Toute personne ayant le lien de l'appli pourra voir les photos, donc évitez de photographier des personnes ou des documents confidentiels.";
+    expect(scoreClarify(french, { text: `Des tableaux blancs. ${frenchReminder}\n${FOUR_QUESTIONS}`, offersSpec: false }).pass).toBe(true);
+    const frenchNoReminder = `Des tableaux blancs. Toute personne ayant le lien pourra le partager avec d'autres personnes ; les documents restent visibles.\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(french, { text: frenchNoReminder, offersSpec: false }).detail).toContain("never mentions (photographier des personnes");
   });
 
   it("readiness.json: the drawing gallery and the voice board are ready, video uploads are not ready with a server reason", () => {
