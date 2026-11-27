@@ -120,3 +120,5 @@ paths:
   of several shapes (`shapeApp` in `template.test.ts`), never on one participant's app; a page with its own `index.html`
   routes every file, `workshop-data.js` too, and a fallback test deletes `Element.prototype.checkVisibility` in an init
   script.
+- `expect.poll` waits 1 s by default: a poll that waits on a big picture being decoded and re-encoded (12 megapixels)
+  gets `{ timeout: 15_000 }` and its test a 30 s limit, or a busy runner fails it (deploy run 69).
