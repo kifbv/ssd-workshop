@@ -481,8 +481,8 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
   // Sign-in fix (2026-11-27): a refused save must offer the sign-in wherever the app put its own button. Generic,
   // hand-written apps of different shapes: a list whose items each have a saving Add button, and the app's only sign-in
   // element placed out of sight in a different way per shape (or nowhere), with a "Show more" control that reveals it.
-  type Shape = "hidden-screen" | "css-class" | "details" | "none" | "visible";
-  const HIDDEN_SHAPES: Shape[] = ["hidden-screen", "css-class", "details", "none"];
+  type Shape = "hidden-screen" | "css-class" | "details" | "nested-details" | "none" | "visible";
+  const HIDDEN_SHAPES: Shape[] = ["hidden-screen", "css-class", "details", "nested-details", "none"];
   const SIGN_IN_ELEMENT = '<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>';
   const shapeBody = (shape: Shape): string => {
     switch (shape) {
@@ -492,6 +492,9 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
         return `<button id="more" type="button">Show more</button>\n<div id="extra" class="panel off"><h2>More</h2><p>${SIGN_IN_ELEMENT}</p></div>`;
       case "details":
         return `<details id="extra"><summary>Show more</summary><p>${SIGN_IN_ELEMENT}</p></details>`;
+      case "nested-details":
+        // In the summary of an open <details> that sits inside a closed one: still out of sight.
+        return `<details id="extra"><summary>Show more</summary><details open><summary>${SIGN_IN_ELEMENT}</summary></details></details>`;
       case "none":
         return "";
       case "visible":
@@ -554,7 +557,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   /** Opens what hides the app's own sign-in element ("Show more"). */
   const reveal = async (shape: Shape): Promise<void> => {
-    if (shape === "details") await page.locator("summary").click();
+    if (shape === "details" || shape === "nested-details") await page.locator("#extra > summary").click();
     else await page.getByRole("button", { name: "Show more" }).click();
   };
 

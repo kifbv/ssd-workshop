@@ -173,8 +173,14 @@
   // screen), not inside a closed <details> (outside its summary), not visibility: hidden and not transparent. Browsers
   // without checkVisibility get the layout, details and visibility checks.
   function canBeSeen(element) {
-    const closed = element.closest("details:not([open])");
-    if (closed !== null && !closed.contains(element.closest("summary"))) return false;
+    // Every closed <details> around it must hold it in its own summary (nested ones too).
+    let closed = element.closest("details:not([open])");
+    while (closed !== null) {
+      const summary = closed.querySelector(":scope > summary");
+      if (summary === null || !summary.contains(element)) return false;
+      const outer = closed.parentElement;
+      closed = outer === null ? null : outer.closest("details:not([open])");
+    }
     if (typeof element.checkVisibility === "function") {
       return element.checkVisibility({ visibilityProperty: true, opacityProperty: true });
     }
