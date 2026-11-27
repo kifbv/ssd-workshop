@@ -1,19 +1,17 @@
-// An in-memory stand-in for the app write tokens' table access (ticket 3.24), shared by the tests of the token route,
-// the data API and the reset (not bundled: no handler imports it). Same rules as DynamoAppTokenStore: a participant's
-// list drops expired entries on each new token and refuses one when MAX_APP_TOKENS are live; revocation deletes every
-// listed token and the list, and no token is made once the session is gone (`sessionExists`). Each call is atomic here,
-// so the version races of DynamoAppTokenStore cannot happen (they are tested in store.test.ts); the DynamoDB list is
-// emptied rather than deleted, which callers cannot tell apart.
-import { MAX_APP_TOKENS, type AppTokenReader, type AppTokenWriter, type CreateTokenResult, type StoredAppToken } from "./token.js";
+// An in-memory stand-in for the edit links' table access (ticket 3.26), shared by the tests of the build routes, the
+// data, media and AI APIs, and the reset (not bundled: no handler imports it). Same rules as DynamoAppTokenStore: a
+// link is made only if the app has none, replaced only while its hash is the one read (the old lookup item goes in the
+// same step), and neither happens for a profile marked removed (`profileRemoved`). Each call is atomic here.
+import { EDIT_KIND, hashAppToken, type AppTokenReader, type EditLink, type EditLinkStore, type EditLinkWrite, type StoredAppToken } from "./token.js";
 
-export class FakeAppTokenStore implements AppTokenReader, AppTokenWriter {
-  /** Whether a session (by its token's hash) still exists; every session does unless a test says otherwise. */
-  constructor(private readonly sessionExists: (sessionTokenHash: string) => boolean = () => true) {}
+export class FakeAppTokenStore implements AppTokenReader, EditLinkStore {
+  /** Whether a participant's profile is gone or marked removed; none is unless a test says otherwise. */
+  constructor(private readonly profileRemoved: (participantId: string) => boolean = () => false) {}
 
-  /** Token items by hash. */
+  /** Lookup items by hash (a test may add a 3.24 token without `kind`). */
   readonly tokens = new Map<string, StoredAppToken>();
-  /** Each participant's list: hash -> expiry. */
-  readonly lists = new Map<string, Map<string, number>>();
+  /** Per-app items by lower-cased nickname. */
+  readonly links = new Map<string, EditLink>();
   /** Hashes looked up, in order (to prove what was read). */
   readonly reads: string[] = [];
   /** When set, every call fails with it. */
@@ -30,25 +28,45 @@ export class FakeAppTokenStore implements AppTokenReader, AppTokenWriter {
     return token && { ...token };
   }
 
-  async createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
+  async getEditLink(app: string): Promise<EditLink | undefined> {
     this.check();
-    if (!this.sessionExists(sessionTokenHash)) return "no-session";
-    const list = this.lists.get(participantId) ?? new Map<string, number>();
-    for (const [hash, expiresAt] of list) if (!(expiresAt > nowSeconds)) list.delete(hash);
-    if (list.size >= MAX_APP_TOKENS) return "too-many";
-    if (this.tokens.has(tokenHash)) return "conflict";
-    this.tokens.set(tokenHash, { ...token });
-    list.set(tokenHash, token.expiresAt);
-    this.lists.set(participantId, list);
+    const link = this.links.get(app.toLowerCase());
+    return link && { ...link };
+  }
+
+  async createEditLink(app: string, participantId: string, link: EditLink): Promise<EditLinkWrite> {
+    this.check();
+    if (this.profileRemoved(participantId)) return "removed";
+    if (this.links.has(app.toLowerCase()) || this.tokens.has(link.secretHash)) return "exists";
+    this.links.set(app.toLowerCase(), { ...link });
+    this.tokens.set(link.secretHash, { app: app.toLowerCase(), nickname: link.nickname, kind: EDIT_KIND });
     return "saved";
   }
 
-  async revokeAppTokens(participantId: string): Promise<number> {
+  async renewEditLink(app: string, participantId: string, oldHash: string, link: EditLink): Promise<EditLinkWrite> {
     this.check();
-    const list = this.lists.get(participantId);
-    if (list === undefined) return 0;
-    for (const hash of list.keys()) this.tokens.delete(hash);
-    this.lists.delete(participantId);
-    return list.size;
+    if (this.profileRemoved(participantId)) return "removed";
+    const stored = this.links.get(app.toLowerCase());
+    if (stored?.secretHash !== oldHash || this.tokens.has(link.secretHash)) return "changed";
+    this.tokens.delete(oldHash);
+    this.links.set(app.toLowerCase(), { ...stored, secret: link.secret, secretHash: link.secretHash });
+    this.tokens.set(link.secretHash, { app: app.toLowerCase(), nickname: stored.nickname, kind: EDIT_KIND });
+    return "saved";
+  }
+
+  async deleteEditLink(app: string): Promise<boolean> {
+    this.check();
+    const stored = this.links.get(app.toLowerCase());
+    if (stored === undefined) return false;
+    this.tokens.delete(stored.secretHash);
+    this.links.delete(app.toLowerCase());
+    return true;
+  }
+
+  /** Test helper: makes the app's edit link for its builder, as the builder's first GET /api/build would. */
+  addEditLink(app: string, builder: string, secret: string): void {
+    const secretHash = hashAppToken(secret);
+    this.links.set(app.toLowerCase(), { secret, secretHash, nickname: builder });
+    this.tokens.set(secretHash, { app: app.toLowerCase(), nickname: builder, kind: EDIT_KIND });
   }
 }

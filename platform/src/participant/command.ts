@@ -132,7 +132,7 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   if (!command.confirmed) {
     deps.out(`${conversation}.`);
     deps.out(`App: ${describeAppData(appData)}, ${describeMedia(mediaFiles.length)}, live marker ${live ? "present" : "absent"}, repository ${repository} ${repositoryExists ? "exists" : "already gone"}.`);
-    deps.out(`Nothing changed. Run again with --yes to delete all of this${stepName === undefined ? "" : ` and send ${nickname} back to step 1 (Clarify)`}, and to end ${nickname}'s sign-ins to save in apps.`);
+    deps.out(`Nothing changed. Run again with --yes to delete all of this${stepName === undefined ? "" : ` and send ${nickname} back to step 1 (Clarify)`}, including the app's edit link.`);
     deps.out(KEPT);
     return 0;
   }
@@ -150,9 +150,9 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
       `Reset ${nickname}: deleted ${plural(items.messages.length, "message or reply", "messages and replies")} and ${plural(items.specs.length, "spec version", "spec versions")}; back at step 1 (Clarify).`,
     );
   }
-  // Ticket 3.24: the participant's app write tokens (for any app) stop working at once; their sessions are kept.
-  const revoked = await store.revokeAppTokens(participantId);
-  deps.out(`Ended ${plural(revoked, "sign-in to save in apps", "sign-ins to save in apps")} (app write tokens).`);
+  // Ticket 3.26: the app's edit link stops working at once (its lookup item goes with it); the sessions are kept. Deleted
+  // again after the last pass below, in case a GET /api/build that read the live build before the restart made one.
+  const editLinkDeleted = await store.deleteEditLink(nickname);
   // The live marker before the data: without it the data API answers 404 to every new request. A request that read the
   // marker just before it went can still commit its write after the first listing (the API does not re-check the
   // marker inside its transaction), so after a pause the data is listed and deleted once more; a write held up longer
@@ -182,6 +182,8 @@ async function reset(command: ResetCommand, deps: ParticipantDeps, store: Partic
   deps.out(`Waiting ${MEDIA_SETTLE_MS / 1000} s for uploads already under way, then deleting the app's photos and recordings once more.`);
   await deps.sleep(MEDIA_SETTLE_MS);
   await mediaPass();
+  const lateEditLink = await store.deleteEditLink(nickname);
+  deps.out(editLinkDeleted || lateEditLink ? "Deleted the app's edit link: saving through it answers \"This link is view only.\"." : "The app had no edit link.");
   await media.forget(nickname);
   deps.out(`Deleted ${describeAppData([...new Set(passes.data)])}; ${markerDeleted ? "deleted the live marker" : "the live marker was already gone"}.`);
   deps.out(`Deleted ${describeMedia(new Set(passes.files).size)}; CloudFront stops serving the app's media within minutes.`);

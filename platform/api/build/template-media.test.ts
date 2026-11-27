@@ -22,6 +22,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { APP_MEDIA_CONTENT_SECURITY_POLICY, APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
 import { inspectMedia, MEDIA_CONTENT_TYPES, recordingSeconds } from "../app-media/formats.js";
 import { APP_MEDIA_MESSAGES, MAX_MEDIA_FILE_BYTES, MEDIA_ID_PATTERN } from "../app-media/media.js";
+import { APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 
 const CLIENT = readFileSync(fileURLToPath(new URL("../../../templates/basic/workshop-data.js", import.meta.url)), "utf8");
 /** The app under test is served sandboxed; `mic-nick` is the same app without the sandbox (a page allowed the microphone). */
@@ -31,7 +32,7 @@ const OPEN_NICKNAME = "mic-nick";
 const RULE_NICKNAME = "rule-nick";
 const OPEN_CSP = APPS_CONTENT_SECURITY_POLICY.split("; ").filter((part) => !part.startsWith("sandbox")).join("; ");
 const TOKEN = Buffer.alloc(32, 7).toString("base64url");
-const HAND_OFF = `#wt=${TOKEN}`;
+const HAND_OFF = `#edit=${TOKEN}`;
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
 const LOGGED = (status: number) => `Failed to load resource: the server responded with a status of ${status}`;
 
@@ -49,7 +50,6 @@ const PAGE = `<!doctype html>
     <label for="photo">Add a photo</label>
     <input id="photo" type="file" accept="image/*" capture="environment">
     <button id="record" type="button">Record</button>
-    <p><button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button></p>
     <img id="shown" alt="The photo" loading="lazy" hidden>
     <audio id="voice" controls hidden></audio>
     <button id="remove" type="button">Delete the photo</button>
@@ -179,7 +179,7 @@ beforeAll(async () => {
       }
       if (app !== undefined && path === `/api/apps/${app}/data/whoami`) {
         if (request.method === "OPTIONS") return json(204, "");
-        if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: APP_MEDIA_MESSAGES.signInToSave });
+        if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: APP_EDIT_LINK_TEXTS.viewOnly });
         return json(200, { nickname: "Bob" });
       }
       const media = /^\/api\/apps\/([a-z-]+)\/media\/([^/]+)$/.exec(path);
@@ -210,7 +210,7 @@ beforeAll(async () => {
           } else json(status, value);
         };
         if (!MEDIA_ID_PATTERN.test(id)) return answer(400, { message: APP_MEDIA_MESSAGES.badId });
-        if (request.headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { message: APP_MEDIA_MESSAGES.signInToSave });
+        if (request.headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { message: APP_EDIT_LINK_TEXTS.viewOnly });
         if (request.method === "DELETE") {
           stored.delete(id);
           return answer(204, null);
@@ -484,28 +484,28 @@ describe("savePhoto (ticket 3.19)", () => {
     expect(errors).toEqual([]);
   });
 
-  it("WHEN a visitor (no sign-in) picks a photo THEN the sign-in message and button show and nothing is sent", async () => {
+  it("ticket 3.28: WHEN the app opens without a secret and a photo is picked or Record pressed THEN \"This link is view only.\" shows, nothing is sent and no sign-in button appears", async () => {
     await openApp("");
-    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(false);
     await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: await picture("image/jpeg", 64, 48) });
-    await expect.poll(statusText).toBe(APP_MEDIA_MESSAGES.signInToSave);
+    await expect.poll(statusText).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
     await page.click("#record");
     await expect.poll(() => page.evaluate<unknown>("window.usedMicrophone")).toBeUndefined();
-    expect(await statusText()).toBe(APP_MEDIA_MESSAGES.signInToSave);
+    expect(await statusText()).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
     expect(calls).toEqual([]);
-    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: /sign in/i }).count()).toBe(0);
     expect(errors).toEqual([]);
   });
 
-  it("WHEN the sign-in has ended (the API answers 401) THEN its message shows and the sign-in button comes back", async () => {
+  it("ticket 3.28: WHEN the edit link was replaced (the API answers 401) THEN its message shows and canSave() stays true", async () => {
     allowed.push(LOGGED(401));
     await openApp();
-    expect(await page.locator("[data-workshop-sign-in]").isHidden()).toBe(true);
-    refuseNext = { status: 401, message: APP_MEDIA_MESSAGES.signInToSave };
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    refuseNext = { status: 401, message: APP_EDIT_LINK_TEXTS.viewOnly };
     await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: await picture("image/jpeg", 64, 48) });
-    await expect.poll(statusText).toBe(APP_MEDIA_MESSAGES.signInToSave);
-    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
+    await expect.poll(statusText).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(await page.getByRole("button", { name: /sign in/i }).count()).toBe(0);
     expect(errors).toEqual([]);
   });
 });

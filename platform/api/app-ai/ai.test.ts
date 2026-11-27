@@ -1,11 +1,11 @@
 // Ticket 3.21: the AI tasks route on the in-memory store, a fake Bedrock and a fake Transcribe (criteria 1 to 5 and 7;
 // 6 is the live eval `npm run eval -- app-ai`, 8 the access-stack test, 9 a synth test in infra/lib/app.test.ts).
 import { describe, expect, it } from "vitest";
-import { hashAppToken } from "../app-token/token.js";
+import { hashAppToken, renewEditLink } from "../app-token/token.js";
 import { jpegOfSize, webmOfSize } from "../app-media/fixtures.js";
 import { mediaKey } from "../app-media/media.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
-import { APP_AI_TEXTS, APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { APP_AI_TEXTS, APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 import {
   AI_PREFLIGHT_HEADERS,
   APP_AI_ROUTES,
@@ -44,7 +44,7 @@ function setup() {
   const transcriber = new FakeTranscriber();
   for (const nickname of [NICK, OTHER]) {
     store.live.add(nickname.toLowerCase());
-    store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", expiresAt: NOW.getTime() / 1000 + 86400 });
+    store.tokens.tokens.set(hashAppToken(tokenFor(nickname)), { app: nickname.toLowerCase(), nickname: "Bob", kind: "edit" });
   }
   media.objects.set(mediaKey(NICK, PHOTO_ID), jpegOfSize(200_000));
   media.objects.set(mediaKey(NICK, VOICE_ID), webmOfSize(50_000, ["A_OPUS"], "webm", 10));
@@ -115,7 +115,7 @@ describe("route", () => {
     for (const token of [null, "x".repeat(43), tokenFor(OTHER)]) {
       const answer = await call(post(TAG, { token }));
       expect(answer.statusCode).toBe(401);
-      expect(message(answer)).toBe(APP_SIGN_IN_TEXTS.signInToSave);
+      expect(message(answer)).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
       expect(answer.headers?.["access-control-allow-origin"]).toBe("*");
     }
     expect(store.calls).not.toContain("getSettings");
@@ -492,7 +492,7 @@ describe("criterion 5: the app's $1 and the workshop's $10 per UTC day", () => {
 
   it("WHEN the token's writer is not a nickname THEN 401 (its counter could not be keyed)", async () => {
     const { call, store, model } = setup();
-    store.tokens.tokens.set(hashAppToken(tokenFor(NICK)), { app: NICK.toLowerCase(), nickname: "no#such", expiresAt: NOW.getTime() / 1000 + 86400 });
+    store.tokens.tokens.set(hashAppToken(tokenFor(NICK)), { app: NICK.toLowerCase(), nickname: "no#such", kind: "edit" });
     expect((await call(post(SORT))).statusCode).toBe(401);
     expect(model.calls).toEqual([]);
   });
@@ -817,3 +817,50 @@ function craftedOgg(pages: number, seconds: number): Buffer {
   }
   return Buffer.concat(out);
 }
+
+describe("ticket 3.26: the app's edit link", () => {
+  const SECRET = Buffer.alloc(32, 41).toString("base64url");
+  const BOB_SECRET = Buffer.alloc(32, 42).toString("base64url");
+
+  function linked() {
+    const s = setup();
+    s.store.tokens.tokens.clear();
+    s.store.tokens.addEditLink(NICK, NICK, SECRET);
+    s.store.tokens.addEditLink(OTHER, OTHER, BOB_SECRET);
+    return s;
+  }
+
+  it("criterion 1: WHEN an AI task carries the app's edit secret THEN it is accepted and the spend counts against the app's builder", async () => {
+    const { call, model, store, logs } = linked();
+    model.next = tool({ categories: ["transport"] });
+    const answer = await call(post(SORT, { token: SECRET }));
+    expect([answer.statusCode, bodyOf(answer)]).toEqual([200, { categories: ["transport"] }]);
+    expect(store.writers.has(NICK.toLowerCase())).toBe(true);
+    expect(store.writers.has("bob")).toBe(false);
+    expect(logs.at(-1)?.writer).toBe(NICK);
+  });
+
+  it("criterion 2: WHEN it carries no secret, another app's, or an old one replaced by New edit link THEN 401 'This link is view only.' and no model call or spend", async () => {
+    const { call, model, store } = linked();
+    const renewed = await renewEditLink(store.tokens, "p-ada", NICK, (n) => Buffer.alloc(n, 43), NOW);
+    if (!renewed.ok) throw new Error("not renewed");
+    for (const token of [null, BOB_SECRET, SECRET]) {
+      const answer = await call(post(SORT, { token }));
+      expect([answer.statusCode, message(answer)], String(token)).toEqual([401, "This link is view only."]);
+    }
+    expect(model.calls).toEqual([]);
+    expect(store.writers.size).toBe(0);
+    expect(store.apps.size).toBe(0);
+    model.next = tool({ categories: ["food"] });
+    expect((await call(post(SORT, { token: renewed.link.secret }))).statusCode).toBe(200);
+  });
+
+  it("criterion 6 (AI part): no log line holds the secret or its hash", async () => {
+    const { call, model, logs } = linked();
+    model.next = tool({ categories: ["food"] });
+    await call(post(SORT, { token: SECRET }));
+    await call(post(SORT, { token: BOB_SECRET }));
+    const text = JSON.stringify(logs);
+    for (const secret of [SECRET, hashAppToken(SECRET), BOB_SECRET, hashAppToken(BOB_SECRET)]) expect(text).not.toContain(secret);
+  });
+});

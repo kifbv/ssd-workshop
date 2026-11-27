@@ -201,7 +201,7 @@ async function setup() {
   let clock = START;
   let counter = 0;
   const logs: ConversationLogEntry[] = [];
-  const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
+  const deps: ConversationDeps = { sessions: table, store: table, editLinks: table.appTokens, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
   const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), held: queue, now: () => clock, log: () => undefined, sleep: async () => undefined };
   const advance = (seconds: number) => {
     clock = new Date(clock.getTime() + seconds * 1000);

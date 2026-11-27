@@ -780,6 +780,10 @@ describe("ticket 3.25: every app gets the platform's current workshop-data.js, a
       { "index.html": PAGE, "app.js": "ok();\n", "workshop-data.js": "window.workshopData = { set() { return Promise.resolve(); } };\n" },
       { "index.html": PAGE, "app.js": "ok();\n", "workshop-data.js/x.txt": "a folder of that name" },
     ];
+    // Ticket 3.28: the platform's file is the edit-link client (canSave, #edit=), with no sign-in of its own.
+    expect(client()).toContain("canSave: canSave,");
+    expect(client()).toContain('part.startsWith("edit=")');
+    expect(client()).not.toContain("/app-sign-in/");
     for (const files of repositories) {
       const t = setup(gzip(githubTar(files)));
       await processDeploy(job(), 1, t.deps);

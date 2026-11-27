@@ -1071,7 +1071,6 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/me/nickname",
       "GET /api/participants/{id}",
       "POST /api/sign-out",
-      "POST /api/app-tokens",
       "GET /api/admin/settings",
       "PUT /api/admin/settings",
       "POST /api/admin/stop",
@@ -1089,6 +1088,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "POST /api/conversation/change/discard",
       "POST /api/conversation/change/rebuild",
       "POST /api/conversation/change/edit",
+      "POST /api/build/edit-link",
       ...FACILITATOR_ROUTE_KEYS,
       "GET /api/apps/{nickname}/data/{key}",
       "PUT /api/apps/{nickname}/data/{key}",
@@ -1605,8 +1605,8 @@ describe("api stack: participant function (ticket 1.5)", () => {
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("routes GET /api/me, POST /api/me/nickname, GET /api/participants/{id}, POST /api/sign-out (ticket 3.1) and POST /api/app-tokens (ticket 3.24) to it, invoked only by this API", () => {
-    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}", "POST /api/sign-out", "POST /api/app-tokens"]);
+  it("routes GET /api/me, POST /api/me/nickname, GET /api/participants/{id} and POST /api/sign-out (ticket 3.1) to it, invoked only by this API (ticket 3.26: no POST /api/app-tokens)", () => {
+    expect([...PARTICIPANT_ROUTE_KEYS]).toEqual(["GET /api/me", "POST /api/me/nickname", "GET /api/participants/{id}", "POST /api/sign-out"]);
     for (const routeKey of PARTICIPANT_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
         IntegrationType: "AWS_PROXY",
@@ -1654,96 +1654,29 @@ describe("api stack: participant function (ticket 1.5)", () => {
         },
       },
       ...sessionCheckStatements(f.tableArn()),
-      // Ticket 3.24: app write tokens. The live marker's `liveAt` and the caller's token list, read with a projection.
-      {
-        Effect: "Allow",
-        Action: "dynamodb:GetItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
-          // Try 3: `pk` and `sk` too, like every other read list of the repository.
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "liveAt"] },
-          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
-        },
-      },
-      {
-        Effect: "Allow",
-        Action: "dynamodb:GetItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "tokens", "version"] },
-          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
-        },
-      },
-      {
-        Effect: "Allow",
-        Action: "dynamodb:PutItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "app", "nickname", "createdAt", "expiresAt"] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
-        },
-      },
-      {
-        Effect: "Allow",
-        Action: "dynamodb:UpdateItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "tokens", "expiresAt", "version"] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
-        },
-      },
-      {
-        Effect: "Allow",
-        Action: "dynamodb:DeleteItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
-        },
-      },
-      // Ticket 3.24 try 2: no token once the session is gone. Only that the session item exists, nothing else of it
-      // (try 3: `pk` and `sk`, as a transaction item's `dynamodb:Attributes` always lists the key, .claude/rules/infra.md).
-      {
-        Effect: "Allow",
-        Action: "dynamodb:ConditionCheckItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk"] },
-        },
-      },
-      // Ticket 3.24 try 3 (access review L1): no token once the person is removed from the allow-list (profile role).
-      {
-        Effect: "Allow",
-        Action: "dynamodb:ConditionCheckItem",
-        Resource: f.tableArn(),
-        Condition: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "role"] },
-        },
-      },
+      // Ticket 3.26: no right on app write tokens any more (3.24's token route and list are gone).
     ]);
   });
 
-  it("ticket 3.24: only the participant function writes app write tokens, and only it and the data function (3.18: and the media function) read them", () => {
+  it("ticket 3.26: only the conversation function reads or writes edit links (APPEDIT#) and writes their lookup items, which only the app write routes read", () => {
     const like = (pattern: string, value: string) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(value);
-    // The token partitions never overlap each other or the partitions other roles hold.
+    // The edit link partitions never overlap each other or the partitions other roles hold.
     for (const [pattern, key] of [
       ["APP#*", "APPTOKEN#ab"],
+      ["APP#*", "APPEDIT#ada"],
       ["APPDATA#*", "APPTOKEN#ab"],
-      ["APPTOKEN#*", "TOKENS#p-1"],
-      ["TOKENS#*", "APPTOKEN#ab"],
-      ["APPTOKEN#*", "APP#ada"],
-      ["PARTICIPANT#*", "TOKENS#p-1"],
+      ["APPDATA#*", "APPEDIT#ada"],
+      ["APPMEDIA#*", "APPEDIT#ada"],
+      ["APPAI#*", "APPEDIT#ada"],
+      ["APPTOKEN#*", "APPEDIT#ada"],
+      ["APPEDIT#*", "APPTOKEN#ab"],
+      ["APPEDIT#*", "APP#ada"],
+      ["PARTICIPANT#*", "APPEDIT#ada"],
     ] as const) {
       expect(like(pattern, key), `${pattern} ${key}`).toBe(false);
     }
-    expect(like("APPTOKEN#*", "APPTOKEN#ab")).toBe(true);
-    // Every DynamoDB right in every stack that reaches a token item or a token list, by role name and action.
+    expect(like("APPEDIT#*", "APPEDIT#ada")).toBe(true);
+    // Every DynamoDB right in every stack that reaches an edit link or a lookup item, by role name and action.
     const roleNames = new Map(ofType("AWS::IAM::Role").map(([st, id, r]) => [`${st}/${id}`, String(r.Properties?.RoleName ?? id)]));
     const reach = (sampleKey: string): string[] => {
       const found: string[] = [];
@@ -1766,18 +1699,20 @@ describe("api stack: participant function (ticket 1.5)", () => {
       [
         `${APP_DATA_FUNCTION_NAME} dynamodb:GetItem`,
         `${APP_MEDIA_FUNCTION_NAME} dynamodb:GetItem`,
-        // Ticket 3.21: the AI tasks check the same token.
         `${APP_AI_FUNCTION_NAME} dynamodb:GetItem`,
-        `${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`,
-        `${PARTICIPANT_FUNCTION_NAME} dynamodb:PutItem`,
+        `${CONVERSATION_FUNCTION_NAME} dynamodb:DeleteItem`,
+        `${CONVERSATION_FUNCTION_NAME} dynamodb:PutItem`,
       ].sort(),
     );
-    expect(reach("TOKENS#p-1")).toEqual(
-      [`${PARTICIPANT_FUNCTION_NAME} dynamodb:GetItem`, `${PARTICIPANT_FUNCTION_NAME} dynamodb:UpdateItem`].sort(),
+    // The secrets: the conversation function alone, and it never deletes the per-app item (the reset does, as Franck).
+    expect(reach("APPEDIT#ada")).toEqual(
+      [`${CONVERSATION_FUNCTION_NAME} dynamodb:GetItem`, `${CONVERSATION_FUNCTION_NAME} dynamodb:PutItem`, `${CONVERSATION_FUNCTION_NAME} dynamodb:UpdateItem`].sort(),
     );
-    expect(JSON.stringify(apiFunction(APP_DATA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
-    expect(JSON.stringify(apiFunction(APP_MEDIA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
-    expect(JSON.stringify(apiFunction(APP_AI_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
+    for (const name of [APP_DATA_FUNCTION_NAME, APP_MEDIA_FUNCTION_NAME, APP_AI_FUNCTION_NAME, PARTICIPANT_FUNCTION_NAME]) {
+      expect(JSON.stringify(apiFunction(name).statements()), name).not.toContain("APPEDIT#");
+      expect(JSON.stringify(apiFunction(name).statements()), name).not.toContain("TOKENS#");
+    }
+    expect(JSON.stringify(apiFunction(PARTICIPANT_FUNCTION_NAME).statements())).not.toContain("APPTOKEN#");
   });
 
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
@@ -2256,14 +2191,14 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
           "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "value", "bytes", "keys", "updatedAt", "updatedBy", "writeDay", "writtenBytes", "sizes"] },
         },
       },
-      // Ticket 3.24: the write check reads a token's app, nickname and expiry only, never the rest of APPTOKEN#, never TOKENS#.
+      // Ticket 3.26: the write check reads a lookup item's app, nickname and kind only, never the rest of APPTOKEN#, never APPEDIT#.
       {
         Effect: "Allow",
         Action: "dynamodb:GetItem",
         Resource: f.tableArn(),
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "app", "nickname", "expiresAt"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "app", "nickname", "kind"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },
@@ -2399,6 +2334,7 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       "POST /api/conversation/change/discard",
       "POST /api/conversation/change/rebuild",
       "POST /api/conversation/change/edit",
+      "POST /api/build/edit-link",
     ]);
     for (const routeKey of CONVERSATION_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
@@ -2457,6 +2393,65 @@ describe("api stack: conversation function (ticket 1.7)", () => {
       { Effect: "Allow", Action: "sqs:SendMessage", Resource: queueArn() },
       settingsReadStatement(f.tableArn()),
       ...sessionCheckStatements(f.tableArn()),
+      // Ticket 3.26: the caller's app's edit link: read projected, made once, renewed; its lookup items put and deleted.
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPEDIT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "secret", "secretHash", "nickname"] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPEDIT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "app", "nickname", "secret", "secretHash", "createdAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPEDIT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "secret", "secretHash", "updatedAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:PutItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "app", "nickname", "kind", "createdAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:DeleteItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:ConditionCheckItem",
+        Resource: f.tableArn(),
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "role"] },
+        },
+      },
     ]);
   });
 
@@ -3959,7 +3954,8 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(JSON.parse(WAF_MEDIA_WRITE_RATE_BODY)).toEqual({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
     expect(WAF_MEDIA_AUTH_RULE_NAME).toBe("ssd-workshop-media-auth");
     // The same answer as the media API's own 401 (workshop-data.js shows `message`).
-    expect(JSON.parse(WAF_MEDIA_AUTH_BODY)).toEqual({ message: APP_MEDIA_MESSAGES.signInToSave });
+    expect(JSON.parse(WAF_MEDIA_AUTH_BODY)).toEqual({ message: APP_MEDIA_MESSAGES.viewOnly });
+    expect(WAF_MEDIA_AUTH_BODY).toBe(JSON.stringify({ message: "This link is view only." }));
     expect(WAF_MEDIA_AUTH_STATUS).toBe(401);
     // checkAppWrite (3.24) reads `Bearer <token>` in any case (`/^Bearer .../i`): the filter compares lower-cased (try 3).
     expect(WAF_BEARER_PREFIX).toBe("bearer ");
@@ -4377,7 +4373,7 @@ describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcript
         Resource: table,
         Condition: {
           "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "app", "nickname", "expiresAt"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "app", "nickname", "kind"] },
           StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
         },
       },

@@ -5,9 +5,9 @@
 // Same host, as in production: under the sandbox the page's origin is opaque ("null"), so even its own
 // server is cross-origin and the browser reads an answer only if CORS allows it.
 //
-// Ticket 3.24: writes need `Authorization: Bearer <token>`. Since 3.25 the template's workshop-data.js sends it, taking
-// the token from the address (`#wt=<token>`), which also proves the preflight lets a sandboxed page send it. Try 2: the
-// template asks the real API who the token's writer is (`GET ...?whoami=1` with the token, preflighted too).
+// Ticket 3.24: writes need `Authorization: Bearer <token>`. Since 3.28 the template's workshop-data.js sends the app's
+// edit secret (ticket 3.26), taking it from the address (`#edit=<secret>`), which also proves the preflight lets a
+// sandboxed page send it. The template asks the real API whose link it is (`GET ...?whoami=1`, preflighted too).
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -41,9 +41,9 @@ interface Seen {
   allowCredentials: string | undefined;
 }
 
-/** The write token the tests give the page (ticket 3.24), handed over in the address as /app-sign-in does (3.25). */
+/** The edit secret the tests give the page (ticket 3.26), in the address as the edit link carries it (3.28). */
 const TOKEN = Buffer.alloc(32, 5).toString("base64url");
-const HAND_OFF = `#wt=${TOKEN}`;
+const HAND_OFF = `#edit=${TOKEN}`;
 
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -128,7 +128,7 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
 
   beforeEach(async () => {
     store = new FakeAppDataStore();
-    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", kind: "edit" });
     seen = [];
     logs = [];
     context = await browser.newContext({ viewport: { width: 375, height: 667 } });
@@ -161,7 +161,7 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     store.live.add(NICKNAME);
     await openApp("0", HAND_OFF);
     expect(await page.evaluate<string>("window.origin")).toBe("null");
-    expect(page.url()).toBe(`${origin}${APP_PATH}`);
+    expect(page.url()).toBe(`${origin}${APP_PATH}${HAND_OFF}`);
 
     await page.getByRole("button", { name: "Press" }).click();
     await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
@@ -207,31 +207,26 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     expect(errors).toEqual([]);
   });
 
-  it("ticket 3.24: a visitor without a token reads, but a save gets the plain 401 reason and stores nothing", async () => {
-    // The page as a visitor opens it: no token sent.
-    await context.close();
-    context = await browser.newContext({ viewport: { width: 375, height: 667 } });
-    page = await context.newPage();
-    page.setDefaultTimeout(5_000);
-    errors = [];
+  it("ticket 3.24/3.28: a visitor without a secret reads and a save is refused unsent with the API's text; with an edit link the API does not know, the save gets the plain 401 reason and stores nothing", async () => {
+    page.removeAllListeners("console");
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 401")) errors.push(message.text());
     });
-    page.on("pageerror", (error) => errors.push(error.message));
     store.live.add(NICKNAME);
     store.values.set(`${NICKNAME}/presses`, { json: "5", bytes: 1 });
     await openApp("5");
-    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
-    // No token, no whoami question: whoAmI() is null at once.
+    // View only: the template hides its Press button; no secret, no whoami question, whoAmI() is null at once.
+    expect(await page.getByRole("button", { name: "Press" }).isVisible()).toBe(false);
     expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
     expect(seen.some((s) => s.path === `${DATA_PREFIX}whoami`)).toBe(false);
-    const message = await page.evaluate<string>(`workshopData.set("presses", 6).then(() => "stored", (error) => error.message)`);
-    expect(message).toBe(APP_DATA_MESSAGES.signInToSave);
-    // Ticket 3.25: the template's own button, pressed by a visitor, shows the same reason and saves nothing.
+    expect(await page.evaluate<string>(`workshopData.set("presses", 6).then(() => "stored", (error) => error.message)`)).toBe(APP_DATA_MESSAGES.viewOnly);
+    expect(seen.filter((s) => s.method === "PUT")).toEqual([]);
+    // An edit link that was replaced (well formed, unknown to the API): the real API's 401, readable from the opaque origin.
+    await openApp("5", `#edit=${Buffer.alloc(32, 8).toString("base64url")}`);
     await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => page.locator("#status").textContent()).toBe(APP_DATA_MESSAGES.signInToSave);
+    await expect.poll(() => page.locator("#status").textContent()).toBe(APP_DATA_MESSAGES.viewOnly);
     expect(store.values.get(`${NICKNAME}/presses`)?.json).toBe("5");
-    expect(seen.filter((s) => s.method === "PUT").map((s) => s.status)).toEqual([401, 401]);
+    expect(seen.filter((s) => s.method === "PUT").map((s) => s.status)).toEqual([401]);
     expect(seen.find((s) => s.method === "PUT")).toMatchObject({ status: 401, allowOrigin: "*", allowCredentials: undefined });
     expect(errors).toEqual([]);
   });
@@ -250,16 +245,16 @@ describe("criterion 5: a page with an opaque origin reads the data API's answers
     expect(errors).toEqual([]);
   });
 
-  it("ticket 3.25 try 2: WHEN the address holds a token the API does not accept THEN whoAmI() stays null and the page names no one", async () => {
+  it("ticket 3.25 try 2 / 3.28: WHEN the address holds a secret the API does not accept THEN whoAmI() stays null and the page names no one", async () => {
     page.removeAllListeners("console");
     page.on("console", (message) => {
       if (message.type() === "error" && !message.text().startsWith("Failed to load resource: the server responded with a status of 401")) errors.push(message.text());
     });
     store.live.add(NICKNAME);
     // Another app's token, then an unknown one: both well formed, neither for this app.
-    store.tokens.tokens.set(hashAppToken(Buffer.alloc(32, 6).toString("base64url")), { app: "other-app", nickname: "Eve", expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+    store.tokens.tokens.set(hashAppToken(Buffer.alloc(32, 6).toString("base64url")), { app: "other-app", nickname: "Eve", kind: "edit" });
     for (const token of [Buffer.alloc(32, 6).toString("base64url"), Buffer.alloc(32, 7).toString("base64url")]) {
-      await openApp("0", `#wt=${token}`);
+      await openApp("0", `#edit=${token}`);
       expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
       expect(await page.locator("#who").textContent()).toBe("");
     }

@@ -36,12 +36,12 @@ import {
   APP_MEDIA_KEY_PREFIX,
   APP_MEDIA_READ_ATTRIBUTES,
   APP_MEDIA_WRITE_ATTRIBUTES,
-  APP_TOKEN_LIST_READ_ATTRIBUTES,
-  APP_TOKEN_LIST_UPDATE_ATTRIBUTES,
-  APP_TOKEN_PUT_ATTRIBUTES,
-  APP_TOKEN_PROFILE_CHECK_ATTRIBUTES,
+  APP_EDIT_PROFILE_CHECK_ATTRIBUTES,
+  APP_EDIT_PUT_ATTRIBUTES,
+  APP_EDIT_READ_ATTRIBUTES,
+  APP_EDIT_TOKEN_PUT_ATTRIBUTES,
+  APP_EDIT_UPDATE_ATTRIBUTES,
   APP_TOKEN_READ_ATTRIBUTES,
-  APP_TOKEN_SESSION_CHECK_ATTRIBUTES,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   BUILD_QUEUE_NAME,
   BUILD_QUEUE_PARTITION,
@@ -162,10 +162,8 @@ export const PARTICIPANT_ROUTES = [
   { path: "/api/me", method: HttpMethod.GET },
   { path: "/api/me/nickname", method: HttpMethod.POST },
   { path: "/api/participants/{id}", method: HttpMethod.GET },
-  // Ticket 3.1: deletes the caller's own session and clears its cookie (ticket 3.24: and revokes their app write tokens).
+  // Ticket 3.1: deletes the caller's own session and clears its cookie (ticket 3.26 removed 3.24's `/api/app-tokens`).
   { path: "/api/sign-out", method: HttpMethod.POST },
-  // Ticket 3.24: an app write token for one live app, for the hand-off page /app-sign-in.
-  { path: "/api/app-tokens", method: HttpMethod.POST },
 ] as const;
 
 /** The admin routes (ticket 3.2; Stop and Resume from 3.5), served by their own function: the only role that may write `SETTINGS`. */
@@ -212,6 +210,8 @@ export const CONVERSATION_ROUTES = [
   { path: "/api/conversation/change/rebuild", method: HttpMethod.POST },
   // Ticket 3.15: Rebuild with my edits.
   { path: "/api/conversation/change/edit", method: HttpMethod.POST },
+  // Ticket 3.26: New edit link (the caller's own app).
+  { path: "/api/build/edit-link", method: HttpMethod.POST },
 ] as const;
 
 /**
@@ -461,93 +461,6 @@ export class ApiStack extends Stack {
       }),
     );
     addSessionCheckRights(participant, this.table);
-    // Ticket 3.24: app write tokens. It reads an app's live marker (`liveAt` only) and the caller's token list
-    // (`tokens`, `version`), puts token items (`APPTOKEN#*`, their names only), updates token lists (`TOKENS#*`, their names
-    // only) and deletes token items (sign-out). It never reads a token item back, and no call returns an item.
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:GetItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_LIVE_READ_ATTRIBUTES] },
-          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
-        },
-      }),
-    );
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:GetItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_LIST_READ_ATTRIBUTES] },
-          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
-        },
-      }),
-    );
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:PutItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_PUT_ATTRIBUTES] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
-        },
-      }),
-    );
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:UpdateItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TOKENS#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_LIST_UPDATE_ATTRIBUTES] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
-        },
-      }),
-    );
-    // Sign-out deletes token items; a list is only ever emptied (an update), never deleted, so its version only rises.
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:DeleteItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
-          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
-        },
-      }),
-    );
-    // Ticket 3.24 try 2: the create transaction checks that the caller's session still exists (no token after sign-out).
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:ConditionCheckItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_SESSION_CHECK_ATTRIBUTES] },
-        },
-      }),
-    );
-    // Ticket 3.24 try 3 (access review L1): ... and that the caller's profile is not marked removed from the allow-list.
-    participant.addToRolePolicy(
-      new PolicyStatement({
-        effect: Effect.ALLOW,
-        actions: ["dynamodb:ConditionCheckItem"],
-        resources: [this.table.tableArn],
-        conditions: {
-          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
-          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_TOKEN_PROFILE_CHECK_ATTRIBUTES] },
-        },
-      }),
-    );
     // One invoke permission for the function, scoped to this API (`<api id>/*/*/*`) instead of one
     // per route: CDK's per-route source ARN would hold `{id}` literally for the path parameter route.
     const participantIntegration = new HttpLambdaIntegration("ParticipantIntegration", participant, {
@@ -654,6 +567,80 @@ export class ApiStack extends Stack {
     // Ticket 3.3: `GET /api/conversation` answers the budget left, so it reads the settings' caps (projected).
     addSettingsReadRights(conversation, this.table);
     addSessionCheckRights(conversation, this.table);
+    // Ticket 3.26: edit links. `GET /api/build` reads the caller's app's edit link (`APPEDIT#*`: the secret, its hash and
+    // the builder, projected) and makes it once (a put of the per-app item and of its lookup item `APPTOKEN#*`, each only
+    // if absent); New edit link updates the per-app item, puts the new lookup item and deletes the old one. Both check
+    // the builder's profile's `role` (ConditionCheckItem). Nothing returns an item. No other role reads `APPEDIT#*`.
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPEDIT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_EDIT_READ_ATTRIBUTES] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPEDIT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_EDIT_PUT_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPEDIT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_EDIT_UPDATE_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_EDIT_TOKEN_PUT_ATTRIBUTES] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:DeleteItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
+        },
+      }),
+    );
+    conversation.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:ConditionCheckItem"],
+        resources: [this.table.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PARTICIPANT#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": [...APP_EDIT_PROFILE_CHECK_ATTRIBUTES] },
+        },
+      }),
+    );
     // One invoke permission scoped to this API, as for the participant routes (path parameter route).
     const conversationIntegration = new HttpLambdaIntegration("ConversationIntegration", conversation, {
       scopePermissionToRoute: false,
@@ -841,8 +828,8 @@ export class ApiStack extends Stack {
         },
       }),
     );
-    // Ticket 3.24: the write check reads an app write token by its hash (`app`, `nickname` and `expiresAt` only, with a
-    // projection); nothing else in `APPTOKEN#*`, and nothing at all in `TOKENS#*`.
+    // Ticket 3.24 (3.26: edit links): the write check reads a lookup item by its hash (`app`, `nickname` and `kind` only,
+    // with a projection); nothing else in `APPTOKEN#*`, and nothing at all in `APPEDIT#*` (the secrets).
     appData.addToRolePolicy(
       new PolicyStatement({
         effect: Effect.ALLOW,

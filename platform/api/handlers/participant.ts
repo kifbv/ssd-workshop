@@ -1,5 +1,4 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { randomBytes } from "node:crypto";
 import { clientSettings } from "../aws.js";
 import type { HttpRequest, HttpResponse } from "../http.js";
 import { handleParticipantRequest, type ParticipantDeps, type ParticipantLogEntry } from "../participant/participant.js";
@@ -8,7 +7,7 @@ import { TABLE_NAME } from "../settings.js";
 
 /**
  * The protected participant routes (ticket 1.5): `GET /api/me`, `POST /api/me/nickname` and
- * `GET /api/participants/{id}`, `POST /api/sign-out` and `POST /api/app-tokens` (ticket 3.24), each behind the one
+ * `GET /api/participants/{id}` and `POST /api/sign-out` (ticket 3.24's `POST /api/app-tokens` went in 3.26), each behind the one
  * session check. Rules in ../participant/.
  */
 
@@ -29,7 +28,6 @@ export async function handler(event: HttpRequest): Promise<HttpResponse> {
   live ??= createHandler({
     store: new DynamoParticipantStore(new DynamoDBClient(clientSettings()), TABLE_NAME),
     now: () => new Date(),
-    randomBytes,
     log: logEntry,
   });
   return live(event);

@@ -9,7 +9,8 @@ import {
   formatBuildSummary,
   missingScreens,
   scoreBuild,
-  signInProblem,
+  editLinkProblem,
+  type EditLinkCheck,
   mediaProblem,
   mediaKindOf,
   aiKindOf,
@@ -528,7 +529,7 @@ describe("scoreBuild", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
-    signIn: { shown: 1, visible: 1, opens: true },
+    editLink: { editorCanSave: true, editorControls: 2, savedOnOpen: 0, saved: true, editorOverflow: 0, editorErrors: [], visitorCanSave: false, visitorControls: [], visitorRefused: false, secretLeaks: [] },
     fetches: 0,
     fetchHosts: [],
     durationMs: 185_000,
@@ -539,12 +540,28 @@ describe("scoreBuild", () => {
     expect(scoreBuild(ok).pass).toBe(true);
   });
 
-  it("ticket 3.25: requires the sign-in button for a visitor, opening the workshop's sign-in when it is on the first screen", () => {
-    expect(scoreBuild(ok).detail).toContain("sign-in button shown to a visitor and opens the sign-in");
-    expect(scoreBuild({ ...ok, signIn: { shown: 2, visible: 0, opens: undefined } })).toEqual({ pass: true, detail: expect.stringMatching(/sign-in button shown to a visitor$/) as unknown });
-    expect(scoreBuild({ ...ok, signIn: { shown: 0, visible: 0, opens: undefined } })).toEqual({ pass: false, detail: 'no "Sign in to save" button (data-workshop-sign-in) for a visitor' });
-    expect(scoreBuild({ ...ok, signIn: { shown: 1, visible: 1, opens: false } })).toEqual({ pass: false, detail: "the sign-in button does not open the workshop's sign-in page in a new tab" });
-    expect(signInProblem({ shown: 1, visible: 1, opens: true })).toBeUndefined();
+  it("ticket 3.28: requires saving controls and a save with the edit link, none for a visitor, nothing saved on open", () => {
+    const check = ok.editLink as EditLinkCheck;
+    expect(scoreBuild(ok).detail).toContain("saves with the edit link, none for a visitor");
+    expect(editLinkProblem(check)).toBeUndefined();
+    // A media or AI case is not asked to save in this pass.
+    expect(scoreBuild({ ...ok, editLink: { ...check, saved: undefined } })).toEqual({ pass: true, detail: expect.stringContaining("saving controls with the edit link, none for a visitor") as unknown });
+    const { editLink: _unused, ...withoutCheck } = ok;
+    void _unused;
+    expect(scoreBuild(withoutCheck)).toEqual({ pass: false, detail: "the edit-link check did not run" });
+    const fails: [Partial<EditLinkCheck>, string][] = [
+      [{ visitorControls: ["Save", "file input (Take a photo)"] }, "a visitor without the edit link sees saving controls: Save, file input (Take a photo)"],
+      [{ visitorRefused: true }, 'a visitor without the edit link got "This link is view only." (the app saved by itself, or a screen tab saves)'],
+      [{ savedOnOpen: 2 }, "saves when the page opens (2 write(s) before anyone did anything)"],
+      [{ editorControls: 0 }, "no saving control (Save, Add, photo or Record button) with the edit link"],
+      [{ saved: false }, "with the edit link, filling the fields and pressing Save or Add saved nothing"],
+      [{ editorOverflow: 12 }, "with the edit link, scrolls sideways by 12 px"],
+      [{ editorErrors: ["boom"] }, "1 console error(s) with the edit link: boom"],
+      [{ visitorCanSave: true }, "workshopData.canSave() is true with the edit link and true without it"],
+      // Ticket 3.28 try 2 (access review L2).
+      [{ secretLeaks: ["a request to qr.example (its address)", "the page's text"] }, "the edit link's secret left the workshop or showed in the page: a request to qr.example (its address), the page's text"],
+    ];
+    for (const [change, detail] of fails) expect(scoreBuild({ ...ok, editLink: { ...check, ...change } })).toEqual({ pass: false, detail });
   });
 
   it("ticket 3.19: a media case also needs its photo or Record button, an upload kept in the data and shown from its address, a tag or topic filter and no console error", () => {
@@ -715,7 +732,7 @@ describe("the change suite (ticket 3.7)", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
-    signIn: { shown: 1, visible: 1, opens: true },
+    editLink: { editorCanSave: true, editorControls: 2, savedOnOpen: 0, saved: true, editorOverflow: 0, editorErrors: [], visitorCanSave: false, visitorControls: [], visitorRefused: false, secretLeaks: [] },
     fetches: 0,
     fetchHosts: [],
     durationMs: 120_000,

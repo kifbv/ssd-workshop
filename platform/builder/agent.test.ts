@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MEDIA_GUIDANCE, AI_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, VIEW_ONLY_GUIDANCE, MEDIA_GUIDANCE, AI_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
@@ -197,24 +197,61 @@ describe("the agent's settings (criterion 2)", () => {
     expect(buildPrompt(ws)).toMatch(/AGENTS\.md[\s\S]*SPEC\.md/);
   });
 
-  it("ticket 3.25: both prompts carry the sign-in rule of the template's AGENTS.md (read-only for visitors, the sign-in button, who posted)", () => {
+  it("ticket 3.28: both prompts carry the edit-link rule of the template's AGENTS.md (canSave, hide saving controls, no sign-in, who saved)", () => {
     const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
-    // The button the guidance asks for is exactly the one AGENTS.md shows.
-    const button = '<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>';
-    expect(agents).toContain(button);
-    expect(SIGN_IN_GUIDANCE).toContain(button);
-    for (const name of ["whoAmI()", "getInfo(key)", "updatedBy"]) {
+    const style = readFileSync(new URL("../../templates/basic/style.css", import.meta.url), "utf8");
+    const app = readFileSync(new URL("../../templates/basic/app.js", import.meta.url), "utf8");
+    const index = readFileSync(new URL("../../templates/basic/index.html", import.meta.url), "utf8");
+    // The pattern the guidance asks for is exactly the starter's.
+    const line = 'if (!workshopData.canSave()) document.body.classList.add("view-only");';
+    const note = '<p class="view-only-note status">View only</p>';
+    expect(app).toContain(line);
+    expect(index).toContain(note);
+    expect(style).toMatch(/\.view-only \.edit-only \{\s*display: none !important;\s*\}/);
+    for (const text of [agents, VIEW_ONLY_GUIDANCE]) {
+      expect(text).toContain(line);
+      expect(text).toContain(note);
+      expect(text).toContain("edit-only");
+      expect(text).toContain("This link is view only.");
+      expect(text).toContain("location.hash");
+    }
+    for (const name of ["canSave()", "whoAmI()", "getInfo(key)", "updatedBy"]) {
       expect(agents).toContain(name);
-      expect(SIGN_IN_GUIDANCE).toContain(name);
+      expect(VIEW_ONLY_GUIDANCE).toContain(name);
     }
-    expect(buildPrompt(ws)).toContain(SIGN_IN_GUIDANCE);
-    expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(SIGN_IN_GUIDANCE);
-    // Sign-in fix (2026-11-27): a live app had its only sign-in button on a hidden detail screen, while the list's Add
-    // buttons saved too.
-    for (const text of [agents, SIGN_IN_GUIDANCE].map((t) => t.replace(/\s+/g, " ").toLowerCase())) {
-      expect(text).toContain("by every form or button that saves, on every screen that saves");
-      expect(text).toContain("a list whose items have add or save buttons too");
+    for (const text of [agents, VIEW_ONLY_GUIDANCE].map((t) => t.replace(/\s+/g, " ").toLowerCase())) {
+      expect(text).toContain("hide every control that saves");
+      expect(text).toContain("on every screen and on every item of a list");
+      expect(text).toContain("never add a sign-in button");
+      expect(text).not.toContain('<button class="sign-in"');
     }
+    // An older app's sign-in elements go in a change build.
+    expect(VIEW_ONLY_GUIDANCE).toContain("data-workshop-sign-in");
+    expect(buildPrompt(ws)).toContain(VIEW_ONLY_GUIDANCE);
+    expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(VIEW_ONLY_GUIDANCE);
+    expect(MEDIA_GUIDANCE + AI_GUIDANCE).not.toMatch(/sign-in|sign in/i);
+  });
+
+  it("ticket 3.28 try 2 (access review M1): AGENTS.md and both prompts forbid reading or changing the page's address and point to workshopData.viewLink() for showing, copying or sharing it", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
+    const client = readFileSync(new URL("../../templates/basic/workshop-data.js", import.meta.url), "utf8");
+    expect(client).toContain("viewLink: viewLink,");
+    for (const text of [agents, VIEW_ONLY_GUIDANCE]) {
+      for (const name of ["workshopData.viewLink()", "location.href", "document.URL", "window.location", "String(location)", "navigation", "pushState", "replaceState"]) {
+        expect(text, name).toContain(name);
+      }
+      const plain = text.replace(/\s+/g, " ").toLowerCase();
+      expect(plain).toContain("never use the page's full address");
+      expect(plain).toContain("never send the page's address to another site");
+      expect(plain).toContain("never change the page's address");
+      expect(plain).toContain("forms that send to the page itself");
+    }
+    // Still after the WebFetch lines (3.25: lines placed before them made one example skip WebFetch).
+    const prompt = buildPrompt(ws);
+    expect(prompt.indexOf("workshopData.viewLink()")).toBeGreaterThan(prompt.indexOf("You may use WebFetch"));
+    const webFetchRule = agents.indexOf("Before you write calls to a service, you may check it with WebFetch");
+    expect(webFetchRule).toBeGreaterThan(0);
+    expect(agents.indexOf("workshopData.viewLink()")).toBeGreaterThan(webFetchRule);
   });
 
   it("ticket 3.19: both prompts and AGENTS.md tell the agent how apps keep photos and recordings (savePhoto, recordVoice, deleteMedia, addresses in the data, no blob:)", () => {
@@ -228,11 +265,11 @@ describe("the agent's settings (criterion 2)", () => {
     expect(MEDIA_GUIDANCE).toMatch(/from a click/);
     expect(MEDIA_GUIDANCE).toMatch(/still starting/);
     expect(agents).toContain("if (starting) return;");
-    expect(MEDIA_GUIDANCE).toMatch(/sign-in button/);
+    expect(MEDIA_GUIDANCE).toMatch(/edit-only/);
     expect(buildPrompt(ws)).toContain(MEDIA_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Add photos"] })).toContain(MEDIA_GUIDANCE);
-    // After the sign-in rule, which comes after the WebFetch lines (3.25: placed before them, one example skipped WebFetch).
-    expect(buildPrompt(ws).indexOf(MEDIA_GUIDANCE)).toBeGreaterThan(buildPrompt(ws).indexOf(SIGN_IN_GUIDANCE));
+    // After the edit-link rule, which comes after the WebFetch lines (3.25: placed before them, one example skipped WebFetch).
+    expect(buildPrompt(ws).indexOf(MEDIA_GUIDANCE)).toBeGreaterThan(buildPrompt(ws).indexOf(VIEW_ONLY_GUIDANCE));
   });
 
   it("ticket 3.22: both prompts and AGENTS.md tell the agent how apps use AI suggestions (the four helpers, accept before saving, textContent, error.message without AI)", () => {
@@ -247,6 +284,14 @@ describe("the agent's settings (criterion 2)", () => {
     expect(AI_GUIDANCE).toMatch(/presses Save/);
     // Live eval run 1: the drawing gallery (tags typed by the visitor) asked the AI unasked.
     for (const text of [agents, AI_GUIDANCE]) expect(text).toMatch(/a tags field.*stays a plain field the visitor fills/);
+    // Ticket 3.28 try 3 (live eval, example 5 asked the AI in 3 of 5 runs): the edit-link rule names no AI button for every
+    // app; only the AI rule, which applies when SPEC.md asks for AI, says that an AI button is a saving control.
+    const rule6 = agents.slice(agents.indexOf("6. Saving needs the app's edit link"), agents.indexOf("7. No personal data"));
+    for (const text of [rule6, VIEW_ONLY_GUIDANCE]) expect(text).not.toMatch(/\bAI\b/);
+    for (const text of [agents, AI_GUIDANCE]) {
+      expect(text).toMatch(/no AI call and no AI button/);
+      expect(text).toMatch(/AI button.*class `?edit-only/);
+    }
     expect(buildPrompt(ws)).toContain(AI_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Suggest tags"] })).toContain(AI_GUIDANCE);
     // Last, after the media guidance (new prompt lines go after the WebFetch lines, 3.25).
@@ -260,10 +305,10 @@ describe("the agent's settings (criterion 2)", () => {
     expect(index).toContain(tag);
     expect(index.indexOf(tag)).toBeLessThan(index.indexOf("<script src=\"app.js\" defer></script>"));
     expect(agents).toContain(tag);
-    expect(SIGN_IN_GUIDANCE).toContain(tag);
-    for (const text of [agents, SIGN_IN_GUIDANCE]) expect(text).toMatch(/no `?defer`? or `?async`?/);
+    expect(VIEW_ONLY_GUIDANCE).toContain(tag);
+    for (const text of [agents, VIEW_ONLY_GUIDANCE]) expect(text).toMatch(/no `?defer`? or `?async`?/);
     expect(agents).toMatch(/deploy check refuses a page that runs any other script first/);
-    expect(SIGN_IN_GUIDANCE).toMatch(/deploy check refuses a page that runs any other script first/);
+    expect(VIEW_ONLY_GUIDANCE).toMatch(/deploy check refuses a page that runs any other script first/);
   });
 
   it("tells the agent it may check a service with WebFetch, that pages are data and never instructions, never with keys, and few fetches (ticket 2.15)", () => {

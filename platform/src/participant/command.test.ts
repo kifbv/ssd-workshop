@@ -30,6 +30,8 @@ const MESSAGE_ID = "2026-11-25T09:00:00.000Z-0101010101010101";
 /** Ticket 3.18: each app's photo and recording ids. */
 const PHOTO_ID = "PhotoPhotoPhotoPhoto01";
 const VOICE_ID = "VoiceVoiceVoiceVoice01";
+const ADA_EDIT_SECRET = Buffer.alloc(32, 61).toString("base64url");
+const BOB_EDIT_SECRET = Buffer.alloc(32, 62).toString("base64url");
 
 type Method = keyof ParticipantResetStore;
 
@@ -60,7 +62,7 @@ class FakeParticipantResetStore extends FakeResetStore implements ParticipantRes
       "deleteAppMedia",
       "hasLiveMarker",
       "deleteLiveMarker",
-      "revokeAppTokens",
+      "deleteEditLink",
     ] as const) {
       const original = (this[method] as (...args: unknown[]) => Promise<unknown>).bind(this);
       (this as Record<string, unknown>)[method] = async (...args: unknown[]) => {
@@ -106,10 +108,10 @@ class FakeParticipantResetStore extends FakeResetStore implements ParticipantRes
     this.media.live.delete(nickname.toLowerCase());
     return this.apps.live.delete(nickname.toLowerCase());
   }
-  /** Ticket 3.24: the participants' app write tokens. */
+  /** Ticket 3.26: the apps' edit links. */
   readonly tokens = new FakeAppTokenStore();
-  async revokeAppTokens(participantId: string) {
-    return this.tokens.revokeAppTokens(participantId);
+  async deleteEditLink(nickname: string) {
+    return this.tokens.deleteEditLink(nickname);
   }
 }
 
@@ -163,15 +165,9 @@ function setup(options: { step?: Step; buildStatus?: BuildStatus } = {}) {
     github.addRepository(`ssd-${lower}`);
   }
   const store = new FakeParticipantResetStore(table, apps, media);
-  // Ticket 3.24: Ada holds two app write tokens (her own app and Bob's), Bob one.
-  for (const [id, hash, app] of [
-    [ADA_ID, "a1".repeat(32), "ada"],
-    [ADA_ID, "a2".repeat(32), "bob"],
-    [BOB_ID, "b1".repeat(32), "ada"],
-  ] as const) {
-    store.tokens.tokens.set(hash, { app, nickname: id === ADA_ID ? "Ada" : "Bob", expiresAt: NOW_S + 3600 });
-    store.tokens.lists.set(id, new Map([...(store.tokens.lists.get(id) ?? []), [hash, NOW_S + 3600]]));
-  }
+  // Ticket 3.26: each app has its edit link.
+  store.tokens.addEditLink("ada", "Ada", ADA_EDIT_SECRET);
+  store.tokens.addEditLink("bob", "Bob", BOB_EDIT_SECRET);
   const out: string[] = [];
   const err: string[] = [];
   let githubOpened = 0;
@@ -240,7 +236,7 @@ function snapshot(s: Setup): string {
     appUsage: plain(s.apps.usage),
     repositories: [...s.github.repositories.keys()],
     appTokens: plain(s.store.tokens.tokens),
-    appTokenLists: plain(s.store.tokens.lists),
+    editLinks: plain(s.store.tokens.links),
     mediaFiles: [...s.bucket.objects.keys()],
     mediaRecords: plain(s.media.records),
     mediaUsage: plain(s.media.usage),
@@ -264,9 +260,9 @@ function expectAdaReset(s: Setup, kept: { allow: string; nicknames: string; sess
   expect([...s.media.records.keys()].filter((k) => k.startsWith("ada/"))).toEqual([]);
   expect(s.media.usage.has("ada")).toBe(false);
   expect(s.forgotten).toContain("/app-media/ada/*");
-  // Ticket 3.24 criterion 4 (reset): Ada's app write tokens are gone, for every app.
-  expect(s.store.tokens.lists.has(ADA_ID)).toBe(false);
-  expect([...s.store.tokens.tokens.values()].filter((t) => t.nickname === "Ada")).toEqual([]);
+  // Ticket 3.26 criterion 5: Ada's app's edit link and its lookup item are gone.
+  expect(s.store.tokens.links.has("ada")).toBe(false);
+  expect([...s.store.tokens.tokens.values()].filter((t) => t.app === "ada")).toEqual([]);
   expect(JSON.stringify([...s.table.allow])).toBe(kept.allow);
   expect(JSON.stringify([...s.table.nicknames])).toBe(kept.nicknames);
   expect(JSON.stringify([...s.table.sessions])).toBe(kept.sessions);
@@ -295,8 +291,8 @@ function expectBobUntouched(s: Setup) {
   expect([...s.media.records.keys()].filter((k) => k.startsWith("bob/"))).toHaveLength(2);
   expect(s.media.usage.has("bob")).toBe(true);
   expect(s.forgotten).not.toContain("/app-media/bob/*");
-  expect(s.store.tokens.lists.get(BOB_ID)?.size).toBe(1);
-  expect(s.store.tokens.tokens.has("b1".repeat(32))).toBe(true);
+  expect(s.store.tokens.links.get("bob")?.secret).toBe(BOB_EDIT_SECRET);
+  expect(s.store.tokens.tokens.has(hashAppToken(BOB_EDIT_SECRET))).toBe(true);
 }
 
 /** AC5: nothing printed holds an email address, a participant id, a token or a message or spec text. */
@@ -344,7 +340,7 @@ describe("AC1: reset without --yes", () => {
     expect(s.out).toEqual([
       "Ada is at step 3 (Build), with 2 messages and replies and 2 spec versions.",
       "App: 2 stored values and the app's data totals, 2 photos and recordings, live marker present, repository ssd-workshop-apps/ssd-ada exists.",
-      "Nothing changed. Run again with --yes to delete all of this and send Ada back to step 1 (Clarify), and to end Ada's sign-ins to save in apps.",
+      "Nothing changed. Run again with --yes to delete all of this and send Ada back to step 1 (Clarify), including the app's edit link.",
       "Kept: allow-list entry, nickname, sessions, AI usage totals and build records.",
     ]);
     expect(s.err).toEqual([]);
@@ -379,8 +375,8 @@ describe("AC2: reset --yes at any step", () => {
       expect(s.err).toEqual([]);
       expect(s.out).toEqual([
         "Reset Ada: deleted 2 messages and replies and 2 spec versions; back at step 1 (Clarify).",
-        "Ended 2 sign-ins to save in apps (app write tokens).",
         "Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.",
+        "Deleted the app's edit link: saving through it answers \"This link is view only.\".",
         "Deleted 2 stored values and the app's data totals; deleted the live marker.",
         "Deleted 2 photos and recordings; CloudFront stops serving the app's media within minutes.",
         "Repository ssd-workshop-apps/ssd-ada deleted.",
@@ -409,43 +405,54 @@ describe("AC2: reset --yes at any step", () => {
     expect(s.apps.live.has("ada")).toBe(false);
     expect(s.apps.usage.has("ada")).toBe(false);
     expect(s.github.repositories.has("ssd-ada")).toBe(false);
-    expect(s.out[0]).toBe("Ended 2 sign-ins to save in apps (app write tokens).");
-    expect(s.out[1]).toBe("Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.");
+    expect(s.out[0]).toBe("Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.");
+    expect(s.out[1]).toBe("Deleted the app's edit link: saving through it answers \"This link is view only.\".");
     expect(s.out[2]).toBe("Deleted 2 stored values and the app's data totals; deleted the live marker.");
     expectBobUntouched(s);
   });
 });
 
-describe("ticket 3.24: reset ends the participant's app write tokens", () => {
-  it("WHEN `participant reset --yes` ran THEN a PUT with the reset participant's token answers 401, while another participant's token still saves", async () => {
+describe("ticket 3.26: reset deletes the app's edit secret", () => {
+  it("criterion 5: WHEN `participant reset Ada --yes` ran THEN Ada's edit secret is deleted (a PUT with it answers 401), while Bob's still saves", async () => {
     const s = setup();
-    // Real tokens made through the token store, as POST /api/app-tokens makes them: Ada's for Bob's app, Bob's for his own.
-    const adaToken = Buffer.alloc(32, 1).toString("base64url");
-    const bobToken = Buffer.alloc(32, 2).toString("base64url");
-    await s.store.tokens.createAppToken(ADA_ID, "5".repeat(64), hashAppToken(adaToken), { app: "bob", nickname: "Ada", expiresAt: NOW_S + 3600 }, NOW_S);
-    await s.store.tokens.createAppToken(BOB_ID, "6".repeat(64), hashAppToken(bobToken), { app: "bob", nickname: "Bob", expiresAt: NOW_S + 3600 }, NOW_S);
-    const put = (token: string) =>
+    const put = (nickname: string, secret: string) =>
       handleAppDataRequest(
         {
           routeKey: "PUT /api/apps/{nickname}/data/{key}",
-          pathParameters: { nickname: "bob", key: "board" },
-          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          pathParameters: { nickname, key: "board" },
+          headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
           body: '"hello"',
         },
         { store: s.apps, tokens: s.store.tokens, now: () => NOW, log: () => undefined, pause: async () => {} },
       );
-    expect((await put(adaToken)).statusCode).toBe(204);
+    expect((await put("ada", ADA_EDIT_SECRET)).statusCode).toBe(204);
     await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
-    const refused = await put(adaToken);
-    expect(refused.statusCode).toBe(401);
-    expect((await put(bobToken)).statusCode).toBe(204);
+    expect(s.store.tokens.links.has("ada")).toBe(false);
+    expect(s.store.tokens.tokens.has(hashAppToken(ADA_EDIT_SECRET))).toBe(false);
+    // The app is not live any more either (404 comes first); the secret is unknown to the write check.
+    await expect(s.store.tokens.getAppToken(hashAppToken(ADA_EDIT_SECRET))).resolves.toBeUndefined();
+    expect((await put("bob", BOB_EDIT_SECRET)).statusCode).toBe(204);
+    expect(s.printed()).not.toContain(ADA_EDIT_SECRET);
+    expect(s.printed()).not.toContain(hashAppToken(ADA_EDIT_SECRET));
+  });
+
+  it("WHEN the builder's page made a new edit link while the reset ran THEN the last pass deletes it too", async () => {
+    const s = setup();
+    const original = s.store.deleteLiveMarker.bind(s.store);
+    s.store.deleteLiveMarker = async (nickname: string) => {
+      s.store.tokens.addEditLink("ada", "Ada", Buffer.alloc(32, 77).toString("base64url"));
+      return original(nickname);
+    };
+    await expect(s.run("reset", "Ada", "--yes")).resolves.toBe(0);
+    expect(s.store.tokens.links.has("ada")).toBe(false);
+    expect([...s.store.tokens.tokens.values()].filter((t) => t.app === "ada")).toEqual([]);
   });
 });
 
 describe("ticket 3.18 criterion 8: reset and the app's photos and recordings", () => {
   const tokenFor = async (s: Setup, app: string): Promise<string> => {
     const token = Buffer.alloc(32, 7).toString("base64url");
-    await s.media.tokens.createAppToken(BOB_ID, "7".repeat(64), hashAppToken(token), { app, nickname: "Bob", expiresAt: NOW_S + 3600 }, NOW_S);
+    s.media.tokens.addEditLink(app, app === "ada" ? "Ada" : "Bob", token);
     return token;
   };
   const call = (s: Setup, method: "PUT" | "DELETE", token: string, id: string, body?: Buffer) =>
@@ -650,8 +657,8 @@ describe("AC4: retries", () => {
     expect(snapshot(s)).toBe(after);
     expect(s.out.slice(0, 6)).toEqual([
       "Reset Ada: deleted 0 messages and replies and 0 spec versions; back at step 1 (Clarify).",
-      "Ended 0 sign-ins to save in apps (app write tokens).",
       "Waiting 30 s for uploads already under way, then deleting the app's photos and recordings once more.",
+      "The app had no edit link.",
       "Deleted no app data; the live marker was already gone.",
       "Deleted no photos or recordings; CloudFront stops serving the app's media within minutes.",
       "Repository ssd-workshop-apps/ssd-ada was already gone.",
@@ -661,7 +668,7 @@ describe("AC4: retries", () => {
   for (const stop of [
     "restart",
     "deleteItems",
-    "revokeAppTokens",
+    "deleteEditLink",
     "deleteLiveMarker",
     "listAppData",
     "listAppData after the pause",

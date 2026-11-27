@@ -16,7 +16,8 @@
 // ask the AI worker (once) for three suggested changes. Ticket 3.9: `POST /api/conversation/change/rebuild` (Rebuild from my
 // repository) asks for a change build from the caller's own SPEC.md on GitHub. Ticket 3.15:
 // `POST /api/conversation/change/edit` (Rebuild with my edits) asks for one from the spec the caller edited on the page,
-// through the same pipeline. Every route starts with the
+// through the same pipeline. Ticket 3.26: `GET /api/build` also answers the caller's own `editUrl` (the app's edit link,
+// made when the build is first seen live) and `POST /api/build/edit-link` (New edit link) replaces it. Every route starts with the
 // one session check and reads or writes only the caller's own partition, so another participant's
 // message id is simply not found.
 import { MESSAGE_ID_PATTERN, newMessageId } from "../keys.js";
@@ -30,11 +31,12 @@ import {
 } from "../http.js";
 import { FAILED_MESSAGE, NICKNAME_PATTERN, NOT_FOUND_MESSAGE } from "../participant/participant.js";
 import { appAddress, appRepositoryUrl, QUEUE_SEEN_MS } from "../settings.js";
-import { requireSession, type ParticipantRecord, type SessionReader } from "../session/session.js";
+import { requireSession, signInRequiredResponse, type ParticipantRecord, type SessionReader } from "../session/session.js";
+import { editUrl, ensureEditLink, renewEditLink, type EditLink, type EditLinkStore } from "../app-token/token.js";
 import { errorName } from "../sign-in/code-request.js";
 import type { ConversationState, MessageStatus, Step } from "../types.js";
 import { budgetOf } from "../workshop/budget.js";
-import { changesUsedText, PHASE_3_TEXTS } from "../workshop/texts.js";
+import { APP_EDIT_LINK_TEXTS, changesUsedText, PHASE_3_TEXTS } from "../workshop/texts.js";
 import type { BudgetFacts } from "../workshop/budget.js";
 import { CHANGE_BUILD_REQUEST, CHANGE_FAILURE_REPLY } from "./change.js";
 import { MAX_SPEC_VERSION } from "../keys.js";
@@ -70,6 +72,8 @@ export const CHANGE_DISCARD_ROUTE = "POST /api/conversation/change/discard";
 export const CHANGE_REBUILD_ROUTE = "POST /api/conversation/change/rebuild";
 /** Ticket 3.15: Rebuild with my edits (step 4): the caller's own live spec, edited on the page. */
 export const CHANGE_EDIT_ROUTE = "POST /api/conversation/change/edit";
+/** Ticket 3.26, New edit link (step 4): a new edit secret for the caller's own app; the old one stops at once. */
+export const EDIT_LINK_ROUTE = "POST /api/build/edit-link";
 export const CONVERSATION_ROUTES = [
   SEND_ROUTE,
   POLL_ROUTE,
@@ -83,6 +87,7 @@ export const CONVERSATION_ROUTES = [
   CHANGE_DISCARD_ROUTE,
   CHANGE_REBUILD_ROUTE,
   CHANGE_EDIT_ROUTE,
+  EDIT_LINK_ROUTE,
 ] as const;
 
 /** Ticket 3.6: a page load asks for the suggested changes again only this long after the last ask (none stored yet). */
@@ -112,6 +117,7 @@ export const MESSAGES = {
   stale: "There is a newer version of your spec. Please have a look at it, then approve it.",
   "invalid-change": "Send a JSON body with the version of the proposed change.",
   "invalid-rebuild": "Send a JSON body (it may be empty: {}).",
+  "invalid-edit-link": "Send a JSON body (it may be empty: {}) to make a new edit link.",
   "invalid-edit": "Send a JSON body with the version of your live spec and the edited text.",
   "edit-empty": PHASE_3_TEXTS.editEmpty,
   "too-long": PHASE_3_TEXTS.editTooLong,
@@ -119,7 +125,21 @@ export const MESSAGES = {
   "not-live": PHASE_3_TEXTS.changeBeforeLive,
 } as const;
 
-export type ConversationRoute = "send" | "poll" | "history" | "step" | "spec" | "approve" | "build" | "status" | "change-build" | "change-discard" | "change-rebuild" | "change-edit" | "unknown";
+export type ConversationRoute =
+  | "send"
+  | "poll"
+  | "history"
+  | "step"
+  | "spec"
+  | "approve"
+  | "build"
+  | "status"
+  | "change-build"
+  | "change-discard"
+  | "change-rebuild"
+  | "change-edit"
+  | "edit-link"
+  | "unknown";
 export type ConversationOutcome =
   | "accepted"
   | "ok"
@@ -141,9 +161,11 @@ export type ConversationOutcome =
   | "no-changes-left"
   | "discarded"
   | "too-long"
+  /** Ticket 3.26: New edit link made a new secret. */
+  | "renewed"
   | "failed";
 
-/** The only things ever logged: route, outcome and an error name (no text, id, token or reply). */
+/** The only things ever logged: route, outcome and an error name (no text, id, token, edit secret or its hash, or reply). */
 export interface ConversationLogEntry {
   event: "conversation";
   route: ConversationRoute;
@@ -156,6 +178,8 @@ export interface ConversationDeps {
   store: ConversationStore;
   /** The AI worker's queue (ticket 3.6: also the suggestions job). */
   queue: MessageQueue & SuggestionsQueue;
+  /** Ticket 3.26: the apps' edit links (the caller's own only). */
+  editLinks: EditLinkStore;
   now: () => Date;
   randomBytes: (size: number) => Buffer;
   log: (entry: ConversationLogEntry) => void;
@@ -184,6 +208,7 @@ const refused = (reason: keyof typeof MESSAGES, status: number): Result => {
     reason === "invalid-approve" ||
     reason === "invalid-change" ||
     reason === "invalid-rebuild" ||
+    reason === "invalid-edit-link" ||
     reason === "invalid-edit" ||
     reason === "edit-empty";
   return {
@@ -575,8 +600,20 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       return undefined;
     });
   }
+  // Ticket 3.26: the app's edit link, only ever in the caller's own answer (the build names the caller). Made when the
+  // build is first seen live; while a change build runs, the existing one is shown. A failure leaves `editUrl` out (the
+  // page keeps the plain address) and is logged by name only, never the secret or its hash.
+  let link: EditLink | undefined;
+  let linkError: string | undefined;
+  if (nickname !== undefined) {
+    try {
+      link = found.status === "live" ? await ensureEditLink(deps.editLinks, participant.id, nickname, deps.randomBytes, deps.now()) : await ownLink(deps.editLinks, nickname);
+    } catch (error) {
+      linkError = errorName(error);
+    }
+  }
   const paused = await pausedFlag(participant.id, deps);
-  const error = aheadError ?? paused.error ?? suggestionsError;
+  const error = aheadError ?? linkError ?? paused.error ?? suggestionsError;
   return {
     outcome: "ok",
     response: jsonResponse(200, {
@@ -584,6 +621,7 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
       status: found.status,
       feed: found.feed ?? [],
       ...(nickname === undefined ? {} : { repositoryUrl: appRepositoryUrl(nickname), appUrl: appAddress(nickname) }),
+      ...(nickname === undefined || link === undefined ? {} : { editUrl: editUrl(nickname, link.secret) }),
       ...(found.status === "failed" && found.failureReasons !== undefined ? { failureReasons: found.failureReasons } : {}),
       ...(ahead === undefined ? {} : { ahead }),
       // Ticket 3.6: a change build says so, with its number.
@@ -592,6 +630,28 @@ async function build(participant: ParticipantRecord, deps: ConversationDeps): Pr
     }),
     ...(error === undefined ? {} : { error }),
   };
+}
+
+/** Ticket 3.26: the app's stored edit link when it is this builder's (nicknames are unique), else undefined. */
+async function ownLink(store: EditLinkStore, nickname: string): Promise<EditLink | undefined> {
+  const link = await store.getEditLink(nickname);
+  return link !== undefined && link.nickname.toLowerCase() === nickname.toLowerCase() ? link : undefined;
+}
+
+/**
+ * Ticket 3.26, New edit link: a new secret for the caller's own app (the app named by the session's nickname: nothing in
+ * the body names one), only once the app has an edit link (it went live and was not reset; 404 otherwise). The old
+ * secret's lookup item goes in the same transaction, so it answers 401 at once. The body must be JSON (415 otherwise,
+ * so a plain form on another site cannot press it); its content is ignored. Answers the new `editUrl`.
+ */
+async function newEditLink(request: HttpRequest, participant: ParticipantRecord, deps: ConversationDeps): Promise<Result> {
+  if (!isJsonContentType(request)) return { outcome: "unsupported-media-type", response: unsupportedMediaTypeResponse() };
+  if (readJsonObject(request) === undefined) return refused("invalid-edit-link", 400);
+  const notLive: Result = { outcome: "not-live", response: jsonResponse(404, { message: APP_EDIT_LINK_TEXTS.notLive, reason: "not-live" }) };
+  if (participant.nickname === undefined || !NICKNAME_PATTERN.test(participant.nickname)) return notLive;
+  const renewed = await renewEditLink(deps.editLinks, participant.id, participant.nickname, deps.randomBytes, deps.now());
+  if (!renewed.ok) return renewed.reason === "removed" ? { outcome: "removed", response: signInRequiredResponse() } : notLive;
+  return { outcome: "renewed", response: jsonResponse(200, { editUrl: editUrl(participant.nickname, renewed.link.secret) }) };
 }
 
 /** Ticket 3.6: the version a change route names (a whole number from 1), or undefined. */
@@ -740,6 +800,7 @@ function routeOf(request: HttpRequest): ConversationRoute {
   if (request.routeKey === CHANGE_DISCARD_ROUTE) return "change-discard";
   if (request.routeKey === CHANGE_REBUILD_ROUTE) return "change-rebuild";
   if (request.routeKey === CHANGE_EDIT_ROUTE) return "change-edit";
+  if (request.routeKey === EDIT_LINK_ROUTE) return "edit-link";
   return "unknown";
 }
 
@@ -763,6 +824,7 @@ export async function handleConversationRequest(request: HttpRequest, deps: Conv
     else if (route === "change-discard") result = await discardChange(request, session.participant, deps);
     else if (route === "change-rebuild") result = await rebuildFromRepository(request, session.participant, deps);
     else if (route === "change-edit") result = await editSpec(request, session.participant, deps);
+    else if (route === "edit-link") result = await newEditLink(request, session.participant, deps);
     else result = { outcome: "not-found", response: jsonResponse(404, { message: NOT_FOUND_MESSAGE }) };
   } catch (error) {
     result = { outcome: "failed", response: jsonResponse(500, { message: FAILED_MESSAGE }), error: errorName(error) };

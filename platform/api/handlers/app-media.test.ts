@@ -31,7 +31,7 @@ describe("ticket 3.18: the media function's logs", () => {
     const store = new FakeAppMediaStore();
     const bucket = new FakeMediaBucket();
     store.live.add(NICK.toLowerCase());
-    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", expiresAt: Date.parse("2026-11-28T10:00:00.000Z") / 1000 });
+    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", kind: "edit" });
     const call = createHandler({ store, bucket, tokens: store.tokens, now: () => new Date("2026-11-27T10:00:00.000Z"), log: logEntry, pause: async () => {} });
 
     const statuses: number[] = [];

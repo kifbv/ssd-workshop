@@ -24,7 +24,7 @@ async function setupFlagged() {
   const queue = new FakeQueue();
   const model = new FakeModel();
   let clock = NOW;
-  const api: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, 5), log: () => undefined };
+  const api: ConversationDeps = { sessions: table, store: table, editLinks: table.appTokens, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, 5), log: () => undefined };
   const workerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), held: queue, now: () => clock, log: () => undefined };
   const send = (text: string, t = TOKEN): HttpRequest => ({
     routeKey: SEND_ROUTE,

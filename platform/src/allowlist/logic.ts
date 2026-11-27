@@ -19,8 +19,8 @@ export const USAGE = `Usage: npm run -s allowlist -- <command>
 Commands:
   import </absolute/path/file.csv>   add or update the people in the file (header: email,group,role)
   list                               print how many people are allow-listed, per group and role
-  remove <email> [--yes]             say whether this address has an entry; with --yes, remove it and end the
-                                     person's sign-ins to save in apps (app write tokens)
+  remove <email> [--yes]             say whether this address has an entry; with --yes, remove it and delete the
+                                     edit link of the person's app
                                      (the person is signed out at their next call)
 
 Give the CSV file as an absolute path, outside this repository and any other git work tree.
@@ -74,14 +74,14 @@ function parseRemove(rest: readonly string[]): AllowlistCommand | { error: strin
 }
 
 /** What `remove` prints: about "this address" only, never the address or anyone else's. */
-export function formatRemoveReport(result: "found" | "absent" | "removed", revokedTokens = 0): string {
+export function formatRemoveReport(result: "found" | "absent" | "removed", editLinkDeleted = false): string {
   switch (result) {
     case "found":
       return `This address has an allow-list entry. Nothing was changed: run again with ${CONFIRM_FLAG} to remove it.`;
     case "absent":
       return "This address has no allow-list entry. Nothing was changed.";
     case "removed":
-      return `Removed the allow-list entry for this address and ended ${revokedTokens === 1 ? "1 sign-in" : `${revokedTokens} sign-ins`} to save in apps. Their sessions end at their next call; their profile and app are kept.`;
+      return `Removed the allow-list entry for this address${editLinkDeleted ? " and deleted their app's edit link" : ""}. Their sessions end at their next call; their profile and app are kept.`;
   }
 }
 

@@ -53,7 +53,7 @@ describe("criterion 6: the function's logs hold no stored value", () => {
     const capture = captureConsole();
     const store = new FakeAppDataStore();
     store.live.add(NICK.toLowerCase());
-    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", expiresAt: Date.parse("2026-11-25T10:00:00.000Z") / 1000 });
+    store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICK.toLowerCase(), nickname: "Writer-Nick", kind: "edit" });
     const call = createHandler({ store, tokens: store.tokens, now: () => new Date("2026-11-24T10:00:00.000Z"), log: logEntry, pause: async () => {} });
     const values = [
       "VALUE-MARKER-TEXT",

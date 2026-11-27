@@ -1,4 +1,4 @@
-// workshop-data.js: stores the app's data on the workshop's data service, and handles the workshop's sign-in to save.
+// workshop-data.js: stores the app's data on the workshop's data service. Saving needs the app's edit link.
 // Do not change this file: the workshop publishes its own current copy of it with every app. index.html loads it first,
 // as the first script in <head>, with no defer or async: <script src="workshop-data.js"></script>.
 // Use it from app.js:
@@ -6,8 +6,10 @@
 //   const info = await workshopData.getInfo("score"); // { value, updatedBy, updatedAt }: who saved it last (a nickname) and when
 //   await workshopData.set("score", 42);              // any JSON value: number, text, list, object
 //   await workshopData.remove("score");
-//   const me = await workshopData.whoAmI();           // the visitor's workshop nickname once signed in to save, or null
-//   workshopData.signInLink();                        // the address of the workshop's page that signs a visitor in to save
+//   workshopData.canSave();                           // true when the app was opened with its edit link, else false
+//   workshopData.viewLink();                          // the app's address without the edit link: show, copy or share
+//                                                     // this one, never the page's own address (location.href)
+//   const me = await workshopData.whoAmI();           // with the edit link: the nickname of the app's builder; else null
 // Photos and voice recordings (each at most 4 MB; anyone with the app's address can see and hear them):
 //   const address = await workshopData.savePhoto(file); // a File from <input type="file" accept="image/*">: shrunk to
 //                                                       // 2,560 px at most, saved as a JPEG; answers the photo's address
@@ -17,7 +19,7 @@
 //   const voice = await recording.done;                 // the recording's address, once it is saved
 //   await workshopData.deleteMedia(address);            // deletes a photo or recording this app saved
 // Keep each address in the app's data with the item it belongs to, and show it with <img src> or <audio controls src>.
-// AI suggestions (each needs the sign-in and can be refused: AI switched off, or today's allowance spent; the error's
+// AI suggestions (each needs the edit link and can be refused: AI switched off, or today's allowance spent; the error's
 // message says which). Show them for the visitor to accept or change, never save them by themselves:
 //   const tags = await workshopData.ai.tagPhoto(address);            // up to 5 suggested tags for a photo of this app
 //   const picked = await workshopData.ai.tagPhoto(address, ["cat", "dog"]); // or those of these (up to 20) that fit
@@ -28,20 +30,20 @@
 //   const said = await workshopData.ai.transcribe(voice); // { text, language } of a recording of this app (it asks
 //                                                         // again by itself while the workshop is still working on it)
 // Keys use letters, digits, dashes and underscores. Every visitor of the app shares the same data.
-// Anyone can read. Saving needs the workshop's own sign-in: give the element that offers it (a button or a link
-// reading "Sign in to save", next to where the app saves) the attribute data-workshop-sign-in. This file shows such
-// elements to visitors who are not signed in, hides them once they are, and opens the sign-in in a new tab when one is
-// pressed. A save refused for lack of sign-in shows them again, and a floating button of its own when none of them
-// can be seen (none on the page, or only on another screen): put one by every form or button that saves, on every screen.
+// Anyone with the app's address can read. Saving, uploading, deleting and AI need the app's edit link: the address its
+// builder gets on the workshop page (link or QR code), which ends with #edit= and a secret. This file keeps that part
+// of the address as it is (a reload or a bookmark can still save) and sends the secret with every write. Opened
+// without it, the app is view only: canSave() is false, and every write fails with "This link is view only." without
+// being sent. Hide every control that saves when canSave() is false. The page's address holds the edit link: never
+// read it (location.href, document.URL) or change it (location.hash, pushState); share viewLink() instead.
 "use strict";
 
 (function () {
-  // Taken before any other script of the page can run (this file is the page's first script), and the only ones used
-  // with the sign-in: code that runs later cannot wrap them to see what is sent.
+  // Taken before any other script of the page can run (this file is the page's first script): code that runs later
+  // cannot wrap them to change where a save goes.
   const nativeFetch = window.fetch.bind(window);
   const replaceState = history.replaceState.bind(history);
   const replaceLocation = location.replace.bind(location);
-  const openWindow = window.open.bind(window);
   const createObject = Object.create;
   const randomValues = crypto.getRandomValues.bind(crypto);
   const startPath = location.pathname;
@@ -49,14 +51,15 @@
   const startHash = location.hash;
   const startState = history.state;
   // Every address this file uses is absolute, built from the page's own server as it was at the start: a <base> element
-  // added later by app code changes how relative addresses resolve, and must not send a save (or the sign-in) elsewhere.
+  // added later by app code changes how relative addresses resolve, and must not send a save elsewhere.
   const startServer = location.protocol + "//" + location.host;
 
   const KEY = /^[A-Za-z0-9_-]+$/;
-  const PASS = /^[A-Za-z0-9_-]{43}$/;
+  // The edit link's secret: 32 random bytes in base64url (ticket 3.26).
+  const SECRET = /^[A-Za-z0-9_-]{43}$/;
   const NICKNAME = /^[A-Za-z0-9-]{3,20}$/;
+  // Apps built before the edit link (from ticket 3.25 on) carry "Sign in to save" elements: there is no sign-in any more.
   const SIGN_IN = "[data-workshop-sign-in]";
-  const SIGN_IN_TEXT = "Sign in to save";
   // Photos and voice recordings (ticket 3.19): the media service's limits and the messages shown before asking it.
   const MEDIA_ID = /^[A-Za-z0-9_-]{22}$/;
   const PHOTO_SIDE = 2560;
@@ -65,7 +68,7 @@
   const RECORDING_MS = 5 * 60 * 1000;
   const RECORDING_BITS = 64000;
   const RECORDING_TYPES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
-  const SIGN_IN_TO_SAVE = "Sign in to the workshop to save in this app.";
+  const VIEW_ONLY = "This link is view only.";
   const NO_PHOTO = "Choose a photo first.";
   const UNREADABLE_PHOTO = "This browser cannot read this photo. Try another photo, or take it again with the camera.";
   const TOO_BIG = "This file is too big: a photo or recording can be at most 4 MB.";
@@ -99,11 +102,10 @@
   // The app lives at /apps/<nickname>/; its data at /api/apps/<nickname>/data/<key> on the same server.
   const appMatch = /^\/apps\/([^/]+)\//.exec(startPath);
   const app = appMatch ? appMatch[1] : null;
-  const signInAddress = app === null ? null : startServer + "/app-sign-in/?app=" + encodeURIComponent(app);
 
-  // What the workshop's sign-in hands over in the address (#wt=<token>): kept in memory only, never stored or shown.
-  let pass = null;
-  // The visitor's nickname, as the data service names the token's writer (never taken from the address).
+  // The edit link's secret (#edit=<secret> in the address), or null: the app is then view only. Never shown or logged.
+  let editSecret = null;
+  // The app builder's nickname, as the data service names the secret's writer (never taken from the address).
   let nickname = null;
 
   function appName() {
@@ -121,123 +123,91 @@
     return startServer + "/api/apps/" + name + "/data/" + key;
   }
 
-  // Reads the hand-off from the address once and removes it at once, keeping any other part after the #.
-  function takeHandOff() {
+  // Reads the edit link's secret from the part after the # (parts joined by &), and leaves it in the address, so a
+  // reload, a bookmark or a home-screen icon can still save. A hand-off of the old sign-in (wt=, refused by the workshop
+  // since the edit link) is removed from the address; any other part stays.
+  function readAddress() {
     const parts = startHash.replace(/^#/, "").split("&");
-    const rest = [];
-    let found = false;
+    const kept = [];
+    let oldHandOff = false;
     for (const part of parts) {
       if (part.startsWith("wt=")) {
-        found = true;
-        if (PASS.test(part.slice(3))) pass = part.slice(3);
-      } else if (part !== "") {
-        rest.push(part);
+        oldHandOff = true;
+      } else {
+        if (part.startsWith("edit=") && editSecret === null && SECRET.test(part.slice(5))) editSecret = part.slice(5);
+        if (part !== "") kept.push(part);
       }
     }
-    if (!found) return;
-    const kept = rest.length > 0 ? "#" + rest.join("&") : "";
+    if (!oldHandOff) return;
+    const rest = kept.length > 0 ? "#" + kept.join("&") : "";
     try {
-      replaceState(startState, "", startPath + startSearch + kept);
+      replaceState(startState, "", startPath + startSearch + rest);
     } catch {
       // A browser that refuses: replace the part after the # instead (no new history entry).
-      replaceLocation(kept === "" ? "#" : kept);
+      replaceLocation(rest === "" ? "#" : rest);
     }
   }
 
-  function signInLink() {
-    appName();
-    return signInAddress;
+  function canSave() {
+    return editSecret !== null;
   }
 
-  // The floating sign-in button this file adds (made once, then reused), or null while there is none.
-  let ownButton = null;
+  // Apps built before the edit link have "Sign in to save" elements: they stay hidden, whatever the app's styles or code
+  // do (inline display: none !important, set through the CSSOM, which the security policy allows).
+  function hideSignIn(element) {
+    if (!element.hidden) element.hidden = true;
+    if (element.style.getPropertyValue("display") !== "none" || element.style.getPropertyPriority("display") !== "important") {
+      element.style.setProperty("display", "none", "important");
+    }
+  }
 
-  // Shows the sign-in elements to a visitor who is not signed in to save, and hides them once signed in. The floating
-  // button is shown only by signedOut(), when no other sign-in element can be seen.
-  function showSignIn() {
-    const signedIn = pass !== null;
-    if (ownButton !== null && signedIn) ownButton.hidden = true;
-    for (const element of document.querySelectorAll(SIGN_IN)) {
-      if (element === ownButton) continue;
-      if (element.textContent.trim() === "" && element.getAttribute("aria-label") === null) element.textContent = SIGN_IN_TEXT;
-      if (element.tagName === "A" && signInAddress !== null) {
-        element.href = signInAddress;
-        element.target = "_blank";
-        element.rel = "noopener";
+  function hideSignInWithin(node) {
+    if (!(node instanceof Element)) return;
+    if (node.matches(SIGN_IN)) hideSignIn(node);
+    for (const element of node.querySelectorAll(SIGN_IN)) hideSignIn(element);
+  }
+
+  // Also those the app adds or changes later (a list drawn by app.js, a style or hidden attribute changed).
+  function watchSignIn() {
+    hideSignInWithin(document.documentElement);
+    if (typeof MutationObserver !== "function") return;
+    new MutationObserver(function (changes) {
+      for (const change of changes) {
+        if (change.type === "attributes") {
+          if (change.target instanceof Element && change.target.matches(SIGN_IN)) hideSignIn(change.target);
+        } else {
+          for (const node of change.addedNodes) hideSignInWithin(node);
+        }
       }
-      element.hidden = signedIn;
-    }
+    }).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-workshop-sign-in", "hidden", "style", "class"],
+    });
   }
 
-  // Whether a visitor can see the element: laid out (not display: none, itself or through an ancestor such as a hidden
-  // screen), not inside a closed <details> (outside its summary), not visibility: hidden and not transparent. Browsers
-  // without checkVisibility get the layout, details and visibility checks.
-  function canBeSeen(element) {
-    // Every closed <details> around it must hold it in its own summary (nested ones too).
-    let closed = element.closest("details:not([open])");
-    while (closed !== null) {
-      const summary = closed.querySelector(":scope > summary");
-      if (summary === null || !summary.contains(element)) return false;
-      const outer = closed.parentElement;
-      closed = outer === null ? null : outer.closest("details:not([open])");
-    }
-    if (typeof element.checkVisibility === "function") {
-      return element.checkVisibility({ visibilityProperty: true, opacityProperty: true });
-    }
-    return element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== "hidden";
+  // The app's address for everyone (view only): its server and path as the page opened, without the query or the part
+  // after the # (which holds the edit link). Apps show, copy or share this, never the page's own address.
+  function viewLink() {
+    return startServer + startPath;
   }
 
-  // The floating button for a visitor who sees no sign-in element: one for an app made before saving needed sign-in,
-  // or one whose sign-in button sits on another screen than the one that saved. Made once, at the bottom right.
-  function addSignInButton() {
-    if (ownButton !== null) return ownButton;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = SIGN_IN_TEXT;
-    button.setAttribute("data-workshop-sign-in", "");
-    const look = button.style;
-    look.position = "fixed";
-    look.right = "1rem";
-    look.bottom = "1rem";
-    look.zIndex = "2147483647";
-    look.minHeight = "2.75rem";
-    look.padding = "0.5rem 1.25rem";
-    look.border = "none";
-    look.borderRadius = "0.5rem";
-    look.font = "inherit";
-    look.background = "#2f5bd3";
-    look.color = "#ffffff";
-    look.boxShadow = "0 2px 8px rgba(0, 0, 0, 0.3)";
-    ownButton = button;
-    document.body.append(button);
-    return button;
+  // Older apps may still ask for the sign-in page's address: there is none any more.
+  function signInLink() {
+    return null;
   }
 
-  // A save, upload, delete or AI call refused for lack of sign-in: show the page's sign-in elements, and the floating
-  // button when none of them can be seen where the visitor is.
-  function signedOut() {
-    pass = null;
-    nickname = null;
-    showSignIn();
-    for (const element of document.querySelectorAll(SIGN_IN)) {
-      if (element !== ownButton && canBeSeen(element)) return;
-    }
-    addSignInButton().hidden = false;
+  // A write without the edit link: refused here, before anything is recorded or sent.
+  function needEditLink() {
+    if (editSecret === null) throw new Error(VIEW_ONLY);
   }
-
-  // Any sign-in element opens the workshop's sign-in page in a new tab (links too, wherever they point).
-  document.addEventListener("click", function (event) {
-    const target = event.target instanceof Element ? event.target.closest(SIGN_IN) : null;
-    if (target === null) return;
-    event.preventDefault();
-    openWindow(signInLink(), "_blank", "noopener");
-  });
 
   // The request's options, in objects without a prototype: nothing the page adds to Object.prototype is read with them.
-  function requestOptions(method, signedIn) {
+  function requestOptions(method, withSecret) {
     const headers = createObject(null);
     headers.accept = "application/json";
-    if (signedIn && pass !== null) headers.authorization = "Bearer " + pass;
+    if (withSecret && editSecret !== null) headers.authorization = "Bearer " + editSecret;
     const options = createObject(null);
     options.method = method;
     options.credentials = "omit";
@@ -259,9 +229,9 @@
     }
   }
 
-  // The error for a refused request: the service's own message when it gives one (else `fallback`, when given). A refused
-  // write offers the sign-in.
-  async function refusal(response, write, fallback) {
+  // The error for a refused request: the service's own message when it gives one (else `fallback`, when given). An edit
+  // link replaced by a new one is refused with 401 and "This link is view only."; the secret stays in the address.
+  async function refusal(response, fallback) {
     if (response.status === 404) {
       return new Error("This app is not live on the workshop yet, so it cannot load or save data.");
     }
@@ -272,8 +242,6 @@
     } catch {
       // Keep the general message.
     }
-    // Not signed in to save (or the sign-in ended): offer the sign-in.
-    if (response.status === 401 && write) signedOut();
     return new Error(message);
   }
 
@@ -283,20 +251,15 @@
       options.headers["content-type"] = "application/json";
       options.body = JSON.stringify(value);
     }
-    const response = await reach(address(key) + (query || ""), options);
-    if (!response.ok) throw await refusal(response, method !== "GET");
+    const url = address(key) + (query || "");
+    if (method !== "GET") needEditLink();
+    const response = await reach(url, options);
+    if (!response.ok) throw await refusal(response);
     // A key with no value answers null.
     return method === "GET" ? response.json() : undefined;
   }
 
   // ---- Photos and voice recordings (ticket 3.19) ----
-
-  // Uploading needs the sign-in: a visitor gets the sign-in offer at once, before anything is recorded or sent.
-  function needSignIn() {
-    if (pass !== null) return;
-    signedOut();
-    throw new Error(SIGN_IN_TO_SAVE);
-  }
 
   // Where this app's files are served: the media service answers addresses under it.
   function mediaFolder() {
@@ -312,7 +275,7 @@
   }
 
   async function upload(body) {
-    needSignIn();
+    needEditLink();
     if (body.size > MAX_MEDIA_BYTES) throw new Error(TOO_BIG);
     const options = requestOptions("PUT", true);
     // The media service judges the bytes, never the declared type; this type keeps the body as it is on the way.
@@ -322,7 +285,7 @@
     const id = newMediaId();
     if (typeof id !== "string" || !MEDIA_ID.test(id)) throw new Error(BROKEN_ID);
     const response = await reach(startServer + "/api/apps/" + appName() + "/media/" + id, options);
-    if (!response.ok) throw await refusal(response, true);
+    if (!response.ok) throw await refusal(response);
     let answer = null;
     try {
       answer = await response.json();
@@ -387,7 +350,7 @@
 
   async function savePhoto(file) {
     if (!(file instanceof Blob)) throw new Error(NO_PHOTO);
-    needSignIn();
+    needEditLink();
     if (typeof createImageBitmap !== "function") throw new Error(UNREADABLE_PHOTO);
     return upload(await shrinkPhoto(file));
   }
@@ -482,7 +445,7 @@
   }
 
   async function recordVoice() {
-    needSignIn();
+    needEditLink();
     const devices = navigator.mediaDevices;
     if (devices && typeof devices.getUserMedia === "function" && typeof MediaRecorder === "function") {
       let stream = null;
@@ -507,9 +470,9 @@
 
   async function deleteMedia(mediaAddress) {
     const id = mediaIdOf(mediaAddress);
-    needSignIn();
+    needEditLink();
     const response = await reach(startServer + "/api/apps/" + appName() + "/media/" + id, requestOptions("DELETE", true));
-    if (!response.ok) throw await refusal(response, true);
+    if (!response.ok) throw await refusal(response);
   }
 
   // ---- AI suggestions (ticket 3.22): the workshop's AI tasks for apps (ticket 3.21) ----
@@ -546,14 +509,14 @@
     return "/app-media/" + appName().toLowerCase() + "/" + mediaIdOf(mediaAddress);
   }
 
-  // Asks the AI tasks once, with the sign-in. Answers the parsed object and whether it was "still working" (202).
+  // Asks the AI tasks once, with the edit link. Answers the parsed object and whether it was "still working" (202).
   async function askAi(body) {
-    needSignIn();
+    needEditLink();
     const options = requestOptions("POST", true);
     options.headers["content-type"] = "application/json";
     options.body = JSON.stringify(body);
     const response = await reach(startServer + "/api/apps/" + appName() + "/ai", options);
-    if (!response.ok) throw await refusal(response, true, response.status === 429 ? AI_BUSY : undefined);
+    if (!response.ok) throw await refusal(response, response.status === 429 ? AI_BUSY : undefined);
     let answer = null;
     try {
       answer = await response.json();
@@ -648,7 +611,7 @@
   // up after 3 minutes in all (the recording is at most 5 minutes; the workshop keeps working, a later ask gets the text).
   async function transcribe(recording) {
     const path = mediaPath(recording);
-    needSignIn();
+    needEditLink();
     const started = Date.now();
     for (;;) {
       const { answer, working } = await askAi({ task: "transcribe", recording: path });
@@ -666,25 +629,23 @@
     }
   }
 
-  // Asks the data service whose token this is (`?whoami=1`), once, when the page opens with one. Until it answers, and
-  // when it cannot, whoAmI() gives null; saving still works with the token (a refused save signs the visitor out).
+  // Asks the data service whose edit link this is (`?whoami=1`: the app builder's nickname), once, when the page opens
+  // with one. Until it answers, and when it cannot, whoAmI() gives null; saving still works with the secret.
   async function confirmNickname() {
-    if (pass === null || app === null) return;
+    if (editSecret === null || app === null) return;
     try {
       const response = await nativeFetch(startServer + "/api/apps/" + app + "/data/whoami?whoami=1", requestOptions("GET", true));
       if (!response.ok) return;
       const body = await response.json();
-      if (body && typeof body.nickname === "string" && NICKNAME.test(body.nickname) && pass !== null) nickname = body.nickname;
+      if (body && typeof body.nickname === "string" && NICKNAME.test(body.nickname)) nickname = body.nickname;
     } catch {
       // Not confirmed: whoAmI() stays null.
     }
   }
 
-  takeHandOff();
+  readAddress();
   const confirmed = confirmNickname();
-  // This file runs before the page's body is read: the sign-in elements are there once it is.
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", showSignIn);
-  else showSignIn();
+  watchSignIn();
 
   window.workshopData = Object.freeze({
     get: function (key) {
@@ -706,10 +667,13 @@
     remove: function (key) {
       return send("DELETE", key);
     },
-    // A promise: the nickname the data service confirmed for the visitor's sign-in, or null (a visitor, or signed out).
+    canSave: canSave,
+    // The app's view-only address (no edit link): the one to show, copy or share.
+    viewLink: viewLink,
+    // A promise: the app builder's nickname, as the data service confirmed it for the edit link, or null (view only).
     whoAmI: async function () {
       await confirmed;
-      return pass === null ? null : nickname;
+      return nickname;
     },
     signInLink: signInLink,
     savePhoto: savePhoto,

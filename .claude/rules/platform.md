@@ -305,12 +305,14 @@ paths:
   times, not once (ticket 3.17: 4 of 33 before, 0 of 12 and 3 x 17/17 after).
 - Removing block tags (`</spec>`, `</message>`) from untrusted text is repeated until nothing changes (`withoutTags`,
   `api/conversation/tags.ts`): one pass lets nested tags rebuild one (`</parti</participant>cipant>`, ticket 3.16 try 2).
-- Saving from an app (ticket 3.24): every app route that writes, uploads or calls AI checks `checkAppWrite`
-  (`platform/api/app-token/token.ts`): `Authorization: Bearer <app write token>`, never a cookie (the sandboxed app's
-  opaque origin never sends the platform's `SameSite=Strict` one). Tokens are stored only as SHA-256 (`APPTOKEN#<hash>`),
-  reach the app only in the address's fragment (`/apps/<nick>/#wt=`), and are listed per participant (`TOKENS#<id>`,
-  capped) so sign-out and reset can delete them without a Scan. A route that adds a header for apps adds it to the
-  function's preflight AND bumps CloudFront's `ssd-workshop-app-data-v<N>` policy (it cannot be updated).
+- Saving from an app (ticket 3.24, edit links since 3.26): every app route that writes, uploads or calls AI checks
+  `checkAppWrite` (`platform/api/app-token/token.ts`): `Authorization: Bearer <the app's edit secret>`, never a cookie (the
+  sandboxed app's opaque origin never sends the platform's `SameSite=Strict` one). The secret is kept at `APPEDIT#<nick>`
+  (only the conversation function reads it, to show it again on step 4) and looked up by its SHA-256 at `APPTOKEN#<hash>`
+  with `kind = "edit"`: a check that reuses a key an older scheme wrote must require a marker the old items lack, or they
+  keep working until their TTL. It reaches the app only in the address's fragment (`/apps/<nick>/#edit=`). A route that
+  adds a header for apps adds it to the function's preflight AND bumps CloudFront's `ssd-workshop-app-data-v<N>` policy
+  (it cannot be updated).
 - A tab a sandboxed app opens inherits the app's sandbox (opaque origin, no cookies) unless the apps' CSP has
   `allow-popups-to-escape-sandbox` (ticket 3.24 try 2): a platform page an app opens must be proved in Playwright with the
   REAL apps CSP on the opener (`platform/web/app-sign-in-popup.test.ts`), not only opened directly.
@@ -320,7 +322,10 @@ paths:
   session item inside its own transaction (`ConditionCheck`), and the ending runs its cleanup again after deleting the
   session (retried; a failure there is logged by outcome and the ending still answers done). A cleanup that leaves the
   session in place (allow-list removal) needs its own mark checked in the same transaction (the profile's `role`). Prove such races over every interleaving against a small condition-evaluating stand-in for DynamoDB
-  (`MiniDynamo` in `app-token/store.test.ts`), with a control showing the old order fails.
+  (`MiniDynamo` in `app-token/store.test.ts`, since 3.26: making and renewing an edit link against reset's delete and
+  allow-list removal's mark-then-delete), with a control showing the wrong order fails. An owner cleanup never gives up
+  after N lost races (a user can keep winning them, 3.26 try 2): fall back to an unconditional delete that returns the
+  old item (`ALL_OLD`) to find what hangs off it, then repeat once for anything made in between.
 - Only the deployer's role may write app files (bucket policy, Franck included): an operator command that must change
   live apps (3.25's `npm run apps -- refresh`) sends a message of its own kind to the deploy queue (`{"refresh": nick}`,
   parsed strictly beside the deploy job) and lets the deployer do it. A file a Lambda needs at run time travels with its

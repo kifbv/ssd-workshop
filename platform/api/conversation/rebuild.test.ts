@@ -82,7 +82,7 @@ function setup(options: { repositorySpec?: string | Uint8Array; used?: number; f
   const logs: unknown[] = [];
   const workerLogs: WorkerLogEntry[] = [];
   const launcherLogs: LauncherLogEntry[] = [];
-  const deps: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
+  const deps: ConversationDeps = { sessions: table, store: table, editLinks: table.appTokens, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: (e) => logs.push(e) };
   const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds, held: queue, now: () => clock, log: (e) => workerLogs.push(e), sleep: async () => undefined };
   const githubDeps: GitHubDeps = { fetch: github.fetch, now: () => clock, log: () => undefined, sleep: async () => undefined };
   // The launcher's records over the same table (DynamoLaunchRecords reads and writes the same message item).

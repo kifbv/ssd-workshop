@@ -40,7 +40,7 @@ function setup(step: "clarify" | "spec" | "approved" | "building" = "spec") {
   const out: string[] = [];
   const err: string[] = [];
   const deps: ConversationDeps = { createStore: () => store, now: () => NOW, out: (l) => out.push(l), err: (l) => err.push(l) };
-  const api: ApiDeps = { sessions: table, store: table, queue: new FakeQueue(), now: () => NOW, randomBytes: (n) => Buffer.alloc(n, 7), log: () => undefined };
+  const api: ApiDeps = { sessions: table, store: table, editLinks: table.appTokens, queue: new FakeQueue(), now: () => NOW, randomBytes: (n) => Buffer.alloc(n, 7), log: () => undefined };
   const history = async (token = ADA) =>
     JSON.parse((await handleConversationRequest({ routeKey: HISTORY_ROUTE, cookies: [`${SESSION_COOKIE}=${token}`] }, api)).body ?? "{}") as {
       step: string;

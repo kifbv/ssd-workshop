@@ -2,7 +2,7 @@
 // in Playwright's Chromium under the apps' REAL sandbox CSP (opaque origin), against the REAL AI route of ticket 3.21
 // (`handleAppAiRequest`) behind a local server, with its in-memory store, media bucket, model and Transcribe
 // (platform/api/app-ai/fakes.ts): the route's own parser judges what the helpers send, and its own answers come back.
-// - Criterion 1: each helper sends the documented request (with the sign-in, to the workshop only, even after app code
+// - Criterion 1: each helper sends the documented request (with the edit link (3.28), to the workshop only, even after app code
 //   adds a <base> to another server) and returns the parsed answer; transcribe asks again every 3 s while the route
 //   answers 202, and gives up after 3 minutes.
 // - Criterion 2: a refusal (AI switched off, the app's, the person's or the workshop's allowance spent, the sign-in
@@ -24,13 +24,13 @@ import { jpegOfSize, webmOfSize } from "../app-media/fixtures.js";
 import { mediaKey } from "../app-media/media.js";
 import { hashAppToken } from "../app-token/token.js";
 import type { HttpRequest } from "../http.js";
-import { APP_AI_TEXTS, APP_SIGN_IN_TEXTS } from "../workshop/texts.js";
+import { APP_AI_TEXTS, APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 
 const CLIENT = readFileSync(fileURLToPath(new URL("../../../templates/basic/workshop-data.js", import.meta.url)), "utf8");
 const AGENTS = readFileSync(fileURLToPath(new URL("../../../templates/basic/AGENTS.md", import.meta.url)), "utf8");
 const NICKNAME = "test-nick";
 const TOKEN = Buffer.alloc(32, 9).toString("base64url");
-const HAND_OFF = `#wt=${TOKEN}`;
+const HAND_OFF = `#edit=${TOKEN}`;
 const PHOTO_ID = "PhOtOpHoToPhOtOpHoTo01";
 const VOICE_ID = "VoIcEvOiCeVoIcEvOiCe01";
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
@@ -55,7 +55,6 @@ const PAGE = `<!doctype html>
     <input id="tags" type="text">
     <button id="suggest" type="button">Suggest tags</button>
     <button id="save" type="button">Save</button>
-    <p><button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button></p>
     <p id="status" role="status"></p>
   </body>
 </html>`;
@@ -146,7 +145,7 @@ beforeAll(async () => {
       }
       if (path === `/api/apps/${NICKNAME}/data/whoami`) {
         if (request.method === "OPTIONS") return json(204, "");
-        if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: APP_SIGN_IN_TEXTS.signInToSave });
+        if (request.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: APP_EDIT_LINK_TEXTS.viewOnly });
         return json(200, { nickname: "Bob" });
       }
       if (path.startsWith(`/api/apps/${NICKNAME}/data/`)) {
@@ -219,7 +218,7 @@ afterAll(async () => {
 beforeEach(async () => {
   store = new FakeAppAiStore();
   store.live.add(NICKNAME);
-  store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", expiresAt: Math.floor(Date.now() / 1000) + 86400 });
+  store.tokens.tokens.set(hashAppToken(TOKEN), { app: NICKNAME, nickname: "Bob", kind: "edit" });
   media = new FakeMediaReader();
   media.objects.set(mediaKey(NICKNAME, PHOTO_ID), jpegOfSize(200_000));
   media.objects.set(mediaKey(NICKNAME, VOICE_ID), webmOfSize(50_000, ["A_OPUS"], "webm", 10));
@@ -513,23 +512,27 @@ describe("criterion 2: a refusal carries the route's message, and the app shows 
     expect(errors).toEqual([]);
   });
 
-  it("WHEN the sign-in has ended (the route answers 401) THEN its message shows and the sign-in button comes back; a visitor gets the message without anything sent", async () => {
+  it("ticket 3.28: WHEN the edit link was replaced (the route answers 401) THEN its message shows and canSave() stays true; without a secret the message shows without anything sent and no sign-in button appears", async () => {
     allowed.push(LOGGED(401));
     await openApp();
-    expect(await page.locator("[data-workshop-sign-in]").isHidden()).toBe(true);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
     store.tokens.tokens.clear();
     await page.click("#suggest");
-    await expect.poll(statusText).toBe(APP_SIGN_IN_TEXTS.signInToSave);
+    // The server's own 401 text since ticket 3.26 (the template shows it as it comes).
+    await expect.poll(statusText).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
     expect(calls.map((call) => call.status)).toEqual([401]);
-    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(await page.getByRole("button", { name: /sign in/i }).count()).toBe(0);
 
     calls = [];
     await page.goto("about:blank");
     await openApp("");
     await page.click("#suggest");
-    await expect.poll(statusText).toBe(APP_SIGN_IN_TEXTS.signInToSave);
-    expect(await outcome(`workshopData.ai.transcribe(${JSON.stringify(voiceAddress())})`)).toEqual({ error: APP_SIGN_IN_TEXTS.signInToSave });
+    await expect.poll(statusText).toBe(APP_EDIT_LINK_TEXTS.viewOnly);
+    expect(await outcome(`workshopData.ai.transcribe(${JSON.stringify(voiceAddress())})`)).toEqual({ error: APP_EDIT_LINK_TEXTS.viewOnly });
     expect(calls).toEqual([]);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(false);
+    expect(await page.getByRole("button", { name: /sign in/i }).count()).toBe(0);
     expect(errors).toEqual([]);
   });
 });

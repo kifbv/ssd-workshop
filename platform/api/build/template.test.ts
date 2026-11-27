@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
-import { APP_DATA_MESSAGES } from "../app-data/data.js";
+import { APP_EDIT_LINK_TEXTS } from "../workshop/texts.js";
 import { ALLOWED_EXTENSIONS, MAX_APP_BYTES, NAMESPACE_ADDRESSES, checkApp, readAppFolder } from "./check.js";
 import { selfSignedCertificate } from "./test-certificate.js";
 
@@ -24,11 +24,12 @@ const DATA_PREFIX = `/api/apps/${NICKNAME}/data/`;
 const PHONE = { width: 375, height: 667 };
 const TYPES: Record<string, string> = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript" };
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
-/** Ticket 3.25: the app write token the fake API accepts (as the hand-off gives it), and the 401 text of the real API. */
-const TOKEN = Buffer.alloc(32, 9).toString("base64url");
-const HAND_OFF = `#wt=${TOKEN}`;
-const SIGN_IN_TO_SAVE = APP_DATA_MESSAGES.signInToSave;
-/** Chromium logs every 401 answer itself (a visitor's save): only that line is expected then. */
+/** Ticket 3.28: the app's edit secret the fake API accepts (ticket 3.26: 32 bytes, base64url), as the edit link carries it. */
+const SECRET = Buffer.alloc(32, 9).toString("base64url");
+const EDIT_LINK = `#edit=${SECRET}`;
+/** The real API's 401 text (ticket 3.26), which workshop-data.js also gives a write it refuses without a secret. */
+const VIEW_ONLY = APP_EDIT_LINK_TEXTS.viewOnly;
+/** Chromium logs every 401 answer itself (a replaced edit link): only that line is expected then. */
 const LOGGED_401 = "Failed to load resource: the server responded with a status of 401";
 
 describe("the template in a browser under the apps' sandbox (criterion 5)", () => {
@@ -120,7 +121,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     serviceHits = [];
     // A stand-in for the data API (ticket 2.4): JSON values by key, CORS for any origin, no cookies.
     // A key with no value answers 200 with null (Chromium logs every 404 as a console error).
-    // Ticket 3.24/3.25: like the real API, a write needs `Authorization: Bearer <token>` (401 with its text otherwise), and
+    // Ticket 3.26/3.28: like the real API, a write needs `Authorization: Bearer <edit secret>` (401 with its text otherwise), and
     // `?info=1` answers `{value, updatedBy, updatedAt}`.
     writers = new Map();
     await page.route("**/api/apps/**", async (route: Route) => {
@@ -137,7 +138,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
       const key = path.startsWith(DATA_PREFIX) ? path.slice(DATA_PREFIX.length) : "";
       if (request.method() === "OPTIONS") return answer(204);
       if (request.method() === "PUT" || request.method() === "DELETE") {
-        if (headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) });
+        if (headers.authorization !== `Bearer ${SECRET}`) return answer(401, { body: JSON.stringify({ message: VIEW_ONLY }) });
         if (request.method() === "PUT") {
           store.set(key, request.postData() ?? "");
           writers.set(key, "Bob");
@@ -147,9 +148,9 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
         }
         return answer(204);
       }
-      // Try 2: `?whoami=1` names the token's writer (Bob), 401 without the token.
+      // `?whoami=1` names the edit link's writer (Bob, the builder), 401 without the secret.
       if (url.searchParams.get("whoami") === "1") {
-        if (headers.authorization !== `Bearer ${TOKEN}`) return answer(401, { body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) });
+        if (headers.authorization !== `Bearer ${SECRET}`) return answer(401, { body: JSON.stringify({ message: VIEW_ONLY }) });
         return answer(200, { body: JSON.stringify({ nickname: "Bob" }) });
       }
       const value = store.get(key) ?? "null";
@@ -205,13 +206,13 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
   it("stores and reads data through workshop-data.js, without cookies, from the opaque origin", async () => {
     await context.addCookies([{ name: "session", value: "platform-session", url: origin }]);
     store.set("presses", String(STORED));
-    await openApp(String(STORED), HAND_OFF);
+    await openApp(String(STORED), EDIT_LINK);
 
     await page.getByRole("button", { name: "Press" }).click();
     await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
     expect(await page.locator("#count").textContent()).toBe(String(STORED + 1));
     expect(store.get("presses")).toBe(String(STORED + 1));
-    await openApp(String(STORED + 1), HAND_OFF);
+    await openApp(String(STORED + 1), EDIT_LINK);
 
     const roundTrip = await page.evaluate<{ read: unknown; gone: unknown; badKey: unknown }>(`(async () => {
       const value = { name: "Ada's list", items: [1, 2, 3], done: false };
@@ -406,7 +407,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(errors).toEqual([]);
   });
 
-  /** Ticket 3.25: the console check of a visitor's save, where Chromium logs the API's 401 itself. */
+  /** The console check of a save the API refuses (a replaced edit link), where Chromium logs the API's 401 itself. */
   const allow401 = (): void => {
     page.removeAllListeners("console");
     page.on("console", (message) => {
@@ -414,75 +415,174 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     });
   };
 
-  it("ticket 3.25 criterion 1: WHEN the template opens without a token THEN reads work, a save shows the sign-in button, and nothing is written", async () => {
+  /** Every request the page sends that is not a read (a write, an upload, an AI call), as Chromium sees it. */
+  const watchWrites = (): string[] => {
+    const sent: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET") sent.push(`${request.method()} ${new URL(request.url()).pathname}`);
+    });
+    return sent;
+  };
+
+  /** The helpers' outcome for each write without the edit link: data, photo, media delete and AI. */
+  const WRITES_SCRIPT = `Promise.all([
+    workshopData.set("presses", 1).then(() => "set", (error) => error.message),
+    workshopData.remove("presses").then(() => "removed", (error) => error.message),
+    workshopData.savePhoto(new File([new Uint8Array(10)], "a.jpg", { type: "image/jpeg" })).then(() => "saved", (error) => error.message),
+    workshopData.deleteMedia(location.origin + "/app-media/${NICKNAME}/" + "A".repeat(22)).then(() => "deleted", (error) => error.message),
+    workshopData.ai.sortText("Milk and bread", ["Food", "Drink"]).then(() => "sorted", (error) => error.message),
+    workshopData.recordVoice().then(() => "recording", (error) => error.message),
+  ])`;
+
+  it("ticket 3.28 criterion 2: WHEN the template opens without a secret THEN reads work, canSave() is false, no sign-in element or floating button is visible, and a save shows \"This link is view only.\" and writes nothing", async () => {
     store.set("presses", String(STORED));
     writers.set("presses", "Ada");
-    allow401();
+    const sent = watchWrites();
     await openApp(String(STORED));
-    // Reads work for a visitor, who-posted included (`?info=1`).
+    // Reads work, who-saved included (`?info=1`).
     expect(calls.find((call) => call.method === "GET")?.search).toBe("?info=1");
     expect(await page.locator("#who").textContent()).toBe("Last press by Ada.");
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
     expect(await page.evaluate<unknown>(`workshopData.get("presses")`)).toBe(STORED);
     expect(await page.evaluate<unknown>(`workshopData.getInfo("presses")`)).toEqual({ value: STORED, updatedBy: "Ada", updatedAt: "2026-11-26T10:00:00.000Z" });
     expect(await page.evaluate<unknown>(`workshopData.getInfo("nothing-here")`)).toEqual({ value: null, updatedBy: null, updatedAt: null });
-    expect(await page.evaluate<string>("workshopData.signInLink()")).toBe(`${origin}/app-sign-in/?app=${NICKNAME}`);
-    // The sign-in button shows where saving happens, before any save.
-    const signIn = page.getByRole("button", { name: "Sign in to save" });
-    expect(await signIn.isVisible()).toBe(true);
-
-    await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-    expect(await page.locator("#count").textContent()).toBe(String(STORED));
-    expect(await signIn.isVisible()).toBe(true);
-    const removed = await page.evaluate<string>(`workshopData.remove("presses").then(() => "removed", (error) => error.message)`);
-    expect(removed).toBe(SIGN_IN_TO_SAVE);
-    // Nothing written: the writes carried no token and were refused; the value is as it was.
-    const writes = calls.filter((call) => call.method === "PUT" || call.method === "DELETE");
-    expect(writes.map((call) => [call.method, call.authorization, call.status])).toEqual([
-      ["PUT", undefined, 401],
-      ["DELETE", undefined, 401],
-    ]);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(false);
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
+    expect(await page.evaluate<unknown>("workshopData.signInLink()")).toBeNull();
+    // View only: the template hides its Press button and shows its note; no sign-in element or floating button.
+    expect(await page.getByRole("button", { name: "Press" }).isVisible()).toBe(false);
+    expect(await page.getByText("View only", { exact: true }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: /sign in/i }).count()).toBe(0);
+    expect(await page.locator("body > button").count()).toBe(0);
+    // Every write is refused with the message, before anything is sent.
+    expect(await page.evaluate<string[]>(WRITES_SCRIPT)).toEqual(Array(6).fill(VIEW_ONLY));
+    expect(await page.evaluate<unknown>(`workshopData.set("../me", 1).catch((error) => error.message)`)).toBe("A key may only hold letters, digits, dashes and underscores.");
+    expect(sent).toEqual([]);
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+    // Nobody asked who the link names, since there is none.
+    expect(calls.some((call) => call.search === "?whoami=1")).toBe(false);
     expect(store.get("presses")).toBe(String(STORED));
     expect(writers.get("presses")).toBe("Ada");
-
-    // The button opens the workshop's hand-off page in a new tab (the CSP's allow-popups-to-escape-sandbox, 3.24).
-    const popup = page.waitForEvent("popup");
-    await signIn.click();
-    const tab = await popup;
-    await tab.waitForURL(`${origin}/app-sign-in/?app=${NICKNAME}`);
     expect(page.url()).toBe(`${origin}${APP_PATH}`);
+    // No 401 to log: nothing was sent.
     expect(errors).toEqual([]);
   });
 
-  it("ticket 3.25: WHEN an app without a sign-in element (built before 3.25) gets a 401 THEN workshop-data.js adds its own sign-in button, under the CSP", async () => {
-    allow401();
+  it("ticket 3.28 criterion 2: WHEN an app keeps its saving button visible without a secret THEN pressing it shows \"This link is view only.\" and writes nothing", async () => {
+    const sent = watchWrites();
+    await openShapeApp("visible");
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(false);
+    await pressAdd();
+    expect(await page.locator("#status").textContent()).toBe(VIEW_ONLY);
+    expect(sent).toEqual([]);
+    expect(store.has("notes")).toBe(false);
+    expect(await visibleSignIn()).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.28 criterion 1: WHEN the template opens with #edit=<secret> THEN saves carry Authorization: Bearer <secret>, canSave() is true, the secret stays in the address, and after a reload saving still works", async () => {
+    store.set("presses", String(STORED));
+    await openApp(String(STORED), `${EDIT_LINK}&screen=list`);
+    // Kept in the address (Franck's design): a reload, a bookmark or a home-screen icon keeps the right to save.
+    expect(page.url()).toBe(`${origin}${APP_PATH}${EDIT_LINK}&screen=list`);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
+    expect(await page.locator("#who").textContent()).toBe("You save as Bob.");
+    expect(await page.getByRole("button", { name: "Press" }).isVisible()).toBe(true);
+    expect(await page.getByText("View only", { exact: true }).isVisible()).toBe(false);
+    // Never shown in the page (the title or text), nor put in history state.
+    expect(await page.evaluate<string>("JSON.stringify(history.state) + document.title + document.body.innerText")).not.toContain(SECRET);
+
+    await page.getByRole("button", { name: "Press" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
+    expect(await page.locator("#who").textContent()).toBe("Last press by Bob. You save as Bob.");
+    expect(await page.evaluate<string>(`workshopData.remove("other").then(() => "removed")`)).toBe("removed");
+    // After a reload (the address still holds the secret), saving still works.
+    await page.reload();
+    await expect.poll(() => page.locator("#count").textContent()).toBe(String(STORED + 1));
+    expect(page.url()).toBe(`${origin}${APP_PATH}${EDIT_LINK}&screen=list`);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    await page.getByRole("button", { name: "Press" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
+    const writes = calls.filter((call) => call.method === "PUT" || call.method === "DELETE");
+    expect(writes.map((call) => [call.method, call.authorization, call.status])).toEqual([
+      ["PUT", `Bearer ${SECRET}`, 204],
+      ["DELETE", `Bearer ${SECRET}`, 204],
+      ["PUT", `Bearer ${SECRET}`, 204],
+    ]);
+    // Reads never carry it; only the question whose link this is (`?whoami=1`) does, once per page load.
+    const whoami = calls.filter((call) => call.method === "GET" && call.search === "?whoami=1");
+    expect(whoami.map((call) => [call.path, call.authorization])).toEqual([
+      [`${DATA_PREFIX}whoami`, `Bearer ${SECRET}`],
+      [`${DATA_PREFIX}whoami`, `Bearer ${SECRET}`],
+    ]);
+    expect(calls.filter((call) => call.method === "GET" && call.search !== "?whoami=1").every((call) => call.authorization === undefined)).toBe(true);
+    expect(store.get("presses")).toBe(String(STORED + 2));
+    expect(await visibleSignIn()).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.28 try 2 (access review M1): WHEN an app asks workshopData.viewLink() THEN it gets the app's view-only address, without the query or the edit secret, even after the app changes its address", async () => {
+    await openApp("0", `?from=qr${EDIT_LINK}`);
+    expect(page.url()).toBe(`${origin}${APP_PATH}?from=qr${EDIT_LINK}`);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(await page.evaluate<unknown>("workshopData.viewLink()")).toBe(`${origin}${APP_PATH}`);
+    // App code that changes the address (or adds a <base>) does not change what viewLink() gives.
+    await page.evaluate(`history.pushState(null, "", "elsewhere/?x=1#y"); const base = document.createElement("base"); base.href = "https://example.org/"; document.head.append(base);`);
+    expect(await page.evaluate<unknown>("workshopData.viewLink()")).toBe(`${origin}${APP_PATH}`);
+    // The same without the edit link.
     await openApp("0");
-    // An older app's page: no element with data-workshop-sign-in.
-    await page.evaluate(`document.querySelector("[data-workshop-sign-in]").remove()`);
-    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(0);
-    await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-    const added = page.getByRole("button", { name: "Sign in to save" });
-    expect(await added.isVisible()).toBe(true);
-    expect(await page.evaluate<string>(`getComputedStyle(document.querySelector("[data-workshop-sign-in]")).position`)).toBe("fixed");
-    // A second refusal does not add another one.
-    await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => calls.filter((call) => call.method === "PUT").length).toBe(2);
-    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(1);
-    const popup = page.waitForEvent("popup");
-    await added.click();
-    await (await popup).waitForURL(`${origin}/app-sign-in/?app=${NICKNAME}`);
-    expect(store.has("presses")).toBe(false);
-    // No CSP refusal of the button's look (CSSOM, not a style attribute) and no other console error.
+    expect(await page.evaluate<unknown>("workshopData.viewLink()")).toBe(`${origin}${APP_PATH}`);
     expect(errors).toEqual([]);
   });
 
-  // Sign-in fix (2026-11-27): a refused save must offer the sign-in wherever the app put its own button. Generic,
-  // hand-written apps of different shapes: a list whose items each have a saving Add button, and the app's only sign-in
-  // element placed out of sight in a different way per shape (or nowhere), with a "Show more" control that reveals it.
+  it("ticket 3.28: WHEN the edit link was replaced (the API answers 401) THEN the save shows \"This link is view only.\" and canSave() stays true", async () => {
+    allow401();
+    await openApp("0", EDIT_LINK);
+    await page.unroute("**/api/apps/**");
+    await page.route("**/api/apps/**", (route) =>
+      route.request().method() === "OPTIONS"
+        ? route.fulfill({ status: 204, headers: CORS })
+        : route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: VIEW_ONLY }) }),
+    );
+    await page.getByRole("button", { name: "Press" }).click();
+    await expect.poll(() => page.locator("#status").textContent()).toBe(VIEW_ONLY);
+    expect(await page.locator("#count").textContent()).toBe("0");
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(await visibleSignIn()).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.28: WHEN the address holds a malformed secret THEN the app is view only, nothing is asked, and the address stays as it is", async () => {
+    for (const hash of ["#edit=short", "#edit=", `#edit=${SECRET}x`, `#edit=${SECRET.slice(0, 42)}!`, `#xedit=${SECRET}`]) {
+      await openApp("0", hash);
+      expect(await page.evaluate<unknown>("workshopData.canSave()"), hash).toBe(false);
+      expect(await page.evaluate<unknown>("workshopData.whoAmI()"), hash).toBeNull();
+      expect(page.url(), hash).toBe(`${origin}${APP_PATH}${hash}`);
+    }
+    expect(calls.some((call) => call.search === "?whoami=1")).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
+  it("ticket 3.28: WHEN the address holds an old sign-in hand-off (#wt=) THEN it is removed from the address and ignored, any other part kept", async () => {
+    const sent = watchWrites();
+    await openApp("0", `#wt=${SECRET}&screen=list`);
+    expect(page.url()).toBe(`${origin}${APP_PATH}#screen=list`);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(false);
+    expect(await page.evaluate<string>(`workshopData.set("presses", 1).catch((error) => error.message)`)).toBe(VIEW_ONLY);
+    expect(sent).toEqual([]);
+    // Beside an edit link, the old hand-off goes and the edit link stays.
+    await openApp("0", `#wt=${SECRET}&${EDIT_LINK.slice(1)}`);
+    expect(page.url()).toBe(`${origin}${APP_PATH}${EDIT_LINK}`);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  // Ticket 3.28 criterion 3: apps built before the edit link have "Sign in to save" elements (3.25's rule), placed in many
+  // ways. Generic, hand-written apps of different shapes: a list whose items each have a saving Add button, and the app's
+  // sign-in element out of sight in a different way per shape (or nowhere, or in sight), with a "Show more" control that
+  // reveals it. The app's own style.css shows its .sign-in class, as an app could.
   type Shape = "hidden-screen" | "css-class" | "details" | "nested-details" | "none" | "visible";
-  const HIDDEN_SHAPES: Shape[] = ["hidden-screen", "css-class", "details", "nested-details", "none"];
+  const SHAPES: Shape[] = ["hidden-screen", "css-class", "details", "nested-details", "none", "visible"];
   const SIGN_IN_ELEMENT = '<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>';
   const shapeBody = (shape: Shape): string => {
     switch (shape) {
@@ -493,12 +593,12 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
       case "details":
         return `<details id="extra"><summary>Show more</summary><p>${SIGN_IN_ELEMENT}</p></details>`;
       case "nested-details":
-        // In the summary of an open <details> that sits inside a closed one: still out of sight.
+        // In the summary of an open <details> that sits inside a closed one.
         return `<details id="extra"><summary>Show more</summary><details open><summary>${SIGN_IN_ELEMENT}</summary></details></details>`;
       case "none":
         return "";
       case "visible":
-        return `<p>${SIGN_IN_ELEMENT}</p>`;
+        return `<p>${SIGN_IN_ELEMENT}</p>\n<p><a href="#" data-workshop-sign-in>Sign in to save</a></p>`;
     }
   };
   const shapeApp = (shape: Shape): Record<string, string> => ({
@@ -526,7 +626,7 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
   </body>
 </html>
 `,
-    "style.css": ".panel.off { display: none; }\n",
+    "style.css": ".panel.off { display: none; }\n.sign-in { display: inline-block; }\n",
     "app.js": `"use strict";
 document.addEventListener("DOMContentLoaded", () => {
   const status = document.getElementById("status");
@@ -558,12 +658,7 @@ document.addEventListener("DOMContentLoaded", () => {
   /** Opens what hides the app's own sign-in element ("Show more"). */
   const reveal = async (shape: Shape): Promise<void> => {
     if (shape === "details" || shape === "nested-details") await page.locator("#extra > summary").click();
-    else await page.getByRole("button", { name: "Show more" }).click();
-  };
-
-  /** A browser without checkVisibility: workshop-data.js falls back to its layout check. */
-  const withoutCheckVisibility = async (): Promise<void> => {
-    await page.addInitScript("delete Element.prototype.checkVisibility;");
+    else if (shape === "hidden-screen" || shape === "css-class") await page.getByRole("button", { name: "Show more" }).click();
   };
 
   const pressAdd = async (): Promise<void> => {
@@ -572,196 +667,69 @@ document.addEventListener("DOMContentLoaded", () => {
     await expect.poll(() => page.locator("#status").textContent()).not.toBe("");
   };
 
-  /** The floating sign-in button workshop-data.js adds at the end of the body (an app's own sits deeper). */
-  const floating = () => page.locator("body > [data-workshop-sign-in]");
-
-  const MODES = ["checkVisibility", "layout fallback"] as const;
-  const CASES = HIDDEN_SHAPES.flatMap((shape) => MODES.map((mode) => [shape, mode] as const));
-
-  it.each(CASES)(
-    "sign-in fix: WHEN the app's sign-in element is out of sight (%s) and a save is refused with 401 THEN a floating Sign in to save button shows, is reused, and opens the workshop's sign-in in a new tab (%s)",
-    async (shape, mode) => {
-      allow401();
-      if (mode === "layout fallback") await withoutCheckVisibility();
-      await openShapeApp(shape);
-      expect(await page.evaluate<string>("typeof document.body.checkVisibility")).toBe(mode === "layout fallback" ? "undefined" : "function");
-      // Before any save: no floating button.
-      expect(await floating().count()).toBe(0);
-      await pressAdd();
-      expect(await page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-      expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[undefined, 401]]);
-      expect(await floating().isVisible()).toBe(true);
-      expect(await floating().textContent()).toBe("Sign in to save");
-      expect(await page.evaluate<string>(`getComputedStyle(document.querySelector("body > [data-workshop-sign-in]")).position`)).toBe("fixed");
-      // The app's own element is still out of sight.
-      if (shape !== "none") expect(await page.locator("#extra [data-workshop-sign-in]").isVisible()).toBe(false);
-      // A second refusal reuses the same button.
-      await pressAdd();
-      expect(calls.filter((call) => call.method === "PUT").length).toBe(2);
-      expect(await floating().count()).toBe(1);
-      const popup = page.waitForEvent("popup");
-      await floating().click();
-      await (await popup).waitForURL(`${origin}/app-sign-in/?app=${NICKNAME}`);
-      expect(store.has("notes")).toBe(false);
-      // No CSP refusal of the button's look and no other console error.
-      expect(errors).toEqual([]);
-    },
-  );
-
-  it.each(MODES)(
-    "sign-in fix: WHEN a visible sign-in element already exists THEN no floating button is added (%s)",
-    async (mode) => {
-      allow401();
-      if (mode === "layout fallback") await withoutCheckVisibility();
-      // The template itself: its sign-in button shows right after the Press button.
-      await openApp("0");
-      await page.getByRole("button", { name: "Press" }).click();
-      await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-      expect(await page.evaluate<string>("workshopData.ai.sortText('Milk', ['Food']).catch((error) => error.message)")).toBe(SIGN_IN_TO_SAVE);
-      expect(await page.locator("[data-workshop-sign-in]").count()).toBe(1);
-      // An app whose sign-in element is in sight from the start.
-      await openShapeApp("visible");
-      await pressAdd();
-      expect(await page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-      expect(await page.locator("[data-workshop-sign-in]").count()).toBe(1);
-      // Each out-of-sight shape once the visitor has opened what hid it.
-      for (const shape of HIDDEN_SHAPES.filter((one) => one !== "none")) {
-        await openShapeApp(shape);
-        await reveal(shape);
-        await pressAdd();
-        expect(await page.locator("#status").textContent(), shape).toBe(SIGN_IN_TO_SAVE);
-        expect(await page.locator("#extra [data-workshop-sign-in]").isVisible(), shape).toBe(true);
-        expect(await floating().count(), shape).toBe(0);
-      }
-      expect(errors).toEqual([]);
-    },
-  );
-
-  it.each(["hidden-screen", "none"] as const)(
-    "sign-in fix: WHEN a visitor without a pass uploads, deletes or asks the AI and no sign-in element is visible (%s) THEN the floating button shows and nothing is sent",
-    async (shape) => {
-      const sent: string[] = [];
-      page.on("request", (request) => {
-        if (request.method() !== "GET") sent.push(`${request.method()} ${request.url()}`);
-      });
-      await openShapeApp(shape);
-      const outcome = await page.evaluate<string[]>(`Promise.all([
-        workshopData.ai.sortText("Milk and bread", ["Food", "Drink"]).then(() => "sorted", (error) => error.message),
-        workshopData.deleteMedia(location.origin + "/app-media/${NICKNAME}/" + "A".repeat(22)).then(() => "deleted", (error) => error.message),
-        workshopData.savePhoto(new File([new Uint8Array(10)], "a.jpg", { type: "image/jpeg" })).then(() => "saved", (error) => error.message),
-      ])`);
-      expect(outcome).toEqual([SIGN_IN_TO_SAVE, SIGN_IN_TO_SAVE, SIGN_IN_TO_SAVE]);
-      expect(await floating().isVisible()).toBe(true);
-      expect(await floating().count()).toBe(1);
-      expect(sent).toEqual([]);
-      expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
-      expect(errors).toEqual([]);
-    },
-  );
-
-  it("sign-in fix: WHEN the visitor is signed in (hand-off) THEN no floating button shows, and once the sign-in is refused it shows", async () => {
-    allow401();
-    await openShapeApp("hidden-screen", HAND_OFF);
-    await pressAdd();
-    expect(await page.locator("#status").textContent()).toBe("Saved.");
-    expect(await floating().count()).toBe(0);
-    // The token ends (signed out elsewhere): the next refused save shows the floating button.
-    await page.unroute("**/api/apps/**");
-    await page.route("**/api/apps/**", (route) =>
-      route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) }),
-    );
-    await pressAdd();
-    expect(await page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-    expect(await floating().isVisible()).toBe(true);
-    expect(errors).toEqual([]);
-  });
-
-  it("ticket 3.25 criterion 2: WHEN it opens with #wt=<token> THEN the token is gone from the address at once, saves carry the token, and whoAmI() gives the nickname", async () => {
-    // What the address holds when the page's scripts have run (DOMContentLoaded comes after the deferred scripts).
-    await page.addInitScript(`document.addEventListener("DOMContentLoaded", () => { window.addressAtLoad = location.href; });`);
-    store.set("presses", String(STORED));
-    await openApp(String(STORED), `${HAND_OFF}&screen=list`);
-    expect(await page.evaluate<string>("window.addressAtLoad")).toBe(`${origin}${APP_PATH}#screen=list`);
-    expect(page.url()).toBe(`${origin}${APP_PATH}#screen=list`);
-    expect(await page.evaluate<string>("location.hash")).toBe("#screen=list");
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
-    expect(await page.locator("#who").textContent()).toBe("You save as Bob.");
-    // Signed in: the sign-in button is hidden.
-    expect(await page.locator("[data-workshop-sign-in]").isHidden()).toBe(true);
-    // Kept in memory only: nothing in the page's address, history state or title holds it.
-    expect(await page.evaluate<string>("JSON.stringify(history.state) + document.title + location.href")).not.toContain(TOKEN);
-
-    await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => page.locator("#status").textContent()).toBe("Saved.");
-    expect(await page.locator("#who").textContent()).toBe("Last press by Bob. You save as Bob.");
-    expect(await page.evaluate<string>(`workshopData.remove("other").then(() => "removed")`)).toBe("removed");
-    const writes = calls.filter((call) => call.method === "PUT" || call.method === "DELETE");
-    expect(writes.map((call) => [call.method, call.authorization, call.status])).toEqual([
-      ["PUT", `Bearer ${TOKEN}`, 204],
-      ["DELETE", `Bearer ${TOKEN}`, 204],
-    ]);
-    // Reads never carry it; only the one question who the token names does (try 2), asked once when the page opened.
-    const whoami = calls.filter((call) => call.method === "GET" && call.search === "?whoami=1");
-    expect(whoami.map((call) => [call.path, call.authorization])).toEqual([[`${DATA_PREFIX}whoami`, `Bearer ${TOKEN}`]]);
-    expect(calls.filter((call) => call.method === "GET" && call.search !== "?whoami=1").every((call) => call.authorization === undefined)).toBe(true);
-    expect(store.get("presses")).toBe(String(STORED + 1));
-    expect(errors).toEqual([]);
-  });
-
-  it("ticket 3.25: WHEN the token is refused (expired or signed out) THEN whoAmI() is null and the sign-in button shows again", async () => {
-    allow401();
-    await openApp("0", HAND_OFF);
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
-    // The API stops accepting it (as after a sign-out).
-    await page.unroute("**/api/apps/**");
-    await page.route("**/api/apps/**", (route) =>
-      route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) }),
-    );
-    await page.getByRole("button", { name: "Press" }).click();
-    await expect.poll(() => page.locator("#status").textContent()).toBe(SIGN_IN_TO_SAVE);
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
-    expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
-    expect(errors).toEqual([]);
-  });
-
-  it("ticket 3.25: WHEN the fragment holds a malformed token THEN it is removed and the visitor is not signed in", async () => {
-    for (const hash of ["#wt=short", "#wt=", `#wt=${TOKEN}x`]) {
-      await openApp("0", hash);
-      expect(page.url(), hash).toBe(`${origin}${APP_PATH}`);
-      expect(await page.evaluate<unknown>("workshopData.whoAmI()"), hash).toBeNull();
-      expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible(), hash).toBe(true);
+  /**
+   * The sign-in elements a visitor could see (each element of the page with data-workshop-sign-in, or reading "Sign in",
+   * that Playwright finds visible), as their outer HTML; the floating button 3.25 added at the end of the body counts too.
+   */
+  const visibleSignIn = async (): Promise<string[]> => {
+    const found: string[] = [];
+    for (const element of await page.locator("[data-workshop-sign-in], button, a").all()) {
+      const text = (await element.textContent()) ?? "";
+      const marked = (await element.getAttribute("data-workshop-sign-in")) !== null;
+      if ((marked || /sign in/i.test(text)) && (await element.isVisible())) found.push(await element.evaluate((el: { outerHTML: string }) => el.outerHTML));
     }
-    expect(calls.some((call) => call.search === "?whoami=1")).toBe(false);
-    expect(errors).toEqual([]);
-  });
+    return found;
+  };
 
-  it("ticket 3.25 try 2 (finding A): WHEN the address names someone (an old #wn=) THEN whoAmI() still gives only the nickname the API confirms for the token", async () => {
-    allow401();
-    await openApp("0", `#wt=${TOKEN}&wn=Ada`);
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
-    expect(await page.locator("#who").textContent()).toBe("You save as Bob.");
-    // A token the API does not accept: no name at all, whatever the address says.
-    await page.unroute("**/api/apps/**");
-    await page.route("**/api/apps/**", (route) => {
-      const url = new URL(route.request().url());
-      if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
-      if (url.searchParams.get("whoami") === "1") return route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ message: SIGN_IN_TO_SAVE }) });
-      return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: url.searchParams.get("info") === "1" ? '{"value":0,"updatedBy":null,"updatedAt":null}' : "0" });
-    });
-    await openApp("0", `#wt=${TOKEN}&wn=Ada`);
-    expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBeNull();
-    expect(await page.locator("#who").textContent()).toBe("");
+  it.each(SHAPES.flatMap((shape) => (["without", "with"] as const).map((secret) => [shape, secret] as const)))(
+    "ticket 3.28 criterion 3: WHEN an app built before this phase (sign-in element: %s) runs with the new file, %s a secret, THEN its sign-in elements stay hidden and no floating button shows, before and after a save and once revealed",
+    async (shape, secret) => {
+      await openShapeApp(shape, secret === "with" ? EDIT_LINK : "");
+      expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(secret === "with");
+      expect(await visibleSignIn()).toEqual([]);
+      await reveal(shape);
+      expect(await visibleSignIn()).toEqual([]);
+      await pressAdd();
+      expect(await page.locator("#status").textContent()).toBe(secret === "with" ? "Saved." : VIEW_ONLY);
+      expect(store.has("notes")).toBe(secret === "with");
+      expect(await visibleSignIn()).toEqual([]);
+      await pressAdd();
+      expect(await visibleSignIn()).toEqual([]);
+      // Nothing opens on a press of a hidden sign-in element (a click forced by code).
+      const popups: string[] = [];
+      page.on("popup", (popup) => popups.push(popup.url()));
+      await page.evaluate(`document.querySelectorAll("[data-workshop-sign-in]").forEach((el) => el.click())`);
+      expect(popups).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it("ticket 3.28 criterion 3: WHEN an older app's code shows or adds sign-in elements itself THEN they stay hidden", async () => {
+    await openShapeApp("visible");
+    await page.evaluate(`(() => {
+      for (const el of document.querySelectorAll("[data-workshop-sign-in]")) { el.hidden = false; el.style.display = "block"; el.removeAttribute("style"); }
+      const added = document.createElement("div");
+      added.innerHTML = '<button type="button" data-workshop-sign-in>Sign in to save</button>';
+      document.querySelector("main").append(added);
+      const marked = document.createElement("button");
+      marked.textContent = "Sign in to save";
+      document.querySelector("main").append(marked);
+      marked.setAttribute("data-workshop-sign-in", "");
+    })()`);
+    // The observer runs once the page's code is done.
+    await expect.poll(visibleSignIn).toEqual([]);
+    expect(await page.locator("[data-workshop-sign-in]").count()).toBe(4);
     expect(errors).toEqual([]);
   });
 
   /**
    * Try 2 (finding B): app code that runs after workshop-data.js, trying every way short of reading browser internals to
-   * see the token: wrapping fetch, XMLHttpRequest, Headers, history and location, getters on Object.prototype (read by
-   * fetch for its options), and Symbol.iterator. It records any text that holds the token in `window.stolen`.
+   * see the secret: wrapping fetch, XMLHttpRequest, Headers, history and location, getters on Object.prototype (read by
+   * fetch for its options), and Symbol.iterator. It records any text that holds the secret in `window.stolen`.
    */
   const HOSTILE_APP = `"use strict";
     window.stolen = [];
-    const T = ${JSON.stringify(TOKEN)};
+    const T = ${JSON.stringify(SECRET)};
     const grab = (where, value) => { try { if (String(JSON.stringify(value) ?? value).includes(T)) window.stolen.push(where); } catch (e) { if (String(value).includes(T)) window.stolen.push(where); } };
     const realFetch = window.fetch;
     window.fetch = function (input, init) { grab("fetch", [input, init, init && init.headers]); return realFetch.apply(this, arguments); };
@@ -790,18 +758,20 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 
-  it("ticket 3.25 try 2 (finding B): WHEN the app's own code wraps fetch, XMLHttpRequest, history and Object.prototype THEN it never sees the token, and saves still carry it", async () => {
+  it("ticket 3.28 (was 3.25 finding B): WHEN the app's own code wraps fetch, XMLHttpRequest, history and Object.prototype THEN it sees the secret only in the address (by design), and saves still carry it", async () => {
     await serveApp({ "app.js": HOSTILE_APP });
-    await page.goto(`${origin}${APP_PATH}${HAND_OFF}`);
+    await page.goto(`${origin}${APP_PATH}${EDIT_LINK}`);
     await expect.poll(() => page.evaluate<unknown>("window.saved")).toBe("yes");
-    expect(await page.evaluate<string[]>("window.stolen")).toEqual([]);
+    // The edit link stays in the address, so the app's code can read it there; workshop-data.js's requests, headers and
+    // options show it nowhere else (the one JSON.stringify entry is the hostile code's own reading of the address).
+    expect(await page.evaluate<string[]>("window.stolen")).toEqual(["JSON.stringify", "location"]);
     expect(await page.evaluate<unknown>("workshopData.whoAmI()")).toBe("Bob");
-    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[`Bearer ${TOKEN}`, 204]]);
-    expect(page.url()).toBe(`${origin}${APP_PATH}`);
+    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[`Bearer ${SECRET}`, 204]]);
+    expect(page.url()).toBe(`${origin}${APP_PATH}${EDIT_LINK}`);
     expect(errors).toEqual([]);
   });
 
-  it("ticket 3.25 (access review of try 3): WHEN the app's own code adds a <base> to another server THEN saves and the sign-in still go to the workshop's own addresses", async () => {
+  it("ticket 3.25 (access review of try 3): WHEN the app's own code adds a <base> to another server THEN saves still go to the workshop's own addresses", async () => {
     const elsewhere: string[] = [];
     await page.route("https://evil.example/**", (route) => {
       elsewhere.push(route.request().url());
@@ -818,31 +788,22 @@ document.addEventListener("DOMContentLoaded", () => {
           try { await workshopData.set("presses", 1); window.saved = "yes"; } catch (e) { window.saved = e.message; }
         });`,
     });
-    await page.goto(`${origin}${APP_PATH}${HAND_OFF}`);
+    await page.goto(`${origin}${APP_PATH}${EDIT_LINK}`);
     await expect.poll(() => page.evaluate<unknown>("window.saved")).toBe("yes");
     expect(elsewhere).toEqual([]);
-    expect(await page.evaluate<string>("window.link")).toBe(`${origin}/app-sign-in/?app=${encodeURIComponent(APP_PATH.split("/")[2] ?? "")}`);
-    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[`Bearer ${TOKEN}`, 204]]);
+    expect(await page.evaluate<unknown>("window.link")).toBeNull();
+    expect(calls.filter((call) => call.method === "PUT").map((call) => [call.authorization, call.status])).toEqual([[`Bearer ${SECRET}`, 204]]);
   });
 
-  it("ticket 3.25 try 2 (finding B, control):the same code run BEFORE workshop-data.js sees the token, which is why the deploy check requires it first", async () => {
+  it("ticket 3.25 try 2 (finding B, control): the same code run BEFORE workshop-data.js sees the secret in its requests too, and the deploy check refuses such a page", async () => {
     const index = readFileSync(join(TEMPLATE_DIR, "index.html"), "utf8").replace('<script src="workshop-data.js"></script>', '<script src="early.js"></script><script src="workshop-data.js"></script>');
     expect(checkApp([{ path: "index.html", kind: "file", bytes: new TextEncoder().encode(index) }]).ok).toBe(false);
     // Every file through the same route (Chromium refuses a routed page's loads from the loopback server).
     const own = (name: string) => readFileSync(join(TEMPLATE_DIR, name), "utf8");
     await serveApp({ "index.html": index, "early.js": HOSTILE_APP, "workshop-data.js": own("workshop-data.js"), "app.js": own("app.js"), "style.css": own("style.css") });
-    await page.goto(`${origin}${APP_PATH}${HAND_OFF}`);
+    await page.goto(`${origin}${APP_PATH}${EDIT_LINK}`);
     await expect.poll(() => page.evaluate<unknown>("window.saved")).toBe("yes");
-    // It read the address before workshop-data.js removed the token, and saw it again in every save it wrapped.
     expect(await page.evaluate<string[]>("window.stolen")).toEqual(expect.arrayContaining(["location", "fetch"]));
-  });
-
-  it("ticket 3.25 try 2 (residual, docs/decisions.md): the browser's navigation timing entry still holds the address the page opened with, token included", async () => {
-    await openApp("0", HAND_OFF);
-    expect(page.url()).toBe(`${origin}${APP_PATH}`);
-    // Any script of the page can read it; no script can clear it. Only a hand-off that keeps the token out of the app's own
-    // address (another origin or frame for the data client) would close this.
-    expect(await page.evaluate<string>(`performance.getEntriesByType("navigation")[0].name`)).toBe(`${origin}${APP_PATH}${HAND_OFF}`);
   });
 });
 
@@ -915,7 +876,7 @@ describe("the template's contents", () => {
     expect(agents).toContain("show a friendly message in the page");
   });
 
-  it("ticket 3.25: the whole template, sign-in included, passes the deploy check as it is", async () => {
+  it("ticket 3.28: the whole template, edit link included, passes the deploy check as it is", async () => {
     expect(checkApp(await readAppFolder(TEMPLATE_DIR)).problems).toEqual([]);
   });
 

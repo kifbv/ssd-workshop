@@ -4,10 +4,8 @@
 // The function's role (infra/lib/api-stack.ts) may read `SESSION#*` and `PARTICIPANT#*` items,
 // read in `EMAIL#*` only the allow-list entry's `role`, `group` and `participantId` (ticket 3.1, never
 // `email`), delete in `SESSION#*` (sign-out and removed people, ticket 3.1), update in `PARTICIPANT#*`
-// only `nickname`, `step` and `stepSince` (ticket 3.2), and put in `NICK#*` only the claim's attribute names. Ticket 3.24:
-// it reads an app's live marker (`APP#*`, `liveAt` only) and makes and revokes app write tokens (`APPTOKEN#*`,
-// `TOKENS#*`, ../app-token/store.ts), checking inside the create transaction that the session still exists. A transaction is
-// authorized item by item as PutItem and UpdateItem. The conversation function reads sessions through
+// only `nickname`, `step` and `stepSince` (ticket 3.2), and put in `NICK#*` only the claim's attribute names (3.26 removed
+// 3.24's app write tokens and their rights). A transaction is authorized item by item as PutItem and UpdateItem. The conversation function reads sessions through
 // this store too, with the same session rights.
 import {
   DeleteItemCommand,
@@ -20,9 +18,7 @@ import {
   type UpdateItemCommand,
   type UpdateItemCommandOutput,
 } from "@aws-sdk/client-dynamodb";
-import { DynamoAppTokenStore } from "../app-token/store.js";
-import type { CreateTokenResult, StoredAppToken } from "../app-token/token.js";
-import { allowListKey, appLiveKey, nicknameKey, participantKey, sessionKey, type ItemKey } from "../keys.js";
+import { allowListKey, nicknameKey, participantKey, sessionKey, type ItemKey } from "../keys.js";
 import { isRole, isStep, type ParticipantRecord, type SessionAllowEntry, type StoredSession } from "../session/session.js";
 import type { ClaimResult, ParticipantStore } from "./participant.js";
 
@@ -45,36 +41,10 @@ function cancellationCodes(error: unknown): (string | undefined)[] | undefined {
 }
 
 export class DynamoParticipantStore implements ParticipantStore {
-  private readonly tokens: DynamoAppTokenStore;
-
   constructor(
     private readonly client: ParticipantSender,
     private readonly tableName: string,
-  ) {
-    this.tokens = new DynamoAppTokenStore(client, tableName);
-  }
-
-  /** Live only with the marker's `liveAt` (written by the deployer), read consistently. */
-  async isAppLive(nickname: string): Promise<boolean> {
-    const output = await this.client.send(
-      new GetItemCommand({
-        TableName: this.tableName,
-        Key: keyOf(appLiveKey(nickname)),
-        ConsistentRead: true,
-        ProjectionExpression: "#liveAt",
-        ExpressionAttributeNames: { "#liveAt": "liveAt" },
-      }),
-    );
-    return output.Item?.["liveAt"]?.S !== undefined;
-  }
-
-  createAppToken(participantId: string, sessionTokenHash: string, tokenHash: string, token: StoredAppToken, nowSeconds: number): Promise<CreateTokenResult> {
-    return this.tokens.createAppToken(participantId, sessionTokenHash, tokenHash, token, nowSeconds);
-  }
-
-  revokeAppTokens(participantId: string): Promise<number> {
-    return this.tokens.revokeAppTokens(participantId);
-  }
+  ) {}
 
   async getSession(tokenHash: string): Promise<StoredSession | undefined> {
     const output = await this.client.send(

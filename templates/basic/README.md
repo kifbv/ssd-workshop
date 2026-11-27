@@ -20,7 +20,7 @@ from it. Every file is plain HTML, CSS or JavaScript, so you can open any of the
 | `index.html` | The page itself: its title, headings, buttons and text. The browser opens this file first. |
 | `style.css` | How the page looks: colours, sizes and spacing, in light and dark mode, on a phone or a laptop. |
 | `app.js` | What the page does when you tap or type: it reacts, changes the page and saves data. |
-| `workshop-data.js` | A small helper that saves and loads the app's data (and any photos or voice recordings) on the workshop's data service. Everyone who opens the app shares the same data. Saving needs the workshop's sign-in: its "Sign in to save" button opens it in a new tab. |
+| `workshop-data.js` | A small helper that saves and loads the app's data (and any photos or voice recordings) on the workshop's data service. Everyone who opens the app shares the same data. Saving needs the app's edit link (the link or QR code on the workshop page); with the plain address the app is view only. |
 | `SPEC.md` | The spec you approved: what the app should do. |
 | `AGENTS.md` | The instructions the coding AI followed while building the app. |
 | `README.md` | This file. |
@@ -33,6 +33,7 @@ live, a check makes sure it holds only web files, uses nothing from other websit
 
 ## Good to know
 
-- Anyone with the app's address can open it and see its data; anyone signed in to the workshop can change it,
-  and the app may show their workshop nickname next to what they saved. Keep personal details out of it.
+- Anyone with the app's address can open it and see its data. Only someone with its edit link (the link or QR code
+  on the workshop page) can change it: share that link only with people who may save. What they save shows your
+  workshop nickname as who saved it. Keep personal details out of it.
 - Each change is saved as a commit in this repository, so you can see how the app grew step by step.

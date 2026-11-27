@@ -487,6 +487,62 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$U"
 # expect: 204
 ```
 
+## Check after the edit links deploy (ticket 3.26)
+
+```mermaid
+sequenceDiagram
+  participant B as Builder (signed in, step 4)
+  participant C as ssd-workshop-api-conversation
+  participant A as /apps/nick/#edit=secret (sandboxed)
+  participant D as data, media and AI functions
+  B->>C: GET /api/build (session cookie)
+  C-->>B: {..., appUrl, editUrl} (secret kept at APPEDIT#nick, lookup APPTOKEN#sha256)
+  B->>A: open editUrl (link or QR code)
+  A->>D: PUT/DELETE/upload/AI with Authorization: Bearer secret
+  D-->>A: 2xx as the builder, or 401 "This link is view only."
+```
+
+The 3.24 per-person tokens stop at this deploy (their items are refused: no `kind`), and `POST /api/app-tokens` answers
+404 (`/app-sign-in/` still calls it until ticket 3.27). Merge 3.28 with this ticket, or right after, then run
+`AWS_PROFILE=franck npm run -s apps -- refresh` once. No credentials needed:
+
+```sh
+U=https://workshop.rankly.games/api/apps/<nick>/data/sign-in-check
+curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H 'content-type: application/json' --data '1' "$U"
+# expect: 401 {"message":"This link is view only."}
+curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' "https://workshop.rankly.games/api/apps/<nick>/media/AbCdEfGhIjKlMnOpQrStUv"
+# expect: 401 {"message":"This link is view only."} (the WAF's answer, no bearer)
+```
+
+Then, signed in as a builder whose app is live: step 4's `GET /api/build` (browser dev tools) answers `editUrl`; a
+`PUT` with `authorization: Bearer <the part after #edit=>` answers 204, and `?info=1` shows the builder as `updatedBy`.
+
+## After the apps-use-the-edit-link deploy (ticket 3.28): refresh the live apps
+
+```mermaid
+flowchart LR
+  m["merge 3.26 + 3.28 to main"] --> dep["deploy workflow<br/>(deployer bundles the new workshop-data.js)"]
+  dep --> new["new builds: get it at once"]
+  dep --> f["Franck: npm run -s apps -- refresh"]
+  f -->|"one {refresh: nick} per live app"| d[Deployer]
+  d -->|"puts workshop-data.js, invalidates it"| live["apps already live:<br/>edit link saves, plain address is view only,<br/>old Sign in to save buttons hidden"]
+```
+
+The new `workshop-data.js` reads `#edit=<secret>` from the address and keeps it there (a reload or a bookmark still
+saves), sends it on every write, and gives `workshopData.canSave()`. Without it every write fails with "This link is view
+only." before anything is sent, and the "Sign in to save" elements of apps built before stay hidden (no floating button
+any more). Run once after the deploy (safe to repeat):
+
+```sh
+AWS_PROFILE=franck npm run -s apps -- refresh
+curl -sS https://workshop.rankly.games/apps/<nick>/workshop-data.js | grep -c 'canSave: canSave'
+# expect: 1 (the old file has none)
+```
+
+On a phone: open an app with its plain address (no `#edit=`): no sign-in button anywhere, and an app built since 3.28
+hides its Add/Save controls and shows "View only" (an older app keeps its buttons; pressing one says "This link is view
+only."). Open the edit link (step 4's link or QR code once 3.27 is live; until then `editUrl` from `GET /api/build`): saving works, and still works after closing and reopening the tab.
+
 ## Check after the sign-in-to-save deploy (ticket 3.24)
 
 ```mermaid

@@ -65,7 +65,7 @@ function setup() {
   let counter = 10;
   const logs: FacilitatorLogEntry[] = [];
   const deps: FacilitatorDeps = { sessions: table, store: table, queue: () => queue, now: () => clock, log: (e) => logs.push(e) };
-  const api: ConversationDeps = { sessions: table, store: table, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: () => undefined };
+  const api: ConversationDeps = { sessions: table, store: table, editLinks: table.appTokens, queue, now: () => clock, randomBytes: (n) => Buffer.alloc(n, ++counter), log: () => undefined };
   const workerDeps: WorkerDeps = { store: table, model, modelId: MODEL_ID, builds: new FakeBuildQueue(), held: queue, now: () => clock, log: () => undefined, sleep: async () => undefined };
   const drain = async () => {
     const outcomes = [];
