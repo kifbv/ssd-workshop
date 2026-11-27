@@ -373,3 +373,13 @@ paths:
   sign-in to save; "a login of its own" does not), and give the eval case `avoids` for the false claim as phrases, not a word a
   correct reply may use. A `mentionsEach` group that stands for a reminder is phrase-level too ("photograph people", not "people").
 - A change to `SPEC_FORMAT_AND_RULES` moves two prompt versions: the spec prompt's and the change prompt's, which embeds it.
+- Bedrock Converse tool schemas (ticket 3.21): property names must match `^[a-zA-Z0-9_-]{1,64}$`, so names an app
+  chooses (read-photo's fields) go to the model as `f1`..`fn` and are mapped back; force the tool with `toolChoice`,
+  set `temperature: 0`, and check the tool input against the request (never trust an enum to hold). A per-call budget
+  reserves the worst case before the call (prompt bound + image bound + text, `maxTokens` out) and settles to the real
+  tokens after; give it back only for errors Bedrock never bills, and use one attempt (`maxAttempts: 1`), since a retry
+  bills twice.
+- A service billed per minute (Transcribe) is charged before the call on the length measured from the file's own
+  timing (`app-media/formats.ts`), bounded by the recording limit, never on what the client says; an async job is
+  named after the media id so a repeat request joins it instead of paying again.
+
