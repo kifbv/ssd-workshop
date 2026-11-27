@@ -34,6 +34,7 @@ Suites:
                pass, and specs
                needing a login, a payment, an outside service (a key, a sign-in elsewhere, emails,
                notifications, AI) or a server, or leaving a question open, fail with a reason that names it
+               (and none of the example's avoids: ticket 3.23's business cards are never typed in)
   build        the readiness file's four workshop example specs through the real runner and coding agent
                (GitHub, the table and the deploy queue in memory): each result must pass the deploy check,
                load at 375 px under the apps' sandbox CSP in Chromium (network open: the fourth reads
@@ -561,6 +562,8 @@ export interface ReadinessExample {
   participantText?: string;
   /** Ticket 3.16, not-ready: every reason names at least one of these words (start of a word, any case): its language. */
   languageWords?: string[];
+  /** Ticket 3.23 try 2, not-ready: phrases no reason may name (start of a word, any case), such as advice the guardrail declines. */
+  avoids?: string[];
 }
 
 /** The examples of a readiness file, or an error naming the first bad entry. */
@@ -575,7 +578,7 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: ReadinessExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { name, category, expected, spec, keywords = [], participantText, languageWords = [] } = (e ?? {}) as Record<string, unknown>;
+    const { name, category, expected, spec, keywords = [], participantText, languageWords = [], avoids = [] } = (e ?? {}) as Record<string, unknown>;
     const bad =
       typeof name !== "string" ||
       typeof category !== "string" ||
@@ -586,13 +589,24 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
       (expected === "not-ready" && keywords.length === 0) ||
       (participantText !== undefined && (typeof participantText !== "string" || participantText.trim() === "")) ||
       !isStringList(languageWords) ||
-      (languageWords.length > 0 && expected !== "not-ready");
+      (languageWords.length > 0 && expected !== "not-ready") ||
+      !isStringList(avoids) ||
+      (avoids.length > 0 && expected !== "not-ready");
     if (bad) {
       return {
-        error: `example ${i + 1} needs a name, a category, an expected verdict (ready or not-ready), a spec of the right shape, for not-ready keywords, and languageWords only on not-ready`,
+        error: `example ${i + 1} needs a name, a category, an expected verdict (ready or not-ready), a spec of the right shape, for not-ready keywords, and languageWords and avoids only on not-ready`,
       };
     }
-    result.push({ name, category, expected, spec, keywords, ...(languageWords.length > 0 ? { languageWords } : {}), ...(typeof participantText === "string" ? { participantText } : {}) });
+    result.push({
+      name,
+      category,
+      expected,
+      spec,
+      keywords,
+      ...(languageWords.length > 0 ? { languageWords } : {}),
+      ...(avoids.length > 0 ? { avoids } : {}),
+      ...(typeof participantText === "string" ? { participantText } : {}),
+    });
   }
   return result;
 }
@@ -627,6 +641,8 @@ export function scoreReadiness(example: ReadinessExample, outcome: Pick<Readines
   if (example.expected === "ready") return { pass: true, detail: "ready" };
   const named = example.keywords.filter((k) => outcome.reasons.some((r) => r.toLowerCase().includes(k.toLowerCase())));
   if (named.length === 0) return { pass: false, detail: `not-ready, but no reason names ${example.keywords.join(" / ")}` };
+  const avoided = (example.avoids ?? []).filter((k) => outcome.reasons.some((r) => startsWord(r, k)));
+  if (avoided.length > 0) return { pass: false, detail: `not-ready, but a reason says what it should not (${avoided.join(", ")})` };
   const languageWords = example.languageWords ?? [];
   if (languageWords.length > 0) {
     const other = outcome.reasons.filter((r) => !languageWords.some((w) => startsWord(r, w)));

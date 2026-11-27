@@ -162,6 +162,7 @@ describe("clarify.json (ticket 1.8 criteria 1 and 2)", () => {
       "photo idea in French",
       "team prototype gallery: may offer suggested tags",
       "team chatbot: steered to answers people write",
+      "business cards at fairs: a version without contact details",
     ]);
     // Ticket 2.14: the outside-service idea must hear about a free service that needs no key, never that it is impossible,
     // and get no technical question.
@@ -281,6 +282,8 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       // Ticket 3.23: the AI may suggest tags; a chatbot becomes questions and answers people write.
       { text: "Paper prototypes in a gallery.\n1. Should the AI suggest tags for each photo, which you can keep or change?\n2. Who adds them?\n3. What can wait?", inputTokens: 100, outputTokens: 50 },
       { text: `The workshop's AI cannot chat, but a page of questions and answers your team writes works.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
+      // Ticket 3.23 try 2: business cards become the companies met and notes, never contacts typed in.
+      { text: `Remembering fairs. The AI cannot read business cards; keep the companies you met and notes instead.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
     ]);
     const seen: string[] = [];
     const results = await runClarifyEval(
@@ -291,7 +294,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       },
       (r, i) => seen.push(formatClarifyResult(r, i)),
     );
-    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true, true, true, true, true, true]);
+    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true, true, true, true, true, true, true]);
     expect(results[2]?.detail).toBe("error Error");
     // The history goes to the model before the new message.
     expect(model.requests[3]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
@@ -299,9 +302,9 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
     expect(seen[0]).toContain("     | 1. Who is it for?");
     expect(seen[4]).toContain("(offers to write the spec)");
     expect(formatClarifySummary(results)).toEqual([
-      "Clarify: 13/14 passed",
-      `Tokens: 1300 in, 650 out, cost $${usageOf({ inputTokens: 1300, outputTokens: 650 }).costUsd.toFixed(4)}`,
-      "  first-reply: 9/10",
+      "Clarify: 14/15 passed",
+      `Tokens: 1400 in, 700 out, cost $${usageOf({ inputTokens: 1400, outputTokens: 700 }).costUsd.toFixed(4)}`,
+      "  first-reply: 10/11",
       "  change-of-mind: 1/1",
       "  offers-spec: 1/1",
       "  answers-question: 2/2",
@@ -411,9 +414,30 @@ describe("readiness (ticket 2.7)", () => {
     }
   });
 
+  it("readiness.json (ticket 3.23 try 2): the business-card reason must not tell the participant to type the contacts in", () => {
+    const examples = parseReadinessExamples(READINESS_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const cards = must(examples.find((e) => e.name === "contact list read from business card photos"));
+    // Try 1's logged reason (eval-3.23-readiness run 2 and run 3) now fails: the 3.16 guardrail declines collecting
+    // other people's contact details.
+    const tryOne =
+      "Your spec asks the AI to read names, phone numbers and email addresses from a business card photo; this counts as reading other people's contact details from a photo, which the workshop cannot build. Try storing contacts by typing them in manually instead (outside service).";
+    expect(scoreReadiness(cards, { verdict: "not-ready", reasons: [tryOne] })).toEqual({ pass: false, detail: "not-ready, but a reason says what it should not (typing them in)" });
+    const good = "Your spec reads people's names, phone numbers and emails from business cards; keep a list of the companies you met and notes instead, without contact details (outside service).";
+    expect(scoreReadiness(cards, { verdict: "not-ready", reasons: [good] })).toEqual({ pass: true, detail: "not-ready, naming outside service" });
+  });
+
   it("refuses a malformed file or a spec of the wrong shape", () => {
     expect(parseReadinessExamples("nope")).toEqual({ error: "the examples file is not JSON" });
     expect(parseReadinessExamples('{"examples":[{"name":"x","category":"example","expected":"ready","spec":"# Only a title"}]}')).toMatchObject({ error: expect.stringContaining("example 1") });
+    // Ticket 3.23 try 2: avoids is a list of phrases, and only on not-ready (a ready verdict has no reasons).
+    const SHAPED_SPEC = (JSON.parse(READINESS_FILE) as { examples: { spec: string }[] }).examples[0]?.spec ?? "";
+    const shaped = (extra: string, expected = "not-ready") =>
+      `{"examples":[{"name":"x","category":"login","expected":"${expected}","keywords":["login"],"spec":${JSON.stringify(SHAPED_SPEC)}${extra}}]}`;
+    expect(parseReadinessExamples(shaped(',"avoids":["by hand"]'))).toEqual([expect.objectContaining({ avoids: ["by hand"] })]);
+    expect(parseReadinessExamples(shaped(',"avoids":"by hand"'))).toMatchObject({ error: expect.stringContaining("avoids only on not-ready") });
+    expect(parseReadinessExamples(shaped(',"avoids":["by hand"]', "ready"))).toMatchObject({ error: expect.stringContaining("example 1") });
+    expect(parseReadinessExamples(shaped(""))).toEqual([expect.not.objectContaining({ avoids: expect.anything() as unknown })]);
   });
 
   it("scores the verdict, and for a failing spec a reason naming the problem; a failed call fails", async () => {
@@ -879,6 +903,28 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     // Run 1's correct steer: rules written out, questions answered in writing on a message board.
     expect(scoreClarify(chatbot, { text: steer("The rules are written out and colleagues post questions anyone can answer in writing, like a small message board."), offersSpec: false }).pass).toBe(true);
     expect(scoreClarify(chatbot, { text: steer("A page about holidays."), offersSpec: false }).detail).toContain("never mentions (questions and answers");
+  });
+
+  it("clarify.json (ticket 3.23 try 2): a business-card idea gets a version without contact details, never told to type contacts in", () => {
+    const examples = parseClarifyExamples(CLARIFY_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const cards = must(examples.find((e) => e.name === "business cards at fairs: a version without contact details"));
+    expect(cards.check).toBe("first-reply");
+    const reply = (line: string): string => `Remembering who you met at fairs. ${line}\n${FOUR_QUESTIONS}`;
+    expect(
+      scoreClarify(cards, { text: reply("The AI cannot read business cards, but the app can keep the companies you met and your notes, without names, phones or emails."), offersSpec: false }).pass,
+    ).toBe(true);
+    // The steer the 3.16 guardrail contradicts fails, however it is worded.
+    for (const line of [
+      "The AI cannot read business cards, but you can type in their phone and the companies you met.",
+      "The AI cannot read the cards; typing them in works and you keep the companies you met.",
+      "The AI cannot read the cards, so type the contacts into the list with the company.",
+      "You can enter their email and company by hand.",
+    ]) {
+      expect(scoreClarify(cards, { text: reply(line), offersSpec: false }).detail, line).toContain("says what it should not");
+    }
+    // A reply without a version that keeps no contact details fails.
+    expect(scoreClarify(cards, { text: reply("The AI cannot read business cards."), offersSpec: false }).detail).toContain("never mentions (compan");
   });
 
   it("readiness.json: the drawing gallery and the voice board are ready, video uploads are not ready with a server reason", () => {

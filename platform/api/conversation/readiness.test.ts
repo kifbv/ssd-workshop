@@ -204,6 +204,12 @@ describe("parseReadinessAnswer", () => {
     expect(READINESS_SYSTEM_PROMPT).toContain("uses the workshop's AI only for these four tasks");
     // Run 1 (e1232d8) let a business-card reader through as a fields-from-a-photo task: named as the exception.
     expect(READINESS_SYSTEM_PROMPT).toContain("Business cards are the exception to reading fields from a photo: a spec whose AI reads a business card, or people's names, phone numbers or email addresses from a photo, is not ready (outside service)");
+    // Try 1's reason said to type the contacts in by hand, which the 3.16 guardrail declines (other people's contact
+    // details): the reason must suggest a version that keeps none.
+    expect(READINESS_SYSTEM_PROMPT).toContain(
+      "its reason suggests a version that keeps no contact details (for example the companies met and notes about each meeting, without names, phone numbers or email addresses), never typing the contacts in",
+    );
+    expect(READINESS_SYSTEM_PROMPT).not.toContain("typing them in by hand");
   });
 
   it("asks for reasons in the participant's language, each ending with the problem's English word in brackets (readiness-v3, ticket 3.16)", () => {
