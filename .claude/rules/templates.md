@@ -132,6 +132,8 @@ paths:
   the visitor types got AI tag suggestions): say in the rule what a spec without it keeps ("stays a plain field"), and
   make the build eval fail the other cases when they use it (`callsAi`). A check that reads the page right after a write
   was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.
+- Rules every app reads (the edit-link rule, its list of saving controls) never name an optional feature ("AI buttons"):
+  3.28 try 2's gallery added a "Suggest tags" button in 3 of 5 runs; with AI named only in the AI rule, 0 of 5 (try 3).
 - Test client behaviour on generic hand-written apps of several shapes (`shapeApp` in `template.test.ts`: an element on a
   `hidden` screen, in a closed `<details>`, in an open one inside a closed one, under a CSS class, none, in sight), never
   on one participant's app; a page with its own `index.html` routes every file, `workshop-data.js` too. A closed

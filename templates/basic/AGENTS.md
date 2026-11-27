@@ -122,9 +122,9 @@ shell and no package manager. You cannot run or preview the app, so check your w
      save only when the visitor does something (presses a button, sends a form).
    - `workshopData.canSave()` is `true` when the app was opened with its edit link, else `false`. When it is
      `false`, hide every control that saves: Add, Save, Delete and Edit buttons, forms and their fields, rating
-     stars, Watched or Done buttons, photo and Record buttons, AI buttons, and buttons that only open such a
-     form, on every screen and on every item of a list. The screen tabs named in `SPEC.md` stay, so everyone
-     can see every screen.
+     stars, Watched or Done buttons, photo and Record buttons, and buttons that only open such a form, on
+     every screen and on every item of a list. The screen tabs named in `SPEC.md` stay, so everyone can see
+     every screen.
    - The starter shows how: `app.js` starts with
      `if (!workshopData.canSave()) document.body.classList.add("view-only");` and `style.css` hides
      `.view-only .edit-only`. Keep both, give every saving control (or the form or row that holds it) the
@@ -222,7 +222,7 @@ shell and no package manager. You cannot run or preview the app, so check your w
     a photo (a receipt's shop, date and total), sort a text into categories and turn a voice recording into text; nothing
     else (no chat, no writing texts, no free questions). Each call needs the edit link (rule 6), like saving. Use AI only
     when `SPEC.md` says the AI suggests, reads or sorts something: a tags field, a form or a list in a spec that does not
-    ask for AI stays a plain field the visitor fills, with no AI call.
+    ask for AI stays a plain field the visitor fills, with no AI call and no AI button (no "Suggest" button).
    - `await workshopData.ai.tagPhoto(address)` gives up to 5 suggested tags for a photo of this app (the address
      `savePhoto` gave); `await workshopData.ai.tagPhoto(address, ["Portrait", "Pencil"])` gives those of up to 20 tags
      that fit.
@@ -236,7 +236,8 @@ shell and no package manager. You cannot run or preview the app, so check your w
    - A suggestion is shown for the visitor to accept or change, never saved by itself: put it into the form's fields (the
      tags field, the amount field) or show it as choices the visitor taps, and save only when the visitor presses Save.
      Ask only when the visitor does something (right after a photo is saved, or from a "Suggest tags" button), never when
-     the page opens or for every stored item.
+     the page opens or for every stored item. An AI button needs the edit link like saving: give it the class
+     `edit-only` (rule 6).
    - Show what the AI gives with `textContent` or as a field's `value`, never with `innerHTML`.
    - Every call can fail: AI may be switched off for apps, or today's AI allowance may be spent. Show `error.message` (it
      says which) and let the visitor fill the fields by hand: everything works without AI. For example:

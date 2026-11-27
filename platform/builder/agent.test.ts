@@ -284,6 +284,14 @@ describe("the agent's settings (criterion 2)", () => {
     expect(AI_GUIDANCE).toMatch(/presses Save/);
     // Live eval run 1: the drawing gallery (tags typed by the visitor) asked the AI unasked.
     for (const text of [agents, AI_GUIDANCE]) expect(text).toMatch(/a tags field.*stays a plain field the visitor fills/);
+    // Ticket 3.28 try 3 (live eval, example 5 asked the AI in 3 of 5 runs): the edit-link rule names no AI button for every
+    // app; only the AI rule, which applies when SPEC.md asks for AI, says that an AI button is a saving control.
+    const rule6 = agents.slice(agents.indexOf("6. Saving needs the app's edit link"), agents.indexOf("7. No personal data"));
+    for (const text of [rule6, VIEW_ONLY_GUIDANCE]) expect(text).not.toMatch(/\bAI\b/);
+    for (const text of [agents, AI_GUIDANCE]) {
+      expect(text).toMatch(/no AI call and no AI button/);
+      expect(text).toMatch(/AI button.*class `?edit-only/);
+    }
     expect(buildPrompt(ws)).toContain(AI_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Suggest tags"] })).toContain(AI_GUIDANCE);
     // Last, after the media guidance (new prompt lines go after the WebFetch lines, 3.25).
