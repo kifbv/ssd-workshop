@@ -51,6 +51,7 @@ import {
   runClarifyEval,
   runGuardrailEval,
   mediaKindOf,
+  aiKindOf,
   USAGE,
 } from "./logic.js";
 
@@ -63,7 +64,8 @@ async function runBuildSuite(modelId: string | undefined, only: number | undefin
     console.error(all.error);
     return 1;
   }
-  // Ticket 3.19: then the build file's media cases (a photo gallery, voice messages), examples 5 and 6.
+  // Ticket 3.19: then the build file's media cases (a photo gallery, voice messages), examples 5 and 6; ticket 3.22: its
+  // AI cases (a gallery that suggests tags, an expense app that reads receipts), examples 7 and 8.
   const media = parseReadinessExamples(readFileSync(examplesFile("build"), "utf8"));
   if ("error" in media) {
     console.error(media.error);
@@ -83,7 +85,7 @@ async function runBuildSuite(modelId: string | undefined, only: number | undefin
     for (const [i, example] of chosen.entries()) {
       let result: BuildEvalResult;
       try {
-        const outcome = await evalBuild(example.spec, model, browser, (entry) => console.log(`     . ${JSON.stringify(entry)}`), mediaKindOf(example.category));
+        const outcome = await evalBuild(example.spec, model, browser, (entry) => console.log(`     . ${JSON.stringify(entry)}`), mediaKindOf(example.category), aiKindOf(example.category));
         result = { example, outcome, ...scoreBuild(outcome, expectsWebFetch(example.spec)) };
       } catch (error) {
         result = { example, pass: false, detail: `eval failed: ${redactError(error instanceof Error ? `${error.name}: ${error.message}` : String(error))}` };
