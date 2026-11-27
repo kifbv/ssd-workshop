@@ -114,8 +114,9 @@ paths:
   was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.
 - An app may hide the screen that holds its only sign-in button while another screen saves (live, 2026-11-27): "the page
   has a sign-in element" is not "the visitor can see one". `workshop-data.js` checks visibility at the refusal
-  (`checkVisibility` with `visibilityProperty`/`opacityProperty`, else `getClientRects().length > 0`), and Playwright's
-  `getByRole` skips elements on a `display: none` screen, so a test of the floating button finds it by role while the
-  app's own one stays out of the tree. A test page with its own `index.html` routes every file, `workshop-data.js` too
-  (`openScreensApp` in `template.test.ts`), and a test of the fallback deletes `Element.prototype.checkVisibility` in an
-  init script.
+  (`checkVisibility` with `visibilityProperty`/`opacityProperty`, else `getClientRects().length > 0`). A closed
+  `<details>` needs its own check: Chromium hides its content with `content-visibility`, which `checkVisibility` sees but
+  `getClientRects()` does not (the fallback failed only there). Test such client behaviour on generic hand-written apps
+  of several shapes (`shapeApp` in `template.test.ts`), never on one participant's app; a page with its own `index.html`
+  routes every file, `workshop-data.js` too, and a fallback test deletes `Element.prototype.checkVisibility` in an init
+  script.

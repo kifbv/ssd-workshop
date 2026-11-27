@@ -170,8 +170,11 @@
   }
 
   // Whether a visitor can see the element: laid out (not display: none, itself or through an ancestor such as a hidden
-  // screen), not visibility: hidden and not transparent. Browsers without checkVisibility get the layout check only.
+  // screen), not inside a closed <details> (outside its summary), not visibility: hidden and not transparent. Browsers
+  // without checkVisibility get the layout, details and visibility checks.
   function canBeSeen(element) {
+    const closed = element.closest("details:not([open])");
+    if (closed !== null && !closed.contains(element.closest("summary"))) return false;
     if (typeof element.checkVisibility === "function") {
       return element.checkVisibility({ visibilityProperty: true, opacityProperty: true });
     }
