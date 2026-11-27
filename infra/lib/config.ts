@@ -140,8 +140,9 @@ export const PAGES_CONTENT_SECURITY_POLICY = [
  * only to itself, and `http:` stays blocked. Tested in Chromium in `platform/api/build/template.test.ts`.
  * Ticket 3.24 try 2 (spec delta, approved by Franck 2026-11-26): `allow-popups-to-escape-sandbox`, so a tab an app opens (the
  * "Sign in to save" hand-off page `/app-sign-in`) is a normal page under its own CSP, not sandboxed in an opaque origin
- * where it could not see the workshop's session. The app itself stays sandboxed and cannot read the tab
- * (`platform/web/app-sign-in-popup.test.ts`).
+ * where it could not see the workshop's session. The app itself stays sandboxed and cannot read the tab.
+ * Ticket 3.27: `/app-sign-in` is gone, but the exception stays (Franck, 2026-11-27): a tab an app opens (maps, a video,
+ * a site the visitor is signed in to) is a normal page, with its own cookies and storage.
  */
 export const APPS_CONTENT_SECURITY_POLICY = [
   "sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox",

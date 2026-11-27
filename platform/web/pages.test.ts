@@ -23,6 +23,8 @@ const jsQR = jsQRModule.default;
 const PHONE = { width: 375, height: 667 };
 /** Ticket 3.15's screenshot of the spec editor at 375 px, when asked (`EDIT_SCREENSHOTS=<folder>`); CI takes none. */
 const EDIT_SHOTS = process.env["EDIT_SCREENSHOTS"];
+/** Ticket 3.27's screenshot of step 4 with the edit link at 375 px, when asked (`LINK_SCREENSHOTS=<folder>`); CI takes none. */
+const LINK_SHOTS = process.env["LINK_SCREENSHOTS"];
 const EMAIL = "ada@example.com";
 const OTHER_EMAIL = "not-on-the-list@example.com";
 const NEUTRAL_BODY = { message: MESSAGES.neutral };
@@ -1205,13 +1207,22 @@ const SHA_1 = "1111111111111111111111111111111111111111";
 const SHA_2 = "2222222222222222222222222222222222222222";
 const REPOSITORY_URL = "https://github.com/ssd-workshop-apps/ssd-ada-l";
 const APP_URL = "https://workshop.rankly.games/apps/ada-l/";
+/** Ticket 3.27: fake edit secrets (43 base64url characters, as the API makes them); never a real one. */
+const SECRET_1 = "fake-test-secret-one_".padEnd(43, "A");
+const SECRET_2 = "fake-test-secret-two_".padEnd(43, "B");
+const EDIT_URL = `${APP_URL}#edit=${SECRET_1}`;
+const EDIT_URL_2 = `${APP_URL}#edit=${SECRET_2}`;
+/** The edit link's QR code as screen readers hear it (not its address: that holds the secret). */
+const EDIT_QR_NAME = "QR code of your app's edit link";
+/** Ticket 3.27 try 2: the edit link's visible text (and name): the plain address, never the secret (screens are projected). */
+const EDIT_LINK_TEXT = `${APP_URL} (edit link)`;
 type FeedEvent = Record<string, string>;
 const stepEvent = (step: string): FeedEvent => ({ kind: "step", step, at: "2026-11-25T10:00:00.000Z" });
 const fileEvent = (path: string): FeedEvent => ({ kind: "file", path, at: "2026-11-25T10:00:01.000Z" });
 
 /** A participant at step building and their build, which the test moves on; every GET /api/build is counted. */
 function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("preparing"), stepEvent("writing"), fileEvent("index.html")]) {
-  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false, pausedBy: undefined as "facilitator" | undefined };
+  const state = { status, feed: [...feed], polls: 0, answer: undefined as Reply | undefined, editUrl: EDIT_URL as string | undefined, linked: false, renewals: 0, renewAnswer: undefined as Reply | undefined, failureReasons: undefined as string[] | undefined, ahead: undefined as number | undefined, paused: false, pausedUnknown: false, pausedBy: undefined as "facilitator" | undefined };
   const handlers: Record<string, Handler> = {
     "GET /api/me": () => ({ status: 200, body: { ...ME, step: "building" } }),
     // Ticket 3.8: step 4 reads the change conversation: none yet, no change used, the three suggestions written.
@@ -1222,6 +1233,8 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
     "GET /api/build": () => {
       state.polls++;
       if (state.answer !== undefined) return state.answer;
+      // Ticket 3.26: the edit link once the app is live (and from then on, as the API keeps it).
+      if (state.status === "live") state.linked = true;
       return {
         status: 200,
         body: {
@@ -1230,11 +1243,19 @@ function fakeBuildApi(status = "building", feed: FeedEvent[] = [stepEvent("prepa
           feed: state.feed,
           repositoryUrl: REPOSITORY_URL,
           appUrl: APP_URL,
+          ...(state.linked && state.editUrl !== undefined ? { editUrl: state.editUrl } : {}),
           ...(state.failureReasons === undefined ? {} : { failureReasons: state.failureReasons }),
           ...(state.ahead === undefined ? {} : { ahead: state.ahead }),
           ...(state.pausedUnknown ? { pausedUnknown: true } : state.paused ? { paused: true, ...(state.pausedBy === undefined ? {} : { pausedBy: state.pausedBy }) } : {}),
         },
       };
+    },
+    // Ticket 3.26/3.27: New edit link: a new secret, the old one ended.
+    "POST /api/build/edit-link": () => {
+      state.renewals++;
+      if (state.renewAnswer !== undefined) return state.renewAnswer;
+      state.editUrl = state.editUrl === EDIT_URL ? EDIT_URL_2 : EDIT_URL;
+      return { status: 200, body: { editUrl: state.editUrl } };
     },
   };
   return { state, handlers };
@@ -1418,8 +1439,8 @@ describe("step 3: Build (ticket 2.10)", () => {
     expect(await screen("build").isVisible()).toBe(false);
     expect(await page.locator("#live-heading").textContent()).toBe("Step 4: Live");
     expect(await screen("live").textContent()).toContain("Your app is live");
-    const link = page.getByRole("link", { name: APP_URL });
-    expect(await link.getAttribute("href")).toBe(APP_URL);
+    const link = page.getByRole("link", { name: EDIT_LINK_TEXT });
+    expect(await link.getAttribute("href")).toBe(EDIT_URL);
     await expectNoSideScroll();
     // No more polls.
     const polls = api.state.polls;
@@ -1507,15 +1528,16 @@ async function expectLiveScreen(): Promise<void> {
   expect(await screen("build").isVisible()).toBe(false);
   expect(await page.locator("#live-heading").textContent()).toBe("Step 4: Live");
   expect(await screen("live").textContent()).toContain("Your app is live");
-  const address = page.getByRole("link", { name: APP_URL });
-  expect(await address.getAttribute("href")).toBe(APP_URL);
+  // Ticket 3.27: the link and the QR code hold the edit link.
+  const address = page.getByRole("link", { name: EDIT_LINK_TEXT });
+  expect(await address.getAttribute("href")).toBe(EDIT_URL);
   expect(await address.getAttribute("target")).toBe("_blank");
   expect(await address.getAttribute("rel")).toBe("noopener noreferrer");
   const repository = page.getByRole("link", { name: REPOSITORY_URL });
   expect(await repository.getAttribute("href")).toBe(REPOSITORY_URL);
   expect(await repository.getAttribute("target")).toBe("_blank");
   expect(await repository.getAttribute("rel")).toBe("noopener noreferrer");
-  const qr = page.getByRole("img", { name: `QR code for ${APP_URL}` });
+  const qr = page.getByRole("img", { name: EDIT_QR_NAME });
   expect(await qr.isVisible()).toBe(true);
   // Ticket 3.8: "Next: you will be able to ask for changes" made way for the change requests, and Behind the scenes
   // leads with the change loop diagram (Mermaid), the text under it.
@@ -1554,7 +1576,7 @@ describe("step 4: Live (ticket 2.11)", () => {
     await mockApi(api.handlers);
     await page.goto(origin);
     await expectLiveScreen();
-    expect(await decodeQrOnScreen()).toBe(APP_URL);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL);
   }, 30_000);
 
   it("WHEN a participant reloads at step 4 THEN they land on step 4 again (criterion 4)", async () => {
@@ -1564,14 +1586,21 @@ describe("step 4: Live (ticket 2.11)", () => {
     await expectLiveScreen();
     await page.reload();
     await expectLiveScreen();
-    expect(await decodeQrOnScreen()).toBe(APP_URL);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL);
   }, 30_000);
 
   it("WHEN the answer has no address the page trusts THEN step 4 shows neither a link nor a QR code for it", async () => {
     const api = fakeBuildApi("live", LIVE_FEED);
     api.state.answer = {
       status: 200,
-      body: { buildId: "b-1", status: "live", feed: [], repositoryUrl: "https://evil.example/ssd-ada-l", appUrl: "javascript:alert(1)//workshop.rankly.games/apps/ada-l/" },
+      body: {
+        buildId: "b-1",
+        status: "live",
+        feed: [],
+        repositoryUrl: "https://evil.example/ssd-ada-l",
+        appUrl: "javascript:alert(1)//workshop.rankly.games/apps/ada-l/",
+        editUrl: `javascript:alert(1)//workshop.rankly.games/apps/ada-l/#edit=${SECRET_1}`,
+      },
     };
     await mockApi(api.handlers);
     await page.goto(origin);
@@ -1582,6 +1611,267 @@ describe("step 4: Live (ticket 2.11)", () => {
     expect(await page.locator("#live-qr-code svg").count()).toBe(0);
     expect(await page.locator("#live-repository").isHidden()).toBe(true);
     expect(await page.locator("#screen-live a[href]").count()).toBe(0);
+    await expectNoSideScroll();
+  }, 30_000);
+});
+
+// Ticket 3.27: step 4 gives the edit link (link and QR code), Copy view-only link and New edit link, against a fake API.
+const EDIT_NOTE = "Anyone who has this link or QR code can save in your app.";
+
+/** Opens step 4 on a live app (fake API) and waits for the edit link; every request the page sends is kept. */
+async function openLiveWithEditLink(): Promise<{ api: ReturnType<typeof fakeBuildApi>; calls: Call[]; requests: { url: string; body: string }[] }> {
+  const api = fakeBuildApi("live", LIVE_FEED);
+  const requests: { url: string; body: string }[] = [];
+  page.on("request", (request) => requests.push({ url: request.url(), body: request.postData() ?? "" }));
+  page.on("dialog", (dialog) => {
+    violations.push(`dialog: ${dialog.type()}`);
+    void dialog.dismiss();
+  });
+  const calls = await mockApi(api.handlers);
+  await page.goto(origin);
+  await expectLiveScreen();
+  return { api, calls, requests };
+}
+
+/**
+ * The secret is only in step 4's link's `href` and its QR code (try 2: not in the link's text, screens are projected):
+ * not in the title, storage, any text, any other attribute or any request.
+ */
+async function expectSecretOnlyInLink(secret: string, requests: { url: string; body: string }[]): Promise<void> {
+  const seen = await page.evaluate((s) => {
+    const holders = [...document.querySelectorAll("*")].flatMap((e) => [...e.attributes].filter((a) => a.value.includes(s)).map((a) => `${e.id || e.tagName}[${a.name}]`));
+    const storage = [...Object.values(localStorage), ...Object.values(sessionStorage)].filter((v) => v.includes(s));
+    const text = (document.body.textContent ?? "").includes(s) || document.body.innerText.includes(s);
+    return { title: document.title.includes(s), text, holders, storage, address: location.href.includes(s) };
+  }, secret);
+  expect(seen).toEqual({ title: false, text: false, holders: ["live-link[href]"], storage: [], address: false });
+  for (const request of requests) {
+    if (request.url.includes(secret) || request.body.includes(secret)) throw new Error(`a request holds the secret: ${new URL(request.url).pathname}`);
+  }
+  // The page asks only its own server.
+  for (const request of requests) expect(new URL(request.url).origin).toBe(origin);
+}
+
+describe("step 4: the edit link (ticket 3.27)", () => {
+  it("criterion 1: WHEN the builder reaches step 4 THEN the link and the QR code both hold editUrl, and decoding the QR gives exactly that address", async () => {
+    const { requests } = await openLiveWithEditLink();
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL);
+    expect(await page.locator("#live-link").textContent()).toBe(EDIT_LINK_TEXT);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL);
+    expect(await page.locator("#live-link-label").textContent()).toBe("Open your app with its edit link:");
+    expect(await page.locator("#live-edit-note").isVisible()).toBe(true);
+    expect(await page.locator("#live-edit-note").textContent()).toContain(EDIT_NOTE);
+    expect(await page.getByRole("button", { name: "Copy view-only link" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "New edit link" }).isVisible()).toBe(true);
+    expect(await page.locator("#new-edit-link-confirm").isVisible()).toBe(false);
+    await expectSecretOnlyInLink(SECRET_1, requests);
+    // Nothing else on the page links to the app without the edit link.
+    const appLinks = await page.locator("#screen-live a[href*='/apps/']").evaluateAll((links) => links.map((a) => a.getAttribute("href")));
+    expect(appLinks).toEqual([EDIT_URL]);
+  }, 30_000);
+
+  it("criterion 2: WHEN the builder presses New edit link and confirms THEN the link and QR change to the new secret (in-page confirmation, Cancel first)", async () => {
+    const { api, calls, requests } = await openLiveWithEditLink();
+    // Cancel: nothing sent, the link stays.
+    await page.getByRole("button", { name: "New edit link" }).click();
+    expect(await page.locator("#new-edit-link-confirm").isVisible()).toBe(true);
+    expect(await page.locator("#new-edit-link-question").textContent()).toContain("The current link and QR code stop saving at once");
+    await page.getByRole("button", { name: "Cancel" }).click();
+    expect(await page.locator("#new-edit-link-confirm").isVisible()).toBe(false);
+    expect(api.state.renewals).toBe(0);
+    // Yes: the new link and QR code.
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+    expect(api.state.renewals).toBe(1);
+    const renew = calls.filter((c) => c.path === "/api/build/edit-link");
+    expect(renew).toEqual([{ method: "POST", path: "/api/build/edit-link", search: "", contentType: "application/json", body: {} }]);
+    expect(await page.locator("#live-link").textContent()).toBe(EDIT_LINK_TEXT);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
+    expect(await page.getByRole("img", { name: EDIT_QR_NAME }).isVisible()).toBe(true);
+    expect(await page.locator("#live-link-message").textContent()).toBe("Your new edit link is ready. The old link and QR code no longer save.");
+    expect(await page.locator("#new-edit-link-confirm").isVisible()).toBe(false);
+    expect(await page.content()).not.toContain(SECRET_1);
+    await expectSecretOnlyInLink(SECRET_2, requests);
+    await expectNoSideScroll();
+    // A reload shows the new link (the API's).
+    await page.reload();
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+  }, 30_000);
+
+  it("WHEN New edit link's answer is lost after the link changed THEN the page reads the build again and shows the link that works; a 404 keeps the link with the API's words", async () => {
+    const { api } = await openLiveWithEditLink();
+    api.state.renewAnswer = { status: 404, body: { message: "Your app is not live yet: its edit link comes once it is.", reason: "not-live" } };
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link-message").textContent()).toBe("Your app is not live yet: its edit link comes once it is.");
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL);
+    // 503 after the server made the new link: the page reads GET /api/build again.
+    const handler = must(api.handlers["POST /api/build/edit-link"]);
+    api.state.renewAnswer = undefined;
+    api.handlers["POST /api/build/edit-link"] = (call) => {
+      handler(call);
+      return { status: 503, body: {} };
+    };
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
+    expect(await page.locator("#live-link-message").textContent()).toBe(MESSAGES.failed);
+  }, 30_000);
+
+  it("WHEN a build read sent before New edit link answers late with the old link THEN the link and the QR code keep the new secret (editLinkRound)", async () => {
+    const { api } = await openLiveWithEditLink();
+    // Rebuild from my repository answering 404 makes the page read GET /api/build again: that read is held open.
+    api.handlers["POST /api/conversation/change/rebuild"] = () => ({ status: 404, body: {} });
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let held: (() => void) | undefined;
+    const arrived = new Promise<void>((resolve) => (held = resolve));
+    let holding = true;
+    await page.route("**/api/build", async (route: Route) => {
+      if (!holding || route.request().method() !== "GET") return route.fallback();
+      holding = false;
+      // The answer as the server made it then: the old link.
+      const old = must(api.handlers["GET /api/build"])({ method: "GET", path: "/api/build", search: "", contentType: undefined, body: null });
+      expect((old.body as { editUrl?: string }).editUrl).toBe(EDIT_URL);
+      held?.();
+      await released;
+      await route.fulfill({ status: old.status, contentType: "application/json", body: JSON.stringify(old.body) });
+    });
+    await page.locator("#rebuild-fold summary").click();
+    await page.getByRole("button", { name: "Rebuild from my repository" }).click();
+    await arrived;
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
+    // The old answer arrives now; the page handles it (Rebuild's button is no longer busy).
+    const late = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/build");
+    release();
+    await late;
+    await expect.poll(() => page.locator("#rebuild-button").getAttribute("aria-busy")).toBe(null);
+    await expect.poll(() => api.state.polls).toBeGreaterThanOrEqual(1);
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(EDIT_URL_2);
+    expect(await decodeQrOnScreen()).toBe(EDIT_URL_2);
+    expect(await page.content()).not.toContain(SECRET_1);
+  }, 30_000);
+
+  /** Step 4's edit link is gone from the whole page: no secret in any attribute or text, no QR code, no message. */
+  async function expectNoEditLinkLeft(): Promise<void> {
+    await expect.poll(() => screen("email").isVisible()).toBe(true);
+    for (const secret of [SECRET_1, SECRET_2]) {
+      const left = await page.evaluate((s) => {
+        const attributes = [...document.querySelectorAll("*")].flatMap((e) => [...e.attributes].filter((a) => a.value.includes(s)).map((a) => `${e.id || e.tagName}[${a.name}]`));
+        return { attributes, text: (document.body.textContent ?? "").includes(s), html: document.documentElement.outerHTML.includes(s) };
+      }, secret);
+      expect(left).toEqual({ attributes: [], text: false, html: false });
+    }
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(null);
+    expect(await page.locator("#live-link").textContent()).toBe("");
+    expect(await page.locator("#live-qr-code").evaluate((e) => e.childElementCount)).toBe(0);
+    expect(await page.locator("#live-link-message").textContent()).toBe("");
+    expect(await page.locator("#new-edit-link-confirm").isHidden()).toBe(true);
+  }
+
+  it("WHEN the builder signs out from step 4 THEN the page holds no edit link anywhere (link, QR code, message)", async () => {
+    const { api } = await openLiveWithEditLink();
+    api.handlers["POST /api/sign-out"] = () => ({ status: 200, body: { message: "You're signed out." } });
+    // A message under the buttons, to see it go too.
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expect.poll(() => page.locator("#live-link-message").textContent()).toBe("Your new edit link is ready. The old link and QR code no longer save.");
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expectNoEditLinkLeft();
+  }, 30_000);
+
+  it("WHEN New edit link finds the session ended (401) THEN the sign-in screen shows and the page holds no edit link anywhere", async () => {
+    const { api } = await openLiveWithEditLink();
+    api.state.renewAnswer = { status: 401, body: { message: "Please sign in." } };
+    await page.getByRole("button", { name: "New edit link" }).click();
+    await page.getByRole("button", { name: "Yes, make a new link" }).click();
+    await expectNoEditLinkLeft();
+    expect(await page.locator("#message-email").textContent()).toBe(MESSAGES.signedOut);
+  }, 30_000);
+
+  it("criterion 3: WHEN the builder presses Copy view-only link THEN the copied address has no fragment", async () => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+    await openLiveWithEditLink();
+    await page.getByRole("button", { name: "Copy view-only link" }).click();
+    await expect.poll(() => page.locator("#live-link-message").textContent()).toBe("View-only link copied. People who open it can look, not save.");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toBe(APP_URL);
+    expect(new URL(copied).hash).toBe("");
+    expect(copied).not.toContain("#");
+    expect(copied).not.toContain(SECRET_1);
+  }, 30_000);
+
+  it("WHEN the browser will not copy THEN the page shows the view-only address to copy by hand (still no fragment)", async () => {
+    await openLiveWithEditLink();
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: () => Promise.reject(new Error("denied")) } });
+    });
+    await page.getByRole("button", { name: "Copy view-only link" }).click();
+    await expect.poll(() => page.locator("#live-link-message").textContent()).toBe(`Copying did not work here. Your view-only link is ${APP_URL}`);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("criterion 5: WHEN step 4 is shown at 375 px THEN nothing scrolls sideways, with the edit link, its note, the confirmation and a message", async () => {
+    await openLiveWithEditLink();
+    await expectNoSideScroll();
+    await page.getByRole("button", { name: "New edit link" }).click();
+    expect(await page.locator("#new-edit-link-confirm").isVisible()).toBe(true);
+    // The longest message: copying refused, the address shown.
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: () => Promise.reject(new Error("denied")) } });
+    });
+    await page.getByRole("button", { name: "Copy view-only link" }).click();
+    await expect.poll(() => page.locator("#live-link-message").textContent()).toContain("Copying did not work here.");
+    await expectNoSideScroll();
+    for (const id of ["live-link", "live-edit-note", "new-edit-link-confirm", "live-link-actions", "live-link-message"]) {
+      const box = await page.locator(`#${id}`).boundingBox();
+      if (box === null) throw new Error(`#${id} has no box`);
+      expect(box.x, id).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width, id).toBeLessThanOrEqual(PHONE.width);
+    }
+  }, 30_000);
+
+  it("WHEN the answer has no edit link (it could not be read) THEN step 4 shows the plain address as before, Copy view-only link, and no New edit link", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    api.state.editUrl = undefined;
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    expect(await page.getByRole("link", { name: APP_URL }).getAttribute("href")).toBe(APP_URL);
+    expect(await page.locator("#live-link-label").textContent()).toBe("Open it at");
+    expect(await page.getByRole("img", { name: `QR code for ${APP_URL}` }).isVisible()).toBe(true);
+    expect(await decodeQrOnScreen()).toBe(APP_URL);
+    expect(await page.locator("#live-edit-note").isVisible()).toBe(false);
+    expect(await page.getByRole("button", { name: "Copy view-only link" }).isVisible()).toBe(true);
+    expect(await page.locator("#new-edit-link").isVisible()).toBe(false);
+    await expectNoSideScroll();
+  }, 30_000);
+
+  it("WHEN an edit link is for another app or malformed THEN the page does not show it", async () => {
+    const api = fakeBuildApi("live", LIVE_FEED);
+    api.state.editUrl = `https://workshop.rankly.games/apps/bob-x/#edit=${SECRET_1}`;
+    await mockApi(api.handlers);
+    await page.goto(origin);
+    await expect.poll(() => screen("live").isVisible()).toBe(true);
+    expect(await page.locator("#live-link").getAttribute("href")).toBe(APP_URL);
+    expect(await page.locator("#new-edit-link").isVisible()).toBe(false);
+  }, 30_000);
+
+  it.skipIf(LINK_SHOTS === undefined || LINK_SHOTS === "")("takes the 375 px screenshot of step 4 with the edit link (fake data)", async () => {
+    const target = LINK_SHOTS as string;
+    mkdirSync(target, { recursive: true });
+    await context.close();
+    context = await browser.newContext({ viewport: PHONE, deviceScaleFactor: 2 });
+    page = await context.newPage();
+    page.setDefaultTimeout(5_000);
+    await openLiveWithEditLink();
+    await page.locator("#screen-live").screenshot({ path: join(target, "step4-375.png") });
     await expectNoSideScroll();
   }, 30_000);
 });
@@ -1741,7 +2031,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     expect(await page.locator("#live-failed").isVisible()).toBe(false);
     expect(await page.locator("#live-chat-budget").textContent()).toBe("AI budget left: $3.20");
     // The address, QR code and repository link stay above the change requests.
-    const qr = await page.getByRole("img", { name: `QR code for ${APP_URL}` }).boundingBox();
+    const qr = await page.getByRole("img", { name: EDIT_QR_NAME }).boundingBox();
     const count = await page.locator("#changes-left").boundingBox();
     expect(must(qr ?? undefined).y).toBeLessThan(must(count ?? undefined).y);
     // Behind the scenes: the change loop drawn by Mermaid as a picture inside the card, its text under it.
@@ -1845,7 +2135,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     await buildPollAfter(2000);
     await expect.poll(() => screen("live").isVisible()).toBe(true);
     await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
-    expect(await page.getByRole("link", { name: APP_URL }).getAttribute("href")).toBe(APP_URL);
+    expect(await page.getByRole("link", { name: EDIT_LINK_TEXT }).getAttribute("href")).toBe(EDIT_URL);
     expect(await page.locator("#proposal").isVisible()).toBe(false);
     expect(await suggestionButtons()).toEqual(SUGGESTIONS);
     expect(await page.locator("#suggestions").isVisible()).toBe(true);
@@ -1945,7 +2235,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     expect(await page.locator("#suggestions").isVisible()).toBe(false);
     expect(await page.locator("#proposal").isVisible()).toBe(false);
     // The app itself stays: its address and QR code.
-    expect(await page.getByRole("link", { name: APP_URL }).isVisible()).toBe(true);
+    expect(await page.getByRole("link", { name: EDIT_LINK_TEXT }).isVisible()).toBe(true);
     await expectNoSideScroll();
 
     // A page that still had the box (the fifth change built from another tab): the 409 says so, then the box goes.
@@ -1965,6 +2255,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     api.step4.kind = "change";
     api.step4.changeNumber = 2;
     api.build.state.status = "building";
+    api.build.state.linked = true;
     api.build.state.feed = [stepEvent("preparing"), stepEvent("writing")];
     await mockApi(api.handlers);
     await openPaused();
@@ -1977,7 +2268,7 @@ describe("step 4: change requests (ticket 3.8)", () => {
     expect(await page.locator("#live-failed-text").textContent()).toBe(changeBuildFailedText(2));
     expect(await page.locator("#live-failed-reasons li").allTextContents()).toEqual(["app.js, line 3: <b>an outside address</b>"]);
     expect(await page.locator("#live-failed b").count()).toBe(0);
-    expect(await page.getByRole("link", { name: APP_URL }).getAttribute("href")).toBe(APP_URL);
+    expect(await page.getByRole("link", { name: EDIT_LINK_TEXT }).getAttribute("href")).toBe(EDIT_URL);
     await expect.poll(() => page.locator("#changes-left").textContent()).toBe("Changes left: 3 of 5");
     expect(await page.locator("#live-chat-form").isVisible()).toBe(true);
     await expectNoSideScroll();
@@ -2356,17 +2647,16 @@ describe("ticket 3.5: the paused line on idle signed-in screens (status poll eve
 });
 
 describe("built site", () => {
-  it("holds only the page, its stylesheet, its two scripts, the 404 page, the facilitator dashboard (ticket 3.11) and the hand-off page (ticket 3.24), and no page has an inline script, style or handler", () => {
-    expect(readdirSync(dir).sort()).toEqual(["404.html", "app-sign-in", "app.js", "diagram.js", "facilitator", "index.html", "style.css"]);
+  it("holds only the page, its stylesheet, its two scripts, the 404 page and the facilitator dashboard (ticket 3.11; 3.24's hand-off page went in 3.27), and no page has an inline script, style or handler", () => {
+    expect(readdirSync(dir).sort()).toEqual(["404.html", "app.js", "diagram.js", "facilitator", "index.html", "style.css"]);
     expect(readdirSync(join(dir, "facilitator")).sort()).toEqual(["dashboard.js", "index.html"]);
-    expect(readdirSync(join(dir, "app-sign-in")).sort()).toEqual(["app-sign-in.js", "index.html"]);
     const html = readFileSync(join(dir, "index.html"), "utf8");
     expect(html).toContain('<script src="app.js" defer></script>');
+    expect(html).not.toContain("app-sign-in");
+    expect(readFileSync(join(dir, "app.js"), "utf8")).not.toContain("app-sign-in");
     const dashboard = readFileSync(join(dir, "facilitator", "index.html"), "utf8");
     expect(dashboard).toContain('<script src="/facilitator/dashboard.js" defer></script>');
-    const handOff = readFileSync(join(dir, "app-sign-in", "index.html"), "utf8");
-    expect(handOff).toContain('<script src="/app-sign-in/app-sign-in.js" defer></script>');
-    for (const page of [html, dashboard, handOff]) {
+    for (const page of [html, dashboard]) {
       expect(page).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/);
       expect(page).not.toMatch(/<style/);
       expect(page).not.toMatch(/\son[a-z]+=/i);

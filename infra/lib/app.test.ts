@@ -654,19 +654,16 @@ describe("buckets (criterion 2)", () => {
     expect(deployment?.[1].Properties?.DestinationBucketName).toBeDefined();
   });
 
-  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), the facilitator dashboard (ticket 3.11), the hand-off page (ticket 3.24), no TypeScript or tests (ticket 1.6)", () => {
+  it("uploads the pages built at synth time: the page, its stylesheet, app.js and diagram.js (ticket 1.9), the 404 page (ticket 2.5), the facilitator dashboard (ticket 3.11), no hand-off page (ticket 3.27), no TypeScript or tests (ticket 1.6)", () => {
     // The built folder in the assembly, and the asset CDK staged from it (same content).
-    const site = ["404.html", "app-sign-in", "app.js", "diagram.js", "facilitator", "index.html", "style.css"];
+    const site = ["404.html", "app.js", "diagram.js", "facilitator", "index.html", "style.css"];
     const dashboard = ["dashboard.js", "index.html"];
-    const handOff = ["app-sign-in.js", "index.html"];
     expect(readdirSync(join(dir, WEB_BUILD_FOLDER)).sort()).toEqual(site);
     expect(readdirSync(join(dir, WEB_BUILD_FOLDER, "facilitator")).sort()).toEqual(dashboard);
-    expect(readdirSync(join(dir, WEB_BUILD_FOLDER, "app-sign-in")).sort()).toEqual(handOff);
     const staged = readdirSync(dir).filter((name) => name.startsWith("asset.") && existsSync(join(dir, name, "app.js")) && existsSync(join(dir, name, "style.css")));
     expect(staged).toHaveLength(1);
     expect(readdirSync(join(dir, staged[0] ?? "")).sort()).toEqual(site);
     expect(readdirSync(join(dir, staged[0] ?? "", "facilitator")).sort()).toEqual(dashboard);
-    expect(readdirSync(join(dir, staged[0] ?? "", "app-sign-in")).sort()).toEqual(handOff);
   });
 });
 
@@ -758,7 +755,8 @@ describe("CloudFront /api/* behaviour (ticket 1.2 criteria 2, 3)", () => {
   it("sends /api/* to the HTTP API with managed CachingDisabled and AllViewerExceptHostHeader, all methods, HTTPS only", () => {
     const behaviours = distributionConfig().CacheBehaviors as Record<string, unknown>[];
     // /api/*, the data API's /api/apps/* (ticket 2.4), the apps' /apps/* (ticket 2.5) and the dashboard's /facilitator*
-    // (ticket 3.11), the hand-off page's /app-sign-in* (ticket 3.24) and apps' media /app-media/* (ticket 3.18), in this order.
+    // (ticket 3.11), the old hand-off page's /app-sign-in* (ticket 3.24; a redirect home since 3.27) and apps' media
+    // /app-media/* (ticket 3.18), in this order.
     expect(behaviours.map((b) => b.PathPattern)).toEqual(["/api/apps/*", "/api/*", "/apps/*", "/app-media/*", "/facilitator*", "/app-sign-in*"]);
     const behaviour = apiBehaviour();
     expect(behaviour).toMatchObject({
@@ -3639,11 +3637,15 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
     expect(config.CustomHeadersConfig).toBeUndefined();
   });
 
-  it("names the policy ssd-workshop-apps-v3 in the edge stack (ticket 3.24's popups escaping the sandbox), retained, versioned in its logical id", () => {
+  it("names the policy ssd-workshop-apps-v3 in the edge stack (ticket 3.24's popups escaping the sandbox, kept by Franck in 3.27), retained, versioned in its logical id, and only it is on /apps/*", () => {
     const [stackName, id, resource] = policy() ?? [];
     expect(stackName).toBe(STACK_NAMES.edge);
     expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v3");
     expect(id).toMatch(/^AppsHeadersV3[0-9A-F]{8}$/);
+    expect(behaviour()?.ResponseHeadersPolicyId).toEqual({ Ref: id });
+    // The older versions are not in the template (they stay in the account, retained, for Franck to delete).
+    const names = ofType("AWS::CloudFront::ResponseHeadersPolicy").map(([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name);
+    for (const old of ["ssd-workshop-apps-v1", "ssd-workshop-apps-v2"]) expect(names).not.toContain(old);
     expect(resource).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 
@@ -3704,6 +3706,22 @@ describe("CloudFront /facilitator* behaviour: the facilitator dashboard at /faci
       FunctionCode: readFileSync(SITE_INDEX_FUNCTION_FILE, "utf8"),
     });
     expect(SITE_INDEX_FUNCTION_NAME).toBe("ssd-workshop-site-index");
+  });
+
+  it("ticket 3.27: WHEN anyone opens /app-sign-in/?app=<nick> THEN the synthesized /app-sign-in* behaviour's function sends them to the home page, without the query", () => {
+    const signIn = (distributionConfig().CacheBehaviors as Record<string, unknown>[]).find((b) => b.PathPattern === "/app-sign-in*");
+    const defaults = distributionConfig().DefaultCacheBehavior as Record<string, unknown>;
+    const { PathPattern, FunctionAssociations, ...rest } = signIn ?? {};
+    expect(PathPattern).toBe("/app-sign-in*");
+    expect(rest).toEqual(defaults);
+    expect(FunctionAssociations).toEqual([{ EventType: "viewer-request", FunctionARN: { "Fn::GetAtt": [fn()?.[1], "FunctionARN"] } }]);
+    // The code as synthesized into the template, run as CloudFront runs it.
+    const code = fn()?.[2].Properties?.FunctionCode as string;
+    const handler = new Function(`${code}\nreturn handler;`)() as (event: { request: { uri: string; querystring: Record<string, { value: string }> } }) => unknown;
+    const home = { statusCode: 302, statusDescription: "Found", headers: { location: { value: "/" } } };
+    expect(handler({ request: { uri: "/app-sign-in/", querystring: { app: { value: "ada" } } } })).toEqual(home);
+    expect(handler({ request: { uri: "/app-sign-in", querystring: { app: { value: "ada" } } } })).toEqual(home);
+    expect(handler({ request: { uri: "/facilitator/", querystring: {} } })).toMatchObject({ uri: "/facilitator/index.html" });
   });
 });
 

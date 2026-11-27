@@ -41,8 +41,27 @@ import type { DiagramApi } from "./diagram.js";
 import { pictureUrl } from "./diagram-svg.js";
 import { approveResult, SPEC_TEXTS, specResult, specView, stepTwoMessages, type SpecVersion } from "./spec-view.js";
 import { qrModules, qrSvgPath } from "./qr.js";
-import { BUILD_POLL_INTERVAL_MS, behindPart, buildResult, feedLines, isRunning, nowText, showsStepFour, stageStates, type Build } from "./build-view.js";
-import { changeBuildFailedText, changeBuildingText, PHASE_3_TEXTS, proposalVersionText } from "../../api/workshop/texts.js";
+import {
+  BUILD_POLL_INTERVAL_MS,
+  behindPart,
+  buildResult,
+  editLinkResult,
+  feedLines,
+  isRunning,
+  nowText,
+  showsStepFour,
+  stageStates,
+  type Build,
+} from "./build-view.js";
+import {
+  changeBuildFailedText,
+  changeBuildingText,
+  copyFailedText,
+  editLinkText,
+  PHASE_3_TEXTS,
+  proposalVersionText,
+  STEP_FOUR_LINK_TEXTS,
+} from "../../api/workshop/texts.js";
 import {
   CHANGE_LOOP_ALT,
   CHANGE_LOOP_DIAGRAM,
@@ -56,8 +75,6 @@ import {
   type Proposal,
 } from "./live-view.js";
 import type { Conversation } from "./chat.js";
-import { appFromSearch, handOffAddress } from "./app-sign-in-view.js";
-import { appSignInNoteText } from "../../api/workshop/texts.js";
 
 type ScreenName = Screen | "loading";
 
@@ -109,6 +126,7 @@ function show(name: ScreenName, focusId?: string): void {
   if (name !== "build") stopBuildPolling();
   if (name !== "live") stopSuggestionsReread();
   current = name;
+  if (name === "email") forgetLiveLinks();
   for (const section of document.querySelectorAll<HTMLElement>("[data-screen]")) {
     section.hidden = section.id !== `screen-${name}`;
   }
@@ -614,6 +632,7 @@ function openBuild(): void {
 
 async function pollBuild(round: number): Promise<void> {
   buildTimer = undefined;
+  const linkRound = editLinkRound;
   const result = buildResult(await call("GET", "/api/build"));
   if (round !== buildRound) return;
   if (result.kind === "signed-out") {
@@ -627,7 +646,7 @@ async function pollBuild(round: number): Promise<void> {
     renderBuild(result.build);
     // Live, or a change build that failed (the app before it is still live): back to step 4 (ticket 3.8).
     if (showsStepFour(result.build)) {
-      showLive(result.build);
+      showLive(result.build, linkRound);
       return;
     }
     if (!isRunning(result.build.status)) return;
@@ -704,22 +723,77 @@ function renderBuild(build: Build): void {
 /** Step 3's first-build "Behind the scenes" text, as index.html has it (a change build shows another). */
 let firstBuildBehindText: string | undefined;
 
+/** Ticket 3.27: the app's plain (view-only) address and its edit link as step 4 shows them. */
+let liveLinks: { appUrl: string | undefined; editUrl: string | undefined } = { appUrl: undefined, editUrl: undefined };
 /**
- * Step 4 (tickets 2.10 and 2.11): the app's address as a link and as a QR code, and the repository link. Only the
- * addresses `parseBuild` validated reach the page, set with `href` and `textContent`; each part stays hidden
- * without its address. Ticket 3.8: after a failed change build, the failure and its reasons above them; then the change
- * conversation, read from `GET /api/conversation`.
+ * Ticket 3.27: bumped when New edit link changed (or may have changed) the link: a build read sent before carries the
+ * old link, so its `editUrl` is not shown (the link on the page stays).
  */
-function showLive(build: Build): void {
+let editLinkRound = 0;
+
+/**
+ * Ticket 3.27: the link and the QR code hold the edit link (anyone holding it can save), with the warning, Copy
+ * view-only link and New edit link; without an edit link (it could not be read), the plain address as before. Only
+ * addresses `parseBuild` or `editLinkResult` validated reach the page. The secret goes nowhere else: no title, no
+ * storage, no console, no request but the workshop API's.
+ */
+function renderLiveLinks(appUrl: string | undefined, editUrl: string | undefined): void {
+  const before = liveLinks.editUrl ?? liveLinks.appUrl;
+  liveLinks = { appUrl, editUrl };
+  const shown = editUrl ?? appUrl;
   const link = byId<HTMLAnchorElement>("live-link");
   const code = byId("live-qr-code");
-  if (build.appUrl !== undefined) {
-    link.href = build.appUrl;
-    if (link.textContent !== build.appUrl) code.replaceChildren(qrSvg(build.appUrl));
-    link.textContent = build.appUrl;
-  } else code.replaceChildren();
-  byId("live-address").hidden = build.appUrl === undefined;
-  byId("live-qr").hidden = build.appUrl === undefined;
+  if (shown !== undefined) {
+    link.href = shown;
+    if (shown !== before || code.childElementCount === 0) {
+      code.replaceChildren(qrSvg(shown, editUrl === undefined ? `QR code for ${shown}` : STEP_FOUR_LINK_TEXTS.qrLabel));
+    }
+    // Try 2: the visible text never shows the secret (screens are projected): the plain address and "(edit link)".
+    link.textContent = editUrl === undefined ? shown : editLinkText(editUrl.split("#")[0] ?? "");
+  } else {
+    code.replaceChildren();
+    link.removeAttribute("href");
+    link.textContent = "";
+  }
+  byId("live-link-label").textContent = editUrl === undefined ? STEP_FOUR_LINK_TEXTS.plainLabel : STEP_FOUR_LINK_TEXTS.editLabel;
+  byId("live-address").hidden = shown === undefined;
+  byId("live-qr").hidden = shown === undefined;
+  byId("live-edit-note").hidden = editUrl === undefined;
+  byId("live-link-actions").hidden = appUrl === undefined;
+  byId("new-edit-link").hidden = editUrl === undefined;
+  if (editUrl === undefined) byId("new-edit-link-confirm").hidden = true;
+}
+
+/**
+ * Ticket 3.27 try 2: on the way to the sign-in screen the edit link leaves the page: the hidden step 4 would otherwise
+ * keep the secret in the link and the QR code after signing out.
+ */
+function forgetLiveLinks(): void {
+  renderLiveLinks(undefined, undefined);
+  byId("new-edit-link-confirm").hidden = true;
+  byId("live-link-message").textContent = "";
+}
+
+function sayLink(message: string, tone: Tone): void {
+  const line = byId("live-link-message");
+  line.dataset["tone"] = tone;
+  line.textContent = message;
+}
+
+/**
+ * Step 4 (tickets 2.10 and 2.11): the app's address as a link and as a QR code (since ticket 3.27 its edit link), and
+ * the repository link. Each part stays hidden without its address. Ticket 3.8: after a failed change build, the failure
+ * and its reasons above them; then the change conversation, read from `GET /api/conversation`. `linkRound` is
+ * `editLinkRound` when the build was asked for.
+ */
+function showLive(build: Build, linkRound: number): void {
+  if (current !== "live") {
+    byId("new-edit-link-confirm").hidden = true;
+    byId("live-link-message").textContent = "";
+  }
+  // A read sent before New edit link answered keeps the link shown (it may hold the old secret).
+  const fresh = linkRound === editLinkRound || liveLinks.appUrl !== build.appUrl;
+  renderLiveLinks(build.appUrl, fresh ? build.editUrl : liveLinks.editUrl);
   const repository = byId<HTMLAnchorElement>("live-repository-link");
   if (build.repositoryUrl !== undefined) {
     repository.href = build.repositoryUrl;
@@ -929,6 +1003,7 @@ function renderEditor(changesLeft: boolean): void {
  * else step 4 with the conversation read again. A missing build or a passing problem keeps step 4.
  */
 async function refreshLive(): Promise<void> {
+  const linkRound = editLinkRound;
   const result = buildResult(await call("GET", "/api/build"));
   if (result.kind === "signed-out") {
     stopPolling();
@@ -937,7 +1012,7 @@ async function refreshLive(): Promise<void> {
   }
   if (result.kind === "build") {
     setPausedFrom(result.build);
-    if (showsStepFour(result.build)) showLive(result.build);
+    if (showsStepFour(result.build)) showLive(result.build, linkRound);
     else openBuild();
     return;
   }
@@ -1016,15 +1091,18 @@ async function drawChangeLoop(): Promise<void> {
   }
 }
 
-/** The QR code for `text` as an SVG element: a white square and one black path (no markup, no style attribute). */
-function qrSvg(text: string): SVGSVGElement {
+/**
+ * The QR code for `text` as an SVG element: a white square and one black path (no markup, no style attribute). `label`
+ * names it for screen readers (ticket 3.27: the edit link's QR code is not named by its address, which holds the secret).
+ */
+function qrSvg(text: string, label: string): SVGSVGElement {
   const SVG_NS = "http://www.w3.org/2000/svg";
   const { size, d } = qrSvgPath(qrModules(text));
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
   svg.setAttribute("shape-rendering", "crispEdges");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `QR code for ${text}`);
+  svg.setAttribute("aria-label", label);
   const background = document.createElementNS(SVG_NS, "rect");
   background.setAttribute("width", String(size));
   background.setAttribute("height", String(size));
@@ -1147,13 +1225,6 @@ function wire(): void {
       pendingEmail = null;
       emailInput.value = "";
       codeInput.value = "";
-      // Ticket 3.24: a sign-in opened from an app's "Sign in to save" goes back to the hand-off page for that app.
-      const app = appFromSearch(window.location.search);
-      const back = app === undefined ? undefined : handOffAddress(app);
-      if (back !== undefined) {
-        window.location.assign(back);
-        return;
-      }
       await goToOwnStep("code");
     });
   });
@@ -1316,6 +1387,61 @@ function wire(): void {
     });
   });
 
+  // Ticket 3.27: Copy view-only link copies the app's plain address (no fragment, so no edit secret).
+  byId<HTMLButtonElement>("copy-view-link").addEventListener("click", () => {
+    const viewUrl = liveLinks.appUrl;
+    if (viewUrl === undefined) return;
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(viewUrl);
+        sayLink(STEP_FOUR_LINK_TEXTS.copied, "info");
+      } catch {
+        sayLink(copyFailedText(viewUrl), "info");
+      }
+    })();
+  });
+
+  // Ticket 3.27: New edit link asks first, in the page (never window.confirm); Yes makes the new link, which ends the old.
+  const newLinkButton = byId<HTMLButtonElement>("new-edit-link");
+  const confirmBox = byId("new-edit-link-confirm");
+  newLinkButton.addEventListener("click", () => {
+    if (liveLinks.editUrl === undefined) return;
+    byId("live-link-message").textContent = "";
+    confirmBox.hidden = false;
+    byId("new-edit-link-cancel").focus();
+  });
+  byId<HTMLButtonElement>("new-edit-link-cancel").addEventListener("click", () => {
+    confirmBox.hidden = true;
+    newLinkButton.focus();
+  });
+  const yesButton = byId<HTMLButtonElement>("new-edit-link-yes");
+  yesButton.addEventListener("click", () => {
+    const appUrl = liveLinks.appUrl;
+    if (appUrl === undefined || liveLinks.editUrl === undefined) return;
+    void whileBusy(yesButton, async () => {
+      const result = editLinkResult(await call("POST", "/api/build/edit-link", {}), appUrl);
+      if (current !== "live") return;
+      confirmBox.hidden = true;
+      if (result.kind === "link") {
+        editLinkRound++;
+        renderLiveLinks(appUrl, result.editUrl);
+        sayLink(STEP_FOUR_LINK_TEXTS.renewed, "info");
+        newLinkButton.focus();
+      } else if (result.kind === "signed-out") {
+        stopPolling();
+        showEmail(MESSAGES.signedOut);
+      } else {
+        sayLink(result.message, result.tone);
+        newLinkButton.focus();
+        // The answer may be lost after the link changed: read the build again to show the link that works.
+        if (result.unsure) {
+          editLinkRound++;
+          await refreshLive();
+        }
+      }
+    });
+  });
+
   // Ticket 3.15: Cancel closes the editor and drops the edits (Edit my spec opens the live version again).
   byId<HTMLButtonElement>("spec-editor-cancel").addEventListener("click", () => {
     closeEditor();
@@ -1353,15 +1479,6 @@ function wire(): void {
 }
 
 wire();
-// Ticket 3.24: say why the sign-in is asked when it comes from an app's "Sign in to save".
-{
-  const app = appFromSearch(window.location.search);
-  if (app !== undefined) {
-    const note = byId("app-sign-in-note");
-    note.textContent = appSignInNoteText(app);
-    note.hidden = false;
-  }
-}
 document.addEventListener("visibilitychange", syncStatusPolling);
 show("loading");
 // A returning person with a valid session goes straight to their step.

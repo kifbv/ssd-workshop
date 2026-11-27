@@ -36,8 +36,6 @@
 
       <section id="screen-email" class="card" data-screen aria-labelledby="email-heading" hidden>
         <h2 id="email-heading" tabindex="-1">Sign in</h2>
-        <!-- Ticket 3.24: shown when this sign-in was opened from an app's "Sign in to save" (/?app=<nickname>). -->
-        <p id="app-sign-in-note" class="notice" hidden></p>
         <p>Enter the email address your facilitator has on the workshop list. We'll send you a sign-in code.</p>
         <form id="email-form" method="post" novalidate>
           <label for="email-input">Email address</label>
@@ -211,11 +209,26 @@
           <p id="live-failed-text"></p>
           <ul id="live-failed-reasons" class="reasons" aria-label="What went wrong"></ul>
         </div>
-        <p id="live-address" hidden>Open it at <a id="live-link" rel="noopener noreferrer" target="_blank"></a></p>
+        <!-- Ticket 3.27: the app's edit link (anyone holding it can save) as a link and a QR code; the plain address only
+             when the edit link could not be read. Copy view-only link copies the address without the edit part. -->
+        <p id="live-address" class="live-address" hidden><span id="live-link-label">Open it at</span> <a id="live-link" rel="noopener noreferrer" target="_blank"></a></p>
+        <p id="live-edit-note" class="notice edit-note" hidden>Anyone who has this link or QR code can save in your app. Share it only with people who should add or change things; to let others just look, share the view-only link.</p>
         <figure id="live-qr" class="qr" hidden>
           <div id="live-qr-code" class="qr-code"></div>
           <figcaption>Scan it with your phone's camera to open your app there.</figcaption>
         </figure>
+        <div id="live-link-actions" class="proposal-buttons link-actions" hidden>
+          <button id="copy-view-link" type="button" class="secondary">Copy view-only link</button>
+          <button id="new-edit-link" type="button" class="secondary">New edit link</button>
+        </div>
+        <div id="new-edit-link-confirm" class="notice link-confirm" role="group" aria-labelledby="new-edit-link-question" hidden>
+          <p id="new-edit-link-question">Make a new edit link? The current link and QR code stop saving at once, also on phones that already opened them.</p>
+          <div class="proposal-buttons">
+            <button id="new-edit-link-yes" type="button" class="primary" data-busy-label="Making…">Yes, make a new link</button>
+            <button id="new-edit-link-cancel" type="button" class="secondary">Cancel</button>
+          </div>
+        </div>
+        <p id="live-link-message" class="message" role="status" aria-live="polite"></p>
         <p id="live-repository" hidden>Your app's code is public on GitHub: <a id="live-repository-link" rel="noopener noreferrer" target="_blank"></a></p>
 
         <h3 id="changes-heading">Ask for a change</h3>

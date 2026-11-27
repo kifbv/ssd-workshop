@@ -503,7 +503,7 @@ sequenceDiagram
 ```
 
 The 3.24 per-person tokens stop at this deploy (their items are refused: no `kind`), and `POST /api/app-tokens` answers
-404 (`/app-sign-in/` still calls it until ticket 3.27). Merge 3.28 with this ticket, or right after, then run
+404 (`/app-sign-in/` called it until ticket 3.27 removed that page). Merge 3.28 with this ticket, or right after, then run
 `AWS_PROFILE=franck npm run -s apps -- refresh` once. No credentials needed:
 
 ```sh
@@ -543,7 +543,32 @@ On a phone: open an app with its plain address (no `#edit=`): no sign-in button 
 hides its Add/Save controls and shows "View only" (an older app keeps its buttons; pressing one says "This link is view
 only."). Open the edit link (step 4's link or QR code once 3.27 is live; until then `editUrl` from `GET /api/build`): saving works, and still works after closing and reopening the tab.
 
+## Check after the edit link page deploy (ticket 3.27)
+
+```mermaid
+flowchart LR
+  s4["Step 4"] -->|"link + QR code"| e["/apps/nick/#edit=secret<br/>(saves)"]
+  s4 -->|"Copy view-only link"| v["/apps/nick/<br/>(view only)"]
+  s4 -->|"New edit link + Yes"| n["POST /api/build/edit-link<br/>old secret: 401"]
+  old["/app-sign-in/?app=nick"] -->|"302"| home["/ (home page)"]
+```
+
+Step 4 shows the edit link and its QR code (not the plain address), the line "Anyone who has this link or QR code can
+save in your app...", Copy view-only link and New edit link (an in-page Yes/Cancel). The hand-off page `/app-sign-in/`
+is gone (the apps' CSP is unchanged: `allow-popups-to-escape-sandbox` stays, Franck's choice). No credentials needed:
+
+```sh
+curl -sS -D - -o /dev/null 'https://workshop.rankly.games/app-sign-in/?app=<nick>' | grep -i '^\(HTTP\|location\)'
+# expect: HTTP/2 302 and location: / (no query)
+```
+
+On a phone, signed in as a builder whose app is live: step 4's link and QR code open the app with `#edit=` and saving
+works; Copy view-only link, pasted in a new tab, opens it without `#edit=` (view only); New edit link, then Yes: the
+link and QR code change, and the tab opened with the old link answers "This link is view only." on its next save.
+
 ## Check after the sign-in-to-save deploy (ticket 3.24)
+
+(Historical: ticket 3.27 removed `/app-sign-in/`; the steps below no longer apply. The CSP check in step 8 still holds.)
 
 ```mermaid
 sequenceDiagram
@@ -640,6 +665,8 @@ On a phone signed in to the workshop (with a nickname):
 
 ## Right after the sign-in-in-apps deploy (ticket 3.25): refresh the live apps
 
+(Historical: since tickets 3.26 and 3.27 apps save with the edit link (`#edit=`), per-person sign-in to save and `/app-sign-in/` are gone; the steps below no longer apply as written.)
+
 ```mermaid
 flowchart LR
   f["Franck: npm run apps -- refresh"] -->|"scan APP# LIVE markers"| db[(ssd-workshop-data)]
@@ -683,6 +710,8 @@ Rights: the command needs Franck's `dynamodb:Scan` on `ssd-workshop-data` and `s
 refused both (access stack), so it never runs from a session.
 
 ## After the floating sign-in fix deploy: refresh the live apps
+
+(Historical: since tickets 3.26 and 3.27 apps save with the edit link (`#edit=`), per-person sign-in to save and `/app-sign-in/` are gone; the steps below no longer apply as written.)
 
 ```mermaid
 flowchart LR
@@ -745,8 +774,9 @@ pixels plus "rotate 90") would then show sideways. 3.19's `savePhoto()` draws th
 applies the orientation, so photos uploaded by the template are upright; only a photo sent straight from a camera file
 (as in step 2 below) may show turned.
 
-You need a live app `<nick>`, a write token `$T` for it (as in the 3.24 check: open `/app-sign-in/?app=<nick>`, press
-Continue, copy the `#wt=` value from the address), a photo `photo.jpg` (any phone photo up to 4 MB, ideally one with
+You need a live app `<nick>`, its edit secret `$T` (since 3.27: the part after `#edit=` in step 4's edit link; the
+link's text does not show it, so copy the link's address (long press or right click, "Copy link") or read `editUrl` from
+`GET /api/build` in the browser's dev tools), a photo `photo.jpg` (any phone photo up to 4 MB, ideally one with
 location data) and a voice recording `voice.m4a` or `voice.webm` (a phone's voice memo, up to 4 MB). Bodies go as
 `application/octet-stream` (not verified until this check: which content types API Gateway base64-encodes; a text type
 would garble the bytes and answer 415).
