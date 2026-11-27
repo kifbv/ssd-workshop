@@ -517,6 +517,32 @@ curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' "https://workshop.rankly
 Then, signed in as a builder whose app is live: step 4's `GET /api/build` (browser dev tools) answers `editUrl`; a
 `PUT` with `authorization: Bearer <the part after #edit=>` answers 204, and `?info=1` shows the builder as `updatedBy`.
 
+## After the apps-use-the-edit-link deploy (ticket 3.28): refresh the live apps
+
+```mermaid
+flowchart LR
+  m["merge 3.26 + 3.28 to main"] --> dep["deploy workflow<br/>(deployer bundles the new workshop-data.js)"]
+  dep --> new["new builds: get it at once"]
+  dep --> f["Franck: npm run -s apps -- refresh"]
+  f -->|"one {refresh: nick} per live app"| d[Deployer]
+  d -->|"puts workshop-data.js, invalidates it"| live["apps already live:<br/>edit link saves, plain address is view only,<br/>old Sign in to save buttons hidden"]
+```
+
+The new `workshop-data.js` reads `#edit=<secret>` from the address and keeps it there (a reload or a bookmark still
+saves), sends it on every write, and gives `workshopData.canSave()`. Without it every write fails with "This link is view
+only." before anything is sent, and the "Sign in to save" elements of apps built before stay hidden (no floating button
+any more). Run once after the deploy (safe to repeat):
+
+```sh
+AWS_PROFILE=franck npm run -s apps -- refresh
+curl -sS https://workshop.rankly.games/apps/<nick>/workshop-data.js | grep -c 'canSave: canSave'
+# expect: 1 (the old file has none)
+```
+
+On a phone: open an app with its plain address (no `#edit=`): no sign-in button anywhere, and an app built since 3.28
+hides its Add/Save controls and shows "View only" (an older app keeps its buttons; pressing one says "This link is view
+only."). Open the edit link (step 4's link or QR code once 3.27 is live; until then `editUrl` from `GET /api/build`): saving works, and still works after closing and reopening the tab.
+
 ## Check after the sign-in-to-save deploy (ticket 3.24)
 
 ```mermaid

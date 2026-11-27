@@ -15,11 +15,11 @@ shell and no package manager. You cannot run or preview the app, so check your w
   `<script src="workshop-data.js"></script>` as the first script in `<head>` exactly as written (no
   `defer` or `async`; only `<meta>`, `<link>` and `<title>` may come before it), and keep
   `<script src="app.js" defer></script>` after it. The deploy check refuses a page that runs any other
-  script first: `workshop-data.js` must start before the app's own code, which keeps the workshop's
-  sign-in out of the app's reach.
+  script first: `workshop-data.js` must start before the app's own code, so that it reads the app's
+  edit link (rule 6) before anything else runs.
 - `style.css`: all styles.
 - `app.js`: all behaviour. A classic script (no `import`/`export`), run after the page is parsed.
-- `workshop-data.js`: the data client (data, photos, voice recordings and AI suggestions) and the workshop's sign-in to save. Do not change it: the
+- `workshop-data.js`: the data client (data, photos, voice recordings and AI suggestions), which knows whether the app may save (rule 6). Do not change it: the
   workshop publishes its own current copy with the app, whatever this folder holds.
 - `SPEC.md`: the approved spec. Do not change it.
 - `README.md`: explains the files to the participant. If you add a file, add a row for it to the
@@ -33,7 +33,9 @@ shell and no package manager. You cannot run or preview the app, so check your w
 2. One page: `index.html`. Show different screens by hiding and showing sections, not with more
    HTML files. Give each screen a heading, or a tab or button that opens it, carrying the screen's
    name exactly as `SPEC.md` lists it under "Screens" (a screen called "Home" has a "Home" heading
-   or tab), so participants find what their spec describes.
+   or tab), so participants find what their spec describes. Never read or change `location.hash` and
+   never use `#...` links to switch screens: the part of the address after `#` holds the app's edit
+   link (rule 6), which a changed address would lose.
 3. Outside services: the app may read data (`fetch`) and show images (`<img>`) from free public
    services that need no key, over HTTPS, when `SPEC.md` asks for such information. Nothing else
    comes from other websites: no scripts, styles, fonts or libraries (the app's security policy
@@ -112,35 +114,34 @@ shell and no package manager. You cannot run or preview the app, so check your w
    deletes it. Keys use only letters, digits, `-` and `_`. Every call can fail: wrap it in
    `try`/`catch` and show `error.message` on the page. Limits: 350 KB per value, 500 keys and 10 MB
    per app. All visitors share the same data: anyone with the app's address can read it, and anyone
-   signed in to the workshop can change it.
-6. Saving needs the workshop's sign-in (reading does not). Every app works read-only for visitors:
-   - Everything the app shows loads and works without sign-in. Never save when the page opens or on
-     a timer; save only when the visitor does something (presses a button, sends a form).
-   - Where saving happens (by every form or button that saves, on every screen that saves: a list whose
-     items have Add or Save buttons too, not only a form on another screen; one just after such a list is
-     enough), put the sign-in button in `index.html`:
-     `<button class="sign-in" type="button" data-workshop-sign-in hidden>Sign in to save</button>`, on a
-     line of its own just after the form or the saving button (never inside a row of fields or
-     buttons, which it could make wider than the screen).
-     Do not give it a click handler: `workshop-data.js` shows it to visitors who are not signed in,
-     hides it once they are, and opens the workshop's sign-in in a new tab when it is pressed (the
-     visitor comes back to the app there, signed in). Style it in `style.css` (the `.sign-in` class).
-   - A save by a visitor who is not signed in fails with the message "Sign in to the workshop to save
-     in this app.": show it with the other errors (rule 5).
-   - `await workshopData.whoAmI()` gives the visitor's workshop nickname, as the workshop confirmed it
-     for their sign-in, or `null` (a visitor, or not confirmed); the app may show it ("You save as
-     Ada."). `workshopData.signInLink()` gives the sign-in page's address.
-   - The app may show who posted: `await workshopData.getInfo(key)` returns
+   holding the app's edit link can change it.
+6. Saving needs the app's edit link (reading does not). The app's builder opens the app with it from the
+   workshop page (a link or QR code whose address ends with `#edit=` and a secret) and may share it; anyone who
+   has only the plain address can look but not save. There is no sign-in.
+   - Everything the app shows loads and works for everyone. Never save when the page opens or on a timer;
+     save only when the visitor does something (presses a button, sends a form).
+   - `workshopData.canSave()` is `true` when the app was opened with its edit link, else `false`. When it is
+     `false`, hide every control that saves: Add, Save, Delete and Edit buttons, forms and their fields, rating
+     stars, Watched or Done buttons, photo and Record buttons, AI buttons, and buttons that only open such a
+     form, on every screen and on every item of a list. The screen tabs named in `SPEC.md` stay, so everyone
+     can see every screen.
+   - The starter shows how: `app.js` starts with
+     `if (!workshopData.canSave()) document.body.classList.add("view-only");` and `style.css` hides
+     `.view-only .edit-only`. Keep both, give every saving control (or the form or row that holds it) the
+     class `edit-only`, those `app.js` creates too, and keep the note
+     `<p class="view-only-note status">View only</p>`, which shows only then.
+   - Never add a sign-in button or a password. A save without the edit link fails with the message
+     "This link is view only.": show it with the other errors (rule 5).
+   - Everyone with the edit link saves under the builder's workshop nickname: `await workshopData.whoAmI()`
+     gives it with the edit link, else `null`.
+   - The app may show who saved: `await workshopData.getInfo(key)` returns
      `{ value, updatedBy, updatedAt }`, the value with the nickname of whoever saved it last and when
-     (both `null` when unknown). `updatedBy` is recorded by the workshop itself: prefer it to show who
-     posted. Show only that nickname, never anything else about a person.
-   - A name stored inside a value (for example the author of each item of a list) is written by the
-     app, and anyone signed in to the workshop could save any text there. If the app stores one, use
-     only `await workshopData.whoAmI()` (skip the name when it is `null`), and prefer one key per item
-     with `getInfo(key).updatedBy` when who posted matters.
+     (both `null` when unknown). Show only that nickname, never anything else about a person.
+   - When `SPEC.md` wants each person's name with what they add (the author of a message), ask for it in a
+     plain text field next to the other fields: anyone with the edit link could type any name there.
 7. No personal data: no email addresses, phone numbers, names of real people, passwords or keys in
-   the code, and do not ask visitors for an email address or a password. The app has no accounts or
-   sign-in of its own: the workshop's sign-in (rule 6) is the only one.
+   the code, and do not ask visitors for an email address or a password. The app has no accounts and
+   no sign-in: its edit link (rule 6) is the only way to save.
 8. No `console.log` or `console.error` left in the code, and no errors in the browser console.
 9. Phones first: it must work at 375 px wide with nothing scrolling sideways (no fixed widths wider
    than the screen; use `max-width: 100%` on images). A field and a button side by side in a flex
@@ -162,8 +163,8 @@ shell and no package manager. You cannot run or preview the app, so check your w
    - The photo button is a file input that opens the camera on a phone:
      `<input id="photo-input" class="file-input" type="file" accept="image/*" capture="environment">` with
      `<label for="photo-input" class="button">Take a photo</label>` styled as a button, the input itself hidden by its
-     class in `style.css` (`position: absolute; width: 1px; height: 1px; opacity: 0;`). Put the sign-in button (rule 6)
-     on a line of its own just after it.
+     class in `style.css` (`position: absolute; width: 1px; height: 1px; opacity: 0;`). Hide the label with the class
+     `edit-only` when the app cannot save (rule 6).
    - When a photo is picked: `const address = await workshopData.savePhoto(input.files[0]);` shrinks it to 2,560 px at
      most, saves it as a JPEG and gives its address. Show "Saving..." meanwhile, `error.message` if it fails, and set
      `input.value = ""` afterwards so the same photo can be picked again.
@@ -205,12 +206,12 @@ shell and no package manager. You cannot run or preview the app, so check your w
 
      `recordVoice()` records with the microphone (it stops by itself at 5 minutes) or, where the browser refuses the
      microphone, opens the phone's own recorder (`recording.microphone` is then `false`). `recording.done` gives the
-     saved recording's address. Put the sign-in button (rule 6) on a line of its own just after the record button.
+     saved recording's address. Hide the Record button with the class `edit-only` when the app cannot save (rule 6).
    - Keep the address in the data with the recording's other fields, play it with
      `<audio controls preload="none" src="...">`, and delete it with `await workshopData.deleteMedia(address)`.
 16. AI suggestions (only when `SPEC.md` asks for them). The workshop's AI can suggest tags for a photo, read fields from
     a photo (a receipt's shop, date and total), sort a text into categories and turn a voice recording into text; nothing
-    else (no chat, no writing texts, no free questions). Each call needs the sign-in (rule 6), like saving. Use AI only
+    else (no chat, no writing texts, no free questions). Each call needs the edit link (rule 6), like saving. Use AI only
     when `SPEC.md` says the AI suggests, reads or sorts something: a tags field, a form or a list in a spec that does not
     ask for AI stays a plain field the visitor fills, with no AI call.
    - `await workshopData.ai.tagPhoto(address)` gives up to 5 suggested tags for a photo of this app (the address

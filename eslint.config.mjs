@@ -30,6 +30,8 @@ export default defineConfig(
         MediaRecorder: "readonly",
         setTimeout: "readonly",
         clearTimeout: "readonly",
+        // Ticket 3.28: workshop-data.js keeps old apps' sign-in elements hidden.
+        MutationObserver: "readonly",
         workshopData: "readonly",
       },
     },

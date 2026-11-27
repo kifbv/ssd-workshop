@@ -9,7 +9,8 @@
 // session's proxy the agent gets that proxy for its fetches (`webProxyEnvironment`); the builder task never does.
 // Ticket 3.7: `evalChange` builds an example, then changes it with a change build (the live app on main, edited).
 // Ticket 3.22: the in-memory workshop also answers the AI route (ticket 3.21) with fixed answers (no Bedrock), and an AI
-// case is checked signed in by `exerciseAi`.
+// case is checked with the edit link by `exerciseAi`. Ticket 3.28: every app is opened with its edit link and without it
+// (`exerciseEditLink`).
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
@@ -31,7 +32,7 @@ import { answerChange } from "../../api/conversation/change.js";
 import { usageOf, type ModelClient } from "../../api/conversation/model.js";
 import { loadTemplateFiles } from "../../api/github/template.js";
 import { appArchiveUrl, type ModelSetting } from "../../api/settings.js";
-import { APP_AI_TEXTS, APP_SIGN_IN_TEXTS } from "../../api/workshop/texts.js";
+import { APP_AI_TEXTS, APP_EDIT_LINK_TEXTS } from "../../api/workshop/texts.js";
 import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
@@ -39,18 +40,20 @@ import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
 import { RECEIPT_CASES, receiptPhoto } from "./app-ai.js";
 import {
   AI_HELPER,
+  FILL_AND_MARK_SAVE_SCRIPT,
   MEDIA_FILTER,
   missingScreens,
+  SAVING_CONTROLS_SCRIPT,
+  SCREEN_OPENERS_SCRIPT,
   screenNames,
-  SIGN_IN_SCRIPT,
   specTitle,
   type AiCase,
   type AiCheck,
   type BuildEvalOutcome,
   type ChangeEvalOutcome,
+  type EditLinkCheck,
   type MediaCase,
   type MediaCheck,
-  type SignInCheck,
 } from "./logic.js";
 
 const NICKNAME = "eval-app";
@@ -61,18 +64,19 @@ const CHANGE_BUILD_ID = "eval-build-2";
 const PARTICIPANT = "eval-participant";
 const PHONE = { width: 375, height: 740 };
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, DELETE", "access-control-allow-headers": "content-type, accept, authorization" };
-/** Ticket 3.25: what the in-memory data API answers a write without a valid token, as the real one does (3.24). */
-const SIGN_IN_TO_SAVE = JSON.stringify({ message: APP_SIGN_IN_TEXTS.signInToSave });
+/** What the in-memory data API answers a write without the app's edit secret, as the real one does (3.26). */
+const VIEW_ONLY = JSON.stringify({ message: APP_EDIT_LINK_TEXTS.viewOnly });
 
 /** Labels the title check reads: headings, buttons, tabs, links, labels, legends and aria-labels, hidden ones included. */
 const LABELS_SCRIPT = `Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,button,[role=tab],[role=button],a,label,legend,summary,[aria-label]"))
   .flatMap((el) => [el.textContent || "", el.getAttribute("aria-label") || ""]).filter((t) => t.trim() !== "")`;
 
-/** Ticket 3.19: the write token of the signed-in pass (a media case), and the nickname the in-memory API names for it. */
+/** Ticket 3.28: the app's edit secret (ticket 3.26) the eval opens the app with, and the nickname the in-memory API names for it. */
 const EVAL_TOKEN = Buffer.alloc(32, 5).toString("base64url");
+const EDIT_LINK = `#edit=${EVAL_TOKEN}`;
 const EVAL_WRITER = "eval-writer";
 const MEDIA_ID = /^[A-Za-z0-9_-]{22}$/;
-const MEDIA_MESSAGES = { signInToSave: APP_SIGN_IN_TEXTS.signInToSave, unsupported: "Send a photo as a JPEG, or a voice recording as WebM, Ogg or MP4 audio." };
+const MEDIA_MESSAGES = { unsupported: "Send a photo as a JPEG, or a voice recording as WebM, Ogg or MP4 audio." };
 
 /**
  * The in-memory workshop an app is opened on: its files under the apps' CSP, the data API (ticket 2.4) and, since ticket
@@ -128,7 +132,7 @@ async function routeApp(page: Page, files: readonly AppFile[], token: string | u
         return json(route, status, JSON.stringify(body));
       };
       if (request.method() !== "POST") return answer(404, { message: "Not found." });
-      if (!signedIn) return answer(401, { message: APP_SIGN_IN_TEXTS.signInToSave });
+      if (!signedIn) return answer(401, { message: APP_EDIT_LINK_TEXTS.viewOnly });
       let body: unknown;
       try {
         body = JSON.parse(request.postData() ?? "");
@@ -145,11 +149,10 @@ async function routeApp(page: Page, files: readonly AppFile[], token: string | u
     if (path.startsWith(dataPrefix) || path.startsWith(mediaPrefix)) {
       if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
       const write = request.method() === "PUT" || request.method() === "DELETE";
-      // Ticket 3.24: a visitor has no token, so every write is refused as the real API refuses it (Chromium logs the
-      // 401, so an app that saves without the visitor doing anything fails the console check: apps work read-only).
+      // Without the edit secret every write is refused as the real API refuses it (workshop-data.js sends none then).
       if (write && !signedIn) {
         api.writes.push({ method: request.method(), path, status: 401, body: "" });
-        return json(route, 401, SIGN_IN_TO_SAVE);
+        return json(route, 401, VIEW_ONLY);
       }
       if (path.startsWith(mediaPrefix)) {
         const id = path.slice(mediaPrefix.length);
@@ -170,7 +173,7 @@ async function routeApp(page: Page, files: readonly AppFile[], token: string | u
       }
       const key = path.slice(dataPrefix.length);
       if (url.searchParams.get("whoami") === "1") {
-        return signedIn ? json(route, 200, JSON.stringify({ nickname: EVAL_WRITER })) : json(route, 401, SIGN_IN_TO_SAVE);
+        return signedIn ? json(route, 200, JSON.stringify({ nickname: EVAL_WRITER })) : json(route, 401, VIEW_ONLY);
       }
       if (request.method() === "PUT") {
         const body = request.postData() ?? "";
@@ -225,38 +228,121 @@ async function evalPage(browser: Browser): Promise<{ context: BrowserContext; pa
 }
 
 /**
- * Opens the app's files at /apps/<nickname>/ in Chromium under the CSP, as a visitor (no token: ticket 3.25), and reads
- * what the title check and the sign-in check need.
+ * Opens the app's files at /apps/<nickname>/ in Chromium under the CSP, as a visitor (no edit link: ticket 3.28), and
+ * reads what the title check needs.
  */
 async function openInBrowser(
   browser: Browser,
   files: readonly AppFile[],
-): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[]; signIn: SignInCheck }> {
+): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[] }> {
   const { context, page, errors, outsideHosts } = await evalPage(browser);
   await routeApp(page, files, undefined);
-  // The tab the sign-in button opens: a stand-in for the workshop's hand-off page (its address is what is checked).
-  const handOff = `${EVAL_ORIGIN}/app-sign-in/?app=${NICKNAME}`;
-  await context.route(`${EVAL_ORIGIN}/app-sign-in/**`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Sign in</title>" }));
   try {
     await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/`, { waitUntil: "load" });
     await page.waitForLoadState("networkidle").catch(() => undefined);
     await page.waitForTimeout(500);
-    const overflow = await page.evaluate<number>(`Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - document.documentElement.clientWidth`);
+    const overflow = await page.evaluate<number>(OVERFLOW_SCRIPT);
     const title = await page.title();
     const labels = await page.evaluate<string[]>(LABELS_SCRIPT);
-    // Ticket 3.25: the visitor finds the sign-in button, and pressing it opens the hand-off page in a new tab.
-    const found = await page.evaluate<{ shown: number; visible: number }>(SIGN_IN_SCRIPT);
-    let opens: boolean | undefined;
-    if (found.visible > 0) {
-      const popup = context.waitForEvent("page", { timeout: 5_000 }).catch(() => undefined);
-      await page.click("[data-eval-sign-in]", { timeout: 5_000 }).catch(() => undefined);
-      const tab = await popup;
-      opens = tab !== undefined && (await tab.waitForURL(handOff, { timeout: 5_000 }).then(() => true, () => false));
-    }
-    return { errors, overflow: Math.max(0, overflow), title, labels, outsideHosts: [...outsideHosts].sort(), signIn: { ...found, opens } };
+    return { errors, overflow: Math.max(0, overflow), title, labels, outsideHosts: [...outsideHosts].sort() };
   } finally {
     await context.close();
   }
+}
+
+const OVERFLOW_SCRIPT = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - document.documentElement.clientWidth`;
+const VIEW_ONLY_SHOWN = `(document.body.innerText || "").includes(${JSON.stringify(APP_EDIT_LINK_TEXTS.viewOnly)})`;
+
+/**
+ * Ticket 3.28: looks at the page's first screen, then opens each screen the spec names (SCREEN_OPENERS_SCRIPT, with real
+ * clicks) and looks again; `look` runs after each. Openers are found again before each click (a screen may hide them).
+ */
+async function aroundScreens(page: Page, screens: readonly string[], look: () => Promise<void>): Promise<void> {
+  await look();
+  for (let i = 0; i < screens.length; i += 1) {
+    await page.evaluate<number>(`${SCREEN_OPENERS_SCRIPT}(${JSON.stringify(screens)})`);
+    const opener = page.locator(`[data-eval-opener="${i}"]`);
+    if ((await opener.count()) === 0) continue;
+    await opener.first().click({ timeout: 5_000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    await look();
+  }
+}
+
+/**
+ * Ticket 3.28: the edit-link check (EditLinkCheck in ./logic.ts). With the edit link: canSave(), writes before anything
+ * was done, the saving controls on every screen, sideways scroll and console errors, and (when `tryToSave`: not a media
+ * or AI case, whose own pass saves) a save: on each screen in turn, the fields filled and Save or Add pressed, until the
+ * data API stores a value (a search first, when the app finds an item before adding it). Then, without the edit link and
+ * on the data saved: canSave(), the saving controls a visitor sees on every screen, and "This link is view only." shown.
+ */
+export async function exerciseEditLink(browser: Browser, files: readonly AppFile[], screens: readonly string[], tryToSave: boolean): Promise<EditLinkCheck> {
+  const editor = await evalPage(browser);
+  const api = await routeApp(editor.page, files, EVAL_TOKEN);
+  const check: EditLinkCheck = {
+    editorCanSave: false,
+    editorControls: 0,
+    savedOnOpen: 0,
+    saved: tryToSave ? false : undefined,
+    editorOverflow: 0,
+    editorErrors: editor.errors,
+    visitorCanSave: true,
+    visitorControls: [],
+    visitorRefused: false,
+  };
+  const stored = () => api.writes.some((w) => w.method === "PUT" && w.status === 204 && w.path.startsWith(`/api/apps/${NICKNAME}/data/`));
+  try {
+    const page = editor.page;
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/${EDIT_LINK}`, { waitUntil: "load" });
+    await page.waitForLoadState("networkidle").catch(() => undefined);
+    await page.waitForTimeout(1_000);
+    check.savedOnOpen = api.writes.length;
+    check.editorCanSave = await page.evaluate<boolean>("workshopData.canSave()");
+    const pressSave = async (): Promise<void> => {
+      if (await page.evaluate<boolean>(`${FILL_AND_MARK_SAVE_SCRIPT}(${JSON.stringify(screens)})`)) {
+        await page.click("[data-eval-save]", { timeout: 5_000 }).catch(() => undefined);
+        await waitUntil(stored, 3_000);
+      }
+    };
+    await aroundScreens(page, screens, async () => {
+      check.editorControls = Math.max(check.editorControls, (await page.evaluate<string[]>(`${SAVING_CONTROLS_SCRIPT}(${JSON.stringify(screens)})`)).length);
+      check.editorOverflow = Math.max(check.editorOverflow, await page.evaluate<number>(OVERFLOW_SCRIPT));
+      if (!tryToSave || stored()) return;
+      await pressSave();
+      if (stored()) return;
+      // An app that finds an item before adding it (a film by its title): search, wait for the answer, then add.
+      const search = page.locator("button, input[type=submit]").filter({ hasText: /search|find|look up/i }).first();
+      if ((await search.count()) > 0 && (await search.isVisible())) {
+        await search.click({ timeout: 5_000 }).catch(() => undefined);
+        await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
+        await page.waitForTimeout(1_000);
+        await pressSave();
+      }
+    });
+    if (tryToSave) check.saved = stored();
+  } finally {
+    await editor.context.close();
+  }
+  // Without the edit link, on what was saved (so a list's items show with their own buttons).
+  const visitor = await evalPage(browser);
+  const visitorApi = await routeApp(visitor.page, files, undefined);
+  for (const [key, value] of api.data) visitorApi.data.set(key, value);
+  try {
+    const page = visitor.page;
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/`, { waitUntil: "load" });
+    await page.waitForLoadState("networkidle").catch(() => undefined);
+    await page.waitForTimeout(1_000);
+    check.visitorCanSave = await page.evaluate<boolean>("workshopData.canSave()");
+    const seen = new Set<string>();
+    await aroundScreens(page, screens, async () => {
+      for (const label of await page.evaluate<string[]>(`${SAVING_CONTROLS_SCRIPT}(${JSON.stringify(screens)})`)) seen.add(label);
+      if (await page.evaluate<boolean>(VIEW_ONLY_SHOWN)) check.visitorRefused = true;
+    });
+    check.visitorControls = [...seen];
+  } finally {
+    await visitor.context.close();
+  }
+  return check;
 }
 
 /**
@@ -394,7 +480,7 @@ async function openMediaScreen(page: Page, kind: MediaCase): Promise<void> {
 }
 
 /**
- * Ticket 3.19: a media case, signed in (the app opened with a write token, as after the workshop's sign-in): finds the
+ * Ticket 3.19: a media case, with the edit link (ticket 3.28; the app opened with its secret in the address): finds the
  * photo button (a file input accepting images) or the Record button, picks the sample photo there (or, in the phone's
  * recorder that recordVoice() opens where Chromium refuses the microphone in the sandbox, the sample recording), presses
  * the save button next to it when the app saves only then, and checks that the media API stored a file, that a saved
@@ -410,7 +496,7 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
     api.writes.filter((w) => w.method === "PUT" && w.status === 201).map((w) => `${EVAL_ORIGIN}/app-media/${NICKNAME}/${w.path.split("/").pop() ?? ""}`);
   const waitForUpload = (ms: number) => waitUntil(() => uploadedAddresses().length > 0, ms);
   try {
-    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/${EDIT_LINK}`, { waitUntil: "load" });
     await page.waitForLoadState("networkidle").catch(() => undefined);
     await page.waitForTimeout(500);
     if (kind === "photo") {
@@ -472,7 +558,7 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
         // Some apps draw the list again only when its screen is opened (live eval run 1): open the app afresh, as the
         // next visitor would, and look again (the in-memory workshop keeps what was saved).
         await page.goto("about:blank");
-        await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+        await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/${EDIT_LINK}`, { waitUntil: "load" });
         check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
       }
     }
@@ -578,7 +664,7 @@ const SAVE_AFTER_SUGGESTION = `((word) => {
 })`;
 
 /**
- * Ticket 3.22: an AI case, signed in, on the in-memory workshop whose AI route answers with fixed values: picks a photo
+ * Ticket 3.22: an AI case, with the edit link, on the in-memory workshop whose AI route answers with fixed values: picks a photo
  * in the photo button (a generated drawing, or for a receipt a synthetic receipt drawn in Chromium as the app-ai eval
  * does), waits for the app to ask the AI by itself (else presses a button that asks for a suggestion, else Save), checks
  * that the answer shows and that nothing holding it was saved yet, accepts it as a visitor would (fields already hold it;
@@ -613,7 +699,7 @@ export async function exerciseAi(browser: Browser, files: readonly AppFile[], ki
   const holds = (body: string) => savedMarkers().some((marker) => new RegExp(marker, "i").test(body));
   const dataWrites = () => api.writes.filter((w) => w.method === "PUT" && w.status === 204 && w.path.startsWith(`/api/apps/${NICKNAME}/data/`));
   try {
-    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/${EDIT_LINK}`, { waitUntil: "load" });
     await page.waitForLoadState("networkidle").catch(() => undefined);
     await page.waitForTimeout(500);
     check.button = await page.evaluate<boolean>(`(() => {
@@ -741,7 +827,6 @@ async function runEvalBuild(
       overflow: 0,
       missing: [],
       outsideHosts: [],
-      signIn: { shown: 0, visible: 0, opens: undefined },
       durationMs,
       usage: {
         inputTokens: total.inputTokens - usageBefore.inputTokens,
@@ -762,16 +847,22 @@ async function runEvalBuild(
 }
 
 /** The deploy check and the page at 375 px for the published files, scored against `spec`'s title and screens. */
-async function checkPublished(browser: Browser, published: AppFile[], spec: string): Promise<Pick<BuildEvalOutcome, "checkPassed" | "consoleErrors" | "overflow" | "missing" | "outsideHosts" | "signIn"> & { page: { title: string; labels: string[] } }> {
+async function checkPublished(
+  browser: Browser,
+  published: AppFile[],
+  spec: string,
+  tryToSave = true,
+): Promise<Pick<BuildEvalOutcome, "checkPassed" | "consoleErrors" | "overflow" | "missing" | "outsideHosts"> & { editLink: EditLinkCheck; page: { title: string; labels: string[] } }> {
   const check = checkApp(published);
   const page = await openInBrowser(browser, published);
+  const editLink = await exerciseEditLink(browser, published, screenNames(spec), tryToSave);
   return {
     checkPassed: check.ok,
     consoleErrors: page.errors,
     overflow: page.overflow,
     missing: missingScreens(specTitle(spec), screenNames(spec), page),
     outsideHosts: page.outsideHosts,
-    signIn: page.signIn,
+    editLink,
     page: { title: page.title, labels: page.labels },
   };
 }
@@ -805,10 +896,11 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser, medi
   const run = await runEvalBuild(world, BUILD_ID, baseCommit, attemptId);
   if (run.published === undefined) return { outcome: run.outcome };
   await dumpPublished(run.published);
-  const checked = await checkPublished(browser, run.published, spec);
-  // Ticket 3.19: a media case is also opened signed in, and a photo or recording uploaded through it.
+  // Ticket 3.28: a media or AI case saves with the edit link in its own pass below.
+  const checked = await checkPublished(browser, run.published, spec, media === undefined && ai === undefined);
+  // Ticket 3.19: a media case is also opened with the edit link, and a photo or recording uploaded through it.
   const mediaCheck = media === undefined ? undefined : await exerciseMedia(browser, run.published, media);
-  // Ticket 3.22: an AI case is opened signed in too, and its suggestion asked, shown, accepted and saved.
+  // Ticket 3.22: an AI case is opened with the edit link too, and its suggestion asked, shown, accepted and saved.
   const aiCheck = ai === undefined ? undefined : await exerciseAi(browser, run.published, ai);
   return {
     outcome: {
@@ -818,7 +910,7 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser, medi
       overflow: checked.overflow,
       missing: checked.missing,
       outsideHosts: checked.outsideHosts,
-      signIn: checked.signIn,
+      editLink: checked.editLink,
       ...(mediaCheck === undefined ? {} : { media: mediaCheck }),
       ...(aiCheck === undefined ? {} : { ai: aiCheck }),
       usesAi: callsAi(run.published),

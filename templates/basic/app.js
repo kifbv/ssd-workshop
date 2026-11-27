@@ -1,6 +1,9 @@
 // app.js: what the page does. A shared counter, stored with workshop-data.js.
-// Anyone can see the count; pressing saves, which needs the workshop's sign-in (workshop-data.js offers it).
+// Anyone can see the count; pressing saves, which needs the app's edit link (workshopData.canSave()).
 "use strict";
+
+// Opened without the edit link: view only. style.css then hides every element with the class edit-only.
+if (!workshopData.canSave()) document.body.classList.add("view-only");
 
 const countText = document.getElementById("count");
 const pressButton = document.getElementById("press");

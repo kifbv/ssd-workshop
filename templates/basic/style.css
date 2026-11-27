@@ -78,11 +78,18 @@ button {
   cursor: pointer;
 }
 
-/* The workshop's "Sign in to save" button (workshop-data.js shows it to visitors who are not signed in). */
-.sign-in {
-  background: transparent;
-  color: var(--accent);
-  border: 2px solid var(--accent);
+/* View only: opened without the app's edit link (workshopData.canSave() is false), app.js gives <body> the class
+   view-only. Every control that saves has the class edit-only and is hidden then; the view-only note shows instead. */
+.view-only .edit-only {
+  display: none !important;
+}
+
+.view-only-note {
+  display: none;
+}
+
+.view-only .view-only-note {
+  display: block;
 }
 
 button:disabled {

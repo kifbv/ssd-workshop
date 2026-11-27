@@ -39,42 +39,52 @@ paths:
   a new browser global used there must be added to that list.
 - Since ticket 3.25 the deployer publishes the platform's `templates/basic/workshop-data.js` (bundled with it) in every
   app, whatever the repository holds: a change to it reaches new deploys at once, and live apps through
-  `npm run apps -- refresh` (Franck). Keep it passing the deploy check (`deploy.test.ts` checks it): send the token as
-  `options.headers.authorization = "Bearer " + pass` (a property set with `=`; `authorization:` or `"authorization",`
+  `npm run apps -- refresh` (Franck). Keep it passing the deploy check (`deploy.test.ts` checks it): send the secret as
+  `options.headers.authorization = "Bearer " + editSecret` (a property set with `=`; `authorization:` or `"authorization",`
   fails the check), and never write the header with a colon in a comment either. Keep it backward compatible: older
-  apps' `app.js` call only `get`, `set`, `remove`.
-- Sign-in in apps (3.25): the token arrives in the fragment (`#wt=<token>`, nothing else: a name in the address is not
-  checked by anyone, try 2) and is removed
-  with `history.replaceState` at once (it works in the sandbox's opaque origin in Chromium); in Playwright, a `goto` that
-  changes only the fragment does not reload the page: go to `about:blank` first. A visitor's save gets a 401, which
-  Chromium logs as a console error: a test of that path allows exactly that line. Style an element made by
-  `workshop-data.js` through the CSSOM (`element.style.x = ...`), never a `style` attribute (the CSP refuses it).
+  apps call `get`, `set`, `remove`, `getInfo`, `whoAmI`, `signInLink` (now `null`), media and AI helpers.
+- Edit link in apps (3.28, replaces 3.25's sign-in): the secret arrives in the fragment (`#edit=<43 base64url>`, parts
+  joined by `&`) and STAYS in the address (Franck's design: reload, bookmark, home-screen icon keep the right to save);
+  only an old `wt=` part is removed with `history.replaceState`. Without a secret every write (data, media, AI) is refused
+  inside `workshop-data.js` with "This link is view only." before anything is sent (no 401, so no console error); with a
+  replaced secret the API's 401 says the same and `canSave()` stays true. Old apps' `data-workshop-sign-in` elements are
+  hidden with an inline `display: none !important` set through the CSSOM (the app's CSS can override the `hidden`
+  attribute) and a MutationObserver for elements added or changed later. In Playwright, a `goto` that changes only the
+  fragment does not reload the page: go to `about:blank` first. App code that sets `location.hash` (or uses `#...`
+  links) drops the secret from the address; AGENTS.md rule 2 forbids it.
+- View only (3.28): apps hide saving controls with `if (!workshopData.canSave()) document.body.classList.add("view-only")`
+  and `.view-only .edit-only { display: none !important; }`; the build eval opens each app with the edit link first
+  (generic save: fill visible fields, press Save/Add, `FILL_AND_MARK_SAVE_SCRIPT`) and then without it on the saved data,
+  so per-item buttons (Delete, Watched) show to the visitor check too. Screen tabs named in the spec are not saving
+  controls (`SAVING_CONTROLS_SCRIPT`); a tab reading exactly a screen's name that saves is caught only by the "This link is
+  view only." text appearing after the eval clicks it. Style an element made by `workshop-data.js` through the CSSOM
+  (`element.style.x = ...`), never a `style` attribute (the CSP refuses it).
 - The build eval is noisy: a change to AGENTS.md or the builder's prompt can tip one example (ticket 3.25: placing new
   prompt lines before the WebFetch lines made the Wikipedia example skip WebFetch 3 times in a row). Run the changed
   example several times (`npm run eval -- build --example <n>`), compare with a baseline on `main` before blaming the
   change, then run the whole suite once. Keep the published files with `EVAL_DUMP_DIR=<absolute folder>` and look at a
   failed app before guessing (3.25 try 3). A field beside a button in a flex row needs `min-width: 0` (AGENTS.md rule 9).
-- `whoAmI()` (3.25 try 2) is a promise of the nickname the data API confirms for the token (`GET .../data/whoami?whoami=1`
-  with the token, once per page load), never a name from the address. A name an app stores inside a value is the app's
-  word, not the server's: show who posted from `getInfo(key).updatedBy`.
+- `whoAmI()` is a promise of the nickname the data API confirms for the secret (`GET .../data/whoami?whoami=1` with it,
+  once per page load): since 3.26 always the app builder's, never a name from the address. Who saved is
+  `getInfo(key).updatedBy` (also the builder for every edit-link save); an app that wants each person's name asks for it
+  in a plain field.
 - App code runs in the same page as `workshop-data.js` (3.25 try 2): `workshop-data.js` is the first script of
   `index.html`, not deferred (the deploy check, `runsDataClientFirst` in `platform/api/build/check.ts`, refuses anything
-  else), captures `fetch`, `history.replaceState`, `location.replace` and `window.open` with `.bind` at its top, and
+  else), captures `fetch`, `history.replaceState` and `location.replace` with `.bind` at its top, and
   passes `fetch` options in `Object.create(null)` objects (fetch reads `signal`, `referrer`, ... and `Symbol.iterator`
-  through the prototype chain, where a getter on `Object.prototype` would see the headers). This does not make the token
-  secret from the app: Chromium's `performance.getEntriesByType("navigation")[0].name` keeps the address the page opened
-  with, fragment and token included, after `replaceState` (tested; decision "(3.25) Residual"). Only a separate origin
-  or frame for the data client would.
+  through the prototype chain, where a getter on `Object.prototype` would see the headers). Since 3.28 the edit secret is
+  in the address on purpose, so app code can read it there (the app is the builder's own; tested in `template.test.ts`);
+  the captures still keep saves going to the workshop.
 - `workshop-data.js` builds every address absolute from the page's server read at its start (3.25 access review): a
-  relative address given to a captured `fetch` or `window.open` still resolves against the page's CURRENT base URL,
+  relative address given to a captured `fetch` still resolves against the page's CURRENT base URL,
   which app code can change with a `<base>` element. Test any new request the client makes with that `<base>` test.
 - In Playwright, a document served through `page.route` cannot load files from a real loopback server (Chromium's
   private network check, "Permission was denied for this request to access the `loopback` address space"): route every
   file of such a page, or serve the page from the server and route only one script.
 - Apps hide screens both ways (3.25 try 3): with the `hidden` attribute and with CSS classes (`.screen.hidden { display: none }`,
-  a class named `hidden`, not the attribute). A check of "what a visitor sees once the screen is open" looks at the element's
-  own hiding only (its `hidden`, its own `display`/`opacity`, its `visibility` unless inherited), never at its ancestors.
-  `workshop-data.js` shows only the sign-in elements present at `DOMContentLoaded`: AGENTS.md puts them in `index.html`.
+  a class named `hidden`, not the attribute), and a CSS `display` on a class beats the `hidden` attribute. To check what a
+  visitor sees on every screen, open each screen (3.28's eval clicks the control named after it) and test real
+  visibility there (`checkVisibility` with opacity and visibility, a box larger than 0).
 - The deploy check does not parse JavaScript; the builder's PostToolUse hook does (`scriptSyntaxProblem`, 3.25 try 3), so
   the agent hears of a syntax error (a `'` inside a `'...'` string: "missing ) after argument list") while it can fix it.
 - Microphone in apps (3.19): Chromium refuses `getUserMedia` in the apps' sandbox (`SecurityError: Invalid security
@@ -112,13 +122,9 @@ paths:
   the visitor types got AI tag suggestions): say in the rule what a spec without it keeps ("stays a plain field"), and
   make the build eval fail the other cases when they use it (`callsAi`). A check that reads the page right after a write
   was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.
-- An app may hide the screen that holds its only sign-in button while another screen saves (live, 2026-11-27): "the page
-  has a sign-in element" is not "the visitor can see one". `workshop-data.js` checks visibility at the refusal
-  (`checkVisibility` with `visibilityProperty`/`opacityProperty`, else `getClientRects().length > 0`). A closed
-  `<details>` needs its own check: Chromium hides its content with `content-visibility`, which `checkVisibility` sees but
-  `getClientRects()` does not (the fallback failed only there). Test such client behaviour on generic hand-written apps
-  of several shapes (`shapeApp` in `template.test.ts`), never on one participant's app; a page with its own `index.html`
-  routes every file, `workshop-data.js` too, and a fallback test deletes `Element.prototype.checkVisibility` in an init
-  script.
+- Test client behaviour on generic hand-written apps of several shapes (`shapeApp` in `template.test.ts`: an element on a
+  `hidden` screen, in a closed `<details>`, in an open one inside a closed one, under a CSS class, none, in sight), never
+  on one participant's app; a page with its own `index.html` routes every file, `workshop-data.js` too. A closed
+  `<details>` hides its content with `content-visibility`, which `checkVisibility` sees but `getClientRects()` does not.
 - `expect.poll` waits 1 s by default: a poll that waits on a big picture being decoded and re-encoded (12 megapixels)
   gets `{ timeout: 15_000 }` and its test a 30 s limit, or a busy runner fails it (deploy run 69).

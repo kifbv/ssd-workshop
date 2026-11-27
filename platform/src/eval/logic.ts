@@ -724,52 +724,163 @@ export function missingScreens(title: string | undefined, screens: readonly stri
 }
 
 /**
- * Ticket 3.25: what a visitor (no token) sees of the workshop's sign-in in the published app. `shown`: elements with
- * `data-workshop-sign-in` that read "Sign in" (text or aria-label) and that the visitor sees once the app shows the part
- * they are in (try 3: however an ancestor hides it, by the `hidden` attribute or by CSS, the way apps switch screens and
- * show result panels; never hidden by its own `hidden`, or its own `display: none`, `visibility: hidden` or opacity 0); `visible`: those really visible
- * when the app opens (`checkVisibility`, a box larger than 0), the first one pressed; `opens`: whether pressing the first visible one opened the hand-off page
- * (`/app-sign-in/?app=<nickname>`) in a new tab (undefined when none is on the first screen).
+ * Ticket 3.28 (replaces 3.25's sign-in check): what the build eval saw of the edit link. The app is opened with the edit
+ * link (`#edit=<secret>`) first, then without it on the data saved meanwhile, so list items with their own buttons show.
+ * Each pass looks at the first screen, then opens each screen named in the spec (SCREEN_OPENERS_SCRIPT) and looks again.
+ * - `editorCanSave`, `visitorCanSave`: `workshopData.canSave()` in each pass (true, then false).
+ * - `editorControls`: saving controls (SAVING_CONTROLS_SCRIPT) seen with the edit link: the app has some.
+ * - `savedOnOpen`: writes the app sent with the edit link before anyone did anything (AGENTS.md rule 6 forbids them).
+ * - `saved`: whether a save with the edit link reached the data API (fields filled, Save or Add pressed), or undefined
+ *   when not tried (a media or AI case, whose own pass saves with the edit link).
+ * - `visitorControls`: the saving controls a visitor without the edit link saw (their words): none may show.
+ * - `visitorRefused`: whether "This link is view only." showed while the visitor looked around: the app saved by itself,
+ *   or a control the eval took for a screen tab saved.
+ * - `editorOverflow`, `editorErrors`: sideways scroll and console errors with the edit link (the forms show then).
  */
-export interface SignInCheck {
-  shown: number;
-  visible: number;
-  opens: boolean | undefined;
+export interface EditLinkCheck {
+  editorCanSave: boolean;
+  editorControls: number;
+  savedOnOpen: number;
+  saved: boolean | undefined;
+  editorOverflow: number;
+  editorErrors: string[];
+  visitorCanSave: boolean;
+  visitorControls: string[];
+  visitorRefused: boolean;
 }
 
+/** The words of a saving control: Add, Save, Delete, Upload, Record, AI and rating buttons (ticket 3.28). */
+const SAVING_WORDS = String.raw`\b(add|save|delete|remove|upload|record|post|submit|send|create|rate|vote|watched|log|done|edit|suggest|scan)\b|take a photo|choose a photo|pick a photo|[★☆]`;
+
 /**
- * Ticket 3.25: the sign-in elements a visitor sees once the page settled, as SignInCheck counts them (run in the page by
- * src/eval/build.ts; the first `visible` one is marked `data-eval-sign-in` so the harness can press it).
+ * Ticket 3.28: the saving controls a visitor sees now, as their words (run in the page, with the spec's screen names):
+ * a button (or `role=button`, a submit or button input) whose text, `aria-label`, value or title holds a SAVING_WORDS
+ * word, and a file input, really visible (`checkVisibility` with opacity and visibility, a box larger than 0) itself or
+ * through one of its labels. A screen tab is not one: `role=tab`, in a `nav` or `role=tablist`, with `aria-controls`, or
+ * reading exactly a screen's name. Old sign-in elements are left out.
  */
-export const SIGN_IN_SCRIPT = `(() => {
-  // Shown (try 3): the element is in the page, reads "Sign in", and hides itself in no way: not its own hidden attribute,
-  // not display:none, visibility:hidden (its own, not inherited) or opacity 0 from its own styles. However an ancestor
-  // hides it (a screen or a result panel the app shows later, by the hidden attribute or by CSS such as
-  // .screen.hidden { display: none }), the visitor sees it once the app shows that part. Visible: really visible now
-  // (checkVisibility) and taking room: the one pressed.
-  const reads = (el) => /sign in/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || ""));
-  const shownOnceRevealed = (el) => {
-    if (el.hidden) return false;
-    const own = getComputedStyle(el);
-    if (own.display === "none" || Number(own.opacity) === 0) return false;
-    const parent = el.parentElement;
-    const inherited = parent === null ? "visible" : getComputedStyle(parent).visibility;
-    return own.visibility === "visible" || own.visibility === inherited;
-  };
-  const shown = Array.from(document.querySelectorAll("[data-workshop-sign-in]")).filter((el) => reads(el) && shownOnceRevealed(el));
-  const visible = shown.filter((el) => {
+export const SAVING_CONTROLS_SCRIPT = `((screens) => {
+  const seen = (el) => {
     const box = el.getBoundingClientRect();
     return el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && box.width > 0 && box.height > 0;
-  });
-  if (visible[0]) visible[0].setAttribute("data-eval-sign-in", "");
-  return { shown: shown.length, visible: visible.length };
-})()`;
+  };
+  const said = (el) => ((el.textContent || "") + " " + (el.getAttribute("aria-label") || "") + " " + (el.value || "") + " " + (el.getAttribute("title") || "")).replace(/\\s+/g, " ").trim();
+  const norm = (text) => text.replace(/\\s+/g, " ").trim().toLowerCase();
+  const tab = (el) => el.getAttribute("role") === "tab" || el.closest("nav, [role=tablist]") !== null || el.hasAttribute("aria-controls") || screens.some((name) => norm(el.textContent || "") === norm(name));
+  const words = new RegExp(${JSON.stringify(SAVING_WORDS)}, "i");
+  const found = [];
+  for (const el of document.querySelectorAll("button, [role=button], input[type=submit], input[type=button]")) {
+    if (el.hasAttribute("data-workshop-sign-in") || tab(el) || !words.test(said(el)) || !seen(el)) continue;
+    found.push(said(el).slice(0, 40));
+  }
+  for (const input of document.querySelectorAll("input[type=file]")) {
+    const labels = Array.from(input.labels || []);
+    if (seen(input) || labels.some(seen)) found.push("file input" + (labels[0] ? " (" + said(labels[0]).slice(0, 30) + ")" : ""));
+  }
+  return found;
+})`;
 
-/** The sign-in problem of a published app, if any: a visitor must find the sign-in button, and it must open the hand-off. */
-export function signInProblem(check: SignInCheck): string | undefined {
-  if (check.shown === 0) return 'no "Sign in to save" button (data-workshop-sign-in) for a visitor';
-  if (check.opens === false) return "the sign-in button does not open the workshop's sign-in page in a new tab";
-  return undefined;
+/**
+ * Ticket 3.28: marks (`data-eval-opener="<i>"`) the control that opens each screen named in the spec, when one is visible
+ * and is not a saving control's own screen-less button: a button, tab, link or summary reading exactly the screen's name,
+ * else one that holds it. Returns how many it marked (run in the page, with the screen names).
+ */
+export const SCREEN_OPENERS_SCRIPT = `((screens) => {
+  const seen = (el) => {
+    const box = el.getBoundingClientRect();
+    return el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && box.width > 0 && box.height > 0;
+  };
+  const norm = (text) => text.replace(/\\s+/g, " ").trim().toLowerCase();
+  document.querySelectorAll("[data-eval-opener]").forEach((el) => el.removeAttribute("data-eval-opener"));
+  const all = Array.from(document.querySelectorAll("button, [role=tab], [role=button], a, summary")).filter((el) => !el.hasAttribute("data-workshop-sign-in") && seen(el));
+  let marked = 0;
+  screens.forEach((name, i) => {
+    const n = norm(name);
+    const opener = all.find((el) => norm(el.textContent || "") === n) || all.find((el) => el.getAttribute("role") === "tab" && norm(el.textContent || "").includes(n));
+    if (opener !== undefined && !opener.hasAttribute("data-eval-opener")) {
+      opener.setAttribute("data-eval-opener", String(i));
+      marked += 1;
+    }
+  });
+  return marked;
+})`;
+
+/**
+ * Ticket 3.28: fills the visible empty fields of the page as a person would (a number within its limits, a date, a
+ * time, a title; the first real option of a list; the first choice of a radio group with none chosen), leaving filters,
+ * file inputs and checkboxes, then marks (`data-eval-save`) the visible button that saves: one reading Save, else Add,
+ * Log, Submit, Post, Create, Send or Suggest; never a screen tab. Returns whether one was marked (run in the page).
+ */
+export const FILL_AND_MARK_SAVE_SCRIPT = `((screens) => {
+  const seen = (el) => {
+    const box = el.getBoundingClientRect();
+    return el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && box.width > 0 && box.height > 0;
+  };
+  const norm = (text) => text.replace(/\\s+/g, " ").trim().toLowerCase();
+  const hint = (el) => [el.id, el.getAttribute("name"), el.getAttribute("placeholder"), el.getAttribute("aria-label"), el.className, ...Array.from(el.labels || []).map((l) => l.textContent || "")].join(" ").toLowerCase();
+  const fire = (el) => {
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const numberFor = (el) => {
+    const h = hint(el);
+    const guess = /year/.test(h) ? 1942 : /lat/.test(h) ? 52.52 : /lon|lng/.test(h) ? 13.4 : /calor|kcal|goal/.test(h) ? 2000 : 5;
+    const min = el.min === "" ? -Infinity : Number(el.min);
+    const max = el.max === "" ? Infinity : Number(el.max);
+    return String(Math.max(min, Math.min(max, guess)));
+  };
+  for (const el of document.querySelectorAll("input, textarea, select")) {
+    if (!seen(el) || el.disabled || el.readOnly || /filter/.test(hint(el))) continue;
+    const type = (el.getAttribute("type") || (el.tagName === "SELECT" ? "select" : "text")).toLowerCase();
+    if (type === "select") {
+      if (el.value === "") {
+        const option = Array.from(el.options).find((o) => o.value !== "" && !o.disabled);
+        if (option) { el.value = option.value; fire(el); }
+      }
+      continue;
+    }
+    if (type === "radio") {
+      const group = el.name ? document.querySelectorAll('input[type=radio][name="' + CSS.escape(el.name) + '"]') : [el];
+      if (!Array.from(group).some((r) => r.checked)) { el.checked = true; el.dispatchEvent(new MouseEvent("click", { bubbles: true })); fire(el); }
+      continue;
+    }
+    if (el.value.trim() !== "") continue;
+    const h = hint(el);
+    let value;
+    if (type === "number" || type === "range") value = numberFor(el);
+    else if (type === "date") value = "2026-11-27";
+    else if (type === "time") value = "00:30";
+    else if (type === "datetime-local") value = "2026-11-27T10:00";
+    else if (type === "month") value = "2026-11";
+    else if (type === "text" || type === "search" || el.tagName === "TEXTAREA") {
+      value = /year/.test(h) ? "1942" : /lat/.test(h) ? "52.52" : /lon|lng/.test(h) ? "13.4" : /km|distance|minute|time|duration|calor|amount|total|price|count|number|goal/.test(h) ? "5" : "Casablanca";
+    }
+    if (value === undefined) continue;
+    el.value = value;
+    fire(el);
+  }
+  const tab = (el) => el.getAttribute("role") === "tab" || el.closest("nav, [role=tablist]") !== null || screens.some((name) => norm(el.textContent || "") === norm(name));
+  const buttons = Array.from(document.querySelectorAll("button, input[type=submit], [role=button]")).filter((b) => !b.hasAttribute("data-workshop-sign-in") && !b.disabled && !tab(b) && seen(b));
+  const text = (b) => (b.textContent || b.value || "") + " " + (b.getAttribute("aria-label") || "");
+  const save = buttons.find((b) => /\\bsave\\b/i.test(text(b))) || buttons.find((b) => /^\\s*(add|log|submit|post|create|send|suggest)\\b/i.test(text(b)));
+  document.querySelectorAll("[data-eval-save]").forEach((el) => el.removeAttribute("data-eval-save"));
+  if (save === undefined) return false;
+  save.setAttribute("data-eval-save", "");
+  return true;
+})`;
+
+/** The edit-link problems of a published app, if any (ticket 3.28). */
+export function editLinkProblem(check: EditLinkCheck): string | undefined {
+  const problems: string[] = [];
+  if (!check.editorCanSave || check.visitorCanSave) problems.push(`workshopData.canSave() is ${check.editorCanSave} with the edit link and ${check.visitorCanSave} without it`);
+  if (check.savedOnOpen > 0) problems.push(`saves when the page opens (${check.savedOnOpen} write(s) before anyone did anything)`);
+  if (check.editorControls === 0) problems.push("no saving control (Save, Add, photo or Record button) with the edit link");
+  if (check.saved === false) problems.push("with the edit link, filling the fields and pressing Save or Add saved nothing");
+  if (check.editorOverflow > 0) problems.push(`with the edit link, scrolls sideways by ${check.editorOverflow} px`);
+  if (check.editorErrors.length > 0) problems.push(`${check.editorErrors.length} console error(s) with the edit link: ${check.editorErrors.join(" | ").slice(0, 300)}`);
+  if (check.visitorControls.length > 0) problems.push(`a visitor without the edit link sees saving controls: ${check.visitorControls.join(", ").slice(0, 200)}`);
+  if (check.visitorRefused) problems.push('a visitor without the edit link got "This link is view only." (the app saved by itself, or a screen tab saves)');
+  return problems.length === 0 ? undefined : problems.join("; ");
 }
 
 /** Ticket 3.19: the media a build eval case keeps (its category in platform/api/eval/build.json). */
@@ -884,8 +995,8 @@ export interface BuildEvalOutcome {
   missing: string[];
   /** Hosts other than the app's own that the page asked for (ticket 2.14: free outside services), sorted. */
   outsideHosts: string[];
-  /** Ticket 3.25: the sign-in button a visitor sees (none checked before the app was published). */
-  signIn: SignInCheck;
+  /** Ticket 3.28: the edit-link check (undefined before the app was published). */
+  editLink?: EditLinkCheck;
   /** Ticket 3.19: a media case's check (photo or voice), signed in; undefined for the other examples. */
   media?: MediaCheck;
   /** Ticket 3.22: an AI case's check (tag suggestions or a receipt read), signed in; undefined for the other examples. */
@@ -918,7 +1029,7 @@ export function expectsWebFetch(spec: string): boolean {
 
 /**
  * Scores one build: handed over, steps in order, at least one commit, check passed, no console error, no overflow, every
- * screen found, the sign-in button shown to a visitor (ticket 3.25), and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
+ * screen found, the edit-link check (ticket 3.28: saving controls and a save with the edit link, none for a visitor), and, when `mustFetch` (the spec names an outside service, ticket 2.15), at least one web fetch.
  */
 export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): ClarifyScore {
   const problems: string[] = [];
@@ -932,8 +1043,8 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
     if (outcome.consoleErrors.length > 0) problems.push(`${outcome.consoleErrors.length} console error(s): ${outcome.consoleErrors.join(" | ").slice(0, 300)}`);
     if (outcome.overflow > 0) problems.push(`scrolls sideways by ${outcome.overflow} px`);
     if (outcome.missing.length > 0) problems.push(`missing ${outcome.missing.join(", ")}`);
-    const signIn = signInProblem(outcome.signIn);
-    if (signIn !== undefined) problems.push(signIn);
+    const editLink = outcome.editLink === undefined ? "the edit-link check did not run" : editLinkProblem(outcome.editLink);
+    if (editLink !== undefined) problems.push(editLink);
     const media = outcome.media === undefined ? undefined : mediaProblem(outcome.media);
     if (media !== undefined) problems.push(media);
     const ai = outcome.ai === undefined ? undefined : aiProblem(outcome.ai);
@@ -944,9 +1055,7 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
   return problems.length === 0
     ? {
         pass: true,
-        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown, sign-in button shown to a visitor${
-          outcome.signIn.opens === true ? " and opens the sign-in" : ""
-        }${
+        detail: `${outcome.files} files written, ${outcome.commits} commits, check passed, no console error, title and all screens shown, ${outcome.editLink?.saved === true ? "saves with the edit link" : "saving controls with the edit link"}, none for a visitor${
           outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
         }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}${
           outcome.media === undefined ? "" : `, ${outcome.media.kind === "photo" ? "photo" : "Record"} button, upload kept in the data and shown from its address`
