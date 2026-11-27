@@ -9,7 +9,7 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v4` (v1, v2 and v3 retained until Franck deletes them, tickets 2.14, 3.24 and 3.27) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`; from ticket 3.18 `/app-media/*` from the media bucket through Origin Access Control `ssd-workshop-app-media` with headers policy `ssd-workshop-app-media-v1`, a second WAF rate rule on `/app-media/*` (3,000 per address in 5 minutes), a third rule answering a media `PUT`/`DELETE` without a Bearer token with 401, a fourth limiting media uploads and deletes to 150 per address in 5 minutes, and a fifth limiting media preflights (`OPTIONS`) to 300 per address in 5 minutes), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v3` (v1 and v2 retained until Franck deletes them, tickets 2.14 and 3.24) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`; from ticket 3.18 `/app-media/*` from the media bucket through Origin Access Control `ssd-workshop-app-media` with headers policy `ssd-workshop-app-media-v1`, a second WAF rate rule on `/app-media/*` (3,000 per address in 5 minutes), a third rule answering a media `PUT`/`DELETE` without a Bearer token with 401, a fourth limiting media uploads and deletes to 150 per address in 5 minutes, and a fifth limiting media preflights (`OPTIONS`) to 300 per address in 5 minutes), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out), later more (from ticket 3.18 `ssd-workshop-api-app-media` for `PUT`, `DELETE` and `OPTIONS /api/apps/{nickname}/media/{id}`, 512 MB, 25 s), bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), from ticket 3.18 the private `ssd-workshop-app-media-<account>` bucket (only the media function's role may write files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-alerts` | us-east-1 | ticket 3.13: Cost Anomaly Detection, monitor `ssd-workshop-cost` on the cost allocation tag `project=ssd-workshop` and daily email subscription `ssd-workshop-cost-alerts` to the address in SSM `/ssd-workshop/alert-email`; see "Safety nets (ticket 3.13)" | inline template (`LegacyStackSynthesizer`) |
@@ -555,12 +555,9 @@ flowchart LR
 
 Step 4 shows the edit link and its QR code (not the plain address), the line "Anyone who has this link or QR code can
 save in your app...", Copy view-only link and New edit link (an in-page Yes/Cancel). The hand-off page `/app-sign-in/`
-is gone, and the apps' CSP no longer has `allow-popups-to-escape-sandbox` (new policy `ssd-workshop-apps-v4`;
-`ssd-workshop-apps-v3` stays retained: Franck may delete it after the deploy, like v1 and v2). No credentials needed:
+is gone (the apps' CSP is unchanged: `allow-popups-to-escape-sandbox` stays, Franck's choice). No credentials needed:
 
 ```sh
-curl -sS -D - -o /dev/null https://workshop.rankly.games/apps/<nick>/ | grep -i '^content-security-policy'
-# expect: sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; ... (no escape-sandbox)
 curl -sS -D - -o /dev/null 'https://workshop.rankly.games/app-sign-in/?app=<nick>' | grep -i '^\(HTTP\|location\)'
 # expect: HTTP/2 302 and location: / (no query)
 ```
@@ -571,7 +568,7 @@ link and QR code change, and the tab opened with the old link answers "This link
 
 ## Check after the sign-in-to-save deploy (ticket 3.24)
 
-(Historical: ticket 3.27 removed `/app-sign-in/` and `allow-popups-to-escape-sandbox`; the steps below no longer apply.)
+(Historical: ticket 3.27 removed `/app-sign-in/`; the steps below no longer apply. The CSP check in step 8 still holds.)
 
 ```mermaid
 sequenceDiagram

@@ -3628,12 +3628,8 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
       ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
     });
     expect(APPS_CONTENT_SECURITY_POLICY).toBe(
-      "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self'; connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'",
+      "sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox; default-src 'self'; connect-src 'self' https:; img-src 'self' data: https:; form-action 'self'",
     );
-    // Ticket 3.27: 3.24's allow-popups-to-escape-sandbox is gone (its only reason, /app-sign-in, is gone): a tab an app
-    // opens stays sandboxed, in the policy CloudFront sends as in the constant.
-    expect(APPS_CONTENT_SECURITY_POLICY).not.toContain("escape-sandbox");
-    expect(JSON.stringify(config)).not.toContain("escape-sandbox");
     // Ticket 2.14: data and images from any HTTPS address, never plain http:, and no script, style or font source beyond 'self'.
     expect(APPS_CONTENT_SECURITY_POLICY).not.toMatch(/http:|script-src|style-src|font-src|\*/);
     expect(APPS_CONTENT_SECURITY_POLICY).not.toContain("allow-same-origin");
@@ -3641,15 +3637,15 @@ describe("CloudFront /apps/* behaviour (ticket 2.5)", () => {
     expect(config.CustomHeadersConfig).toBeUndefined();
   });
 
-  it("names the policy ssd-workshop-apps-v4 in the edge stack (ticket 3.27: popups no longer escape the sandbox), retained, versioned in its logical id, and only it is on /apps/*", () => {
+  it("names the policy ssd-workshop-apps-v3 in the edge stack (ticket 3.24's popups escaping the sandbox, kept by Franck in 3.27), retained, versioned in its logical id, and only it is on /apps/*", () => {
     const [stackName, id, resource] = policy() ?? [];
     expect(stackName).toBe(STACK_NAMES.edge);
-    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v4");
-    expect(id).toMatch(/^AppsHeadersV4[0-9A-F]{8}$/);
+    expect(APPS_HEADERS_POLICY_NAME).toBe("ssd-workshop-apps-v3");
+    expect(id).toMatch(/^AppsHeadersV3[0-9A-F]{8}$/);
     expect(behaviour()?.ResponseHeadersPolicyId).toEqual({ Ref: id });
-    // The older versions are not in the template (v3 stays in the account, retained, for Franck to delete).
+    // The older versions are not in the template (they stay in the account, retained, for Franck to delete).
     const names = ofType("AWS::CloudFront::ResponseHeadersPolicy").map(([, , r]) => (r.Properties?.ResponseHeadersPolicyConfig as { Name?: string }).Name);
-    for (const old of ["ssd-workshop-apps-v1", "ssd-workshop-apps-v2", "ssd-workshop-apps-v3"]) expect(names).not.toContain(old);
+    for (const old of ["ssd-workshop-apps-v1", "ssd-workshop-apps-v2"]) expect(names).not.toContain(old);
     expect(resource).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
   });
 
