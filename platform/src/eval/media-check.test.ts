@@ -1,7 +1,7 @@
 // Ticket 3.19: the build eval's media check (`exerciseMedia` in ./build.ts) on hand-written apps, in Playwright's
 // Chromium under the apps' sandbox CSP with the eval's in-memory workshop: a photo gallery that uploads on Save, a voice
 // app whose Record button opens the phone's recorder (Chromium refuses the microphone in the sandbox), and apps that
-// get it wrong (a blob: preview never uploaded, a recording not kept in the data).
+// get it wrong (a blob: preview never uploaded, a recording not kept in the data, a Tags field but no tag filter).
 import { readFileSync } from "node:fs";
 import type { Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -74,8 +74,8 @@ describe("the build eval's media check (exerciseMedia)", () => {
   });
 
   it("WHEN a gallery uploads the picked photo on Save, keeps its address in the data and shows it THEN the check passes", async () => {
-    const check = await exerciseMedia(browser, GALLERY, "photo", []);
-    expect(check).toEqual({ kind: "photo", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
+    const check = await exerciseMedia(browser, GALLERY, "photo");
+    expect(check).toEqual({ kind: "photo", button: true, uploaded: true, keptInData: true, shown: true, filter: true, errors: [] });
     expect(mediaProblem(check)).toBeUndefined();
   }, 60_000);
 
@@ -89,14 +89,14 @@ describe("the build eval's media check (exerciseMedia)", () => {
       return f;
     });
     expect(new TextDecoder().decode(tabbed[0]?.bytes)).toContain('id="screen-add" hidden');
-    const check = await exerciseMedia(browser, tabbed, "photo", []);
-    expect(check).toEqual({ kind: "photo", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
+    const check = await exerciseMedia(browser, tabbed, "photo");
+    expect(check).toEqual({ kind: "photo", button: true, uploaded: true, keptInData: true, shown: true, filter: true, errors: [] });
   }, 60_000);
 
   it("WHEN a voice app's Record button opens the phone's recorder and the recording is kept and played THEN the check passes", async () => {
     const files = VOICE.map((f) => (f.path === "app.js" ? file("app.js", new TextDecoder().decode(f.bytes).replace("/*KEEP*/", 'await workshopData.set("voice-v1", [{ voice: address, topic: "Ideas" }]);')) : f));
-    const check = await exerciseMedia(browser, files, "voice", []);
-    expect(check).toEqual({ kind: "voice", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
+    const check = await exerciseMedia(browser, files, "voice");
+    expect(check).toEqual({ kind: "voice", button: true, uploaded: true, keptInData: true, shown: true, filter: true, errors: [] });
   }, 60_000);
 
   it("WHEN the Record button sits on a screen opened by a \"Record\" tab and the list is drawn only when the app opens (live eval run 1) THEN the check presses the real button and looks again after a reload", async () => {
@@ -119,19 +119,40 @@ describe("the build eval's media check (exerciseMedia)", () => {
         for (const note of notes || []) { const audio = document.createElement("audio"); audio.controls = true; audio.preload = "none"; audio.src = note.voice; document.getElementById("list").append(audio); }
       }, (error) => { statusText.textContent = error.message; });`,
     );
-    const check = await exerciseMedia(browser, files, "voice", []);
-    expect(check).toEqual({ kind: "voice", button: true, uploaded: true, keptInData: true, shown: true, missingWords: [], errors: [] });
+    const check = await exerciseMedia(browser, files, "voice");
+    expect(check).toEqual({ kind: "voice", button: true, uploaded: true, keptInData: true, shown: true, filter: true, errors: [] });
+  }, 60_000);
+
+  it("WHEN the gallery has a Tags field (or a tag list in the add form) but no tag filter THEN the check fails on the filter alone", async () => {
+    const withoutFilter = (html: string) => GALLERY.map((f) => (f.path === "index.html" ? file("index.html", new TextDecoder().decode(f.bytes).replace('<label for="filter">Filter by tag</label><select id="filter"><option value="">All</option></select>', "").replace('<label for="tags">Tags</label><input id="tags" type="text">', html)) : f));
+    const tagsField = withoutFilter('<label for="tags">Tags</label><input id="tags" type="text" placeholder="e.g. portrait, pencil">');
+    expect(new TextDecoder().decode(tagsField[0]?.bytes)).not.toContain("Filter");
+    const check = await exerciseMedia(browser, tagsField, "photo");
+    expect(check).toEqual({ kind: "photo", button: true, uploaded: true, keptInData: true, shown: true, filter: false, errors: [] });
+    expect(mediaProblem(check)).toMatch(/^no tag filter \(/);
+    const tagList = withoutFilter('<input id="tags" type="hidden" value="cat"><label for="tag-pick">Tag</label><select id="tag-pick"><option>Portrait</option><option>Pencil</option></select>');
+    expect((await exerciseMedia(browser, tagList, "photo")).filter).toBe(false);
+  }, 120_000);
+
+  it("WHEN the tag filter is a row of buttons the app draws (live eval run 2: a group named \"Tag filter\") THEN the check finds it", async () => {
+    const chips = GALLERY.map((f) => {
+      const text = new TextDecoder().decode(f.bytes);
+      if (f.path === "index.html") return file("index.html", text.replace('<label for="filter">Filter by tag</label><select id="filter"><option value="">All</option></select>', '<div id="chips" role="group" aria-label="Tag filter"></div>'));
+      if (f.path === "app.js") return file("app.js", `${text}\nfor (const name of ["All", "cat"]) { const chip = document.createElement("button"); chip.type = "button"; chip.textContent = name; document.getElementById("chips").append(chip); }`);
+      return f;
+    });
+    expect((await exerciseMedia(browser, chips, "photo")).filter).toBe(true);
   }, 60_000);
 
   it("WHEN the recording is not kept in the data, or the photo is only previewed from a blob: address THEN the check says so", async () => {
-    expect(mediaProblem(await exerciseMedia(browser, VOICE, "voice", []))).toBe("the recording's address was not saved in the data");
+    expect(mediaProblem(await exerciseMedia(browser, VOICE, "voice"))).toBe("the recording's address was not saved in the data");
     const preview = app(
       `<h2>Tags</h2><input id="p" type="file" accept="image/*"><img id="i" alt="">`,
       `document.getElementById("p").addEventListener("change", () => { document.getElementById("i").src = URL.createObjectURL(document.getElementById("p").files[0]); });`,
     );
-    const check = await exerciseMedia(browser, preview, "photo", []);
+    const check = await exerciseMedia(browser, preview, "photo");
     expect(check.uploaded).toBe(false);
-    expect(mediaProblem(check)).toMatch(/^the photo was not uploaded; 1 console error\(s\) while uploading: Loading the image 'blob:/);
-    expect(mediaProblem(await exerciseMedia(browser, [file("index.html", "<!doctype html><title>x</title>"), file("workshop-data.js", CLIENT)], "voice", []))).toBe('no Record button; no label with "topic"');
+    expect(mediaProblem(check)).toMatch(/^the photo was not uploaded; no tag filter \(.*\); 1 console error\(s\) while uploading: Loading the image 'blob:/);
+    expect(mediaProblem(await exerciseMedia(browser, [file("index.html", "<!doctype html><title>x</title>"), file("workshop-data.js", CLIENT)], "voice"))).toMatch(/^no Record button; no topic filter \(/);
   }, 120_000);
 });

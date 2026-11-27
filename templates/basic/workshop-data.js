@@ -62,6 +62,7 @@
   const NOTHING_RECORDED = "Nothing was recorded. Please try again.";
   const NOT_OUR_MEDIA = "This is not the address of one of this app's photos or recordings.";
   const ODD_ANSWER = "The workshop answered something unexpected. Please try again.";
+  const BROKEN_ID = "Something on this page stopped the upload. Please reload the page and try again.";
 
   // The app lives at /apps/<nickname>/; its data at /api/apps/<nickname>/data/<key> on the same server.
   const appMatch = /^\/apps\/([^/]+)\//.exec(startPath);
@@ -251,7 +252,10 @@
     // The media service judges the bytes, never the declared type; this type keeps the body as it is on the way.
     options.headers["content-type"] = "application/octet-stream";
     options.body = body;
-    const response = await reach(startServer + "/api/apps/" + appName() + "/media/" + newMediaId(), options);
+    // App code shares this page and could replace btoa or replace: never send an id that is not 22 base64url characters.
+    const id = newMediaId();
+    if (typeof id !== "string" || !MEDIA_ID.test(id)) throw new Error(BROKEN_ID);
+    const response = await reach(startServer + "/api/apps/" + appName() + "/media/" + id, options);
     if (!response.ok) throw await refusal(response, true);
     let answer = null;
     try {

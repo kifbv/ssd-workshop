@@ -176,13 +176,17 @@ shell and no package manager. You cannot run or preview the app, so check your w
 
      ```js
      let recording = null;
+     let starting = false;
      recordButton.addEventListener("click", async () => {
+       if (starting) return; // Still waiting for the microphone: a second tap must not start a second recording.
        if (recording !== null) {
          recording.stop();
          return;
        }
+       starting = true;
        try {
          recording = await workshopData.recordVoice();
+         starting = false;
          recordButton.textContent = "Stop";
          statusText.textContent = recording.microphone ? "Recording..." : "Record with the phone's recorder, then choose the recording.";
          const address = await recording.done;
@@ -190,6 +194,7 @@ shell and no package manager. You cannot run or preview the app, so check your w
        } catch (error) {
          statusText.textContent = error.message;
        } finally {
+         starting = false;
          recording = null;
          recordButton.textContent = "Record";
        }

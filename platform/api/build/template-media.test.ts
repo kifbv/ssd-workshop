@@ -9,7 +9,10 @@
 //   and the permission prompt answered yes), so recordVoice() opens the phone's own recorder (a file input with
 //   accept="audio/*" and capture); the recording picked there is uploaded and plays back from its address. The
 //   microphone path itself (MediaRecorder, stop, the 5-minute stop) is proved on the same client served WITHOUT the
-//   sandbox, as a browser that allows the microphone runs it.
+//   sandbox, as a browser that allows the microphone runs it. AGENTS.md rule 15's example runs as written there: a
+//   second tap while the microphone is being asked for starts nothing.
+// - An answer with an address that is not this app's (another server, another app, a short id, none) and an id that app
+//   code broke (btoa replaced) fail with a plain message; deleteMedia and savePhoto ignore a <base> app code adds.
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -24,6 +27,8 @@ const CLIENT = readFileSync(fileURLToPath(new URL("../../../templates/basic/work
 /** The app under test is served sandboxed; `mic-nick` is the same app without the sandbox (a page allowed the microphone). */
 const NICKNAME = "test-nick";
 const OPEN_NICKNAME = "mic-nick";
+/** The same open page, with AGENTS.md rule 15's Record/Stop example as its app code (RULE_APP). */
+const RULE_NICKNAME = "rule-nick";
 const OPEN_CSP = APPS_CONTENT_SECURITY_POLICY.split("; ").filter((part) => !part.startsWith("sandbox")).join("; ");
 const TOKEN = Buffer.alloc(32, 7).toString("base64url");
 const HAND_OFF = `#wt=${TOKEN}`;
@@ -104,6 +109,18 @@ document.getElementById("remove").addEventListener("click", async function () {
   }
 });`;
 
+/**
+ * AGENTS.md rule 15's Record/Stop example, run as it is written there, the address shown in #voice. Its first code block
+ * after "15. Voice recordings".
+ */
+const AGENTS = readFileSync(fileURLToPath(new URL("../../../templates/basic/AGENTS.md", import.meta.url)), "utf8");
+const RULE_EXAMPLE = /^15\. Voice recordings[\s\S]*?```js\n([\s\S]*?)```/m.exec(AGENTS)?.[1] ?? "";
+const RULE_APP = `"use strict";
+const recordButton = document.getElementById("record");
+const voice = document.getElementById("voice");
+const statusText = document.getElementById("status");
+${RULE_EXAMPLE.replace("// Save the address with the message's other fields, then show it.", 'voice.src = address; voice.hidden = false; statusText.textContent = "Saved.";')}`;
+
 /** One request the stand-in received. */
 interface MediaCall {
   method: string;
@@ -127,6 +144,8 @@ let calls: MediaCall[];
 let stored: Map<string, { bytes: Buffer; type: string }>;
 /** The next upload is refused with this answer (criterion 3). */
 let refuseNext: { status: number; message: string } | undefined;
+/** The next successful upload answers this address instead of its own (null: no address at all). */
+let answerNext: ((id: string) => string | null) | undefined;
 /** Expected console lines in the test under way (Chromium logs a refused request itself). */
 let allowed: string[];
 
@@ -149,13 +168,13 @@ beforeAll(async () => {
         response.end(JSON.stringify(body));
       };
       if (app !== undefined && path === `/apps/${app}/`) {
-        response.writeHead(200, { "content-type": "text/html", "content-security-policy": app === OPEN_NICKNAME ? OPEN_CSP : APPS_CONTENT_SECURITY_POLICY });
+        response.writeHead(200, { "content-type": "text/html", "content-security-policy": app === OPEN_NICKNAME || app === RULE_NICKNAME ? OPEN_CSP : APPS_CONTENT_SECURITY_POLICY });
         response.end(PAGE);
         return;
       }
       if (app !== undefined && (path === `/apps/${app}/workshop-data.js` || path === `/apps/${app}/app.js`)) {
         response.writeHead(200, { "content-type": "text/javascript", "content-security-policy": APPS_CONTENT_SECURITY_POLICY, "x-content-type-options": "nosniff" });
-        response.end(path.endsWith("app.js") ? APP : CLIENT);
+        response.end(path.endsWith("app.js") ? (app === RULE_NICKNAME ? RULE_APP : APP) : CLIENT);
         return;
       }
       if (app !== undefined && path === `/api/apps/${app}/data/whoami`) {
@@ -208,7 +227,10 @@ beforeAll(async () => {
         if (found.kind !== "jpeg" && (recordingSeconds(body, found.kind) ?? Infinity) > 305) return answer(413, { message: APP_MEDIA_MESSAGES.recordingTooLong });
         const bytes = found.kind === "jpeg" ? found.photo : body;
         stored.set(id, { bytes, type: MEDIA_CONTENT_TYPES[found.kind] });
-        return answer(201, { address: `${origin}/app-media/${nick}/${id}`, contentType: MEDIA_CONTENT_TYPES[found.kind], bytes: bytes.length });
+        const odd = answerNext?.(id);
+        answerNext = undefined;
+        if (odd === null) return answer(201, { contentType: MEDIA_CONTENT_TYPES[found.kind], bytes: bytes.length });
+        return answer(201, { address: odd ?? `${origin}/app-media/${nick}/${id}`, contentType: MEDIA_CONTENT_TYPES[found.kind], bytes: bytes.length });
       }
       const file = /^\/app-media\/[a-z-]+\/([^/]+)$/.exec(path)?.[1];
       const media2 = file === undefined ? undefined : stored.get(file);
@@ -241,6 +263,7 @@ beforeEach(async () => {
   calls = [];
   stored = new Map();
   refuseNext = undefined;
+  answerNext = undefined;
   page.on("console", (message) => {
     if (message.type() === "error" && !allowed.some((line) => message.text().startsWith(line))) errors.push(message.text());
   });
@@ -256,7 +279,7 @@ afterEach(async () => {
 /** Opens the app (sandboxed unless `nickname` is the open one) and waits until whoAmI() settled. */
 async function openApp(hash = HAND_OFF, nickname = NICKNAME): Promise<void> {
   const response = await page.goto(`${origin}/apps/${nickname}/${hash}`);
-  expect(response?.headers()["content-security-policy"]).toBe(nickname === OPEN_NICKNAME ? OPEN_CSP : APPS_CONTENT_SECURITY_POLICY);
+  expect(response?.headers()["content-security-policy"]).toBe(nickname === OPEN_NICKNAME || nickname === RULE_NICKNAME ? OPEN_CSP : APPS_CONTENT_SECURITY_POLICY);
   await page.evaluate("workshopData.whoAmI()");
 }
 
@@ -411,6 +434,55 @@ describe("savePhoto (ticket 3.19)", () => {
     expect(errors).toEqual([]);
   });
 
+  it("WHEN the media API answers an address that is not this app's photo (another server, another app, a short id, none) THEN the odd-answer message shows and nothing shows that address", async () => {
+    await openApp();
+    const elsewhere: string[] = [];
+    await page.route("https://evil.example/**", (route) => {
+      elsewhere.push(route.request().url());
+      return route.fulfill({ status: 204, body: "" });
+    });
+    const photo = await picture("image/jpeg", 64, 48);
+    const odd: [string, (id: string) => string | null][] = [
+      ["another server", (id) => `https://evil.example/app-media/${NICKNAME}/${id}`],
+      ["another app", (id) => `${origin}/app-media/someone-else/${id}`],
+      ["a short id", () => `${origin}/app-media/${NICKNAME}/short`],
+      ["a longer path", (id) => `${origin}/app-media/${NICKNAME}/${id}/../x`],
+      ["a query after the id", (id) => `${origin}/app-media/${NICKNAME}/${id}?x=1`],
+      ["no address", () => null],
+    ];
+    const answered: string[] = [];
+    for (const [what, address] of odd) {
+      answerNext = (id) => {
+        const chosen = address(id);
+        if (chosen !== null) answered.push(chosen);
+        return chosen;
+      };
+      await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: photo });
+      await expect.poll(statusText, { message: what }).toBe("The workshop answered something unexpected. Please try again.");
+      await page.evaluate(`document.getElementById("status").textContent = ""`);
+    }
+    expect(answered).toHaveLength(5);
+    expect(uploads().map((call) => call.status)).toEqual([201, 201, 201, 201, 201, 201]);
+    const sources = await page.evaluate<string[]>(`Array.from(document.querySelectorAll("img, audio, source")).map((el) => el.getAttribute("src") || "")`);
+    for (const address of answered) expect(sources).not.toContain(address);
+    expect(await page.locator("#shown").isHidden()).toBe(true);
+    expect(elsewhere).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("WHEN app code replaces btoa so the new id is not 22 base64url characters THEN nothing is sent and a plain message shows", async () => {
+    await openApp();
+    const photo = await picture("image/jpeg", 64, 48);
+    for (const made of ["../../data/x", "a".repeat(21), "a".repeat(23), "a/b?c#d" + "a".repeat(15)]) {
+      await page.evaluate(`window.btoa = () => ${JSON.stringify(made)}`);
+      await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: photo });
+      await expect.poll(statusText, { message: made }).toBe("Something on this page stopped the upload. Please reload the page and try again.");
+      await page.evaluate(`document.getElementById("status").textContent = ""`);
+    }
+    expect(calls).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
   it("WHEN a visitor (no sign-in) picks a photo THEN the sign-in message and button show and nothing is sent", async () => {
     await openApp("");
     expect(await page.getByRole("button", { name: "Sign in to save" }).isVisible()).toBe(true);
@@ -443,6 +515,13 @@ describe("deleteMedia (ticket 3.19)", () => {
     await page.setInputFiles("#photo", { name: "a.jpg", mimeType: "image/jpeg", buffer: await picture("image/jpeg", 64, 48) });
     await expect.poll(statusText).toBe("Saved.");
     const id = uploads()[0]?.id ?? "";
+    // App code adds a <base> to another server first (3.25's rule for every request the client makes).
+    const elsewhere: string[] = [];
+    await page.route("https://evil.example/**", (route) => {
+      elsewhere.push(route.request().url());
+      return route.fulfill({ status: 204, body: "" });
+    });
+    await page.evaluate(`(() => { const base = document.createElement("base"); base.href = "https://evil.example/"; document.head.append(base); })()`);
     await page.click("#remove");
     await expect.poll(statusText).toBe("Deleted.");
     expect(calls.filter((call) => call.method === "DELETE").map((call) => [call.path, call.authorization, call.status])).toEqual([
@@ -458,6 +537,7 @@ describe("deleteMedia (ticket 3.19)", () => {
     ].map((address) => workshopData.deleteMedia(address).then(() => "deleted", (error) => error.message)))`);
     expect(new Set(refused)).toEqual(new Set(["This is not the address of one of this app's photos or recordings."]));
     expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(elsewhere).toEqual([]);
     expect(errors).toEqual([]);
   });
 });
@@ -552,6 +632,30 @@ describe("recordVoice (ticket 3.19)", () => {
     expect(seconds).toBeGreaterThan(1);
     expect(seconds).toBeLessThan(4);
     await playsBack(`${origin}/app-media/${OPEN_NICKNAME}/${made.id}`);
+    expect(errors).toEqual([]);
+  });
+
+  it("WHEN the Record button of AGENTS.md rule 15's example is tapped twice while the microphone is still being asked for THEN one recording starts, and the next tap stops and saves it", async () => {
+    expect(RULE_EXAMPLE).toContain("await workshopData.recordVoice()");
+    expect(RULE_APP).toContain('statusText.textContent = "Saved."');
+    // The visitor takes a second to answer the microphone prompt; every request for the microphone is counted.
+    await page.addInitScript(`(() => {
+      window.microphoneAsks = 0;
+      const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = (constraints) => { window.microphoneAsks += 1; return new Promise((resolve) => setTimeout(resolve, 1000)).then(() => ask(constraints)); };
+    })()`);
+    await openApp(HAND_OFF, RULE_NICKNAME);
+    await page.click("#record");
+    await page.click("#record");
+    await expect.poll(statusText, { timeout: 5_000 }).toBe("Recording...");
+    expect(await page.evaluate<number>("window.microphoneAsks")).toBe(1);
+    await page.waitForTimeout(1000);
+    await page.click("#record");
+    await expect.poll(statusText).toBe("Saved.");
+    expect(await page.locator("#record").textContent()).toBe("Record");
+    await page.waitForTimeout(500);
+    expect(uploads().map((call) => call.status)).toEqual([201]);
+    await playsBack(`${origin}/app-media/${RULE_NICKNAME}/${uploads()[0]?.id}`);
     expect(errors).toEqual([]);
   });
 

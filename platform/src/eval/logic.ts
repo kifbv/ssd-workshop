@@ -37,9 +37,12 @@ Suites:
                Wikipedia) with no console error and nothing
                scrolling sideways, and show its title and every screen its spec names; then (ticket 3.19)
                platform/api/eval/build.json's photo gallery and voice-message cases, which must also show a photo
-               or Record button and a tag or topic filter and, signed in, upload a photo or recording, keep its
-               address in the data and show it; prints the duration, tokens and cost of each. --model tries another
-               EU profile (priced at the build role's prices), --example runs one spec only
+               or Record button and have a tag or topic filter (a list, a field, or buttons, links, tabs or radios
+               whose label, text, group or the element before them holds "tag"/"topic" with "filter", "show", "only",
+               "browse" or "search", or a list starting with "All"; a Tags field alone fails) and, signed in, upload a
+               photo or recording, keep its address in the data and show it; prints the duration, tokens and cost
+               of each. --model tries another EU profile (priced at the build role's prices), --example runs one
+               spec only
   suggestions  the readiness file's workshop example specs through the real suggestions call (ticket 3.6): each
                gets exactly three suggested changes, each under 80 characters, and each passes the real
                guardrail check as on-path (a suggestion is sent as a change request when tapped)
@@ -727,8 +730,8 @@ export function signInProblem(check: SignInCheck): string | undefined {
 /** Ticket 3.19: the media a build eval case keeps (its category in platform/api/eval/build.json). */
 export type MediaCase = "photo" | "voice";
 
-/** The words a media case's app must show in a label (its filter): photos by tag, voice messages by topic. */
-export const MEDIA_WORDS: Record<MediaCase, readonly string[]> = { photo: ["tag"], voice: ["topic"] };
+/** The filter a media case's app must have: photos by tag, voice messages by topic. */
+export const MEDIA_FILTER: Record<MediaCase, string> = { photo: "tag", voice: "topic" };
 
 export const mediaKindOf = (category: string): MediaCase | undefined => (category === "photo" || category === "voice" ? category : undefined);
 
@@ -736,7 +739,13 @@ export const mediaKindOf = (category: string): MediaCase | undefined => (categor
  * Ticket 3.19: what the build eval saw of a media case, signed in (src/eval/build.ts): the photo button (a file input
  * accepting images) or a Record button; after picking a photo (or a recording, in the recorder Chromium opens in the
  * sandbox), whether the media API stored it, whether a saved value of the data API holds its address, and whether the
- * page then shows it (`<img>` or `<audio>` with that address); the case's words no label holds; console errors meanwhile.
+ * page then shows it (`<img>` or `<audio>` with that address); whether it has the case's filter (a control, below); console
+ * errors meanwhile. The filter is a list (`<select>`), a text or search field, or a button, link, tab, radio or checkbox
+ * whose own words (text, label, `aria-label`, `aria-labelledby`, title, placeholder, id, name, class, `data-*` names),
+ * the element just before it, or the group it sits in (fieldset and legend, `role=group|radiogroup|toolbar|tablist`,
+ * nav, menu, else its parent: their own words and the element just before them) hold the case's word ("tag", "topic")
+ * AND "filter", "show", "only", "browse" or "search"; a list whose first option starts with "All", "Any" or "Every" also
+ * counts as a filter. A Tags field in the add form, or a tag list without "All", does not.
  */
 export interface MediaCheck {
   kind: MediaCase;
@@ -744,7 +753,7 @@ export interface MediaCheck {
   uploaded: boolean;
   keptInData: boolean;
   shown: boolean;
-  missingWords: string[];
+  filter: boolean;
   errors: string[];
 }
 
@@ -756,7 +765,8 @@ export function mediaProblem(check: MediaCheck): string | undefined {
   else if (!check.uploaded) problems.push(`the ${what} was not uploaded`);
   else if (!check.keptInData) problems.push(`the ${what}'s address was not saved in the data`);
   else if (!check.shown) problems.push(`the saved ${what} is not shown from its address`);
-  for (const word of check.missingWords) problems.push(`no label with "${word}"`);
+  const word = MEDIA_FILTER[check.kind];
+  if (!check.filter) problems.push(`no ${word} filter (a list, buttons or a field named "filter", "show", "only", "browse" or "search", or a list starting with "All", together with "${word}")`);
   if (check.errors.length > 0) problems.push(`${check.errors.length} console error(s) while uploading: ${check.errors.join(" | ").slice(0, 300)}`);
   return problems.length === 0 ? undefined : problems.join("; ");
 }

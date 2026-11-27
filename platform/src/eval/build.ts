@@ -32,7 +32,7 @@ import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
-import { MEDIA_WORDS, missingScreens, screenNames, SIGN_IN_SCRIPT, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type MediaCase, type MediaCheck, type SignInCheck } from "./logic.js";
+import { MEDIA_FILTER, missingScreens, screenNames, SIGN_IN_SCRIPT, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type MediaCase, type MediaCheck, type SignInCheck } from "./logic.js";
 
 const NICKNAME = "eval-app";
 const EVAL_ORIGIN = "https://workshop.test";
@@ -292,6 +292,35 @@ const OPENER_OF_MEDIA = `((words) => {
   return true;
 })`;
 
+/**
+ * Whether the page has a filter by `word` ("tag", "topic"): a `<select>`, a text or search field, or a button, link,
+ * tab, radio or checkbox whose own words, the element just before it, or its group's words hold `word` together with
+ * "filter", "show", "only", "browse" or "search", or a `<select>` whose first option starts with All/Any/Every and whose
+ * words hold `word` (`MediaCheck` in ./logic.ts says it in full). A Tags field in the add form does not count. Hidden
+ * controls count (the filter may sit on a screen the app has not opened). Run in the page.
+ */
+const HAS_FILTER = `((word) => {
+  const text = (el) => (el === null || el === undefined ? "" : el.textContent || "");
+  const own = (el) => [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("placeholder"), el.id, el.getAttribute("name"), el.getAttribute("class"), ...Object.keys(el.dataset || {})]
+    .filter(Boolean).join(" ") + " " + (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => text(document.getElementById(id))).join(" ");
+  const groupOf = (el) => (el.parentElement && el.parentElement.closest("fieldset, [role=group], [role=radiogroup], [role=toolbar], [role=tablist], nav, menu")) || el.parentElement;
+  const words = (el, withText) => {
+    const group = groupOf(el);
+    const legend = group === null ? null : group.querySelector(":scope > legend");
+    return [own(el), withText ? text(el) : "", ...Array.from(el.labels || []).map(text), text(el.previousElementSibling),
+      group === null ? "" : own(group) + " " + text(legend) + " " + text(group.previousElementSibling)].join(" ").toLowerCase();
+  };
+  const filtering = /filter|\\bshow|\\bonly\\b|\\bbrowse|search/;
+  const controls = Array.from(document.querySelectorAll("select, input, button, a, [role=tab], [role=radio], [role=button], [role=option]"))
+    .filter((el) => !el.hasAttribute("data-workshop-sign-in") && !/^(file|hidden|submit|image|reset|password|email|date|number)$/i.test(el.getAttribute("type") || ""));
+  return controls.some((el) => {
+    const said = words(el, el.tagName !== "SELECT" && el.tagName !== "INPUT");
+    if (!said.includes(word)) return false;
+    if (filtering.test(said)) return true;
+    return el.tagName === "SELECT" && el.options.length > 0 && /^\\s*(all|any|every)/i.test(el.options[0].textContent || "");
+  });
+})`;
+
 /** Opens the screen holding the marked media element when it is hidden (OPENER_OF_MEDIA), with a real click. */
 async function openMediaScreen(page: Page, kind: MediaCase): Promise<void> {
   const words = kind === "photo" ? "add|take|new|upload|photo" : "record|new|add";
@@ -306,14 +335,14 @@ async function openMediaScreen(page: Page, kind: MediaCase): Promise<void> {
  * photo button (a file input accepting images) or the Record button, picks the sample photo there (or, in the phone's
  * recorder that recordVoice() opens where Chromium refuses the microphone in the sandbox, the sample recording), presses
  * the save button next to it when the app saves only then, and checks that the media API stored a file, that a saved
- * value holds its address and that the page shows it from that address. `labels` adds the page's labels to the visitor's
- * for the case's words.
+ * value holds its address and that the page shows it from that address; then looks for the case's filter (HAS_FILTER),
+ * once the saved item is drawn.
  */
-export async function exerciseMedia(browser: Browser, files: readonly AppFile[], kind: MediaCase, visitorLabels: readonly string[]): Promise<MediaCheck> {
+export async function exerciseMedia(browser: Browser, files: readonly AppFile[], kind: MediaCase): Promise<MediaCheck> {
   const samples = await mediaSamples(browser);
   const { context, page, errors } = await evalPage(browser);
   const api = await routeApp(page, files, EVAL_TOKEN);
-  const check: MediaCheck = { kind, button: false, uploaded: false, keptInData: false, shown: false, missingWords: [], errors };
+  const check: MediaCheck = { kind, button: false, uploaded: false, keptInData: false, shown: false, filter: false, errors };
   const uploadedAddresses = (): string[] =>
     api.writes.filter((w) => w.method === "PUT" && w.status === 201).map((w) => `${EVAL_ORIGIN}/app-media/${NICKNAME}/${w.path.split("/").pop() ?? ""}`);
   const waitForUpload = (ms: number) => waitUntil(() => uploadedAddresses().length > 0, ms);
@@ -384,8 +413,7 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
         check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
       }
     }
-    const labels = [...visitorLabels, ...(await page.evaluate<string[]>(LABELS_SCRIPT)), ...(await page.evaluate<string[]>(`Array.from(document.querySelectorAll("option, [placeholder]")).map((el) => el.textContent + " " + (el.getAttribute("placeholder") || ""))`))];
-    check.missingWords = MEDIA_WORDS[kind].filter((word) => !labels.some((label) => label.toLowerCase().includes(word)));
+    check.filter = await page.evaluate<boolean>(`${HAS_FILTER}(${JSON.stringify(MEDIA_FILTER[kind])})`);
     return check;
   } finally {
     await context.close();
@@ -551,7 +579,7 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser, medi
   await dumpPublished(run.published);
   const checked = await checkPublished(browser, run.published, spec);
   // Ticket 3.19: a media case is also opened signed in, and a photo or recording uploaded through it.
-  const mediaCheck = media === undefined ? undefined : await exerciseMedia(browser, run.published, media, checked.page.labels);
+  const mediaCheck = media === undefined ? undefined : await exerciseMedia(browser, run.published, media);
   return {
     outcome: {
       ...run.outcome,

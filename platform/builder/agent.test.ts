@@ -220,6 +220,8 @@ describe("the agent's settings (criterion 2)", () => {
     }
     for (const name of ["savePhoto", "recordVoice", "deleteMedia"]) expect(client).toContain(`${name}: ${name},`);
     expect(MEDIA_GUIDANCE).toMatch(/from a click/);
+    expect(MEDIA_GUIDANCE).toMatch(/still starting/);
+    expect(agents).toContain("if (starting) return;");
     expect(MEDIA_GUIDANCE).toMatch(/sign-in button/);
     expect(buildPrompt(ws)).toContain(MEDIA_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Add photos"] })).toContain(MEDIA_GUIDANCE);

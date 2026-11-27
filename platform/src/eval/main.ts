@@ -152,13 +152,7 @@ async function main(): Promise<number> {
       console.error(all.error);
       return 1;
     }
-    // Ticket 3.19: then the build file's media cases (a photo gallery, voice messages), examples 5 and 6.
-  const media = parseReadinessExamples(readFileSync(examplesFile("build"), "utf8"));
-  if ("error" in media) {
-    console.error(media.error);
-    return 1;
-  }
-  const examples = [...all.filter((example) => example.category === "example"), ...media];
+    const examples = all.filter((example) => example.category === "example");
     console.log(`Model: ${MODEL_ID} (${REGION}), ${examples.length} example specs`);
     const results = await runSuggestionsEval(
       examples,
