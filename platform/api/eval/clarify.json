@@ -120,7 +120,7 @@
       "check": "first-reply",
       "text": "An app where our sales team photographs the business cards of the people we meet at trade fairs, so we have all their details in one list.",
       "mentionsEach": [["compan", "organisation", "organization", "notes"]],
-      "avoids": ["server", "API", "typing them in", "type them in", "typing the contacts", "type the contacts", "typing contacts", "type contacts", "typing in the contacts", "type in the contacts", "typing in their", "type in their", "entering their", "enter their", "entering the contacts", "enter the contacts", "the AI can read the card", "the AI will read", "the AI reads the card"]
+      "avoids": ["server", "API", "typing them in", "type them in", "typing the contacts", "type the contacts", "typing contacts", "type contacts", "typing in the contacts", "type in the contacts", "typing in their", "type in their", "entering their", "enter their", "entering the contacts", "enter the contacts", "the AI can read the card", "the AI will read", "the AI reads the card", "and a photo of the card", "with a photo of the card", "keep a photo of the card", "keep the photo of the card", "keep photos of the cards", "keep the card photo", "photo of the card for reference", "photos of the cards for reference"]
     }
   ]
 }

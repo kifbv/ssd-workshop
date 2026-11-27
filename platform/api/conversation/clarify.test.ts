@@ -158,7 +158,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
     // contact details): typed details are for receipts and labels; contact details get a version that keeps none.
     expect(CLARIFY_SYSTEM_PROMPT).toContain("or details from receipts or labels that people type in");
     expect(CLARIFY_SYSTEM_PROMPT).toContain(
-      "For business cards or other people's contact details, never suggest typing them in: suggest a version that keeps no contact details, for example the companies met and notes about each meeting, without names, phone numbers or email addresses",
+      "For business cards or other people's contact details, never suggest typing them in: suggest a version that keeps no contact details, for example the companies met and notes about each meeting, without names, phone numbers, email addresses or photos of the cards",
     );
     expect(CLARIFY_SYSTEM_PROMPT).not.toContain("or details people type in)");
     // 3.20's lessons stay: no sign-in claim of its own, the photo reminder and the storage facts.

@@ -232,7 +232,7 @@
       "keywords": [
         "outside service"
       ],
-      "avoids": ["typing them in", "type them in", "typing the contacts", "type the contacts", "typing contacts", "type contacts", "typing in the contacts", "type in the contacts", "typing in their", "type in their", "entering their", "enter their", "entering the contacts", "enter the contacts"],
+      "avoids": ["typing them in", "type them in", "typing the contacts", "type the contacts", "typing contacts", "type contacts", "typing in the contacts", "type in the contacts", "typing in their", "type in their", "entering their", "enter their", "entering the contacts", "enter the contacts", "and a photo of the card", "with a photo of the card", "keep a photo of the card", "keep the photo of the card", "keep photos of the cards", "keep the card photo", "photo of the card for reference", "photos of the cards for reference"],
       "spec": "# Card Scanner\n\n```mermaid\nflowchart TD\n  list[Contacts] -->|add a card| add[Photo of a business card]\n  add -->|AI reads name phone and email| form[Contact form]\n  form -->|Save| contacts[(Contacts)]\n  contacts --> list\n```\n\n## What it does\nA shared list of the people our sales team meets at fairs. Someone signed in to the workshop takes a photo of a business card, and the workshop's AI reads the person's name, company, phone number and email address from it and fills the form; they check it and press Save.\n\n## Screens\n- Contacts: everyone met so far, with name, company, phone number and email address.\n- Add a card: a button to take a photo of a business card, the fields read by the AI and a Save button.\n\n## Data it keeps\n- Contacts: the card photo, the person's name, company, phone number and email address."
     }
   ]

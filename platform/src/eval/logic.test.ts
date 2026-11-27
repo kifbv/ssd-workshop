@@ -425,6 +425,11 @@ describe("readiness (ticket 2.7)", () => {
     expect(scoreReadiness(cards, { verdict: "not-ready", reasons: [tryOne] })).toEqual({ pass: false, detail: "not-ready, but a reason says what it should not (typing them in)" });
     const good = "Your spec reads people's names, phone numbers and emails from business cards; keep a list of the companies you met and notes instead, without contact details (outside service).";
     expect(scoreReadiness(cards, { verdict: "not-ready", reasons: [good] })).toEqual({ pass: true, detail: "not-ready, naming outside service" });
+    const cardPhoto = "Your spec reads contact details from business cards; keep the companies met with notes, and keep the card photo for reference (outside service).";
+    expect(scoreReadiness(cards, { verdict: "not-ready", reasons: [cardPhoto] }).detail).toContain("says what it should not (keep the card photo)");
+    // Saying what to leave out is fine.
+    const without = "Your spec reads contact details from business cards; keep the companies met and notes, without names, phone numbers, email addresses or photos of the cards (outside service).";
+    expect(scoreReadiness(cards, { verdict: "not-ready", reasons: [without] }).pass).toBe(true);
   });
 
   it("refuses a malformed file or a spec of the wrong shape", () => {
@@ -914,12 +919,17 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     expect(
       scoreClarify(cards, { text: reply("The AI cannot read business cards, but the app can keep the companies you met and your notes, without names, phones or emails."), offersSpec: false }).pass,
     ).toBe(true);
+    expect(
+      scoreClarify(cards, { text: reply("Keep the companies you met and notes, without names, phone numbers, email addresses or photos of the cards."), offersSpec: false }).pass,
+    ).toBe(true);
     // The steer the 3.16 guardrail contradicts fails, however it is worded.
     for (const line of [
       "The AI cannot read business cards, but you can type in their phone and the companies you met.",
       "The AI cannot read the cards; typing them in works and you keep the companies you met.",
       "The AI cannot read the cards, so type the contacts into the list with the company.",
       "You can enter their email and company by hand.",
+      // Run 4 (562487a): the companies and notes, but the card photo kept the contact details anyway.
+      "Instead, the app could keep a list of companies you met, with notes about each meeting, and a photo of the card for reference.",
     ]) {
       expect(scoreClarify(cards, { text: reply(line), offersSpec: false }).detail, line).toContain("says what it should not");
     }
