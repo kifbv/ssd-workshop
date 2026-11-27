@@ -339,7 +339,8 @@ describe("savePhoto (ticket 3.19)", () => {
     await page.evaluate(`(() => { const base = document.createElement("base"); base.href = "https://evil.example/"; document.head.append(base); })()`);
 
     await page.setInputFiles("#photo", { name: "IMG_0001.jpg", mimeType: "image/jpeg", buffer: photo });
-    await expect.poll(statusText).toBe("Saved.");
+    // Decoding and re-encoding 12 megapixels can pass expect.poll's 1 s default on a busy runner (deploy run 69).
+    await expect.poll(statusText, { timeout: 15_000 }).toBe("Saved.");
 
     const [upload] = uploads();
     expect(uploads()).toHaveLength(1);
@@ -362,7 +363,7 @@ describe("savePhoto (ticket 3.19)", () => {
     expect(elsewhere).toEqual([]);
     expect(await page.evaluate<string[]>("window.violations")).toEqual([]);
     expect(errors).toEqual([]);
-  });
+  }, 30_000);
 
   it("criterion 2: WHEN the picked file is a PNG THEN it is uploaded as a JPEG (a small one keeps its size)", async () => {
     await openApp();
@@ -374,7 +375,7 @@ describe("savePhoto (ticket 3.19)", () => {
       const png = await picture("image/png", width, height);
       expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
       await page.setInputFiles("#photo", { name: "drawing.png", mimeType: "image/png", buffer: png });
-      await expect.poll(statusText).toBe("Saved.");
+      await expect.poll(statusText, { timeout: 15_000 }).toBe("Saved.");
       const id = uploads().at(-1)?.id ?? "";
       const kept = stored.get(id);
       expect(kept?.bytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
@@ -386,7 +387,7 @@ describe("savePhoto (ticket 3.19)", () => {
     expect(uploads().map((call) => call.status)).toEqual([201, 201, 201]);
     expect(new Set(uploads().map((call) => call.id)).size).toBe(3);
     expect(errors).toEqual([]);
-  });
+  }, 30_000);
 
   it("criterion 2: WHEN the browser cannot decode the picked file (HEIC in Chromium, or not a picture) THEN a plain message shows and nothing is uploaded", async () => {
     await openApp();
