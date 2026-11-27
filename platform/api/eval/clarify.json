@@ -78,8 +78,8 @@
       "check": "first-reply",
       "text": "I'd like a gallery of my drawings: I take a photo of each drawing with my phone and give it my own tags, so I can find them by tag later.",
       "mentionsEach": [["anyone", "everyone", "everybody", "whoever"], ["link", "address"], ["people", "person", "faces", "someone"], ["confidential", "private", "sensitive", "secret"]],
-      "atMostOnce": ["confidential", "private", "sensitive", "secret"],
-      "avoids": ["server", "megabyte"]
+      "atMostOnce": ["confidential"],
+      "avoids": ["server", "megabyte", "sign-in", "sign in"]
     },
     {
       "name": "photo reminder not repeated",

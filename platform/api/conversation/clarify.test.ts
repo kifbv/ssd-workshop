@@ -134,7 +134,8 @@ describe("the ready marker (clarify-v2 and later)", () => {
     expect(CLARIFY_SYSTEM_PROMPT).toContain("apps can take a photo with the phone's camera or pick one from the phone, and record a voice message with the phone (up to 5 minutes)");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("everyone who has the app's link can see the photos and hear the recordings");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("Apps cannot keep videos");
-    expect(CLARIFY_SYSTEM_PROMPT).toContain("so it is best not to photograph people or confidential papers");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("your reply must say, right after your restatement, in one short sentence in the participant's language, that anyone with the app's link can see the photos, so it is best not to photograph people or confidential papers");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("never say it needs a sign-in or an account");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("if an earlier reply already said it, do not say it again");
     // The storage facts of clarify-v5 stay.
     expect(CLARIFY_SYSTEM_PROMPT).toContain("Nothing stays only on the participant's phone or browser");

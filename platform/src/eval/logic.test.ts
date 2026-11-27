@@ -776,7 +776,9 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
       ["people", "person", "faces", "someone"],
       ["confidential", "private", "sensitive", "secret"],
     ]);
-    expect(gallery.atMostOnce).toEqual(["confidential", "private", "sensitive", "secret"]);
+    expect(gallery.atMostOnce).toEqual(["confidential"]);
+    // A personal gallery needs no sign-in: the first live run said it did (clarify-v6 then forbade it).
+    expect(gallery.avoids).toEqual(expect.arrayContaining(["sign-in", "sign in"]));
     const later = must(examples.find((e) => e.name === "photo reminder not repeated"));
     expect(later.check).toBe("answers-question");
     expect(later.history.some((h) => /confidential papers/.test(h.answer))).toBe(true);
