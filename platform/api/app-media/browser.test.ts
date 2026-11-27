@@ -14,7 +14,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { APP_MEDIA_CONTENT_SECURITY_POLICY, APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
 import { exifWithGps } from "./fixtures.js";
-import { detectMedia, recordingSeconds, stripJpegMetadata, stripRecordingMetadata } from "./formats.js";
+import { decodedSecondsBound, detectMedia, recordingSeconds, stripJpegMetadata, stripRecordingMetadata } from "./formats.js";
 import { MEDIA_CACHE_CONTROL } from "./media.js";
 
 const PHOTO_ID = "PhotoPhotoPhotoPhoto01";
@@ -175,6 +175,10 @@ describe("real encoder output", () => {
       expect(webmSeconds).toBeGreaterThan(0.8);
       expect(webmSeconds).toBeLessThan(3);
       expect(recordingSeconds(stripRecordingMetadata(webm as Buffer, "webm"), "webm")).toBe(webmSeconds);
+      // Ticket 3.21: the decoded length bound (from every packet's TOC byte) stays close to the real length.
+      const webmBound = decodedSecondsBound(webm as Buffer, "webm") as number;
+      expect(webmBound).toBeGreaterThanOrEqual(webmSeconds);
+      expect(webmBound).toBeLessThan(3);
       // Newer Chromium records MP4 too (AAC or Opus inside, fragmented); older ones answer isTypeSupported false.
       const mp4 = await record(page, "audio/mp4");
       if (mp4 !== undefined) {
@@ -182,6 +186,9 @@ describe("real encoder output", () => {
         const mp4Seconds = recordingSeconds(mp4, "mp4") as number;
         expect(mp4Seconds).toBeGreaterThan(0.8);
         expect(mp4Seconds).toBeLessThan(3);
+        const mp4Bound = decodedSecondsBound(mp4, "mp4") as number;
+        expect(mp4Bound).toBeGreaterThanOrEqual(mp4Seconds);
+        expect(mp4Bound).toBeLessThan(3);
         expect(detectMedia(stripRecordingMetadata(mp4, "mp4"))).toBe("mp4");
       }
       // A video recording is refused: a canvas stream recorded as WebM (VP8).

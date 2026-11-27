@@ -704,3 +704,286 @@ function blankWebmMetadata(bytes: Buffer): void {
     pos = el.dataEnd;
   }
 }
+
+// ---- Decoded length bound (ticket 3.21) ----
+//
+// What a decoder can play from a recording, counted from its packets rather than its timestamps, so a crafted file that
+// declares 5 minutes but holds hours of audio (Opus can pack 120 ms into a few bytes, or a decoder may conceal an empty
+// packet as lost audio) is still caught before a paid service (Amazon Transcribe bills per minute) reads it. Every
+// packet counts at the duration its own Opus TOC byte gives (RFC 6716 section 3.1), or 120 ms (Opus's longest packet)
+// when it is empty, malformed or laced; an AAC frame counts 1,024 samples at the lowest sample rate the file names.
+// The bound is the larger of this and recordingSeconds (a decoder that follows timestamps). One pass, no allocation per
+// packet; undefined when the file cannot be walked.
+
+/** Opus's longest packet: 120 ms (RFC 6716 section 3.2.5). */
+export const OPUS_MAX_PACKET_SECONDS = 0.12;
+/** AAC frame length in samples (AAC-LC and HE-AAC's core; 960-sample frames are shorter, so 1,024 is the bound). */
+const AAC_FRAME_SAMPLES = 1024;
+const AAC_SAMPLE_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+
+/** The duration of one Opus packet from its first bytes: its TOC byte (and frame count byte for code 3). */
+export function opusPacketSeconds(length: number, toc: number | undefined, countByte: number | undefined): number {
+  if (length < 1 || toc === undefined) return OPUS_MAX_PACKET_SECONDS;
+  const config = toc >> 3;
+  const frameMs = config < 12 ? [10, 20, 40, 60][config % 4] : config < 16 ? [10, 20][config % 2] : [2.5, 5, 10, 20][config % 4];
+  const code = toc & 0x03;
+  let frames = code === 0 ? 1 : code === 3 ? 0 : 2;
+  if (code === 3) {
+    if (length < 2 || countByte === undefined || (countByte & 0x3f) === 0) return OPUS_MAX_PACKET_SECONDS;
+    frames = countByte & 0x3f;
+  }
+  const seconds = (frames * (frameMs as number)) / 1000;
+  // Over 120 ms is malformed (a decoder refuses it, then may conceal it): counted as the longest packet.
+  return seconds > OPUS_MAX_PACKET_SECONDS ? OPUS_MAX_PACKET_SECONDS : seconds;
+}
+
+/**
+ * At most how many seconds of audio a decoder can get from this recording (see above), or undefined when it cannot be
+ * walked. Never less than recordingSeconds.
+ */
+export function decodedSecondsBound(bytes: Buffer, kind: RecordingKind): number | undefined {
+  const timed = recordingSeconds(bytes, kind);
+  if (timed === undefined) return undefined;
+  const packets = kind === "webm" ? webmPacketSeconds(bytes) : kind === "ogg" ? oggPacketSeconds(bytes) : mp4PacketSeconds(bytes);
+  if (packets === undefined || Number.isNaN(packets)) return undefined;
+  return Math.max(timed, packets);
+}
+
+// Ogg/Opus: packets are rebuilt from the pages' lacing values (a packet ends on a value under 255, and may run on to
+// the next page of its stream); each stream's first two packets are its headers (OpusHead, OpusTags).
+function oggPacketSeconds(bytes: Buffer): number | undefined {
+  // Per stream: packets finished so far, and the packet under way (its length so far and first two bytes).
+  const streams = new Map<number, { done: number; open: boolean; length: number; toc: number | undefined; count: number | undefined }>();
+  let seconds = 0;
+  let pos = 0;
+  while (pos < bytes.length) {
+    if (pos + 27 > bytes.length || bytes.toString("latin1", pos, pos + 4) !== "OggS") return undefined;
+    const flags = bytes[pos + 5] as number;
+    const serial = bytes.readUInt32LE(pos + 14);
+    const segments = bytes[pos + 26] as number;
+    const tableEnd = pos + 27 + segments;
+    if (tableEnd > bytes.length) return undefined;
+    if ((flags & 0x02) !== 0) streams.set(serial, { done: 0, open: false, length: 0, toc: undefined, count: undefined });
+    const stream = streams.get(serial);
+    if (stream === undefined) return undefined;
+    let data = tableEnd;
+    for (let i = pos + 27; i < tableEnd; i += 1) {
+      const lace = bytes[i] as number;
+      if (data + lace > bytes.length) return undefined;
+      if (!stream.open) {
+        stream.open = true;
+        stream.length = 0;
+        stream.toc = undefined;
+        stream.count = undefined;
+      }
+      // The packet's first two bytes, wherever its segments put them.
+      for (let k = 0; k < lace && stream.length + k < 2; k += 1) {
+        if (stream.length + k === 0) stream.toc = bytes[data + k];
+        else stream.count = bytes[data + k];
+      }
+      stream.length += lace;
+      data += lace;
+      if (lace < 255) {
+        stream.open = false;
+        stream.done += 1;
+        if (stream.done > 2) seconds += opusPacketSeconds(stream.length, stream.toc, stream.count);
+      }
+    }
+    pos = data;
+  }
+  // A packet cut off at the end of the file still reaches the decoder: the longest packet.
+  for (const stream of streams.values()) if (stream.open && stream.done >= 2) seconds += OPUS_MAX_PACKET_SECONDS;
+  return seconds;
+}
+
+// WebM/Opus: each SimpleBlock or Block holds one Opus packet, or several with lacing (each then counted at 120 ms). The
+// same flat walk as webmSeconds.
+function webmPacketSeconds(bytes: Buffer): number | undefined {
+  const header = readElement(bytes, 0, bytes.length);
+  if (header?.id !== EBML_HEADER || header.dataEnd === undefined) return undefined;
+  const segment = readElement(bytes, header.dataEnd, bytes.length);
+  if (segment?.id !== SEGMENT) return undefined;
+  const end = segment.dataEnd ?? bytes.length;
+  let seconds = 0;
+  let pos = segment.dataStart;
+  while (pos < end) {
+    const el = readElement(bytes, pos, end);
+    if (el === undefined) return undefined;
+    if (el.id === CLUSTER || el.id === BLOCK_GROUP) {
+      pos = el.dataStart;
+      continue;
+    }
+    if (el.dataEnd === undefined) return undefined;
+    if (el.id === SIMPLE_BLOCK || el.id === BLOCK) {
+      // Track number, relative time (2 bytes), flags (1 byte), then the frame(s).
+      const track = readVint(bytes, el.dataStart, false);
+      if (track === undefined) return undefined;
+      const flagsAt = el.dataStart + track.length + 2;
+      if (flagsAt >= el.dataEnd) return undefined;
+      const lacing = ((bytes[flagsAt] as number) >> 1) & 0x03;
+      const frame = flagsAt + 1;
+      if (lacing !== 0) {
+        if (frame >= el.dataEnd) return undefined;
+        seconds += ((bytes[frame] as number) + 1) * OPUS_MAX_PACKET_SECONDS;
+      } else {
+        const length = el.dataEnd - frame;
+        seconds += opusPacketSeconds(length, length >= 1 ? bytes[frame] : undefined, length >= 2 ? bytes[frame + 1] : undefined);
+      }
+    }
+    pos = el.dataEnd;
+  }
+  return seconds;
+}
+
+/** The AAC sample rate an `esds` box's AudioSpecificConfig names (the core rate), or undefined. */
+function aacSampleRate(bytes: Buffer, esds: Box): number | undefined {
+  // Descriptors after the full box's version and flags: tag (1 byte), size (1 to 4 bytes of 7 bits).
+  const descriptor = (at: number, end: number): { tag: number; start: number; end: number } | undefined => {
+    if (at >= end) return undefined;
+    const tag = bytes[at] as number;
+    let size = 0;
+    let i = at + 1;
+    for (let n = 0; n < 4; n += 1) {
+      if (i >= end) return undefined;
+      const b = bytes[i] as number;
+      size = size * 128 + (b & 0x7f);
+      i += 1;
+      if ((b & 0x80) === 0) break;
+    }
+    return i + size > end ? undefined : { tag, start: i, end: i + size };
+  };
+  const es = descriptor(esds.start + 4, esds.end);
+  if (es?.tag !== 0x03 || es.start + 3 > es.end) return undefined;
+  const esFlags = bytes[es.start + 2] as number;
+  let at = es.start + 3 + ((esFlags & 0x80) !== 0 ? 2 : 0) + ((esFlags & 0x20) !== 0 ? 2 : 0);
+  if ((esFlags & 0x40) !== 0) {
+    if (at >= es.end) return undefined;
+    at += 1 + (bytes[at] as number);
+  }
+  const config = descriptor(at, es.end);
+  if (config?.tag !== 0x04) return undefined;
+  const specific = descriptor(config.start + 13, config.end);
+  if (specific?.tag !== 0x05 || specific.end - specific.start < 2) return undefined;
+  // AudioSpecificConfig: object type (5 bits, or 31 then 6 more), sampling frequency index (4 bits, 15 = 24-bit rate).
+  let bit = specific.start * 8;
+  const read = (count: number): number | undefined => {
+    if (bit + count > specific.end * 8) return undefined;
+    let value = 0;
+    for (let i = 0; i < count; i += 1, bit += 1) value = value * 2 + (((bytes[bit >> 3] as number) >> (7 - (bit & 7))) & 1);
+    return value;
+  };
+  const objectType = read(5);
+  if (objectType === 31 && read(6) === undefined) return undefined;
+  const index = read(4);
+  if (objectType === undefined || index === undefined) return undefined;
+  const rate = index === 15 ? read(24) : AAC_SAMPLE_RATES[index];
+  return rate === undefined || rate === 0 ? undefined : rate;
+}
+
+/** Per track: the most seconds one sample can decode to (AAC), or undefined for Opus (each sample's TOC is read). */
+function mp4SampleSeconds(bytes: Buffer, stsd: Box): { opus: boolean; perSample: number } | undefined {
+  if (stsd.end - stsd.start < 8) return undefined;
+  let found: { opus: boolean; perSample: number } | undefined;
+  let broken = false;
+  eachBox(bytes, stsd.start + 8, stsd.end, (entry) => {
+    if (entry.type === "Opus") {
+      found = { opus: true, perSample: OPUS_MAX_PACKET_SECONDS };
+      return true;
+    }
+    if (entry.type !== "mp4a" || entry.end - entry.start < 28) {
+      broken = true;
+      return false;
+    }
+    // Audio sample entry: version (at 8), sample rate (16.16 at 24); version 1 adds 16 bytes before the child boxes.
+    const version = bytes.readUInt16BE(entry.start + 8);
+    const entryRate = bytes.readUInt16BE(entry.start + 24);
+    const childrenAt = entry.start + 28 + (version === 1 ? 16 : 0);
+    const esds = childrenAt <= entry.end ? firstBox(bytes, childrenAt, entry.end, "esds") : undefined;
+    const rate = esds === undefined ? undefined : aacSampleRate(bytes, esds);
+    if (rate === undefined) {
+      broken = true;
+      return false;
+    }
+    const lowest = entryRate > 0 ? Math.min(rate, entryRate) : rate;
+    const perSample = AAC_FRAME_SAMPLES / lowest;
+    found = { opus: false, perSample: Math.max(found?.perSample ?? 0, perSample) };
+    return true;
+  });
+  return broken ? undefined : found;
+}
+
+// MP4: every sample of every track counts: AAC samples at their frame length (above); Opus samples at their TOC byte in
+// a fragmented file (trun's data offset and sample sizes locate it), else at 120 ms. Sample counts come from `stsz`
+// (plain) and every `trun` (fragments), whatever `stts` says.
+function mp4PacketSeconds(bytes: Buffer): number | undefined {
+  const moov = firstBox(bytes, 0, bytes.length, "moov");
+  if (moov === undefined || !wholeBoxes(bytes, moov.start, moov.end)) return undefined;
+  const tracks = new Map<number, { opus: boolean; perSample: number }>();
+  let seconds = 0;
+  const tracksRead = eachChildBox(bytes, moov, "trak", (trak) => {
+    const tkhd = child(bytes, trak, "tkhd");
+    const stbl = child(bytes, child(bytes, child(bytes, trak, "mdia"), "minf"), "stbl");
+    const stsd = child(bytes, stbl, "stsd");
+    if (tkhd === undefined || stsd === undefined) return false;
+    const idAt = tkhd.start + (fullBoxVersion(bytes, tkhd) === 1 ? 20 : 12);
+    if (idAt + 4 > tkhd.end) return false;
+    const sample = mp4SampleSeconds(bytes, stsd);
+    if (sample === undefined) return false;
+    tracks.set(bytes.readUInt32BE(idAt), sample);
+    // stsz: version and flags, sample size, sample count; stts's counts too, whichever is larger.
+    const stsz = child(bytes, stbl, "stsz");
+    let count = stsz !== undefined && stsz.start + 12 <= stsz.end ? bytes.readUInt32BE(stsz.start + 8) : 0;
+    const stts = child(bytes, stbl, "stts");
+    if (stts !== undefined && stts.start + 8 <= stts.end) {
+      const entries = bytes.readUInt32BE(stts.start + 4);
+      if (stts.start + 8 + entries * 8 > stts.end) return false;
+      let total = 0;
+      for (let i = 0; i < entries; i += 1) total += bytes.readUInt32BE(stts.start + 8 + i * 8);
+      count = Math.max(count, total);
+    }
+    seconds += count * sample.perSample;
+    return true;
+  });
+  if (!tracksRead) return undefined;
+  const fragment = (moof: Box, traf: Box): boolean => {
+    if (!wholeBoxes(bytes, traf.start, traf.end)) return false;
+    const tfhd = child(bytes, traf, "tfhd");
+    if (tfhd === undefined || tfhd.start + 8 > tfhd.end) return false;
+    const tfhdFlags = bytes.readUInt32BE(tfhd.start) & 0xffffff;
+    const sample = tracks.get(bytes.readUInt32BE(tfhd.start + 4));
+    if (sample === undefined) return false;
+    // Where the run's data offsets count from: tfhd's base data offset, else the moof (both MediaRecorders set
+    // default-base-is-moof); a file without either is read at 120 ms a sample.
+    let base: number | undefined;
+    if ((tfhdFlags & 0x01) !== 0) base = tfhd.start + 16 <= tfhd.end ? readUnsigned(bytes, tfhd.start + 8, 8) : undefined;
+    else if ((tfhdFlags & 0x020000) !== 0) base = moof.at;
+    const defaultSizeAt = tfhd.start + 8 + ((tfhdFlags & 0x01) !== 0 ? 8 : 0) + ((tfhdFlags & 0x02) !== 0 ? 4 : 0) + ((tfhdFlags & 0x08) !== 0 ? 4 : 0);
+    if ((tfhdFlags & 0x10) !== 0 && defaultSizeAt + 4 > tfhd.end) return false;
+    const defaultSize = (tfhdFlags & 0x10) !== 0 ? bytes.readUInt32BE(defaultSizeAt) : undefined;
+    return eachChildBox(bytes, traf, "trun", (trun) => {
+      if (trun.start + 8 > trun.end) return false;
+      const flags = bytes.readUInt32BE(trun.start) & 0xffffff;
+      const count = bytes.readUInt32BE(trun.start + 4);
+      const offsetAt = trun.start + 8;
+      const first = offsetAt + ((flags & 0x01) !== 0 ? 4 : 0) + ((flags & 0x04) !== 0 ? 4 : 0);
+      const perEntry = 4 * [0x100, 0x200, 0x400, 0x800].filter((bit) => (flags & bit) !== 0).length;
+      if (first + count * perEntry > trun.end) return false;
+      const sizeAt = (flags & 0x100) !== 0 ? 4 : 0;
+      const sizes = (flags & 0x200) !== 0;
+      if (!sample.opus || base === undefined || (flags & 0x01) === 0 || (!sizes && defaultSize === undefined)) {
+        seconds += count * sample.perSample;
+        return true;
+      }
+      let at = base + bytes.readInt32BE(offsetAt);
+      for (let i = 0; i < count; i += 1) {
+        const size = sizes ? bytes.readUInt32BE(first + i * perEntry + sizeAt) : (defaultSize as number);
+        if (at < 0 || at + size > bytes.length) return false;
+        seconds += opusPacketSeconds(size, size >= 1 ? bytes[at] : undefined, size >= 2 ? bytes[at + 1] : undefined);
+        at += size;
+      }
+      return true;
+    });
+  };
+  const fragmentsRead = eachBox(bytes, 0, bytes.length, (moof) => moof.type !== "moof" || (wholeBoxes(bytes, moof.start, moof.end) && eachChildBox(bytes, moof, "traf", (traf) => fragment(moof, traf))));
+  return fragmentsRead ? seconds : undefined;
+}
