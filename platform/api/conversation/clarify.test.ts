@@ -148,7 +148,9 @@ describe("the ready marker (clarify-v2 and later)", () => {
       "apps may use it for four tasks only: suggest tags for a photo, read named fields from a photo (a receipt's shop, date and total, a label's text), sort a text into categories, and turn a voice recording into text",
     );
     expect(CLARIFY_SYSTEM_PROMPT).toContain("the person sees the suggestion and keeps or changes it before it is saved");
-    expect(CLARIFY_SYSTEM_PROMPT).toContain("you may offer this in one of your questions");
+    // Run 1 (3cb7d0b): "you may offer this" let a tagged gallery go without the offer.
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("offer it in one of your numbered questions");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("offer it only once, and when they say no, the app has no AI");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("Should the AI suggest tags for each photo, which you can keep or change?");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("no chat or chatbot, no writing or rewriting texts, no answering free questions, and it never reads business cards or other people's contact details");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("when the AI is not available, people type it themselves");

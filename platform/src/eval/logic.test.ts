@@ -876,6 +876,8 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     expect(scoreClarify(chatbot, { text: steer("The AI cannot chat, but a page of questions and answers your team writes works."), offersSpec: false }).pass).toBe(true);
     // The false claim fails even with the steer.
     expect(scoreClarify(chatbot, { text: steer("A page of questions and answers, and the AI can answer the rest."), offersSpec: false }).detail).toContain("says what it should not");
+    // Run 1's correct steer: rules written out, questions answered in writing on a message board.
+    expect(scoreClarify(chatbot, { text: steer("The rules are written out and colleagues post questions anyone can answer in writing, like a small message board."), offersSpec: false }).pass).toBe(true);
     expect(scoreClarify(chatbot, { text: steer("A page about holidays."), offersSpec: false }).detail).toContain("never mentions (questions and answers");
   });
 
