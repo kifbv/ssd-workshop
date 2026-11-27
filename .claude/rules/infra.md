@@ -354,6 +354,8 @@ paths:
   Passing `Tags` on Start may need `transcribe:TagResource`: jobs stay untagged and are deleted after reading. Transcribe
   writes the result with the caller's rights (forward access sessions), so a bucket policy deny on that prefix would
   refuse it: leave the result prefix to identity policies (`NotResource`) and check live that the result arrives.
+  The boundary's Transcribe statement is on `Resource "*"` for every bounded role, so the synth test fails when any IAM
+  policy but the AI role's names a `transcribe:` action (or a wildcard or `NotAction` reaching one, ticket 3.21 try 2).
 - A CloudFront response headers policy with CORS `originOverride: true` replaces the function's
   `Access-Control-Allow-Methods` too: a route with a new method (3.21's POST) needs it in the policy's list and a new
   policy version, or browsers refuse the preflight.

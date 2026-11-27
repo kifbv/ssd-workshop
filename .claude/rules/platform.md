@@ -382,4 +382,19 @@ paths:
 - A service billed per minute (Transcribe) is charged before the call on the length measured from the file's own
   timing (`app-media/formats.ts`), bounded by the recording limit, never on what the client says; an async job is
   named after the media id so a repeat request joins it instead of paying again.
+  A request that joins a running job answers 202 at once (ticket 3.21 try 2): only the request that paid may wait, or
+  free requests buy Lambda time. Clean up a finished job's record before its result file, so a second reader that finds
+  the file gone also finds the job gone and answers "ask again" instead of failing.
+- A function whose paid call may run long (3.21's Bedrock, Transcribe polls) takes a deadline from the request's start
+  under its timeout and starts a paid step only when it and everything after it (settlement, clean-up) fit; bound every
+  SDK call (one attempt, and race S3 bodies and the paid call against an `AbortController` limit, `withinLimit` in
+  `app-ai/store.ts`: `requestTimeout` is a socket idle limit, not a total), and write the arithmetic next to the
+  constants with a test that adds them up.
+- A spend cap per person across apps keys its counter by the token's writer (`APPAI_WRITER#<nickname>`, 3.21 try 2) in
+  the same transaction as the other counters; a new counter partition needs the role's `LeadingKeys` and a synth test
+  that the patterns cannot match each other.
+- An object keyed by names a stranger chooses (read-photo's fields) is `Object.create(null)`: `out["__proto__"] = x`
+  on `{}` sets the prototype and the field is lost (3.21 try 2).
+- An MP4's declared playback includes `tkhd` and the edit list (`elst` segment durations, which can repeat media), not
+  only `mvhd`/`mdhd`: take the largest of all declared lengths and the counted samples (3.21 try 2).
 
