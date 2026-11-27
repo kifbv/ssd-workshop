@@ -12,6 +12,10 @@ Choices made while building that the specification left open. Newest phase first
 - **Spec deltas:** a change to signed-off behaviour is recorded here as ADDED, CHANGED or REMOVED,
   with the date and the pull request.
 
+## Phase 3c: one edit link per app
+
+- **Direction (Franck, 2026-11-27 09:02 UTC, decision card in the project thread):** "One edit link per app" replaces the per-person sign-in to save of 3.24/3.25 (alternatives declined: keep personal sign-in and fix the flow; a separate address per app). Brief and questions: `docs/phases/phase-3c.md`; the spec delta waits for Franck's yes there.
+
 ## Phase 3b: photos in apps, more storage, clearer refusals
 
 Franck's answers to the brief's questions (2026-11-26, `docs/phases/phase-3b.md`, PR #65): all as suggested.
