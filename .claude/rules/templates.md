@@ -52,6 +52,16 @@ paths:
   attribute) and a MutationObserver for elements added or changed later. In Playwright, a `goto` that changes only the
   fragment does not reload the page: go to `about:blank` first. App code that sets `location.hash` (or uses `#...`
   links) drops the secret from the address; AGENTS.md rule 2 forbids it.
+- An address that carries a capability (3.28's `#edit=` secret) must never be read by app code (3.28 access review M1: a
+  "share" or "QR code" spec makes the agent use `location.href`, which puts the secret in a share sheet, the clipboard,
+  the page or an outside QR service's address, allowed by `img-src https:`): apps show, copy and share
+  `workshopData.viewLink()` (server and path captured at the client's start, no query or fragment), and never change the
+  address (`pushState`, `?` links, GET forms to the page). The build eval checks it (`secretLeaks`: outside requests'
+  address, body and headers; the page's text, title and `href`/`src`/`value`). A response that CORS refuses reaches
+  Playwright only as `requestfailed` with `net::ERR_FAILED`, the same for a 429 and a 200: read its status through the
+  DevTools protocol (`Network.responseReceivedExtraInfo`). A `page.route` fulfil skips Chromium's CORS check, so test
+  CORS against a real local HTTPS server, launched with Chromium's local-network checks off for a routed public page
+  (`edit-link-script.test.ts`).
 - View only (3.28): apps hide saving controls with `if (!workshopData.canSave()) document.body.classList.add("view-only")`
   and `.view-only .edit-only { display: none !important; }`; the build eval opens each app with the edit link first
   (generic save: fill visible fields, press Save/Add, `FILL_AND_MARK_SAVE_SCRIPT`) and then without it on the saved data,

@@ -521,6 +521,20 @@ describe("the template in a browser under the apps' sandbox (criterion 5)", () =
     expect(errors).toEqual([]);
   });
 
+  it("ticket 3.28 try 2 (access review M1): WHEN an app asks workshopData.viewLink() THEN it gets the app's view-only address, without the query or the edit secret, even after the app changes its address", async () => {
+    await openApp("0", `?from=qr${EDIT_LINK}`);
+    expect(page.url()).toBe(`${origin}${APP_PATH}?from=qr${EDIT_LINK}`);
+    expect(await page.evaluate<unknown>("workshopData.canSave()")).toBe(true);
+    expect(await page.evaluate<unknown>("workshopData.viewLink()")).toBe(`${origin}${APP_PATH}`);
+    // App code that changes the address (or adds a <base>) does not change what viewLink() gives.
+    await page.evaluate(`history.pushState(null, "", "elsewhere/?x=1#y"); const base = document.createElement("base"); base.href = "https://example.org/"; document.head.append(base);`);
+    expect(await page.evaluate<unknown>("workshopData.viewLink()")).toBe(`${origin}${APP_PATH}`);
+    // The same without the edit link.
+    await openApp("0");
+    expect(await page.evaluate<unknown>("workshopData.viewLink()")).toBe(`${origin}${APP_PATH}`);
+    expect(errors).toEqual([]);
+  });
+
   it("ticket 3.28: WHEN the edit link was replaced (the API answers 401) THEN the save shows \"This link is view only.\" and canSave() stays true", async () => {
     allow401();
     await openApp("0", EDIT_LINK);

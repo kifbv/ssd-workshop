@@ -232,6 +232,28 @@ describe("the agent's settings (criterion 2)", () => {
     expect(MEDIA_GUIDANCE + AI_GUIDANCE).not.toMatch(/sign-in|sign in/i);
   });
 
+  it("ticket 3.28 try 2 (access review M1): AGENTS.md and both prompts forbid reading or changing the page's address and point to workshopData.viewLink() for showing, copying or sharing it", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
+    const client = readFileSync(new URL("../../templates/basic/workshop-data.js", import.meta.url), "utf8");
+    expect(client).toContain("viewLink: viewLink,");
+    for (const text of [agents, VIEW_ONLY_GUIDANCE]) {
+      for (const name of ["workshopData.viewLink()", "location.href", "document.URL", "window.location", "String(location)", "navigation", "pushState", "replaceState"]) {
+        expect(text, name).toContain(name);
+      }
+      const plain = text.replace(/\s+/g, " ").toLowerCase();
+      expect(plain).toContain("never use the page's full address");
+      expect(plain).toContain("never send the page's address to another site");
+      expect(plain).toContain("never change the page's address");
+      expect(plain).toContain("forms that send to the page itself");
+    }
+    // Still after the WebFetch lines (3.25: lines placed before them made one example skip WebFetch).
+    const prompt = buildPrompt(ws);
+    expect(prompt.indexOf("workshopData.viewLink()")).toBeGreaterThan(prompt.indexOf("You may use WebFetch"));
+    const webFetchRule = agents.indexOf("Before you write calls to a service, you may check it with WebFetch");
+    expect(webFetchRule).toBeGreaterThan(0);
+    expect(agents.indexOf("workshopData.viewLink()")).toBeGreaterThan(webFetchRule);
+  });
+
   it("ticket 3.19: both prompts and AGENTS.md tell the agent how apps keep photos and recordings (savePhoto, recordVoice, deleteMedia, addresses in the data, no blob:)", () => {
     const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
     const client = readFileSync(new URL("../../templates/basic/workshop-data.js", import.meta.url), "utf8");

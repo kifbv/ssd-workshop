@@ -529,7 +529,7 @@ describe("scoreBuild", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
-    editLink: { editorCanSave: true, editorControls: 2, savedOnOpen: 0, saved: true, editorOverflow: 0, editorErrors: [], visitorCanSave: false, visitorControls: [], visitorRefused: false },
+    editLink: { editorCanSave: true, editorControls: 2, savedOnOpen: 0, saved: true, editorOverflow: 0, editorErrors: [], visitorCanSave: false, visitorControls: [], visitorRefused: false, secretLeaks: [] },
     fetches: 0,
     fetchHosts: [],
     durationMs: 185_000,
@@ -558,6 +558,8 @@ describe("scoreBuild", () => {
       [{ editorOverflow: 12 }, "with the edit link, scrolls sideways by 12 px"],
       [{ editorErrors: ["boom"] }, "1 console error(s) with the edit link: boom"],
       [{ visitorCanSave: true }, "workshopData.canSave() is true with the edit link and true without it"],
+      // Ticket 3.28 try 2 (access review L2).
+      [{ secretLeaks: ["a request to qr.example (its address)", "the page's text"] }, "the edit link's secret left the workshop or showed in the page: a request to qr.example (its address), the page's text"],
     ];
     for (const [change, detail] of fails) expect(scoreBuild({ ...ok, editLink: { ...check, ...change } })).toEqual({ pass: false, detail });
   });
@@ -730,7 +732,7 @@ describe("the change suite (ticket 3.7)", () => {
     overflow: 0,
     missing: [],
     outsideHosts: [],
-    editLink: { editorCanSave: true, editorControls: 2, savedOnOpen: 0, saved: true, editorOverflow: 0, editorErrors: [], visitorCanSave: false, visitorControls: [], visitorRefused: false },
+    editLink: { editorCanSave: true, editorControls: 2, savedOnOpen: 0, saved: true, editorOverflow: 0, editorErrors: [], visitorCanSave: false, visitorControls: [], visitorRefused: false, secretLeaks: [] },
     fetches: 0,
     fetchHosts: [],
     durationMs: 120_000,

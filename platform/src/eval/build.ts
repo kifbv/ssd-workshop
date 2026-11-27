@@ -42,6 +42,7 @@ import {
   AI_HELPER,
   FILL_AND_MARK_SAVE_SCRIPT,
   SEARCH_BUTTON_SCRIPT,
+  PAGE_SECRET_SCRIPT,
   MEDIA_FILTER,
   missingScreens,
   SAVING_CONTROLS_SCRIPT,
@@ -270,21 +271,58 @@ async function aroundScreens(page: Page, screens: readonly string[], look: () =>
   }
 }
 
+/** Ticket 3.28 try 2: a console error, with the address Chromium names for it (a "Failed to load resource" line's resource). */
+export interface ConsoleLine {
+  text: string;
+  url: string;
+}
+
+/** Failures of the request itself, before any answer: the session proxy's tunnel, DNS, a refused or reset connection. */
+const NETWORK_FAILURE =
+  /^net::ERR_(TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_(RESET|REFUSED|CLOSED|FAILED|TIMED_OUT|ABORTED)|TIMED_OUT|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|EMPTY_RESPONSE|SSL_PROTOCOL_ERROR|HTTP2_PROTOCOL_ERROR|QUIC_PROTOCOL_ERROR)$/;
+
 /**
- * Ticket 3.28: console errors without those an outside service's failure causes: Chromium's CORS line for an https
- * address of another site, and as many "net::ERR_FAILED" lines as requests to other sites failed.
+ * Ticket 3.28 try 2 (checker finding 1): whether an outside request's failure is the service's or the environment's, not
+ * the app's: it answered 429 or 5xx (live eval run 2: Wikipedia's 429 to the session's shared address, without CORS), or
+ * the request failed before any answer (a live run of example 4: the session proxy's `net::ERR_TUNNEL_CONNECTION_FAILED`).
+ * A CORS refusal of any other answer (`net::ERR_FAILED` after a 2xx) is the app's: it chose a service that browsers cannot read.
  */
-export function withoutOutsideFailures(errors: readonly string[], outsideFailures: number): string[] {
-  let failures = outsideFailures;
-  return errors.filter((line) => {
-    const cors = /^Access to fetch at 'https:\/\/([^/']+)\//.exec(line);
-    if (cors !== null && `https://${cors[1] ?? ""}` !== EVAL_ORIGIN) return false;
-    if (failures > 0 && line.startsWith("Failed to load resource: net::ERR_FAILED")) {
-      failures -= 1;
-      return false;
-    }
-    return true;
-  });
+export function outsideFault(status: number | undefined, errorText: string | undefined): boolean {
+  if (status !== undefined && (status === 429 || (status >= 500 && status <= 599))) return true;
+  return errorText !== undefined && NETWORK_FAILURE.test(errorText);
+}
+
+const isOutside = (url: string): boolean => {
+  try {
+    const parsed = new URL(url);
+    return ["http:", "https:", "ws:", "wss:"].includes(parsed.protocol) && parsed.origin !== EVAL_ORIGIN;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Ticket 3.28 (narrowed in try 2): console errors without those caused by an excused outside request (`excused`: its
+ * address, once per request whose failure is `outsideFault`): Chromium's CORS line naming that address, and one "Failed
+ * to load resource" line located at it per excused request. Every other line counts, the workshop's own included.
+ */
+export function withoutOutsideFailures(lines: readonly ConsoleLine[], excused: readonly string[]): string[] {
+  const outside = excused.filter(isOutside);
+  const corsExcused = new Set(outside);
+  const left = new Map<string, number>();
+  for (const url of outside) left.set(url, (left.get(url) ?? 0) + 1);
+  return lines
+    .filter((line) => {
+      const cors = /^Access to (?:fetch|XMLHttpRequest) at '([^']+)'/.exec(line.text);
+      if (cors !== null && corsExcused.has(cors[1] ?? "")) return false;
+      const count = left.get(line.url) ?? 0;
+      if (line.text.startsWith("Failed to load resource:") && count > 0) {
+        left.set(line.url, count - 1);
+        return false;
+      }
+      return true;
+    })
+    .map((line) => line.text);
 }
 
 /**
@@ -307,14 +345,53 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
     visitorCanSave: true,
     visitorControls: [],
     visitorRefused: false,
+    secretLeaks: [],
   };
   const stored = () => api.writes.some((w) => w.method === "PUT" && w.status === 204 && w.path.startsWith(`/api/apps/${NICKNAME}/data/`));
   // The eval's searches reach real outside services (live eval run 2: Wikipedia answered the session's shared address
-  // 429 without CORS): those failures are the service's, not the app's, and Chromium logs them as console errors.
-  let outsideFailures = 0;
-  editor.page.on("requestfailed", (request) => {
-    if (new URL(request.url()).origin !== EVAL_ORIGIN) outsideFailures += 1;
+  // 429 without CORS; a later run: the session proxy failed a tunnel): only such failures are the service's or the
+  // environment's, not the app's (outsideFault). Chromium logs them as console errors; the status of an answer that CORS
+  // refused is seen only through the DevTools protocol.
+  const lines: ConsoleLine[] = [];
+  editor.page.on("console", (message) => {
+    if (message.type() === "error") lines.push({ text: message.text(), url: message.location().url });
   });
+  editor.page.on("pageerror", (error) => lines.push({ text: error.message, url: "" }));
+  const excused: string[] = [];
+  const outsideRequests = new Map<string, string>();
+  const devtools = await editor.context.newCDPSession(editor.page);
+  await devtools.send("Network.enable");
+  devtools.on("Network.requestWillBeSent", (event) => {
+    if (isOutside(event.request.url)) outsideRequests.set(event.requestId, event.request.url);
+  });
+  devtools.on("Network.responseReceivedExtraInfo", (event) => {
+    const url = outsideRequests.get(event.requestId);
+    if (url !== undefined && outsideFault(event.statusCode, undefined)) {
+      excused.push(url);
+      outsideRequests.delete(event.requestId);
+    }
+  });
+  devtools.on("Network.loadingFailed", (event) => {
+    const url = outsideRequests.get(event.requestId);
+    if (url !== undefined && outsideFault(undefined, event.errorText)) {
+      excused.push(url);
+      outsideRequests.delete(event.requestId);
+    }
+  });
+  // Access review L2 (try 2): the edit link's secret must stay inside the workshop: no request to another origin may
+  // carry it, and the page must not show it (PAGE_SECRET_SCRIPT, after each look and after the save).
+  const requestLeaks = new Set<string>();
+  const pageLeaks = new Set<string>();
+  editor.page.on("request", (request) => {
+    if (!isOutside(request.url())) return;
+    const host = new URL(request.url()).host;
+    if (request.url().includes(EVAL_TOKEN)) requestLeaks.add(`a request to ${host} (its address)`);
+    if ((request.postDataBuffer()?.toString("latin1") ?? "").includes(EVAL_TOKEN)) requestLeaks.add(`a request to ${host} (its body)`);
+    if (Object.values(request.headers()).some((value) => value.includes(EVAL_TOKEN))) requestLeaks.add(`a request to ${host} (its headers)`);
+  });
+  const lookForSecret = async (page: Page): Promise<void> => {
+    for (const place of await page.evaluate<string[]>(`${PAGE_SECRET_SCRIPT}(${JSON.stringify(EVAL_TOKEN)})`)) pageLeaks.add(place);
+  };
   try {
     const page = editor.page;
     await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/${EDIT_LINK}`, { waitUntil: "load" });
@@ -322,6 +399,9 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
     await page.waitForTimeout(1_000);
     check.savedOnOpen = api.writes.length;
     check.editorCanSave = await page.evaluate<boolean>("workshopData.canSave()");
+    const countControls = async (): Promise<void> => {
+      check.editorControls = Math.max(check.editorControls, (await page.evaluate<string[]>(`${SAVING_CONTROLS_SCRIPT}(${JSON.stringify(screens)})`)).length);
+    };
     const pressSave = async (): Promise<void> => {
       if (await page.evaluate<boolean>(`${FILL_AND_MARK_SAVE_SCRIPT}(${JSON.stringify(screens)})`)) {
         await page.click("[data-eval-save]", { timeout: 5_000 }).catch(() => undefined);
@@ -329,8 +409,9 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
       }
     };
     await aroundScreens(page, screens, async () => {
-      check.editorControls = Math.max(check.editorControls, (await page.evaluate<string[]>(`${SAVING_CONTROLS_SCRIPT}(${JSON.stringify(screens)})`)).length);
+      await countControls();
       check.editorOverflow = Math.max(check.editorOverflow, await page.evaluate<number>(OVERFLOW_SCRIPT));
+      await lookForSecret(page);
       if (!tryToSave || stored()) return;
       await pressSave();
       if (stored()) return;
@@ -339,14 +420,21 @@ export async function exerciseEditLink(browser: Browser, files: readonly AppFile
         await page.click("[data-eval-search]", { timeout: 5_000 }).catch(() => undefined);
         await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
         await page.waitForTimeout(1_000);
+        // The found item's Add button shows only now, and an app may hide it again once added (live eval try 2).
+        await countControls();
+        await lookForSecret(page);
         await pressSave();
       }
     });
     if (tryToSave) check.saved = stored();
+    // An app may show its address only after a save (a "Share your list" line).
+    await page.waitForTimeout(300);
+    await lookForSecret(page);
   } finally {
     await editor.context.close();
   }
-  check.editorErrors = withoutOutsideFailures(editor.errors, outsideFailures);
+  check.editorErrors = withoutOutsideFailures(lines, excused);
+  check.secretLeaks = [...requestLeaks, ...pageLeaks];
   // Without the edit link, on what was saved (so a list's items show with their own buttons).
   const visitor = await evalPage(browser);
   const visitorApi = await routeApp(visitor.page, files, undefined);

@@ -7,6 +7,8 @@
 //   await workshopData.set("score", 42);              // any JSON value: number, text, list, object
 //   await workshopData.remove("score");
 //   workshopData.canSave();                           // true when the app was opened with its edit link, else false
+//   workshopData.viewLink();                          // the app's address without the edit link: show, copy or share
+//                                                     // this one, never the page's own address (location.href)
 //   const me = await workshopData.whoAmI();           // with the edit link: the nickname of the app's builder; else null
 // Photos and voice recordings (each at most 4 MB; anyone with the app's address can see and hear them):
 //   const address = await workshopData.savePhoto(file); // a File from <input type="file" accept="image/*">: shrunk to
@@ -32,8 +34,8 @@
 // builder gets on the workshop page (link or QR code), which ends with #edit= and a secret. This file keeps that part
 // of the address as it is (a reload or a bookmark can still save) and sends the secret with every write. Opened
 // without it, the app is view only: canSave() is false, and every write fails with "This link is view only." without
-// being sent. Hide every control that saves when canSave() is false. The address's # part belongs to the edit link:
-// never change location.hash.
+// being sent. Hide every control that saves when canSave() is false. The page's address holds the edit link: never
+// read it (location.href, document.URL) or change it (location.hash, pushState); share viewLink() instead.
 "use strict";
 
 (function () {
@@ -183,6 +185,12 @@
       attributes: true,
       attributeFilter: ["data-workshop-sign-in", "hidden", "style", "class"],
     });
+  }
+
+  // The app's address for everyone (view only): its server and path as the page opened, without the query or the part
+  // after the # (which holds the edit link). Apps show, copy or share this, never the page's own address.
+  function viewLink() {
+    return startServer + startPath;
   }
 
   // Older apps may still ask for the sign-in page's address: there is none any more.
@@ -660,6 +668,8 @@
       return send("DELETE", key);
     },
     canSave: canSave,
+    // The app's view-only address (no edit link): the one to show, copy or share.
+    viewLink: viewLink,
     // A promise: the app builder's nickname, as the data service confirmed it for the edit link, or null (view only).
     whoAmI: async function () {
       await confirmed;

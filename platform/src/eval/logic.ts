@@ -736,6 +736,9 @@ export function missingScreens(title: string | undefined, screens: readonly stri
  * - `visitorRefused`: whether "This link is view only." showed while the visitor looked around: the app saved by itself,
  *   or a control the eval took for a screen tab saved.
  * - `editorOverflow`, `editorErrors`: sideways scroll and console errors with the edit link (the forms show then).
+ * - `secretLeaks` (3.28 try 2, access review L2): where the edit link's secret left the workshop or showed with the edit
+ *   link: requests to another origin holding it in their address, body or headers, and the page's text, title or an
+ *   `href`, `src`, `srcset`, `action` or `value` (PAGE_SECRET_SCRIPT). None may: apps share `workshopData.viewLink()`.
  */
 export interface EditLinkCheck {
   editorCanSave: boolean;
@@ -747,7 +750,26 @@ export interface EditLinkCheck {
   visitorCanSave: boolean;
   visitorControls: string[];
   visitorRefused: boolean;
+  secretLeaks: string[];
 }
+
+/**
+ * Ticket 3.28 try 2 (access review L2): where the page shows the edit link's secret (run in the page, with the secret):
+ * its text, its title, an `href`, `src`, `srcset`, `action` or `value` attribute, or a field's current value; each place
+ * once, in that order (elements in document order).
+ */
+export const PAGE_SECRET_SCRIPT = `((secret) => {
+  const found = [];
+  if (((document.body && document.body.innerText) || "").includes(secret)) found.push("the page's text");
+  if (document.title.includes(secret)) found.push("the page's title");
+  for (const el of document.querySelectorAll("*")) {
+    for (const name of ["href", "src", "srcset", "action", "value"]) {
+      if ((el.getAttribute(name) || "").includes(secret)) found.push("the " + name + " of " + (/^[aeiou]/.test(el.localName) ? "an" : "a") + " <" + el.localName + ">");
+    }
+    if (typeof el.value === "string" && el.value.includes(secret)) found.push("the value of " + (/^[aeiou]/.test(el.localName) ? "an" : "a") + " <" + el.localName + ">");
+  }
+  return Array.from(new Set(found));
+})`;
 
 /** The words of a saving control: Add, Save, Delete, Upload, Record, AI and rating buttons (ticket 3.28). */
 const SAVING_WORDS = String.raw`\b(add|save|delete|remove|upload|record|post|submit|send|create|rate|vote|watched|log|done|edit|suggest|scan)\b|take a photo|choose a photo|pick a photo|[★☆]`;
@@ -899,6 +921,7 @@ export function editLinkProblem(check: EditLinkCheck): string | undefined {
   if (check.editorErrors.length > 0) problems.push(`${check.editorErrors.length} console error(s) with the edit link: ${check.editorErrors.join(" | ").slice(0, 300)}`);
   if (check.visitorControls.length > 0) problems.push(`a visitor without the edit link sees saving controls: ${check.visitorControls.join(", ").slice(0, 200)}`);
   if (check.visitorRefused) problems.push('a visitor without the edit link got "This link is view only." (the app saved by itself, or a screen tab saves)');
+  if (check.secretLeaks.length > 0) problems.push(`the edit link's secret left the workshop or showed in the page: ${check.secretLeaks.join(", ").slice(0, 300)}`);
   return problems.length === 0 ? undefined : problems.join("; ");
 }
 

@@ -5,10 +5,13 @@
 //   workshop-data.js: an app written as AGENTS.md rule 6 asks passes; apps that show a saving control to a visitor (on
 //   another screen, or on each saved item), save when the page opens, or cannot save with the edit link, fail.
 import { readFileSync } from "node:fs";
+import { createServer as createHttpsServer, type Server } from "node:https";
+import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AppFile } from "../../api/build/check.js";
-import { exerciseEditLink, launchBrowser, withoutOutsideFailures } from "./build.js";
+import { selfSignedCertificate } from "../../api/build/test-certificate.js";
+import { exerciseEditLink, launchBrowser, outsideFault, withoutOutsideFailures } from "./build.js";
 import { editLinkProblem, FILL_AND_MARK_SAVE_SCRIPT, SAVING_CONTROLS_SCRIPT, SCREEN_OPENERS_SCRIPT, SEARCH_BUTTON_SCRIPT } from "./logic.js";
 
 describe("the edit-link check's scripts", () => {
@@ -192,6 +195,7 @@ describe("exerciseEditLink (the build eval's edit-link check) on hand-written ap
       visitorCanSave: false,
       visitorControls: [],
       visitorRefused: false,
+      secretLeaks: [],
     });
     expect(editLinkProblem(check)).toBeUndefined();
   }, 60_000);
@@ -212,7 +216,7 @@ describe("exerciseEditLink (the build eval's edit-link check) on hand-written ap
     expect(editLinkProblem(check)).toMatch(/^saves when the page opens \(1 write\(s\) before anyone did anything\); .*"This link is view only\."/);
   }, 60_000);
 
-  it("WHEN the app shows its Add button only after a search (a film found first) THEN the check searches, adds and passes", async () => {
+  it("WHEN the app shows its Add button only after a search (a film found first), and hides it once added THEN the check searches, counts it, adds and passes", async () => {
     const files: AppFile[] = [
       file(
         "index.html",
@@ -232,12 +236,84 @@ describe("exerciseEditLink (the build eval's edit-link check) on hand-written ap
           document.getElementById("result").hidden = false;
         });
         document.getElementById("add").addEventListener("click", async () => {
-          try { await workshopData.set("films-v1", [document.getElementById("found").textContent]); } catch (e) { document.getElementById("status").textContent = e.message; }
+          // As live eval try 2's example 4 did: the found film (and its Add button) goes once it is added.
+          try { await workshopData.set("films-v1", [document.getElementById("found").textContent]); document.getElementById("result").hidden = true; } catch (e) { document.getElementById("status").textContent = e.message; }
         });`,
       ),
       file("workshop-data.js", CLIENT),
     ];
     const check = await exerciseEditLink(browser, files, ["Find a film"], true);
+    expect(check.saved).toBe(true);
+    // Counted while the search showed it, before the add hid it again.
+    expect(check.editorControls).toBe(1);
+    expect(editLinkProblem(check)).toBeUndefined();
+  }, 60_000);
+
+  /** Ticket 3.28 try 2 (access review L2): a one-screen app with a Save form and a share area, `share` filling it. */
+  const sharing = (share: string): AppFile[] => [
+    file(
+      "index.html",
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><script src="workshop-data.js"></script><title>Notes</title><link rel="icon" href="data:,"><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head><body>
+      <h1>Notes</h1><form id="form" class="edit-only"><label for="note">Note</label><input id="note"><button type="submit">Save</button></form>
+      <section id="share"><h2>Share</h2><p id="link"></p><label for="copy">Link</label><input id="copy" readonly><a id="open" href="">Open</a></section>
+      <p class="view-only-note">View only</p><p id="status" role="status"></p></body></html>`,
+    ),
+    file("style.css", STYLE),
+    file(
+      "app.js",
+      `"use strict";
+      if (!workshopData.canSave()) document.body.classList.add("view-only");
+      const status = document.getElementById("status");
+      document.getElementById("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try { await workshopData.set("note-v1", document.getElementById("note").value); status.textContent = "Saved."; } catch (e) { status.textContent = e.message; }
+      });
+      ${share}`,
+    ),
+    file("workshop-data.js", CLIENT),
+  ];
+
+  it("ticket 3.28 try 2 (L2): WHEN the app sends its full address to another site (an outside image's address, a request's body) THEN the check fails, naming each request", async () => {
+    const check = await exerciseEditLink(
+      browser,
+      sharing(`const qr = new Image(); qr.src = "https://qr.invalid/?data=" + encodeURIComponent(location.href);
+        fetch("https://share.invalid/", { method: "POST", body: String(location) }).catch(() => undefined);`),
+      ["Notes"],
+      true,
+    );
+    expect(check.saved).toBe(true);
+    // In the order Chromium sends them (the image may go after the fetch).
+    expect([...check.secretLeaks].sort()).toEqual(["a request to qr.invalid (its address)", "a request to share.invalid (its body)"]);
+    expect(editLinkProblem(check)).toMatch(/^the edit link's secret left the workshop or showed in the page: a request to (qr|share)\.invalid/);
+  }, 60_000);
+
+  it("ticket 3.28 try 2 (L2): WHEN the app shows its full address (location.href in the text, a field, a link, the title) THEN the check fails, naming where", async () => {
+    const check = await exerciseEditLink(
+      browser,
+      sharing(`document.getElementById("link").textContent = location.href;
+        document.getElementById("copy").value = document.URL;
+        document.getElementById("open").setAttribute("href", window.location.href);
+        document.title = "Notes " + location.hash;`),
+      ["Notes"],
+      true,
+    );
+    expect(check.secretLeaks).toEqual(["the page's text", "the page's title", "the value of an <input>", "the href of an <a>"]);
+    // (The long address also widens the page: that problem comes first.)
+    expect(editLinkProblem(check)).toContain("; the edit link's secret left the workshop or showed in the page: the page's text, the page's title, ");
+  }, 60_000);
+
+  it("ticket 3.28 try 2 (L2): WHEN the app shows, copies and turns into a QR code workshopData.viewLink() THEN the check passes", async () => {
+    const check = await exerciseEditLink(
+      browser,
+      sharing(`const link = workshopData.viewLink();
+        document.getElementById("link").textContent = link;
+        document.getElementById("copy").value = link;
+        document.getElementById("open").setAttribute("href", link);
+        const qr = new Image(); qr.src = "https://qr.invalid/?data=" + encodeURIComponent(link);`),
+      ["Notes"],
+      true,
+    );
+    expect(check.secretLeaks).toEqual([]);
     expect(check.saved).toBe(true);
     expect(editLinkProblem(check)).toBeUndefined();
   }, 60_000);
@@ -250,12 +326,108 @@ describe("exerciseEditLink (the build eval's edit-link check) on hand-written ap
   }, 60_000);
 });
 
-describe("withoutOutsideFailures (ticket 3.28, live eval run 2)", () => {
-  it("drops an outside service's CORS line and one ERR_FAILED line per failed outside request, keeping the app's own errors", () => {
-    const cors = "Access to fetch at 'https://en.wikipedia.org/api/rest_v1/page/summary/Casablanca' from origin 'null' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.";
-    const own = "Access to fetch at 'https://workshop.test/api/apps/eval-app/data/x' from origin 'null' has been blocked by CORS policy: ...";
-    const failed = "Failed to load resource: net::ERR_FAILED";
-    expect(withoutOutsideFailures([cors, failed, "Uncaught TypeError: x is not a function", own, failed], 1)).toEqual(["Uncaught TypeError: x is not a function", own, failed]);
-    expect(withoutOutsideFailures([failed], 0)).toEqual([failed]);
+describe("withoutOutsideFailures and outsideFault (ticket 3.28 try 2, checker finding 1)", () => {
+  const cors = (url: string) => `Access to fetch at '${url}' from origin 'null' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.`;
+  const wiki = "https://en.wikipedia.org/api/rest_v1/page/summary/Casablanca";
+  const other = "https://api.example.org/films?q=x";
+  const failed = (url: string, reason = "net::ERR_FAILED") => ({ text: `Failed to load resource: ${reason}`, url });
+
+  it("outsideFault: a 429 or 5xx answer, or a network-level failure (the session proxy's tunnel, DNS, a reset), never a CORS refusal of a 2xx or a 4xx answer", () => {
+    for (const status of [429, 500, 502, 503, 504]) expect(outsideFault(status, "net::ERR_FAILED"), String(status)).toBe(true);
+    for (const reason of ["net::ERR_TUNNEL_CONNECTION_FAILED", "net::ERR_PROXY_CONNECTION_FAILED", "net::ERR_NAME_NOT_RESOLVED", "net::ERR_CONNECTION_RESET", "net::ERR_CONNECTION_REFUSED", "net::ERR_CONNECTION_CLOSED", "net::ERR_TIMED_OUT", "net::ERR_EMPTY_RESPONSE"]) {
+      expect(outsideFault(undefined, reason), reason).toBe(true);
+    }
+    for (const status of [200, 204, 301, 400, 401, 403, 404]) expect(outsideFault(status, "net::ERR_FAILED"), String(status)).toBe(false);
+    expect(outsideFault(undefined, "net::ERR_FAILED")).toBe(false);
+    expect(outsideFault(undefined, "net::ERR_BLOCKED_BY_CLIENT")).toBe(false);
+    expect(outsideFault(undefined, undefined)).toBe(false);
   });
+
+  it("drops the CORS line and the failure line of an excused outside request only, once per excused request, and keeps every other error", () => {
+    const own = { text: "Access to fetch at 'https://workshop.test/api/apps/eval-app/data/x' from origin 'null' has been blocked by CORS policy: ...", url: "https://workshop.test/apps/eval-app/" };
+    const typeError = { text: "Uncaught TypeError: x is not a function", url: "" };
+    // Wikipedia answered 429 without CORS (excused); api.example.org answered 200 without CORS (the app's fault).
+    const lines = [{ text: cors(wiki), url: "https://workshop.test/apps/eval-app/" }, failed(wiki), typeError, own, { text: cors(other), url: "https://workshop.test/apps/eval-app/" }, failed(other)];
+    expect(withoutOutsideFailures(lines, [wiki])).toEqual([typeError.text, own.text, cors(other), failed(other).text]);
+    // Nothing excused: everything counts, an outside CORS error included (try 1 dropped it).
+    expect(withoutOutsideFailures(lines, [])).toEqual(lines.map((line) => line.text));
+    // One excused request excuses one failure line, not a second request to the same address.
+    expect(withoutOutsideFailures([failed(wiki), failed(wiki)], [wiki])).toEqual([failed(wiki).text]);
+    // A 5xx answer with CORS, and the session proxy's tunnel failure.
+    const busy = { text: "Failed to load resource: the server responded with a status of 503 (Service Unavailable)", url: other };
+    expect(withoutOutsideFailures([busy, failed(wiki, "net::ERR_TUNNEL_CONNECTION_FAILED")], [other, wiki])).toEqual([]);
+    // The workshop's own address is never excused.
+    expect(withoutOutsideFailures([own, failed("https://workshop.test/api/apps/eval-app/data/x")], ["https://workshop.test/api/apps/eval-app/data/x"])).toEqual([own.text, "Failed to load resource: net::ERR_FAILED"]);
+  });
+});
+
+/**
+ * Ticket 3.28 try 2 (checker finding 1): outside services that answer for real, through Chromium's own CORS check (a
+ * response fulfilled by `page.route` skips it). A local HTTPS service, reached from the routed workshop address with
+ * Chromium's local-network checks off (they refuse a public page's request to 127.0.0.1).
+ */
+describe("exerciseEditLink with a real outside service (ticket 3.28 try 2)", () => {
+  let browser: Browser;
+  let service: Server;
+  let serviceOrigin: string;
+
+  beforeAll(async () => {
+    service = createHttpsServer(selfSignedCertificate(), (request, response) => {
+      const path = new URL(request.url ?? "/", "https://localhost").pathname;
+      if (path === "/busy") response.writeHead(429, {}).end("{}");
+      else if (path === "/down") response.writeHead(503, { "access-control-allow-origin": "*" }).end("{}");
+      else if (path === "/no-cors") response.writeHead(200, { "content-type": "application/json" }).end("{}");
+      else response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" }).end("{}");
+    });
+    await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+    serviceOrigin = `https://127.0.0.1:${(service.address() as AddressInfo).port}`;
+    browser = await chromium.launch({ args: ["--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults,LocalNetworkAccessChecks"] });
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    await new Promise((resolve) => service?.close(resolve));
+  });
+
+  const CLIENT = readFileSync(new URL("../../../templates/basic/workshop-data.js", import.meta.url));
+  const file = (path: string, text: string | Uint8Array): AppFile => ({ path, kind: "file", bytes: typeof text === "string" ? new TextEncoder().encode(text) : new Uint8Array(text) });
+  /** A one-screen app that saves a note and, when the page opens, asks the outside service at `path`, showing a friendly message on failure. */
+  const asking = (path: string): AppFile[] => [
+    file(
+      "index.html",
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><script src="workshop-data.js"></script><title>Notes</title><link rel="icon" href="data:,"><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head><body>
+      <h1>Notes</h1><form id="form" class="edit-only"><label for="note">Note</label><input id="note"><button type="submit">Save</button></form><p id="status" role="status"></p></body></html>`,
+    ),
+    file("style.css", ".view-only .edit-only { display: none !important; }\n"),
+    file(
+      "app.js",
+      `"use strict";
+      if (!workshopData.canSave()) document.body.classList.add("view-only");
+      const status = document.getElementById("status");
+      document.getElementById("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try { await workshopData.set("note-v1", document.getElementById("note").value); status.textContent = "Saved."; } catch (e) { status.textContent = e.message; }
+      });
+      (async () => {
+        try { const answer = await fetch(${JSON.stringify(serviceOrigin)} + ${JSON.stringify(path)}, { signal: AbortSignal.timeout(10000) }); if (!answer.ok) throw new Error("busy"); }
+        catch { status.textContent = "The service could not be reached right now. Try again later."; }
+      })();`,
+    ),
+    file("workshop-data.js", CLIENT),
+  ];
+
+  it("WHEN the outside service answers 429 without CORS, or 503 THEN its console lines are not the app's; WHEN it answers 200 without CORS THEN the CORS error counts", async () => {
+    for (const path of ["/busy", "/down", "/ok"]) {
+      const check = await exerciseEditLink(browser, asking(path), ["Notes"], true);
+      expect(check.editorErrors, path).toEqual([]);
+      expect(check.saved, path).toBe(true);
+      expect(editLinkProblem(check), path).toBeUndefined();
+    }
+    const blocked = await exerciseEditLink(browser, asking("/no-cors"), ["Notes"], true);
+    expect(blocked.editorErrors).toEqual([
+      expect.stringMatching(new RegExp(`^Access to fetch at '${serviceOrigin.replace(/\./g, "\\.")}/no-cors' from origin 'null' has been blocked by CORS policy`)) as unknown,
+      "Failed to load resource: net::ERR_FAILED",
+    ]);
+    expect(editLinkProblem(blocked)).toMatch(/^2 console error\(s\) with the edit link: Access to fetch at/);
+  }, 90_000);
 });

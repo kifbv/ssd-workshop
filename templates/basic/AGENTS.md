@@ -132,6 +132,15 @@ shell and no package manager. You cannot run or preview the app, so check your w
      `<p class="view-only-note status">View only</p>`, which shows only then.
    - Never add a sign-in button or a password. A save without the edit link fails with the message
      "This link is view only.": show it with the other errors (rule 5).
+   - The page's address holds the edit link, so never use the page's full address in the app: not
+     `location.href`, `document.URL`, `window.location`, `String(location)` or the navigation timing entry
+     (`performance.getEntriesByType("navigation")`). To show, copy or share the app's address (a Share or Copy
+     link button, a QR code), use `workshopData.viewLink()`: the app's address without the edit link. Never send
+     the page's address to another site; only `workshopData.viewLink()` may go into a link or an outside
+     service's address.
+   - Never change the page's address at all: no `history.pushState` or `history.replaceState`, no `?...` links
+     and no forms that send to the page itself (call `event.preventDefault()` in every submit handler). The next
+     reload would lose the edit link.
    - Everyone with the edit link saves under the builder's workshop nickname: `await workshopData.whoAmI()`
      gives it with the edit link, else `null`.
    - The app may show who saved: `await workshopData.getInfo(key)` returns
