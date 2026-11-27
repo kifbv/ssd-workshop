@@ -9,9 +9,9 @@ through the deploy workflow (see "How deploys work"). `infra/access/access-stack
 | --- | --- | --- | --- |
 | `ssd-workshop-cdk-assets` | eu-central-1 | `ssd-workshop-cdk-assets-<account>` bucket for CDK file assets | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-site` | eu-central-1 | private `ssd-workshop-site-<account>` bucket, pages from `platform/web` (BucketDeployment) | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v3` (v1 and v2 retained until Franck deletes them, tickets 2.14 and 3.24) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
-| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out) bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
-| `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-edge` | us-east-1 | ACM certificate, CloudFront (Origin Access Control `ssd-workshop-site`, managed security headers; `/api/*` to the HTTP API, uncached; from ticket 2.5 `/apps/*` from the apps bucket through Origin Access Control `ssd-workshop-apps`, headers policy `ssd-workshop-apps-v3` (v1 and v2 retained until Franck deletes them, tickets 2.14 and 3.24) and function `ssd-workshop-apps-index`, and every 403 shown as `/404.html` with status 404; from ticket 3.13 the WAF web ACL `ssd-workshop-edge` with one per-address rate rule on `/api/*`; from ticket 3.18 `/app-media/*` from the media bucket through Origin Access Control `ssd-workshop-app-media` with headers policy `ssd-workshop-app-media-v1`, a second WAF rate rule on `/app-media/*` (3,000 per address in 5 minutes), a third rule answering a media `PUT`/`DELETE` without a Bearer token with 401, a fourth limiting media uploads and deletes to 150 per address in 5 minutes, and a fifth limiting media preflights (`OPTIONS`) to 300 per address in 5 minutes), A/AAAA records for `workshop.rankly.games` | inline template (`LegacyStackSynthesizer`) |
+| `ssd-workshop-api` | eu-central-1 | DynamoDB table `ssd-workshop-data` (on demand, point-in-time recovery, retained), HTTP API `ssd-workshop-api` (`GET /api/health`, `POST /api/sign-in/code`, `POST /api/sign-in/verify`, `GET /api/me`, `POST /api/me/nickname`, `GET /api/participants/{id}`, `POST /api/sign-out`), Lambdas `ssd-workshop-api-health`, `ssd-workshop-api-sign-in-code` (DynamoDB GetItem/PutItem in `EMAIL#*` partitions only, 512 MB, SES sends from `ssd-workshop@rankly.games`), `ssd-workshop-api-sign-in-verify` (codes, participant link, profile, session; 512 MB) and `ssd-workshop-api-participant` (session check against the allow-list, own record, nickname, sign-out), later more (from ticket 3.18 `ssd-workshop-api-app-media` for `PUT`, `DELETE` and `OPTIONS /api/apps/{nickname}/media/{id}`, 512 MB, 25 s), bundled by esbuild from `platform/api/handlers` | `CliCredentialsStackSynthesizer`, assets bucket |
+| `ssd-workshop-apps` | eu-central-1 | private `ssd-workshop-apps-<account>` bucket (only the deployer's role may write app files), from ticket 3.18 the private `ssd-workshop-app-media-<account>` bucket (only the media function's role may write files), FIFO deploy queue `ssd-workshop-deploys.fifo` and its dead-letter queue, deployer Lambda `ssd-workshop-apps-deployer`; see "Check after the apps deploy (ticket 2.5)" | `CliCredentialsStackSynthesizer`, assets bucket |
 | `ssd-workshop-alerts` | us-east-1 | ticket 3.13: Cost Anomaly Detection, monitor `ssd-workshop-cost` on the cost allocation tag `project=ssd-workshop` and daily email subscription `ssd-workshop-cost-alerts` to the address in SSM `/ssd-workshop/alert-email`; see "Safety nets (ticket 3.13)" | inline template (`LegacyStackSynthesizer`) |
 | `ssd-workshop-builds` | eu-central-1 | build network (VPC `ssd-workshop-builds`, two public subnets, no NAT gateway), security group `ssd-workshop-builds` (HTTPS out only), ECS cluster `ssd-workshop-builds`, ECR repository `ssd-workshop-builder` (newest 5 images, scan on push), GitHub App secret `ssd-workshop-github` (ticket 2.6), FIFO launch queue `ssd-workshop-builds.fifo` and its dead-letter queue (ticket 2.7; the AI worker is its only sender, the launcher its consumer), from ticket 2.9 the builder task definition `ssd-workshop-builder` (image by digest, logs `/ecs/ssd-workshop-builder`), the launcher Lambda `ssd-workshop-builds-launcher`, the check queue and schedule `ssd-workshop-builds-check`; see "Build network (ticket 2.1)" and "Builds: builder task and launcher (ticket 2.9)" | `CliCredentialsStackSynthesizer`, assets bucket (from ticket 2.9) |
 
@@ -625,6 +625,151 @@ Then:
 Rights: the command needs Franck's `dynamodb:Scan` on `ssd-workshop-data` and `sqs:SendMessage` on
 `ssd-workshop-deploys.fifo` (both already used by `npm run builds` and the manual deploy below). Claude sessions are
 refused both (access stack), so it never runs from a session.
+
+## Check after the media deploy (ticket 3.18)
+
+```mermaid
+sequenceDiagram
+  participant A as App /apps/nick/ (sandboxed, has a write token)
+  participant M as ssd-workshop-api-app-media
+  participant T as ssd-workshop-data (APPMEDIA#nick)
+  participant B as Bucket ssd-workshop-app-media-<account>
+  participant C as CloudFront /app-media/*
+  A->>M: PUT /api/apps/nick/media/<22-char id> (JPEG or audio bytes, Bearer token)
+  M->>M: live? id? token? real format? strip photo metadata
+  M->>T: reserve room and day budget (one transaction)
+  M->>B: put app-media/nick/<id> (fixed type, Cache-Control)
+  M->>T: stored (only while the app is still live)
+  M-->>A: 201 {address, contentType, bytes}
+  A->>C: <img>/<audio> https://workshop.rankly.games/app-media/nick/<id>
+  C->>B: GetObject (origin access control ssd-workshop-app-media)
+```
+
+Before merging (Franck): the edge stack adds four WAF rules to `ssd-workshop-edge` (`ssd-workshop-media-rate`: 3,000
+requests to `/app-media/*` per address in 5 minutes; `ssd-workshop-media-auth`: a media `PUT`/`DELETE` without
+`Authorization: Bearer ...`, in any case, gets WAF's 401; `ssd-workshop-media-write-rate`: more than 150 media `PUT`s
+and `DELETE`s together per address in 5 minutes get WAF's 429 "Too many uploads from this address. Please wait a few
+minutes and try again."; `ssd-workshop-media-preflight-rate`: more than 300 media `OPTIONS` preflights per address in
+5 minutes get the same 429; $1 a month a rule). That is a `wafv2:UpdateWebACL`, which the deploy role already holds through
+the standalone policy `ssd-workshop-deploy-safety-nets` from ticket 3.13 (statement `WafManageWorkshopAcl`, on
+`global/webacl/ssd-workshop-*/*`): no access-stack change is needed; only confirm that policy is still attached to the
+deploy role, or the edge stack's deploy fails and rolls back. Everything else (bucket, origin access control, headers
+policy, function, role) is covered by the deploy rights already in place.
+
+Photos lose their Exif segment, and with it the Exif orientation tag: a phone photo sent as the camera wrote it (sideways
+pixels plus "rotate 90") would then show sideways. 3.19's `savePhoto()` draws the photo through a canvas first, which
+applies the orientation, so photos uploaded by the template are upright; only a photo sent straight from a camera file
+(as in step 2 below) may show turned.
+
+You need a live app `<nick>`, a write token `$T` for it (as in the 3.24 check: open `/app-sign-in/?app=<nick>`, press
+Continue, copy the `#wt=` value from the address), a photo `photo.jpg` (any phone photo up to 4 MB, ideally one with
+location data) and a voice recording `voice.m4a` or `voice.webm` (a phone's voice memo, up to 4 MB). Bodies go as
+`application/octet-stream` (not verified until this check: which content types API Gateway base64-encodes; a text type
+would garble the bytes and answer 415).
+
+```sh
+NICK=<nick>
+API=https://workshop.rankly.games/api/apps/$NICK/media
+newid() { head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
+```
+
+1. Refusals:
+
+   ```sh
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' --data-binary @photo.jpg "$API/$(newid)"
+   # expect: 401 {"message":"Sign in to the workshop to save in this app."} (answered by WAF's ssd-workshop-media-auth
+   #         rule: no x-amzn-requestid header, and no line in the function's log)
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H 'authorization: Bearer not-a-token' --data-binary @photo.jpg "$API/$(newid)"
+   # expect: 401, the same message, this time from the function (a line with outcome "unauthorized" in its log)
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H 'authorization: BEARER not-a-token' --data-binary @photo.jpg "$API/$(newid)"
+   # expect: 401 from the function too (the junk filter compares lower-cased, as the function reads the scheme)
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H "authorization: Bearer $T" \
+     -H 'content-type: application/octet-stream' --data-binary '<html>hi</html>' "$API/$(newid)"
+   # expect: 415 "Send a photo as a JPEG, or a voice recording as WebM, Ogg or MP4 audio."
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H "authorization: Bearer $T" --data-binary @photo.jpg \
+     https://workshop.rankly.games/api/apps/no-such-app-xyz/media/$(newid)
+   # expect: 404
+   ```
+
+2. A photo (criterion 1 live smoke, and criterion 4):
+
+   ```sh
+   ID=$(newid)
+   curl -sS -w '\n%{http_code}\n' -X PUT -H 'origin: null' -H "authorization: Bearer $T" \
+     -H 'content-type: application/octet-stream' --data-binary @photo.jpg "$API/$ID"
+   # expect: 201 {"address":"https://workshop.rankly.games/app-media/<nick>/<ID>","contentType":"image/jpeg","bytes":N}
+   curl -sS -D headers.txt -o got.jpg "https://workshop.rankly.games/app-media/$NICK/$ID"
+   grep -i -E '^(content-type|x-content-type-options|cache-control|content-security-policy):' headers.txt
+   # expect: content-type: image/jpeg, x-content-type-options: nosniff,
+   #         cache-control: public, max-age=86400, s-maxage=3600,
+   #         content-security-policy: default-src 'none'; sandbox
+   wc -c < got.jpg               # expect: N, the answer's bytes
+   grep -c 'Exif' got.jpg        # expect: 0 (the photo's location data is gone); the file opens as the same photo
+   ```
+
+   The address opened in a browser shows the photo; in the app (step 3 of 3.19, later) it shows in an `<img>`.
+
+3. A recording (criterion 2 live smoke): the same `PUT` with `--data-binary @voice.m4a` (or `.webm`) answers 201 with
+   `"contentType":"audio/mp4"` (or `audio/webm`), and its address answers that `content-type` with `nosniff` and plays
+   in a browser. A recording longer than 5:05 answers 413 "This recording is too long: a recording can be at most 5
+   minutes." (the server measures it from the file's own timing).
+
+4. The bucket refuses direct reads (criterion 7):
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' \
+     "https://ssd-workshop-app-media-<account>.s3.eu-central-1.amazonaws.com/app-media/$NICK/$ID"
+   # expect: 403
+   ```
+
+5. Delete: `curl -sS -w '%{http_code}\n' -X DELETE -H 'origin: null' -H "authorization: Bearer $T" "$API/$ID"` answers
+   204, and `AWS_PROFILE=franck aws s3api head-object --bucket ssd-workshop-app-media-<account> --key app-media/$NICK/$ID`
+   answers 404 (Not Found). CloudFront may keep serving its copy for up to an hour (`s-maxage=3600`), browsers that
+   loaded it for up to a day (decision "(3.18) Caching"). A second `PUT` of the same `$ID` answers 409: the deleted
+   file's record stays as a tombstone, so an address never serves other bytes.
+
+6. Uploads per address (try 3; from a machine that is not the venue's address, as it blocks uploads from that address
+   for up to 5 minutes): send 200 refused uploads with a made-up token and watch the answers change from the
+   function's 401 to WAF's 429 a little after the 150th (WAF counts with a short delay):
+
+   ```sh
+   for i in $(seq 200); do curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' \
+     -H 'authorization: Bearer not-a-token' --data-binary 'x' "$API/$(newid)"; done | sort | uniq -c
+   # expect: about 150 x 401, the rest 429
+   curl -sS -i -X PUT -H 'origin: null' -H 'authorization: Bearer not-a-token' --data-binary 'x' "$API/$(newid)" \
+     | grep -i -E '^(HTTP|access-control-allow-origin)|uploads'
+   # expect: 429, access-control-allow-origin: * (once, not doubled by the /api/apps/* headers policy), and
+   #         {"message":"Too many uploads from this address. Please wait a few minutes and try again."}
+   ```
+
+   A path variant must not skip the media rules (access review of try 3, `NORMALIZE_PATH`): with no token,
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'origin: null' --data-binary 'x' \
+     "https://workshop.rankly.games/api//apps/<nick>/media/$(newid)"
+   # expect: WAF's 401 (or a 404 that never reaches the media function: no line in its log group)
+   ```
+
+   Preflights per address (rule 5; same caution about the address): 350 preflights turn from the function's 204 to
+   WAF's 429 a little after the 300th:
+
+   ```sh
+   for i in $(seq 350); do curl -sS -o /dev/null -w '%{http_code}\n' -X OPTIONS -H 'origin: null' \
+     -H 'access-control-request-method: PUT' "$API/$(newid)"; done | sort | uniq -c
+   # expect: about 300 x 204, the rest 429 (with access-control-allow-origin: * and the "Too many uploads" body)
+   ```
+
+   Downloads (`/app-media/...`) and the data API from the same address still answer as before. Not verified until this
+   check: whether the `/api/apps/*` response headers policy also applies to a WAF answer (the header must appear once).
+
+7. Logs: the log group `ssd-workshop-api-app-media` has one JSON line per request above
+   (`{"event":"app-media","method":"PUT","outcome":"stored","status":201,...,"writer":"<your nickname>"}`, `unauthorized`,
+   `unsupported-media-type`, `not-found`, `deleted`), and none holds the token, the id or an `@`.
+
+8. Reset (criterion 8, with a test app): `AWS_PROFILE=franck npm run participant -- reset <nick>` counts its photos and
+   recordings; with `--yes` it waits 30 s (longer than the media function's 25 s timeout) for uploads under way, prints
+   "Deleted N photos and recordings; CloudFront stops serving the app's media within minutes." and the media addresses
+   answer the 404 page a few minutes later.
 
 ## Check after the apps deploy (ticket 2.5)
 
@@ -1285,14 +1430,17 @@ which Claude sessions may not). Run it from your own machine: the GitHub calls d
 ```sh
 AWS_PROFILE=franck npm run participant -- reset <nickname>
 # expect: "<nickname> is at step ..., with N messages and replies and M spec versions.",
-#         "App: ... stored values ..., live marker present, repository ssd-workshop-apps/ssd-<nickname> exists." and "Nothing changed. ..."
+#         "App: ... stored values ..., N photos and recordings, live marker present, repository ssd-workshop-apps/ssd-<nickname> exists." and "Nothing changed. ..."
 AWS_PROFILE=franck npm run participant -- reset <nickname> --yes
 # expect: "Reset <nickname>: deleted ...; back at step 1 (Clarify).", "Deleted ...; deleted the live marker." (after a 2 s pause),
+#         "Deleted N photos and recordings; CloudFront stops serving the app's media within minutes.",
 #         "Repository ssd-workshop-apps/ssd-<nickname> deleted." (or "was already gone.")
 ```
 
 Deleted: the participant's messages, the AI's replies, every spec version and the conversation state (so the
-approved version and the build link), the app's data (`APPDATA#<nickname>`), its live marker
+approved version and the build link), the app's data (`APPDATA#<nickname>`), since ticket 3.18 its photos and
+recordings (`app-media/<nickname>/` in the media bucket, their records `APPMEDIA#<nickname>`, and CloudFront's copies:
+an invalidation of `/app-media/<nickname>/*`), its live marker
 (`APP#<nickname>`/`LIVE`) and its GitHub repository; the step goes back to Clarify. Kept: the allow-list entry,
 the nickname, sessions, AI usage totals and build records. The app's published files stay online until the next
 build's deploy replaces them (decision "(2.13) Reset keeps app files"). It refuses, changing nothing, while their

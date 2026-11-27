@@ -36,6 +36,12 @@ import {
   APPS_INDEX_FUNCTION_NAME,
   APP_DATA_HEADERS_POLICY_NAME,
   APP_DATA_HEADERS_POLICY_VERSION,
+  APP_MEDIA_BUCKET_NAME,
+  APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
+  APP_MEDIA_CONTENT_SECURITY_POLICY,
+  APP_MEDIA_HEADERS_POLICY_NAME,
+  APP_MEDIA_HEADERS_POLICY_VERSION,
+  APP_MEDIA_PATH_PATTERN,
   DOMAIN,
   HOSTED_ZONE_ID,
   HOSTED_ZONE_NAME,
@@ -53,6 +59,26 @@ import {
   WAF_BLOCK_BODY,
   WAF_BLOCK_BODY_KEY,
   WAF_BLOCK_STATUS,
+  WAF_BEARER_PREFIX,
+  WAF_MEDIA_API_PREFIX,
+  WAF_MEDIA_API_SEGMENT,
+  WAF_MEDIA_AUTH_BODY,
+  WAF_MEDIA_AUTH_BODY_KEY,
+  WAF_MEDIA_AUTH_METHODS,
+  WAF_MEDIA_AUTH_RULE_NAME,
+  WAF_MEDIA_AUTH_STATUS,
+  WAF_MEDIA_PATH_PREFIX,
+  WAF_MEDIA_RATE_LIMIT,
+  WAF_MEDIA_RATE_RULE_NAME,
+  WAF_MEDIA_WRITE_RATE_BODY,
+  WAF_MEDIA_WRITE_RATE_BODY_KEY,
+  WAF_MEDIA_WRITE_RATE_LIMIT,
+  WAF_MEDIA_WRITE_RATE_METHODS,
+  WAF_MEDIA_PATH_TRANSFORMATIONS,
+  WAF_MEDIA_PREFLIGHT_RATE_LIMIT,
+  WAF_MEDIA_PREFLIGHT_RATE_METHOD,
+  WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
+  WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
   WEB_ACL_NAME,
 } from "./config.js";
@@ -199,6 +225,42 @@ export class EdgeStack extends Stack {
       functionAssociations: [{ function: appsIndex, eventType: FunctionEventType.VIEWER_REQUEST }],
     };
 
+    // Ticket 3.18: photos and recordings that apps upload, at /app-media/<nickname>/<id>, from the media bucket (apps
+    // stack, imported by name; its policy lets this distribution only read it) through its own origin access control
+    // (retained, like the others). Each file keeps the type the media API stored (from its allow-list) and S3's
+    // Cache-Control (since 3.18 try 2: a day in browsers, an hour in CloudFront, so a deleted file stops being served
+    // from CloudFront within an hour).
+    const mediaBucket = Bucket.fromBucketAttributes(this, "AppMediaBucket", {
+      bucketName: APP_MEDIA_BUCKET_NAME,
+      bucketRegionalDomainName: APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
+      region: REGION,
+    });
+    const mediaAccessControl = new S3OriginAccessControl(this, "AppMediaOriginAccessControl", {
+      originAccessControlName: `${PREFIX}-app-media`,
+    });
+    mediaAccessControl.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    // nosniff (a file is only ever its stored type), HSTS, the referrer policy, and a CSP that leaves a file opened on
+    // its own inert (nothing loads, sandboxed, no script). No CORS: apps show media with <img> and <audio>, which need
+    // none. Retained and versioned like the others.
+    const mediaHeaders = new ResponseHeadersPolicy(this, `AppMediaHeadersV${APP_MEDIA_HEADERS_POLICY_VERSION}`, {
+      responseHeadersPolicyName: APP_MEDIA_HEADERS_POLICY_NAME,
+      comment: `${PREFIX} app media: nosniff, inert sandbox Content-Security-Policy and security headers`,
+      securityHeadersBehavior: {
+        contentSecurityPolicy: { contentSecurityPolicy: APP_MEDIA_CONTENT_SECURITY_POLICY, override: true },
+        contentTypeOptions: { override: true },
+        strictTransportSecurity: { accessControlMaxAge: Duration.days(365), includeSubdomains: false, preload: false, override: true },
+        referrerPolicy: { referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN, override: true },
+      },
+    });
+    mediaHeaders.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const media: BehaviorOptions = {
+      origin: S3BucketOrigin.withOriginAccessControl(mediaBucket, { originAccessControl: mediaAccessControl }),
+      allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+      responseHeadersPolicy: mediaHeaders,
+    };
+
     // Ticket 1.2: pages and API share one origin (no CORS, no new DNS record).
     const api: BehaviorOptions = {
       origin: new HttpOrigin(API_ORIGIN_DOMAIN, {
@@ -243,9 +305,13 @@ export class EdgeStack extends Stack {
     const webAcl = new CfnWebACL(this, "WebAcl", {
       name: WEB_ACL_NAME,
       scope: "CLOUDFRONT",
-      description: `${PREFIX}: per-address rate limit on ${WAF_API_PATH_PREFIX}`,
+      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX}, ${WAF_MEDIA_PATH_PREFIX} and media uploads and preflights, media writes need a Bearer token`,
       defaultAction: { allow: {} },
-      customResponseBodies: { [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY } },
+      customResponseBodies: {
+        [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY },
+        [WAF_MEDIA_AUTH_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_AUTH_BODY },
+        [WAF_MEDIA_WRITE_RATE_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_WRITE_RATE_BODY },
+      },
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WEB_ACL_NAME, sampledRequestsEnabled: true },
       rules: [
         {
@@ -269,6 +335,191 @@ export class EdgeStack extends Stack {
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_API_RATE_RULE_NAME, sampledRequestsEnabled: true },
         },
+        // Ticket 3.18: downloads of apps' media are counted apart (their own limit), so photos never block the API.
+        {
+          name: WAF_MEDIA_RATE_RULE_NAME,
+          priority: 1,
+          action: { block: { customResponse: { responseCode: WAF_BLOCK_STATUS, customResponseBodyKey: WAF_BLOCK_BODY_KEY } } },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_MEDIA_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                byteMatchStatement: {
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: "STARTS_WITH",
+                  searchString: WAF_MEDIA_PATH_PREFIX,
+                  textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.18 try 2: a media upload or delete without `Authorization: Bearer ...` (any case, try 3) never reaches
+        // API Gateway or Lambda (a junk filter; the function still checks every token). Answered like the API's own 401, with the CORS
+        // header, so an app can read the reason.
+        {
+          name: WAF_MEDIA_AUTH_RULE_NAME,
+          priority: 2,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_MEDIA_AUTH_STATUS,
+                customResponseBodyKey: WAF_MEDIA_AUTH_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            andStatement: {
+              statements: [
+                {
+                  orStatement: {
+                    statements: WAF_MEDIA_AUTH_METHODS.map((method) => ({
+                      byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: method, textTransformations: [{ priority: 0, type: "NONE" }] },
+                    })),
+                  },
+                },
+                {
+                  byteMatchStatement: {
+                    fieldToMatch: { uriPath: {} },
+                    positionalConstraint: "STARTS_WITH",
+                    searchString: WAF_MEDIA_API_PREFIX,
+                    textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                  },
+                },
+                {
+                  byteMatchStatement: {
+                    fieldToMatch: { uriPath: {} },
+                    positionalConstraint: "CONTAINS",
+                    searchString: WAF_MEDIA_API_SEGMENT,
+                    textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                  },
+                },
+                {
+                  notStatement: {
+                    statement: {
+                      byteMatchStatement: {
+                        fieldToMatch: { singleHeader: { Name: "authorization" } },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_BEARER_PREFIX,
+                        textTransformations: [{ priority: 0, type: "LOWERCASE" }],
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_AUTH_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.18 try 3: uploads per address, so one address with a made-up token cannot hold the upload route's
+        // shared throttle at 429 for every app (see WAF_MEDIA_WRITE_RATE_LIMIT).
+        {
+          name: WAF_MEDIA_WRITE_RATE_RULE_NAME,
+          priority: 3,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_BLOCK_STATUS,
+                customResponseBodyKey: WAF_MEDIA_WRITE_RATE_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_MEDIA_WRITE_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      orStatement: {
+                        statements: WAF_MEDIA_WRITE_RATE_METHODS.map((method) => ({
+                          byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: method, textTransformations: [{ priority: 0, type: "NONE" }] },
+                        })),
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_MEDIA_API_PREFIX,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "CONTAINS",
+                        searchString: WAF_MEDIA_API_SEGMENT,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_WRITE_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.18 (after the access review of try 3): preflights per address, so one address cannot hold the
+        // preflight route's shared throttle at 429 for every app (see WAF_MEDIA_PREFLIGHT_RATE_LIMIT).
+        {
+          name: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
+          priority: 4,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_BLOCK_STATUS,
+                customResponseBodyKey: WAF_MEDIA_WRITE_RATE_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_MEDIA_PREFLIGHT_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { method: {} },
+                        positionalConstraint: "EXACTLY",
+                        searchString: WAF_MEDIA_PREFLIGHT_RATE_METHOD,
+                        textTransformations: [{ priority: 0, type: "NONE" }],
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_MEDIA_API_PREFIX,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "CONTAINS",
+                        searchString: WAF_MEDIA_API_SEGMENT,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
       ],
     });
 
@@ -288,6 +539,7 @@ export class EdgeStack extends Stack {
         "/api/apps/*": { ...api, responseHeadersPolicy: appDataHeaders },
         "/api/*": api,
         "/apps/*": apps,
+        [APP_MEDIA_PATH_PATTERN]: media,
         "/facilitator*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
         // Ticket 3.24: the hand-off page for saving in apps, /app-sign-in/ (top level, the pages' CSP), like the dashboard.
         "/app-sign-in*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
@@ -302,7 +554,7 @@ export class EdgeStack extends Stack {
     // CDK cannot add to an imported bucket's policy; the site and apps stacks do it.
     Annotations.of(this.distribution).acknowledgeWarning(
       "@aws-cdk/aws-cloudfront-origins:updateImportedBucketPolicyOac",
-      "The site stack's bucket policy grants this account's distributions read access; the apps stack's grants this distribution only (DISTRIBUTION_ARN)",
+      "The site stack's bucket policy grants this account's distributions read access; the apps stack's (apps and app media buckets) grant this distribution only (DISTRIBUTION_ARN)",
     );
 
     const target = RecordTarget.fromAlias(new CloudFrontTarget(this.distribution));

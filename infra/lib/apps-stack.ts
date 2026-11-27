@@ -9,6 +9,9 @@ import type { Construct } from "constructs";
 import { slotReleaseStatements, workshopFunction } from "./api-stack.js";
 import {
   ACCOUNT,
+  APP_MEDIA_BUCKET_NAME,
+  APP_MEDIA_ROLE_ARN,
+  APP_MEDIA_ROLE_ARN_WITHOUT_PATH,
   APPS_BUCKET_NAME,
   ATTRIBUTE_LIMITED_RETURN_VALUES,
   DEPLOY_DLQ_NAME,
@@ -58,12 +61,30 @@ export const APPS_OBJECT_WRITE_ACTIONS = [
 ] as const;
 
 /**
+ * Ticket 3.18: object-writing S3 actions on the media bucket that only the media function's role may take. Deletes are
+ * left to identity policies, so Franck's `npm run participant -- reset` can remove an app's media; a synth test checks
+ * that no other workload role may write or delete there.
+ */
+export const APP_MEDIA_OBJECT_WRITE_ACTIONS = [
+  "s3:PutObject",
+  "s3:PutObjectAcl",
+  "s3:PutObjectVersionAcl",
+  "s3:PutObjectTagging",
+  "s3:PutObjectVersionTagging",
+  "s3:PutObjectRetention",
+  "s3:PutObjectLegalHold",
+  "s3:RestoreObject",
+  "s3:ReplicateObject",
+] as const;
+
+/**
  * Apps hosting (ticket 2.5): the private apps bucket served by CloudFront at `/apps/*` (edge stack), the
  * FIFO deploy queue and the deployer Lambda. The table is looked up by name (api stack), and the
  * distribution by its id constant: nothing crosses stacks.
  */
 export class AppsStack extends Stack {
   readonly bucket: Bucket;
+  readonly mediaBucket: Bucket;
 
   constructor(scope: Construct, id: string, props: StackProps) {
     super(scope, id, props);
@@ -100,6 +121,38 @@ export class AppsStack extends Stack {
         principals: [new AnyPrincipal()],
         resources: [this.bucket.arnForObjects("*")],
         conditions: { ArnNotEquals: { "aws:PrincipalArn": [DEPLOYER_ROLE_ARN, DEPLOYER_ROLE_ARN_WITHOUT_PATH] } },
+      }),
+    );
+
+    // Ticket 3.18: photos and voice recordings that apps upload through the media API, served at `/app-media/*`.
+    this.mediaBucket = new Bucket(this, "AppMediaBucket", {
+      bucketName: APP_MEDIA_BUCKET_NAME,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      encryption: BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      // Participants' photos and recordings: kept when the stack is deleted (reset removes an app's media).
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    this.mediaBucket.addToResourcePolicy(
+      new PolicyStatement({
+        sid: "CloudFrontReadOnly",
+        actions: ["s3:GetObject"],
+        principals: [new ServicePrincipal("cloudfront.amazonaws.com")],
+        resources: [this.mediaBucket.arnForObjects("*")],
+        conditions: { StringEquals: { "AWS:SourceAccount": ACCOUNT, "AWS:SourceArn": DISTRIBUTION_ARN } },
+      }),
+    );
+    // Only the media function stores files: nobody else (the deploy role and the Claude user included) can plant a
+    // file that the workshop's address would then serve.
+    this.mediaBucket.addToResourcePolicy(
+      new PolicyStatement({
+        sid: "OnlyTheMediaFunctionWrites",
+        effect: Effect.DENY,
+        actions: [...APP_MEDIA_OBJECT_WRITE_ACTIONS],
+        principals: [new AnyPrincipal()],
+        resources: [this.mediaBucket.arnForObjects("*")],
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": [APP_MEDIA_ROLE_ARN, APP_MEDIA_ROLE_ARN_WITHOUT_PATH] } },
       }),
     );
 

@@ -18,6 +18,8 @@ import {
   appDataKey,
   appDataUsageKey,
   appLiveKey,
+  appMediaKey,
+  appMediaUsageKey,
   buildKey,
 } from "./keys.js";
 
@@ -130,6 +132,17 @@ describe("app keys (ticket 2.4)", () => {
     // `APP#*` (the live marker's partitions) never matches a data partition, and the reverse.
     expect(appDataKey("app", "k").pk.startsWith("APP#")).toBe(false);
     expect(appLiveKey("data").pk.startsWith("APPDATA#")).toBe(false);
+  });
+
+  it("ticket 3.18: keeps an app's media records and totals in an APPMEDIA# partition, apart from the live marker, the data and the tokens", () => {
+    expect(appMediaKey("Ada-42", "AbCdEfGhIjKlMnOpQrStUv")).toEqual({ pk: "APPMEDIA#ada-42", sk: "MEDIA#AbCdEfGhIjKlMnOpQrStUv" });
+    expect(appMediaUsageKey("ADA-42")).toEqual({ pk: "APPMEDIA#ada-42", sk: "MEDIA_USAGE" });
+    // IAM patterns `APP#*`, `APPDATA#*` and `APPTOKEN#*` never match a media partition, and `APPMEDIA#*` matches none of theirs.
+    for (const other of ["APP#", "APPDATA#", "APPTOKEN#"]) expect(appMediaKey("data", "x").pk.startsWith(other), other).toBe(false);
+    expect(appLiveKey("media").pk.startsWith("APPMEDIA#")).toBe(false);
+    expect(appDataKey("media", "k").pk.startsWith("APPMEDIA#")).toBe(false);
+    expect(() => appMediaKey("ada", "a#b")).toThrow(/separator/);
+    expect(() => appMediaUsageKey("")).toThrow(/empty/);
   });
 
   it("refuses the key separator in a nickname or a key", () => {

@@ -326,3 +326,42 @@ paths:
   parsed strictly beside the deploy job) and lets the deployer do it. A file a Lambda needs at run time travels with its
   code (`afterBundling` copy, read from `LAMBDA_TASK_ROOT`); a synth test that `require`s the bundle sets
   `LAMBDA_TASK_ROOT` to the asset folder.
+- Binary uploads through the HTTP API (the media API, ticket 3.18) arrive base64 (`isBase64Encoded`) only for non-text
+  content types: check the base64 length against the limit before decoding, and remember Lambda's 6 MB request limit
+  (4 MB of bytes is ~5.6 MB of base64). Judge a file's format from its bytes (magic numbers and the container's own
+  track/codec fields), never the declared type, and serve it with a fixed type per format plus `nosniff`. Remove photo
+  metadata by walking the JPEG segments with an ALLOW-list (the picture's own segments SOFn, DHT, DAC, DQT, DNL, DRI,
+  SOS, RSTn, plus JFIF, ICC and Adobe; everything else, reserved and JPGn markers included, goes, and anything after
+  EOI); prove "still decodes" on a JPEG Chromium encodes (`app-media/browser.test.ts`). Dropping APP1 drops the Exif
+  orientation: the template's canvas resize (3.19) applies it first.
+- A limit on a recording's length (3.18 try 2: 5 minutes) is measured from the container's own timing on the server,
+  never trusted from the client: WebM from Info's Duration AND the last block (MediaRecorder writes no Duration and
+  unknown-size Clusters: walk flat, stepping INTO Clusters and BlockGroups), Ogg/Opus from the last granule position
+  less OpusHead's pre-skip (skip granule -1 and the header pages' 0), MP4 from mvhd/mdhd/mehd, `stts` and fragments
+  (`tfdt` + `trun` durations or `tfhd`/`trex` defaults: Chromium's and Safari's MediaRecorder write fragmented MP4).
+  Refuse what cannot be measured. Check every count against the box before looping (multiply when there is no
+  per-sample data), and test with real MediaRecorder output plus 4 MB of tiny elements against a time limit.
+  Metadata in a recording is blanked IN PLACE (MP4 `udta`/`meta` -> `free`, WebM Tags/Title -> Void): a plain MP4's
+  sample offsets point into the file, so removing bytes would break it.
+- An id that must never serve other bytes (media ids, browsers cache by address) keeps a tombstone on delete (status
+  `deleted`, out of the totals) so a create-only PUT still finds it taken; only a full reset deletes tombstones. EVERY
+  end of the record is a tombstone, a failed upload's release included (3.18 try 3: its put may have reached S3 and a
+  cache), and the function's role then needs no `DeleteItem`.
+- A parser of untrusted binary (3.18's JPEG, WebM, MP4 walks) allocates nothing per element: a 4 MB file of 2-byte
+  restart markers or EBML elements, or 8-byte MP4 boxes, is millions of them (try 2's one Buffer per segment reached
+  ~620 MB RSS against a 512 MB function). Visit children with a callback (`eachChild`, `eachBox`) instead of building
+  lists, note kept `[start, end)` ranges (merging touching ones) and copy once into a buffer of the final size, and
+  do the walk once per request (`inspectMedia` returns the stripped photo). Test memory in a child process under a
+  small heap (`--max-old-space-size=32`, `--import tsx`, `app-media/hostile-probe.ts`) reporting `resourceUsage().maxRSS`
+  growth; Buffers live outside the JS heap, so `heapUsed` alone misses them. Check the test fails on the old code.
+- A metadata allow-list keeps a segment by its identifier, never by its marker alone: APP0 only `JFIF\0` (JFXX holds a
+  thumbnail), APP2 only `ICC_PROFILE\0`, APP14 only `Adobe` (3.18 try 3).
+- An operator cleanup racing a Lambda that may still be running (3.18's reset vs an upload in flight) waits longer than
+  that function's timeout before its last pass, and a failed put that may have stored the object deletes the key (best
+  effort) before giving the reservation back.
+- A TypeScript default parameter also applies to an explicit `undefined`: a fixture argument meaning "none" is `null`.
+- Browser code in a `platform/api` test (no DOM types in that tsconfig) goes to `page.evaluate` as plain JavaScript text
+  (`inPage` in `app-media/browser.test.ts`), not as a typed function; `platform/web` tests have DOM types.
+- Media in sandboxed apps: `<img>` and `<audio>` from the workshop's own `/app-media/...` load under the apps' CSP
+  (`img-src 'self'`, `media-src` falling back to `default-src 'self'`): `'self'` is the served address, not the opaque
+  origin (proved in Chromium, ticket 3.18).

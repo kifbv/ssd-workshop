@@ -370,6 +370,38 @@ export const APP_TOKEN_PROFILE_CHECK_ATTRIBUTES = ["pk", "sk", "role"] as const;
 export const APP_LIVE_READ_ATTRIBUTES = ["pk", "sk", "liveAt"] as const;
 
 /**
+ * Ticket 3.18: the media API (photos and voice recordings of apps), its own function and role. It reads the live
+ * marker's `liveAt` (APP_LIVE_READ_ATTRIBUTES: GetItem, and the ConditionCheck that a finished upload's app is still
+ * live), app write tokens (APP_TOKEN_READ_ATTRIBUTES) and, in `APPMEDIA#*` only, reads and writes these names (a file's
+ * record and the app's media totals; conditions included). Never `liveAt` or `nickname` writes, never `APPDATA#*`.
+ */
+export const APP_MEDIA_FUNCTION_NAME = `${PREFIX}-api-app-media`;
+export const APP_MEDIA_ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${APP_MEDIA_FUNCTION_NAME}`;
+/** The same role without its path (see DEPLOYER_ROLE_ARN_WITHOUT_PATH): the media bucket's policy names both forms. */
+export const APP_MEDIA_ROLE_ARN_WITHOUT_PATH = `arn:aws:iam::${ACCOUNT}:role/${APP_MEDIA_FUNCTION_NAME}`;
+export const APP_MEDIA_WRITE_ATTRIBUTES = ["pk", "sk", "type", "bytes", "files", "contentType", "status", "uploadedBy", "createdAt", "updatedAt", "uploadDay", "uploadedBytes"] as const;
+/** What the media function reads in `APPMEDIA#*` (GetItem with a projection, `dynamodb:Select` SPECIFIC_ATTRIBUTES). */
+export const APP_MEDIA_READ_ATTRIBUTES = ["pk", "sk", "bytes", "files", "status", "createdAt", "uploadDay", "uploadedBytes"] as const;
+/**
+ * The private media bucket (ticket 3.18, apps stack), named with the account like the other buckets (S3 names are
+ * global). Files live under APP_MEDIA_KEY_PREFIX, which CloudFront serves at `/app-media/*` (the same path).
+ */
+export const APP_MEDIA_BUCKET_NAME = `${PREFIX}-app-media-${ACCOUNT}`;
+export const APP_MEDIA_BUCKET_REGIONAL_DOMAIN = `${APP_MEDIA_BUCKET_NAME}.s3.${REGION}.amazonaws.com`;
+export const APP_MEDIA_KEY_PREFIX = "app-media/";
+export const APP_MEDIA_PATH_PATTERN = "/app-media/*";
+/**
+ * Response headers of `/app-media/*` (ticket 3.18): nosniff (the stored type, from the API's allow-list, is the only
+ * one a browser may use), HSTS, the referrer policy and a CSP that makes a file opened on its own inert: nothing may
+ * load and the document is sandboxed (no script, opaque origin), so even a file a browser tried to render as a page
+ * could run nothing. An `<img>` or `<audio>` in an app is not affected (a subresource's own CSP does not apply).
+ * Created, never updated, like the other policies: a change bumps this version.
+ */
+export const APP_MEDIA_HEADERS_POLICY_VERSION = 1;
+export const APP_MEDIA_HEADERS_POLICY_NAME = `${PREFIX}-app-media-v${APP_MEDIA_HEADERS_POLICY_VERSION}`;
+export const APP_MEDIA_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
+
+/**
  * Apps hosting and the deployer (ticket 2.5, stack `ssd-workshop-apps`). The bucket name holds the account,
  * like the site's (S3 names are global); every app's files live under `apps/<lower-cased nickname>/`.
  */
@@ -773,6 +805,72 @@ export const WAF_API_RATE_RULE_NAME = `${PREFIX}-api-rate`;
 export const WAF_API_PATH_PREFIX = "/api/";
 export const WAF_API_RATE_LIMIT = 15_000;
 export const WAF_RATE_WINDOW_SECONDS = 300;
+/**
+ * Ticket 3.18 (decision "Abuse cost", question 3): a second rule, per address, at most WAF_MEDIA_RATE_LIMIT requests to
+ * `/app-media/*` in WAF_RATE_WINDOW_SECONDS, counted apart from `/api/*` so a room loading photos never blocks the API.
+ * Try 2 (cost, accepted by Franck 2026-11-26): 3,000. A room behind one venue address: browsers keep a file a day, so
+ * each person fetches each photo or recording about once; ~45 people each opening ~60 files within 5 minutes is
+ * ~2,700. One abusing address then pulls at most 3,000 x 4 MB = 12 GB per 5 minutes. Above it, 429 like the API rule.
+ */
+export const WAF_MEDIA_RATE_RULE_NAME = `${PREFIX}-media-rate`;
+export const WAF_MEDIA_PATH_PREFIX = "/app-media/";
+export const WAF_MEDIA_RATE_LIMIT = 3_000;
+/**
+ * Ticket 3.18 try 2: a junk filter in the same web ACL (its own rule, priority 2): a `PUT` or `DELETE` to
+ * `/api/apps/<nickname>/media/<id>` whose `authorization` header does not start with `Bearer ` (in any case, try 3) is answered by WAF
+ * (WAF_MEDIA_AUTH_STATUS, the API's own 401 body and CORS header), never reaching API Gateway or Lambda. It does not stop
+ * a made-up token (the function checks tokens); it only keeps token-less floods off the paid path.
+ */
+export const WAF_MEDIA_AUTH_RULE_NAME = `${PREFIX}-media-auth`;
+export const WAF_MEDIA_API_PREFIX = "/api/apps/";
+export const WAF_MEDIA_API_SEGMENT = "/media/";
+export const WAF_MEDIA_AUTH_METHODS = ["PUT", "DELETE"] as const;
+/** Compared after a LOWERCASE transformation (try 3), as checkAppWrite reads the scheme in any case. */
+export const WAF_BEARER_PREFIX = "bearer ";
+export const WAF_MEDIA_AUTH_STATUS = 401;
+export const WAF_MEDIA_AUTH_BODY_KEY = "sign-in-to-save";
+/** The media API's own 401 answer (platform APP_SIGN_IN_TEXTS.signInToSave; a synth test keeps them equal). */
+export const WAF_MEDIA_AUTH_BODY = JSON.stringify({ message: "Sign in to the workshop to save in this app." });
+/**
+ * Ticket 3.18 try 3: per address, at most WAF_MEDIA_WRITE_RATE_LIMIT media uploads and deletes together (`PUT` and
+ * `DELETE /api/apps/<nickname>/media/<id>`, WAF_MEDIA_WRITE_RATE_METHODS) in WAF_RATE_WINDOW_SECONDS (priority 3, after
+ * the junk filter), then 429 with its own body and the CORS header. The junk filter lets a made-up `Bearer x` through,
+ * and the upload and delete routes' throttles (APP_MEDIA_UPLOAD_THROTTLE, 2/s; APP_MEDIA_DELETE_THROTTLE, 10/s) are
+ * shared by every app: without this rule one address could keep them at 429 for everyone. 150 per 5 minutes is 0.5/s,
+ * so filling the upload throttle now takes at least 4 addresses. A room behind one venue address shares the 150 (~3
+ * photos each for 45 people in 5 minutes); please veto.
+ */
+export const WAF_MEDIA_WRITE_RATE_RULE_NAME = `${PREFIX}-media-write-rate`;
+export const WAF_MEDIA_WRITE_RATE_LIMIT = 150;
+/**
+ * Ticket 3.18 (access review of try 3): the per-address rule counts uploads AND deletes (the delete route's throttle,
+ * 10/s, is shared by every app too). Preflights are not counted here (each upload sends one, so counting them would
+ * halve a room's uploads); they get their own per-address rule (WAF_MEDIA_PREFLIGHT_RATE_LIMIT).
+ */
+export const WAF_MEDIA_WRITE_RATE_METHODS = ["PUT", "DELETE"] as const;
+/**
+ * Ticket 3.18 (access review of try 3): media path matches decode, then normalize the path (`/api//apps/...`,
+ * `/api/./apps/...`), so a path variant cannot skip the media rules.
+ */
+export const WAF_MEDIA_PATH_TRANSFORMATIONS = [
+  { priority: 0, type: "URL_DECODE" },
+  { priority: 1, type: "NORMALIZE_PATH" },
+];
+export const WAF_MEDIA_WRITE_RATE_BODY_KEY = "too-many-uploads";
+export const WAF_MEDIA_WRITE_RATE_BODY = JSON.stringify({ message: "Too many uploads from this address. Please wait a few minutes and try again." });
+/**
+ * Ticket 3.18 (after the access review of try 3): per address, at most WAF_MEDIA_PREFLIGHT_RATE_LIMIT media preflights
+ * (`OPTIONS /api/apps/<nickname>/media/<id>`, same path matches as WAF_MEDIA_WRITE_RATE_RULE_NAME) in
+ * WAF_RATE_WINDOW_SECONDS (priority 4), then 429 with the CORS header and WAF_MEDIA_WRITE_RATE_BODY (same body key).
+ * The preflight route's throttle (APP_MEDIA_PREFLIGHT_THROTTLE, 20/s) is shared by every app, and the 3.13 rule lets one
+ * address send 50/s: without this rule one address could hold every app's preflights at 429. A per-address rule rather
+ * than a higher throttle, since a higher throttle raises the cost at the cap. 300 per 5 minutes is 1/s, so filling the
+ * 20/s throttle takes ~20 addresses; a room behind one venue address sends one preflight per upload (at most 150 per 5
+ * minutes under rule 3), far below 300. $1 a month; please veto.
+ */
+export const WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME = `${PREFIX}-media-preflight-rate`;
+export const WAF_MEDIA_PREFLIGHT_RATE_LIMIT = 300;
+export const WAF_MEDIA_PREFLIGHT_RATE_METHOD = "OPTIONS";
 /**
  * A blocked request gets 429 with API Gateway's own throttle body, not WAF's default 403: the distribution turns every
  * 403 into the 404 page (ticket 2.5's error response, which CloudFront also applies to WAF's answers), so a block would

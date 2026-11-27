@@ -322,3 +322,29 @@ paths:
   with caching off and the AllViewer / AllViewerExceptHostHeader origin request policy, which the `/api/*` behaviours
   use. A route that needs the header on a GET (3.25 try 2's `?whoami=1`) is checked live after the deploy
   (`infra/README.md`), and the client must degrade if it arrives without it.
+- A bucket only one role writes but an operator command must clean (the media bucket, ticket 3.18): the bucket policy
+  denies only the Put-type object actions to everyone but that role, and leaves `DeleteObject` to identity policies, so
+  Franck's `npm run participant -- reset` can delete; the synth test then fails when any IAM policy but that role's may
+  write OR delete there. Files that anyone with a token can delete get a short CloudFront `s-maxage` (an hour since 3.18
+  try 2, so a photo deleted by mistake leaves the CDN quickly; browsers `max-age` a day, no `immutable`) instead of an
+  invalidation per delete: invalidations cost $0.005 a path beyond 1,000 a month, and a caller could drive them.
+- A change to the WAF web ACL (a new rule, ticket 3.18) needs `wafv2:UpdateWebACL`. The repository's access stack does
+  not hold it: the deploy role has it through the standalone policy `ssd-workshop-deploy-safety-nets` (ticket 3.13,
+  statement `WafManageWorkshopAcl`, applied by Franck outside the access stack), so no access-stack change is needed;
+  check that policy (`/mnt/project-files/phase-3/ticket-3.13/deploy-safety-nets.json`) before asking for one, and ask
+  Franck only to confirm it is still attached.
+- A WAF rule's `FieldToMatch.SingleHeader` is typed `any` in CDK (`CfnWebACL`): write it in CloudFormation's case
+  (`{ Name: "authorization" }`), and add header names (`SingleHeader.Name`, a custom response's `ResponseHeaders[].Name`)
+  to the names test's `NOT_NAME_PATHS`. A WAF answer an app must read (3.18's media-auth 401) carries
+  `access-control-allow-origin: *` in its custom response headers and the API's own JSON body (a custom response body).
+- A WAF junk filter on a header must agree with how the function parses it: `checkAppWrite` reads `Bearer` in any case,
+  so the filter compares after a `LOWERCASE` transformation with `bearer ` (3.18 try 3). A junk filter lets a made-up
+  token through, so a route throttle shared by every caller (API Gateway's per-route rate) can be held at 429 by one
+  address: add a per-address WAF rate rule scoped to that route (rate-based statement with a scope-down AND of method
+  and path; 3.18's `ssd-workshop-media-write-rate`, 150 per 5 minutes) so filling the shared throttle takes several
+  addresses. Cover every method of the route (3.18: `PUT` and `DELETE` counted together; the `OPTIONS` preflight, one per
+  upload, gets its own per-address rule, `ssd-workshop-media-preflight-rate`, 300 per 5 minutes, rather than a higher
+  throttle, since raising a throttle raises the cost at the cap; a synth test checks each shared throttle needs at
+  least 3 addresses to fill), and match paths after
+  `URL_DECODE` then `NORMALIZE_PATH`, or `/api//apps/...` skips a `STARTS_WITH "/api/apps/"` match.
+- A WAF web ACL's `Description` must match `^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+...$` (no `;`, no quotes): `cdk synth` prints only a warning (F3031) and the deploy would fail; the synth test checks it (ticket 3.18 try 2).
