@@ -215,6 +215,13 @@ describe("AwsTranscriber", () => {
     expect(new Set(TRANSCRIBE_LANGUAGES.map((l) => l.slice(0, 2))).size).toBe(TRANSCRIBE_LANGUAGES.length);
   });
 
+  it("throws every start error but a conflict by its name, so the route can tell a refused start from a lost answer (try 3)", async () => {
+    const t = stub<TranscribeSender>([named("BadRequestException"), named("InternalFailureException")]);
+    const transcriber = new AwsTranscriber(t.client, stub<AppAiBucketSender>([]).client, "bucket");
+    await expect(transcriber.start(job)).rejects.toMatchObject({ name: "BadRequestException" });
+    await expect(transcriber.start(job)).rejects.toMatchObject({ name: "InternalFailureException" });
+  });
+
   it("maps the job's status, and a missing job to missing", async () => {
     const t = stub<TranscribeSender>([
       { TranscriptionJob: { TranscriptionJobStatus: "IN_PROGRESS" } },

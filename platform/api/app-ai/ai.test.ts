@@ -633,6 +633,62 @@ describe("criterion 7: transcribe through Amazon Transcribe, then sort-text", ()
     expect(store.all.usd).toBe(0);
   });
 
+  it("WHEN the start is refused with an error that proves nothing started THEN the charge goes back and status is not asked", async () => {
+    for (const name of ["BadRequestException", "LimitExceededException", "AccessDeniedException"]) {
+      const { call, transcriber, store } = setup();
+      transcriber.startFailure = Object.assign(new Error("x"), { name });
+      expect((await call(post(TRANSCRIBE))).statusCode).toBe(500);
+      expect(store.all.usd).toBe(0);
+      expect(transcriber.calls.filter((c) => c.startsWith("status"))).toHaveLength(1);
+    }
+  });
+
+  it("WHEN the start times out and the job exists THEN the charge stays (try 3)", async () => {
+    const { call, transcriber, store, logs } = setup();
+    transcriber.looksToFinish = 1000;
+    transcriber.startFailure = Object.assign(new Error("x"), { name: "TimeoutError" });
+    transcriber.startFailsAfterCreating = true;
+    const answer = await call(post(TRANSCRIBE));
+    // The job runs and is paid for: the app asks again and joins it.
+    expect(answer.statusCode).toBe(202);
+    expect(transcriber.jobs.size).toBe(1);
+    expect(store.all.usd).toBe(transcribeCost(10));
+    expect(store.apps.get(NICK.toLowerCase())?.usd).toBe(transcribeCost(10));
+    expect(store.writers.get("bob")?.usd).toBe(transcribeCost(10));
+    expect(transcriber.calls.filter((c) => c.startsWith("status"))).toHaveLength(2);
+    expect(logs.some((entry) => entry.error === "start:TimeoutError")).toBe(true);
+    // Asking again is a free join, not a second job.
+    expect((await call(post(TRANSCRIBE))).statusCode).toBe(202);
+    expect(store.all.usd).toBe(transcribeCost(10));
+    expect(transcriber.calls.filter((c) => c.startsWith("start"))).toHaveLength(1);
+  });
+
+  it("WHEN the start times out and the job is missing THEN the charge is refunded (try 3)", async () => {
+    for (const name of ["TimeoutError", "AbortError", "InternalFailureException", "ECONNRESET"]) {
+      const { call, transcriber, store } = setup();
+      transcriber.startFailure = Object.assign(new Error("x"), { name });
+      expect((await call(post(TRANSCRIBE))).statusCode).toBe(500);
+      expect(transcriber.jobs.size).toBe(0);
+      expect(store.all.usd).toBe(0);
+      expect(store.writers.get("bob")?.usd).toBe(0);
+      expect(transcriber.calls.filter((c) => c.startsWith("status"))).toHaveLength(2);
+    }
+  });
+
+  it("WHEN the start times out and the status call fails too THEN the charge stays (never under the cost)", async () => {
+    const { call, transcriber, store } = setup();
+    transcriber.startFailure = Object.assign(new Error("x"), { name: "TimeoutError" });
+    const realStatus = transcriber.status.bind(transcriber);
+    let looks = 0;
+    transcriber.status = async (job) => {
+      looks += 1;
+      if (looks === 2) throw Object.assign(new Error("x"), { name: "TimeoutError" });
+      return realStatus(job);
+    };
+    expect((await call(post(TRANSCRIBE))).statusCode).toBe(500);
+    expect(store.all.usd).toBe(transcribeCost(10));
+  });
+
   it("WHEN the address names a photo, nothing, or a recording longer than 5 minutes THEN 400 and no job", async () => {
     const { call, transcriber, media, store } = setup();
     expect(message(await call(post({ task: "transcribe", recording: voiceAddress(NICK, PHOTO_ID) })))).toBe(APP_AI_TEXTS.notARecording);
@@ -666,7 +722,7 @@ describe("criterion 7: transcribe through Amazon Transcribe, then sort-text", ()
 });
 
 describe("time: every paid step and what follows it fits before the deadline (try 2)", () => {
-  it("adds up: the deadline is under the function's 28 s, the last poll leaves one poll and the reading, a model call one settlement", () => {
+  it("adds up: the deadline is under the function's 28 s, the last wait begins by 10 s and leaves one poll and the reading, a model call one settlement", () => {
     expect(REQUEST_DEADLINE_MS).toBe(26_000);
     expect(REQUEST_DEADLINE_MS).toBeLessThan(28_000);
     expect(TRANSCRIBE_AFTER_DONE_MS).toBe(4_000 + 3_000 + 4_000);
@@ -706,11 +762,11 @@ describe("time: every paid step and what follows it fits before the deadline (tr
     expect(logs.at(-1)).toMatchObject({ outcome: "out-of-time", status: 503 });
   });
 
-  it("WHEN a Transcribe start and its refund would not fit THEN 503 and no job; WHEN the reading would not fit THEN 202", async () => {
+  it("WHEN a Transcribe start, one status call and its refund would not fit THEN 503 and no job; WHEN the reading would not fit THEN 202", async () => {
     const { call, transcriber, media, clock, store } = setup();
     const read = media.read.bind(media);
     media.read = async (key) => {
-      clock.now += REQUEST_DEADLINE_MS - TRANSCRIBE_CALL_LIMIT_MS - TABLE_CALL_LIMIT_MS + 1;
+      clock.now += REQUEST_DEADLINE_MS - 2 * TRANSCRIBE_CALL_LIMIT_MS - TABLE_CALL_LIMIT_MS + 1;
       return read(key);
     };
     expect((await call(post(TRANSCRIBE))).statusCode).toBe(503);

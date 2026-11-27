@@ -382,6 +382,9 @@ paths:
 - A service billed per minute (Transcribe) is charged before the call on the length measured from the file's own
   timing (`app-media/formats.ts`), bounded by the recording limit, never on what the client says; an async job is
   named after the media id so a repeat request joins it instead of paying again.
+  Give a start's charge back only on errors that prove nothing started (refused: invalid, quota, access); after a
+  time-out, abort, network error or 5xx the job may exist, so ask its status once and refund only when it is missing
+  (3.21 try 3, `UNSTARTED_TRANSCRIBE_ERRORS`), leaving time for that call in the start's deadline check.
   A request that joins a running job answers 202 at once (ticket 3.21 try 2): only the request that paid may wait, or
   free requests buy Lambda time. Clean up a finished job's record before its result file, so a second reader that finds
   the file gone also finds the job gone and answers "ask again" instead of failing.

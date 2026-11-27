@@ -27,8 +27,9 @@
 // TRANSCRIBE_CALL_LIMIT_MS, the model's timeoutMs), and every paid step starts only when it and everything after it fit
 // before REQUEST_DEADLINE_MS (26 s from the request's start), under the function's 28 s timeout and API Gateway's 30 s:
 // a model call is cut off at the deadline less one settlement (5.5 s), and starts only with MIN_MODEL_CALL_MS left; a
-// Transcribe job starts only with its start call and a refund left; polls stop at TRANSCRIBE_LAST_POLL_MS (10 s), leaving
-// one poll (2 s + 3 s) and the reading and clean-up (4 s + 3 s + 4 s). The free steps before them (about seven table
+// Transcribe job starts only with its start call, one status call and a refund left; no wait between polls begins after
+// TRANSCRIBE_LAST_POLL_MS (10 s), so the last status call starts by 12 s and ends by 15 s, leaving the reading and
+// clean-up (4 s + 3 s + 4 s). The free steps before them (about seven table
 // calls, an S3 read, up to RESERVE_ATTEMPTS reservations) are not cut short: only if every one of them took its full
 // limit could the function's timeout come first, and then nothing was billed and at most a reservation stays counted
 // (never less than the cost).
@@ -67,7 +68,10 @@ export const MIN_MODEL_CALL_MS = 8_000;
 export const TRANSCRIBE_POLL_MS = 2_000;
 /** Reading a finished job's text, then deleting the job, then the result file. */
 export const TRANSCRIBE_AFTER_DONE_MS = S3_CALL_LIMIT_MS + TRANSCRIBE_CALL_LIMIT_MS + S3_CALL_LIMIT_MS;
-/** No poll starts later than this after the request started: one more poll and the reading and clean-up still fit (10 s). */
+/**
+ * No wait before a poll begins later than this after the request started (10 s): that wait (2 s) and its status call
+ * (3 s) end by 15 s, and the reading and clean-up (11 s) still fit before the deadline.
+ */
 export const TRANSCRIBE_LAST_POLL_MS = REQUEST_DEADLINE_MS - TRANSCRIBE_POLL_MS - TRANSCRIBE_CALL_LIMIT_MS - TRANSCRIBE_AFTER_DONE_MS;
 /** Where Amazon Transcribe writes its results in the media bucket (never served: CloudFront maps only `/app-media/*`). */
 export const TRANSCRIPTS_PREFIX = "transcripts/";
@@ -88,6 +92,15 @@ const JSON_ANSWER_HEADERS = { "content-type": "application/json", "cache-control
 
 /** Bedrock errors after which nothing was billed: the call's reservation is given back. */
 export const UNBILLED_MODEL_ERRORS = ["ValidationException", "AccessDeniedException", "ThrottlingException", "ServiceQuotaExceededException", "ModelNotReadyException", "ResourceNotFoundException"];
+
+/**
+ * Transcribe errors on StartTranscriptionJob that prove no job was created (a refused request: invalid, over a quota or
+ * rate, not allowed): the reservation goes back at once (try 3). Any other error (our time limit, an aborted or broken
+ * connection, a 5xx) may arrive after Transcribe created the job, so the request asks once whether the job exists and
+ * gives the reservation back only when it is missing. `ConflictException` is not an error here: the start answers
+ * `exists` (another request created the job and carries its charge).
+ */
+export const UNSTARTED_TRANSCRIBE_ERRORS = ["BadRequestException", "LimitExceededException", "AccessDeniedException"];
 
 /** What the AI tasks need from the table. */
 export interface AppAiStore {
@@ -327,6 +340,19 @@ async function runModelTask(request: Exclude<AppAiRequest, { task: "transcribe" 
   return { outcome: "answered", response: json(200, answer) };
 }
 
+/**
+ * After a failed start: `missing` when the error proves nothing started or the job is not there, `exists` when it is,
+ * `unknown` when the status call fails too (try 3).
+ */
+async function statusAfterFailedStart(deps: AppAiDeps, name: string, error: unknown): Promise<"missing" | "exists" | "unknown"> {
+  if (UNSTARTED_TRANSCRIBE_ERRORS.includes(errorName(error))) return "missing";
+  try {
+    return (await deps.transcriber.status(name)).state === "missing" ? "missing" : "exists";
+  } catch {
+    return "unknown";
+  }
+}
+
 async function runTranscribe(mediaId: string, caller: Caller, deps: AppAiDeps, seen: Seen): Promise<Answer> {
   const name = transcriptionJobName(caller.nickname, mediaId);
   const outputKey = transcriptKey(caller.nickname, mediaId);
@@ -349,14 +375,21 @@ async function runTranscribe(mediaId: string, caller: Caller, deps: AppAiDeps, s
     const cost = transcribeCost(seconds);
     const reserved = await reserve(deps, caller, cost, seen);
     if ("answer" in reserved) return reserved.answer;
-    // The start, and a refund should it fail, must fit before the deadline.
-    if (timeLeft(deps, caller) < TRANSCRIBE_CALL_LIMIT_MS + TABLE_CALL_LIMIT_MS) return giveBack(deps, caller, reserved.today, cost, seen);
+    // The start, one status call should it fail without proof, and a refund must fit before the deadline (try 3).
+    if (timeLeft(deps, caller) < 2 * TRANSCRIBE_CALL_LIMIT_MS + TABLE_CALL_LIMIT_MS) return giveBack(deps, caller, reserved.today, cost, seen);
     let started: "started" | "exists";
     try {
       started = await deps.transcriber.start({ name, mediaKey: key, format: found.kind, outputKey });
     } catch (error) {
-      // A refused start bills nothing (a job that never ran).
-      await settleQuietly(deps, caller, reserved.today, -cost, seen);
+      const after = await statusAfterFailedStart(deps, name, error);
+      // Refused (nothing started) or no job there: nothing is billed, the reservation goes back.
+      if (after === "missing") await settleQuietly(deps, caller, reserved.today, -cost, seen);
+      // The job exists although the answer was lost: it runs and is paid for, the app asks again and joins it.
+      if (after === "exists") {
+        deps.log({ event: "app-ai", method: "POST", outcome: "failed", status: 0, error: `start:${errorName(error)}` });
+        return working();
+      }
+      // Missing, or unknown (the status call failed too: the charge stays, never under the cost).
       throw error;
     }
     // Another request started the same job a moment ago: it carries the charge, and this one does not wait.
@@ -364,7 +397,7 @@ async function runTranscribe(mediaId: string, caller: Caller, deps: AppAiDeps, s
       await settleQuietly(deps, caller, reserved.today, -cost, seen);
       return working();
     }
-    // Only the request that started the job polls it, while one more poll and the reading still fit.
+    // Only the request that started the job polls it: a wait begins only by TRANSCRIBE_LAST_POLL_MS, so the poll and the reading still fit.
     status = { state: "working" };
     while (status.state === "working" && elapsed(deps, caller) <= TRANSCRIBE_LAST_POLL_MS) {
       await deps.sleep(TRANSCRIBE_POLL_MS);

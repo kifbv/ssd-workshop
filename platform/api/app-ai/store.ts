@@ -298,6 +298,11 @@ export class AwsTranscriber implements Transcriber {
     return { state: "working" };
   }
 
+  /**
+   * `exists` on ConflictException (a job of that name is there). Every other error is thrown by name as the SDK gives it
+   * (or TimeoutError from the limit): the route decides from the name whether a job may have started (try 3,
+   * `UNSTARTED_TRANSCRIBE_ERRORS` in ./ai.ts).
+   */
   async start(job: { name: string; mediaKey: string; format: RecordingKind; outputKey: string }): Promise<"started" | "exists"> {
     try {
       const command = new StartTranscriptionJobCommand({

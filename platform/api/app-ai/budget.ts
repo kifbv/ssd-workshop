@@ -1,5 +1,5 @@
 // The AI tasks' budgets (ticket 3.21, question 7): each UTC day, at most $1 of AI per app, $1 per signed-in writer
-// across all apps (try 2, owner's decision pending: WRITER_AI_DAILY_BUDGET_USD) and $10 for all apps together, kept apart from every participant's own $5 (ticket 3.3). Pure: what a call may cost at most (reserved
+// across all apps (try 2, decided by Franck 2026-11-27: WRITER_AI_DAILY_BUDGET_USD) and $10 for all apps together, kept apart from every participant's own $5 (ticket 3.3). Pure: what a call may cost at most (reserved
 // before it runs, so parallel calls cannot pass a budget by more than one call), what it did cost (tokens x Haiku 4.5's
 // EU price, or Amazon Transcribe's $0.024 a minute), and whether a budget is spent. The table side is ./store.ts.
 import { MAX_RECORDING_SECONDS, RECORDING_MARGIN_SECONDS } from "../app-media/media.js";
@@ -10,7 +10,7 @@ import { requestTextBytes, type AppAiRequest } from "./tasks.js";
 export const APP_AI_DAILY_BUDGET_USD = 1;
 /**
  * What one signed-in writer (the nickname stored with the app write token) may spend on AI tasks per UTC day, across
- * every app (ticket 3.21 try 2, the recommended option while the owner decides; one constant to change). Without it,
+ * every app (ticket 3.21 try 2; decided by Franck 2026-11-27 04:15 UTC, ADDED to question 7's answer in docs/decisions.md). Without it,
  * one participant holding tokens for ten apps could use the whole $10 alone.
  */
 export const WRITER_AI_DAILY_BUDGET_USD = 1;

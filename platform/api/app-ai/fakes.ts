@@ -127,6 +127,8 @@ export class FakeTranscriber implements Transcriber {
   language: string | undefined = "fr-FR";
   /** When set, the next start fails with it. */
   startFailure: Error | undefined;
+  /** With `startFailure`: the job is created before the start fails (an answer lost after Transcribe took it, try 3). */
+  startFailsAfterCreating = false;
   /** When set, the next start answers `exists` (someone else started the same job a moment before). */
   startExists = false;
 
@@ -147,6 +149,7 @@ export class FakeTranscriber implements Transcriber {
     if (this.startFailure !== undefined) {
       const failure = this.startFailure;
       this.startFailure = undefined;
+      if (this.startFailsAfterCreating) this.jobs.set(job.name, { mediaKey: job.mediaKey, format: job.format, outputKey: job.outputKey, looksLeft: this.looksToFinish, outcome: this.outcome });
       throw failure;
     }
     if (this.startExists || this.jobs.has(job.name)) {
