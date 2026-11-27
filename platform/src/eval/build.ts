@@ -8,6 +8,8 @@
 // Ticket 2.15: the agent may read pages with WebFetch; the outcome counts them from the feed (hosts only). Behind a
 // session's proxy the agent gets that proxy for its fetches (`webProxyEnvironment`); the builder task never does.
 // Ticket 3.7: `evalChange` builds an example, then changes it with a change build (the live app on main, edited).
+// Ticket 3.22: the in-memory workshop also answers the AI route (ticket 3.21) with fixed answers (no Bedrock), and an AI
+// case is checked signed in by `exerciseAi`.
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { Agent, type AgentOptions } from "node:https";
@@ -16,6 +18,8 @@ import { dirname, isAbsolute, join } from "node:path";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { APP_MEDIA_CONTENT_SECURITY_POLICY, APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
+import { AI_PREFLIGHT_HEADERS } from "../../api/app-ai/ai.js";
+import { parseAppAiRequest, type AppAiRequest } from "../../api/app-ai/tasks.js";
 import { inspectMedia, MEDIA_CONTENT_TYPES } from "../../api/app-media/formats.js";
 import { checkApp, type AppFile } from "../../api/build/check.js";
 import { contentTypeOf, DATA_CLIENT_PATH, withPlatformDataClient } from "../../api/deploy/deploy.js";
@@ -27,12 +31,27 @@ import { answerChange } from "../../api/conversation/change.js";
 import { usageOf, type ModelClient } from "../../api/conversation/model.js";
 import { loadTemplateFiles } from "../../api/github/template.js";
 import { appArchiveUrl, type ModelSetting } from "../../api/settings.js";
-import { APP_SIGN_IN_TEXTS } from "../../api/workshop/texts.js";
+import { APP_AI_TEXTS, APP_SIGN_IN_TEXTS } from "../../api/workshop/texts.js";
 import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
-import { MEDIA_FILTER, missingScreens, screenNames, SIGN_IN_SCRIPT, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type MediaCase, type MediaCheck, type SignInCheck } from "./logic.js";
+import { RECEIPT_CASES, receiptPhoto } from "./app-ai.js";
+import {
+  AI_HELPER,
+  MEDIA_FILTER,
+  missingScreens,
+  screenNames,
+  SIGN_IN_SCRIPT,
+  specTitle,
+  type AiCase,
+  type AiCheck,
+  type BuildEvalOutcome,
+  type ChangeEvalOutcome,
+  type MediaCase,
+  type MediaCheck,
+  type SignInCheck,
+} from "./logic.js";
 
 const NICKNAME = "eval-app";
 const EVAL_ORIGIN = "https://workshop.test";
@@ -66,10 +85,30 @@ interface EvalApi {
   media: Map<string, { bytes: Buffer; type: string }>;
   /** Every data and media write the app sent: method, path, status, and for data the body. */
   writes: { method: string; path: string; status: number; body: string }[];
+  /** Ticket 3.22: every AI request (POST) the app sent: its task, the stand-in's status and answer, and how many writes came before it. */
+  ai: { task: string | undefined; status: number; answer: unknown; writesBefore: number }[];
+}
+
+/** Ticket 3.22: the stand-in AI route's fixed answers (no Bedrock): what the build check looks for afterwards. */
+export const STAND_IN_TAGS = ["sunflower", "crayon"];
+export const STAND_IN_RECEIPT = { text: "Bäckerei Sonnenschein", date: "2026-11-14", amount: 12.4, currency: "EUR" };
+export const STAND_IN_TRANSCRIPT = { text: "An idea for the next team lunch.", language: "en-US" };
+
+/** The stand-in's answer to a checked request: as the real route's shapes (ticket 3.21), with fixed values. */
+export function standInAnswer(request: AppAiRequest): Record<string, unknown> {
+  if (request.task === "tag-photo") return { tags: request.tags.length > 0 ? request.tags.slice(0, 2) : STAND_IN_TAGS };
+  if (request.task === "sort-text") return { categories: request.categories.slice(0, 1) };
+  if (request.task === "transcribe") return { ...STAND_IN_TRANSCRIPT };
+  const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const field of request.fields) {
+    values[field.name] =
+      field.type === "text" ? STAND_IN_RECEIPT.text : field.type === "date" ? STAND_IN_RECEIPT.date : field.type === "number" ? STAND_IN_RECEIPT.amount : { amount: STAND_IN_RECEIPT.amount, currency: STAND_IN_RECEIPT.currency };
+  }
+  return { values };
 }
 
 async function routeApp(page: Page, files: readonly AppFile[], token: string | undefined): Promise<EvalApi> {
-  const api: EvalApi = { data: new Map(), media: new Map(), writes: [] };
+  const api: EvalApi = { data: new Map(), media: new Map(), writes: [], ai: [] };
   const byPath = new Map(files.filter((file) => file.kind === "file").map((file) => [file.path, file]));
   const json = (route: Route, status: number, body: string) => route.fulfill({ status, headers: { ...CORS, "content-type": "application/json" }, body });
   await page.route(`${EVAL_ORIGIN}/**`, async (route: Route) => {
@@ -79,6 +118,30 @@ async function routeApp(page: Page, files: readonly AppFile[], token: string | u
     const dataPrefix = `/api/apps/${NICKNAME}/data/`;
     const mediaPrefix = `/api/apps/${NICKNAME}/media/`;
     const signedIn = token !== undefined && request.headers().authorization === `Bearer ${token}`;
+    if (path === `/api/apps/${NICKNAME}/ai`) {
+      if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: { ...AI_PREFLIGHT_HEADERS } });
+      const call: EvalApi["ai"][number] = { task: undefined, status: 0, answer: undefined, writesBefore: api.writes.length };
+      api.ai.push(call);
+      const answer = (status: number, body: unknown) => {
+        call.status = status;
+        call.answer = body;
+        return json(route, status, JSON.stringify(body));
+      };
+      if (request.method() !== "POST") return answer(404, { message: "Not found." });
+      if (!signedIn) return answer(401, { message: APP_SIGN_IN_TEXTS.signInToSave });
+      let body: unknown;
+      try {
+        body = JSON.parse(request.postData() ?? "");
+      } catch {
+        body = undefined;
+      }
+      // The real route's parser judges the request (ticket 3.21): never a free prompt, within the limits, this app's files.
+      const parsed = parseAppAiRequest(body, NICKNAME);
+      if (!parsed.ok) return answer(400, { message: parsed.reason === "bad-request" ? APP_AI_TEXTS.badRequest : APP_AI_TEXTS.photoNotInApp });
+      call.task = parsed.request.task;
+      if (parsed.request.task !== "sort-text" && !api.media.has(parsed.request.mediaId)) return answer(400, { message: APP_AI_TEXTS.mediaNotFound });
+      return answer(200, standInAnswer(parsed.request));
+    }
     if (path.startsWith(dataPrefix) || path.startsWith(mediaPrefix)) {
       if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
       const write = request.method() === "PUT" || request.method() === "DELETE";
@@ -413,7 +476,9 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
         check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
       }
     }
-    check.filter = await page.evaluate<boolean>(`${HAS_FILTER}(${JSON.stringify(MEDIA_FILTER[kind])})`);
+    // Ticket 3.22 (live eval run 1): the app may still be drawing after its save (the check above can pass on a preview
+    // showing the address while the save is under way), so give the filter a moment to appear.
+    check.filter = await waitUntil(() => page.evaluate<boolean>(`${HAS_FILTER}(${JSON.stringify(MEDIA_FILTER[kind])})`), 3_000);
     return check;
   } finally {
     await context.close();
@@ -427,6 +492,169 @@ async function waitUntil(test: () => boolean | Promise<boolean>, ms: number): Pr
     if (await test()) return true;
     if (Date.now() >= end) return false;
     await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+/**
+ * Ticket 3.22: marks (`data-eval-suggest`) a visible button that asks the AI for a suggestion ("Suggest tags", "Read the
+ * receipt", "Scan", "Auto-fill", "AI"), not the sign-in button. Returns whether one was marked. Run in the page.
+ */
+const SUGGEST_BUTTON = `(() => {
+  const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+  const said = (el) => ((el.textContent || "") + " " + (el.getAttribute("aria-label") || "") + " " + (el.value || "")).trim();
+  const buttons = Array.from(document.querySelectorAll("button, [role=button], input[type=button]")).filter((el) => !el.hasAttribute("data-workshop-sign-in") && !el.disabled && seen(el));
+  const button = buttons.find((el) => /suggest|\\bread\\b|scan|detect|auto|\\bai\\b|fill|recogni|extract/i.test(said(el)));
+  if (button === undefined) return false;
+  button.setAttribute("data-eval-suggest", "");
+  return true;
+})()`;
+
+/**
+ * Ticket 3.22: whether the page shows one of `markers` (regular expression sources, any case): in a field's value, a
+ * selected option, or the page's visible text. Run in the page.
+ */
+const SHOWS_MARKER = `((markers) => {
+  const patterns = markers.map((m) => new RegExp(m, "i"));
+  const values = Array.from(document.querySelectorAll("input, textarea")).map((el) => el.value || "");
+  const options = Array.from(document.querySelectorAll("select")).map((el) => (el.selectedOptions[0] && el.selectedOptions[0].textContent) || "");
+  const texts = [...values, ...options, document.body.innerText || ""];
+  return texts.some((text) => patterns.some((p) => p.test(text)));
+})`;
+
+/**
+ * Ticket 3.22: accepts the AI's suggestion as a visitor would when no field holds it yet: presses a visible Accept / Apply
+ * / Use button, else taps each control whose text is one of the suggested `words` (a tag chip or a checkbox's label).
+ * Returns what it pressed. Run in the page.
+ */
+const ACCEPT_SUGGESTION = `((markers, words) => {
+  const patterns = markers.map((m) => new RegExp(m, "i"));
+  const inFields = Array.from(document.querySelectorAll("input, textarea")).some((el) => patterns.some((p) => p.test(el.value || "")));
+  if (inFields) return "fields";
+  const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+  const said = (el) => ((el.textContent || "") + " " + (el.getAttribute("aria-label") || "") + " " + (el.value || "")).trim();
+  const controls = Array.from(document.querySelectorAll("button, [role=button], [role=option], [role=checkbox], label, input[type=checkbox]")).filter((el) => !el.hasAttribute("data-workshop-sign-in") && seen(el));
+  const accept = controls.find((el) => /accept|apply|\\buse\\b|confirm|keep (the |these |this )?(suggest|tag|value)/i.test(said(el)));
+  if (accept !== undefined) {
+    accept.click();
+    return "accept";
+  }
+  let tapped = 0;
+  for (const el of controls) {
+    if (words.includes(said(el).replace(/^[+✓✔\\s]+|[×✕\\s]+$/g, "").toLowerCase())) {
+      el.click();
+      tapped += 1;
+    }
+  }
+  return tapped > 0 ? "chips" : "none";
+})`;
+
+/**
+ * Ticket 3.22: marks (`data-eval-save`) the button that saves: next to the photo button first (SAVE_NEXT_TO_MEDIA's area),
+ * else anywhere on the page, one reading Save before one reading Add, Log or Submit; never a suggestion or sign-in button.
+ * Fills empty text fields of that area with `word`. Returns whether one was marked. Run in the page.
+ */
+const SAVE_AFTER_SUGGESTION = `((word) => {
+  const media = document.querySelector("[data-eval-media]");
+  const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+  const areas = [media && media.closest("form, dialog, [role=dialog], section, article"), document.body].filter(Boolean);
+  for (const area of areas) {
+    for (const field of area.querySelectorAll("input:not([type]), input[type=text], textarea")) {
+      if (field.value.trim() === "" && seen(field) && !field.closest("[role=search]") && !/search|filter/i.test(field.id + " " + (field.getAttribute("placeholder") || ""))) {
+        field.value = word;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+    const buttons = Array.from(area.querySelectorAll("button, input[type=submit]")).filter((b) => !b.hasAttribute("data-workshop-sign-in") && !b.hasAttribute("data-eval-suggest") && !b.disabled && seen(b));
+    const text = (b) => b.textContent || b.value || "";
+    const save = buttons.find((b) => /save/i.test(text(b))) || buttons.find((b) => /^\\s*(add|log|submit|keep|record|post)\\b/i.test(text(b)));
+    if (save !== undefined) {
+      document.querySelectorAll("[data-eval-save]").forEach((el) => el.removeAttribute("data-eval-save"));
+      save.setAttribute("data-eval-save", "");
+      return true;
+    }
+  }
+  return false;
+})`;
+
+/**
+ * Ticket 3.22: an AI case, signed in, on the in-memory workshop whose AI route answers with fixed values: picks a photo
+ * in the photo button (a generated drawing, or for a receipt a synthetic receipt drawn in Chromium as the app-ai eval
+ * does), waits for the app to ask the AI by itself (else presses a button that asks for a suggestion, else Save), checks
+ * that the answer shows and that nothing holding it was saved yet, accepts it as a visitor would (fields already hold it;
+ * else an Accept button or the suggested tags), presses Save and checks that a saved value holds it.
+ */
+/** Ticket 3.22: the app's own code (not the workshop's data client), all its JavaScript files joined. */
+const appCode = (files: readonly AppFile[]): string =>
+  files
+    .filter((file) => file.kind === "file" && file.path.endsWith(".js") && file.path !== DATA_CLIENT_PATH)
+    .map((file) => new TextDecoder().decode(file.bytes))
+    .join("\n");
+
+/** Ticket 3.22: whether the app's code uses the AI helpers (`workshopData.ai`), which only an AI case may. */
+export const callsAi = (files: readonly AppFile[]): boolean => /\bai\s*\.\s*(tagPhoto|readPhoto|sortText|transcribe)\s*\(/.test(appCode(files));
+
+export async function exerciseAi(browser: Browser, files: readonly AppFile[], kind: AiCase): Promise<AiCheck> {
+  const { helper, task } = AI_HELPER[kind];
+  const code = appCode(files);
+  const photo = kind === "ai-receipt" ? await receiptPhoto(browser, RECEIPT_CASES[0] as (typeof RECEIPT_CASES)[number]) : (await mediaSamples(browser)).photo;
+  const { context, page, errors } = await evalPage(browser);
+  const api = await routeApp(page, files, EVAL_TOKEN);
+  const check: AiCheck = { kind, button: false, helper: new RegExp(`\\bai\\s*\\.\\s*${helper}\\s*\\(`).test(code), uploaded: false, called: false, shown: false, savedEarly: false, saved: false, errors };
+  const answered = () => api.ai.find((call) => call.task === task && call.status === 200);
+  // What a saved value must hold: one of the suggested tags, or the receipt's total (12.4 written as 12.4, 12.40 or 12,40).
+  const words = (): string[] => {
+    const answer = answered()?.answer as { tags?: unknown } | undefined;
+    return Array.isArray(answer?.tags) ? answer.tags.filter((t): t is string => typeof t === "string").map((t) => t.toLowerCase()) : [];
+  };
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const savedMarkers = (): string[] => (kind === "ai-tags" ? words().map(escape) : ["12[.,]40?(?![0-9])"]);
+  const shownMarkers = (): string[] => (kind === "ai-tags" ? savedMarkers() : [...savedMarkers(), "Sonnenschein"]);
+  const holds = (body: string) => savedMarkers().some((marker) => new RegExp(marker, "i").test(body));
+  const dataWrites = () => api.writes.filter((w) => w.method === "PUT" && w.status === 204 && w.path.startsWith(`/api/apps/${NICKNAME}/data/`));
+  try {
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+    await page.waitForLoadState("networkidle").catch(() => undefined);
+    await page.waitForTimeout(500);
+    check.button = await page.evaluate<boolean>(`(() => {
+      const input = Array.from(document.querySelectorAll("input[type=file]")).find((el) => /image/.test(el.accept || ""));
+      if (input === undefined) return false;
+      input.setAttribute("data-eval-media", "");
+      return true;
+    })()`);
+    if (!check.button) return check;
+    await openMediaScreen(page, "photo");
+    await page.setInputFiles("[data-eval-media]", { name: kind === "ai-receipt" ? "receipt.jpg" : "drawing.jpg", mimeType: "image/jpeg", buffer: photo });
+    // The app asks by itself once the photo is saved, else from a button that asks for a suggestion, else after Save.
+    if (!(await waitUntil(() => answered() !== undefined, 6_000))) {
+      if (await page.evaluate<boolean>(SUGGEST_BUTTON)) {
+        await page.click("[data-eval-suggest]", { timeout: 5_000 }).catch(() => undefined);
+        await waitUntil(() => answered() !== undefined, 8_000);
+      }
+    }
+    if (answered() === undefined && (await page.evaluate<boolean>(`${SAVE_AFTER_SUGGESTION}("cat")`))) {
+      await page.click("[data-eval-save]", { timeout: 5_000 }).catch(() => undefined);
+      await waitUntil(() => answered() !== undefined, 8_000);
+    }
+    check.uploaded = api.writes.some((w) => w.method === "PUT" && w.status === 201);
+    check.called = answered() !== undefined;
+    if (!check.called) return check;
+    check.shown = await waitUntil(() => page.evaluate<boolean>(`${SHOWS_MARKER}(${JSON.stringify(shownMarkers())})`), 4_000);
+    // Give an app that would save by itself the time to do it, then look: nothing holding the suggestion is saved yet.
+    await page.waitForTimeout(1_500);
+    check.savedEarly = dataWrites().some((w) => holds(w.body));
+    const before = api.writes.length;
+    await page.evaluate<string>(`${ACCEPT_SUGGESTION}(${JSON.stringify(savedMarkers())}, ${JSON.stringify(words())})`);
+    await page.waitForTimeout(300);
+    const savedAfter = () => api.writes.slice(before).some((w) => w.method === "PUT" && w.status === 204 && holds(w.body));
+    if (await page.evaluate<boolean>(`${SAVE_AFTER_SUGGESTION}("cat")`)) {
+      await page.click("[data-eval-save]", { timeout: 5_000 }).catch(() => undefined);
+      await waitUntil(savedAfter, 6_000);
+    }
+    check.saved = savedAfter();
+    return check;
+  } finally {
+    await context.close();
   }
 }
 
@@ -568,7 +796,7 @@ async function dumpPublished(files: readonly AppFile[]): Promise<void> {
 }
 
 /** A first build of `spec` in `world`: the repository starts as the launcher prepares it (template and spec). */
-async function firstBuild(world: EvalWorld, spec: string, browser: Browser, media?: MediaCase): Promise<{ outcome: BuildEvalOutcome; commit?: string }> {
+async function firstBuild(world: EvalWorld, spec: string, browser: Browser, media?: MediaCase, ai?: AiCase): Promise<{ outcome: BuildEvalOutcome; commit?: string }> {
   const files = withSpec(await loadTemplateFiles(), spec);
   const baseCommit = world.github.seedCommit(REPOSITORY, Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)])), FIRST_COMMIT_MESSAGE);
   // As the launcher leaves it (ticket 2.9): building under one launch.
@@ -580,6 +808,8 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser, medi
   const checked = await checkPublished(browser, run.published, spec);
   // Ticket 3.19: a media case is also opened signed in, and a photo or recording uploaded through it.
   const mediaCheck = media === undefined ? undefined : await exerciseMedia(browser, run.published, media);
+  // Ticket 3.22: an AI case is opened signed in too, and its suggestion asked, shown, accepted and saved.
+  const aiCheck = ai === undefined ? undefined : await exerciseAi(browser, run.published, ai);
   return {
     outcome: {
       ...run.outcome,
@@ -590,13 +820,16 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser, medi
       outsideHosts: checked.outsideHosts,
       signIn: checked.signIn,
       ...(mediaCheck === undefined ? {} : { media: mediaCheck }),
+      ...(aiCheck === undefined ? {} : { ai: aiCheck }),
+      usesAi: callsAi(run.published),
     },
     ...(run.commit === undefined ? {} : { commit: run.commit }),
   };
 }
 
 /**
- * Runs one spec end to end (`media`: a photo or voice case of platform/api/eval/build.json, ticket 3.19). `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
+ * Runs one spec end to end (`media`: a photo or voice case of platform/api/eval/build.json, ticket 3.19; `ai`: an AI
+ * case of that file, ticket 3.22). `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
  * path's shape and a status). The caller's AWS credentials stay in this process (the proxy signs with them); the
  * agent's process gets none.
  */
@@ -606,8 +839,9 @@ export async function evalBuild(
   browser: Browser,
   log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void,
   media?: MediaCase,
+  ai?: AiCase,
 ): Promise<BuildEvalOutcome> {
-  return (await firstBuild(evalWorld(model, log), spec, browser, media)).outcome;
+  return (await firstBuild(evalWorld(model, log), spec, browser, media, ai)).outcome;
 }
 
 /**

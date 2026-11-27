@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MEDIA_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MEDIA_GUIDANCE, AI_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
@@ -227,6 +227,24 @@ describe("the agent's settings (criterion 2)", () => {
     expect(changePrompt(ws, { number: 1, whatChanges: ["Add photos"] })).toContain(MEDIA_GUIDANCE);
     // After the sign-in rule, which comes after the WebFetch lines (3.25: placed before them, one example skipped WebFetch).
     expect(buildPrompt(ws).indexOf(MEDIA_GUIDANCE)).toBeGreaterThan(buildPrompt(ws).indexOf(SIGN_IN_GUIDANCE));
+  });
+
+  it("ticket 3.22: both prompts and AGENTS.md tell the agent how apps use AI suggestions (the four helpers, accept before saving, textContent, error.message without AI)", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8").replace(/\s+/g, " ");
+    const client = readFileSync(new URL("../../templates/basic/workshop-data.js", import.meta.url), "utf8");
+    for (const name of ["workshopData.ai.tagPhoto(address)", "workshopData.ai.readPhoto(address, [", "workshopData.ai.sortText(text, ", "workshopData.ai.transcribe(address)", "never saved by itself", "textContent", "innerHTML", "error.message", "works without AI", "no chat"]) {
+      expect(agents, name).toContain(name);
+      expect(AI_GUIDANCE, name).toContain(name);
+    }
+    for (const name of ["tagPhoto", "readPhoto", "sortText", "transcribe"]) expect(client).toContain(`${name}: ${name},`);
+    expect(AI_GUIDANCE).toMatch(/only when SPEC\.md asks for them/);
+    expect(AI_GUIDANCE).toMatch(/presses Save/);
+    // Live eval run 1: the drawing gallery (tags typed by the visitor) asked the AI unasked.
+    for (const text of [agents, AI_GUIDANCE]) expect(text).toMatch(/a tags field.*stays a plain field the visitor fills/);
+    expect(buildPrompt(ws)).toContain(AI_GUIDANCE);
+    expect(changePrompt(ws, { number: 1, whatChanges: ["Suggest tags"] })).toContain(AI_GUIDANCE);
+    // Last, after the media guidance (new prompt lines go after the WebFetch lines, 3.25).
+    expect(buildPrompt(ws).indexOf(AI_GUIDANCE)).toBeGreaterThan(buildPrompt(ws).indexOf(MEDIA_GUIDANCE));
   });
 
   it("ticket 3.25 try 2: both AGENTS.md and the guidance say workshop-data.js is index.html's first script, as the template has it and the deploy check requires", () => {

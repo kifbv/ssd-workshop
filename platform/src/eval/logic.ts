@@ -600,13 +600,15 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
 /**
  * The readiness suite's examples (ticket 3.20): the readiness file's, then the build file's media specs (a photo gallery,
  * voice messages), which the builder is proved to build, so the check must let them through. An error names the file.
+ * The build file's AI cases (ticket 3.22) are left out until ticket 3.23 teaches the readiness prompt the AI tasks.
  */
 export function readinessSuiteExamples(readinessJson: string, buildJson: string): ReadinessExample[] | { error: string } {
   const readiness = parseReadinessExamples(readinessJson);
   if ("error" in readiness) return { error: `readiness.json: ${readiness.error}` };
   const build = parseReadinessExamples(buildJson);
   if ("error" in build) return { error: `build.json: ${build.error}` };
-  return [...readiness, ...build];
+  // Ticket 3.22: not the AI cases yet: the readiness prompt learns about the AI tasks in ticket 3.23.
+  return [...readiness, ...build.filter((example) => aiKindOf(example.category) === undefined)];
 }
 
 export interface ReadinessOutcome {
@@ -799,6 +801,58 @@ export function mediaProblem(check: MediaCheck): string | undefined {
   return problems.length === 0 ? undefined : problems.join("; ");
 }
 
+/**
+ * Ticket 3.22: the AI case a build eval case is (its category in platform/api/eval/build.json): a gallery that suggests
+ * tags for a photo (`ai-tags`, AI task tag-photo) or an expense app that reads receipts (`ai-receipt`, read-photo).
+ */
+export type AiCase = "ai-tags" | "ai-receipt";
+
+export const aiKindOf = (category: string): AiCase | undefined => (category === "ai-tags" || category === "ai-receipt" ? category : undefined);
+
+/** The helper an AI case's app must call, and the AI task it asks. */
+export const AI_HELPER: Record<AiCase, { helper: string; task: string }> = {
+  "ai-tags": { helper: "tagPhoto", task: "tag-photo" },
+  "ai-receipt": { helper: "readPhoto", task: "read-photo" },
+};
+
+/**
+ * Ticket 3.22: what the build eval saw of an AI case, signed in (src/eval/build.ts `exerciseAi`), on the in-memory
+ * workshop whose AI route gives fixed answers: the photo button (a file input accepting images); whether the app's code
+ * calls the case's helper (`workshopData.ai.tagPhoto(` or `.readPhoto(`); whether the picked photo was uploaded; whether
+ * the app then asked the AI route for the case's task (by itself, or from a button that asks for a suggestion); whether
+ * the answer shows on the page (in a field's value or the page's text); whether a value holding it was saved before the
+ * visitor accepted it (before the eval pressed Save); whether one was saved after the eval accepted it (Save, after
+ * tapping a suggested tag or an Accept button when no field holds it); console errors meanwhile.
+ */
+export interface AiCheck {
+  kind: AiCase;
+  button: boolean;
+  helper: boolean;
+  uploaded: boolean;
+  called: boolean;
+  shown: boolean;
+  savedEarly: boolean;
+  saved: boolean;
+  errors: string[];
+}
+
+/** The AI problems of a published app, if any. */
+export function aiProblem(check: AiCheck): string | undefined {
+  const { helper, task } = AI_HELPER[check.kind];
+  const problems: string[] = [];
+  if (!check.helper) problems.push(`the app's code does not call workshopData.ai.${helper}`);
+  if (!check.button) problems.push("no photo button (a file input accepting images)");
+  else if (!check.uploaded) problems.push("the photo was not uploaded");
+  else if (!check.called) problems.push(`the app did not ask the AI (${task}) for the picked photo`);
+  else {
+    if (!check.shown) problems.push("the AI's suggestion is not shown on the page");
+    if (check.savedEarly) problems.push("the AI's suggestion was saved before the visitor accepted it");
+    if (!check.saved) problems.push("the suggestion was not saved after the visitor accepted it (Save)");
+  }
+  if (check.errors.length > 0) problems.push(`${check.errors.length} console error(s) while using AI: ${check.errors.join(" | ").slice(0, 300)}`);
+  return problems.length === 0 ? undefined : problems.join("; ");
+}
+
 export interface BuildEvalOutcome {
   /** The runner's outcome. */
   outcome: string;
@@ -819,6 +873,10 @@ export interface BuildEvalOutcome {
   signIn: SignInCheck;
   /** Ticket 3.19: a media case's check (photo or voice), signed in; undefined for the other examples. */
   media?: MediaCheck;
+  /** Ticket 3.22: an AI case's check (tag suggestions or a receipt read), signed in; undefined for the other examples. */
+  ai?: AiCheck;
+  /** Ticket 3.22: whether the app's code calls a `workshopData.ai` helper (only an AI case's spec asks for AI). */
+  usesAi?: boolean;
   /** Pages the coding agent read with WebFetch while building (ticket 2.15), from the build feed. */
   fetches: number;
   /** The hosts it read them from, each once, sorted. */
@@ -863,6 +921,10 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
     if (signIn !== undefined) problems.push(signIn);
     const media = outcome.media === undefined ? undefined : mediaProblem(outcome.media);
     if (media !== undefined) problems.push(media);
+    const ai = outcome.ai === undefined ? undefined : aiProblem(outcome.ai);
+    if (ai !== undefined) problems.push(ai);
+    // Live eval run 1: the drawing gallery (tags typed by the visitor) asked the AI for tags though its spec asks for no AI.
+    if (outcome.ai === undefined && outcome.usesAi === true) problems.push("calls workshopData.ai though the spec asks for no AI");
   }
   return problems.length === 0
     ? {
@@ -873,7 +935,7 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
           outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
         }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}${
           outcome.media === undefined ? "" : `, ${outcome.media.kind === "photo" ? "photo" : "Record"} button, upload kept in the data and shown from its address`
-        }`,
+        }${outcome.ai === undefined ? "" : `, calls workshopData.ai.${AI_HELPER[outcome.ai.kind].helper}, suggestion shown, saved only after acceptance`}`,
       }
     : { pass: false, detail: problems.join("; ") };
 }

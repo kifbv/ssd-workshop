@@ -95,3 +95,20 @@ paths:
   second tap during the microphone prompt) is proved; slow `getUserMedia` with an init script to open that window.
 - An eval check of a feature (3.19 try 2: the tag/topic filter) looks for the control itself (a select, field or buttons
   named with "filter" and the word), never for the word in any label: a Tags field in the add form holds "tag" too.
+- AI helpers in apps (3.22): test a client helper against the REAL route behind the local test server (`handleAppAiRequest`
+  with the fakes of `platform/api/app-ai/fakes.ts`, `template-ai.test.ts`), so the route's own parser judges what the
+  helper sends and its own refusals (503, 429, 401) come back; answer a wrong shape from a test hook instead of the route.
+  Send media to the route as the path `/app-media/<nick>/<id>`: the route accepts it on any host, a full address only on
+  the real domain.
+- `page.evaluate("p.then(...)")` awaits the promise the expression ends with: under a paused `page.clock` a helper that
+  waits on a timer then never resolves and the test hangs until its timeout. End such an expression with `; undefined`
+  and read the result from a `window` variable. A poll every 3 s that gives up after 180 s asks 61 times (0 s to 180 s).
+- A route fake whose clock is `Date.now() + offset` (the route's own Transcribe polling, 3.21) polls a varying number of
+  times per request: finish a fake job from the test (`looksLeft = 0` and its result) instead of counting looks.
+- An eval check of AI suggestions (3.22, `exerciseAi`) gives the stand-in route distinctive fixed answers (`sunflower`,
+  12.40) and looks for them in field values and the page's text, in saved bodies only before vs after the eval presses
+  Save; tap suggested tag chips or an Accept button only when no field holds the suggestion yet.
+- A new optional feature in AGENTS.md (3.22's AI rule) leaks into specs that do not ask for it (run 1: a gallery whose tags
+  the visitor types got AI tag suggestions): say in the rule what a spec without it keeps ("stays a plain field"), and
+  make the build eval fail the other cases when they use it (`callsAi`). A check that reads the page right after a write
+  was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.

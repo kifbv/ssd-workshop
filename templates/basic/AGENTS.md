@@ -19,7 +19,7 @@ shell and no package manager. You cannot run or preview the app, so check your w
   sign-in out of the app's reach.
 - `style.css`: all styles.
 - `app.js`: all behaviour. A classic script (no `import`/`export`), run after the page is parsed.
-- `workshop-data.js`: the data client (data, photos and voice recordings) and the workshop's sign-in to save. Do not change it: the
+- `workshop-data.js`: the data client (data, photos, voice recordings and AI suggestions) and the workshop's sign-in to save. Do not change it: the
   workshop publishes its own current copy with the app, whatever this folder holds.
 - `SPEC.md`: the approved spec. Do not change it.
 - `README.md`: explains the files to the participant. If you add a file, add a row for it to the
@@ -206,6 +206,40 @@ shell and no package manager. You cannot run or preview the app, so check your w
      saved recording's address. Put the sign-in button (rule 6) on a line of its own just after the record button.
    - Keep the address in the data with the recording's other fields, play it with
      `<audio controls preload="none" src="...">`, and delete it with `await workshopData.deleteMedia(address)`.
+16. AI suggestions (only when `SPEC.md` asks for them). The workshop's AI can suggest tags for a photo, read fields from
+    a photo (a receipt's shop, date and total), sort a text into categories and turn a voice recording into text; nothing
+    else (no chat, no writing texts, no free questions). Each call needs the sign-in (rule 6), like saving. Use AI only
+    when `SPEC.md` says the AI suggests, reads or sorts something: a tags field, a form or a list in a spec that does not
+    ask for AI stays a plain field the visitor fills, with no AI call.
+   - `await workshopData.ai.tagPhoto(address)` gives up to 5 suggested tags for a photo of this app (the address
+     `savePhoto` gave); `await workshopData.ai.tagPhoto(address, ["Portrait", "Pencil"])` gives those of up to 20 tags
+     that fit.
+   - `await workshopData.ai.readPhoto(address, [{ name: "shop", type: "text" }, { name: "date", type: "date" }, { name: "total", type: "money" }])`
+     gives `{ shop: "Bakery", date: "2026-11-14", total: { amount: 12.4, currency: "EUR" } }`: 1 to 12 fields, each typed
+     `text`, `number`, `date` (`YYYY-MM-DD`) or `money`, and a value is `null` when it cannot be read.
+   - `await workshopData.ai.sortText(text, ["Ideas", "Questions", "News"])` gives the categories (1 to 20) that fit a text
+     of up to 2,000 characters.
+   - `await workshopData.ai.transcribe(address)` gives `{ text, language }` for a voice recording of this app. It can take
+     a minute: show "Turning the recording into text..." meanwhile (it asks again by itself).
+   - A suggestion is shown for the visitor to accept or change, never saved by itself: put it into the form's fields (the
+     tags field, the amount field) or show it as choices the visitor taps, and save only when the visitor presses Save.
+     Ask only when the visitor does something (right after a photo is saved, or from a "Suggest tags" button), never when
+     the page opens or for every stored item.
+   - Show what the AI gives with `textContent` or as a field's `value`, never with `innerHTML`.
+   - Every call can fail: AI may be switched off for apps, or today's AI allowance may be spent. Show `error.message` (it
+     says which) and let the visitor fill the fields by hand: everything works without AI. For example:
+
+     ```js
+     // Right after the photo is saved (address is what savePhoto gave), or from a "Suggest tags" button:
+     statusText.textContent = "Suggesting tags...";
+     try {
+       const tags = await workshopData.ai.tagPhoto(address);
+       if (tagsInput.value.trim() === "") tagsInput.value = tags.join(", ");
+       statusText.textContent = "Suggested tags: keep, change or remove them, then press Save.";
+     } catch (error) {
+       statusText.textContent = error.message; // AI is off or today's allowance is spent: the visitor types the tags.
+     }
+     ```
 
 ## The deploy check
 

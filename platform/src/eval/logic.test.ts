@@ -12,6 +12,10 @@ import {
   signInProblem,
   mediaProblem,
   mediaKindOf,
+  aiKindOf,
+  aiProblem,
+  AI_HELPER,
+  type AiCheck,
   MEDIA_FILTER,
   scoreChange,
   formatChangeResult,
@@ -521,13 +525,52 @@ describe("scoreBuild", () => {
   it("ticket 3.19: the build file's media cases are specs of the right shape, one photo gallery and one voice-message app", () => {
     const parsed = parseReadinessExamples(readFileSync(new URL("../../api/eval/build.json", import.meta.url), "utf8"));
     if ("error" in parsed) throw new Error(parsed.error);
-    expect(parsed.map((example) => example.category)).toEqual(["photo", "voice"]);
-    for (const example of parsed) {
+    expect(parsed.map((example) => example.category)).toEqual(["photo", "voice", "ai-tags", "ai-receipt"]);
+    for (const example of parsed.filter((e) => mediaKindOf(e.category) !== undefined)) {
       expect(example.expected).toBe("ready");
       expect(example.spec.toLowerCase()).toContain(`${MEDIA_FILTER[mediaKindOf(example.category) ?? "photo"]} filter`);
       expect(screenNames(example.spec).length).toBeGreaterThanOrEqual(2);
       expect(expectsWebFetch(example.spec)).toBe(false);
     }
+  });
+
+  it("ticket 3.22: the build file's AI cases are specs of the right shape that ask for the AI's suggestion before Save", () => {
+    const parsed = parseReadinessExamples(readFileSync(new URL("../../api/eval/build.json", import.meta.url), "utf8"));
+    if ("error" in parsed) throw new Error(parsed.error);
+    const ai = parsed.filter((e) => aiKindOf(e.category) !== undefined);
+    expect(ai.map((e) => [aiKindOf(e.category), e.expected])).toEqual([
+      ["ai-tags", "ready"],
+      ["ai-receipt", "ready"],
+    ]);
+    for (const example of ai) {
+      expect(example.spec).toMatch(/AI/);
+      expect(example.spec).toMatch(/presses Save/);
+      expect(example.spec).toMatch(/not available/);
+      expect(screenNames(example.spec).length).toBeGreaterThanOrEqual(2);
+      expect(expectsWebFetch(example.spec)).toBe(false);
+    }
+    expect(aiKindOf("photo")).toBeUndefined();
+    expect(AI_HELPER).toEqual({ "ai-tags": { helper: "tagPhoto", task: "tag-photo" }, "ai-receipt": { helper: "readPhoto", task: "read-photo" } });
+  });
+
+  it("ticket 3.22: an AI case passes only when the helper is called, the suggestion shows, nothing holding it is saved before acceptance and it is saved after", () => {
+    const good: AiCheck = { kind: "ai-tags", button: true, helper: true, uploaded: true, called: true, shown: true, savedEarly: false, saved: true, errors: [] };
+    expect(aiProblem(good)).toBeUndefined();
+    expect(scoreBuild({ ...ok, ai: good })).toMatchObject({ pass: true });
+    expect(scoreBuild({ ...ok, ai: good }).detail).toContain("calls workshopData.ai.tagPhoto, suggestion shown, saved only after acceptance");
+    expect(aiProblem({ ...good, helper: false })).toBe("the app's code does not call workshopData.ai.tagPhoto");
+    expect(aiProblem({ ...good, kind: "ai-receipt", called: false })).toBe("the app did not ask the AI (read-photo) for the picked photo");
+    expect(aiProblem({ ...good, button: false })).toBe("no photo button (a file input accepting images)");
+    expect(aiProblem({ ...good, uploaded: false })).toBe("the photo was not uploaded");
+    expect(aiProblem({ ...good, shown: false })).toBe("the AI's suggestion is not shown on the page");
+    expect(aiProblem({ ...good, savedEarly: true })).toBe("the AI's suggestion was saved before the visitor accepted it");
+    expect(aiProblem({ ...good, saved: false })).toBe("the suggestion was not saved after the visitor accepted it (Save)");
+    expect(aiProblem({ ...good, errors: ["x"] })).toBe("1 console error(s) while using AI: x");
+    expect(scoreBuild({ ...ok, ai: { ...good, savedEarly: true } })).toEqual({ pass: false, detail: "the AI's suggestion was saved before the visitor accepted it" });
+    // Only an AI case may use AI (live eval run 1: the drawing gallery suggested tags unasked).
+    expect(scoreBuild({ ...ok, usesAi: true })).toEqual({ pass: false, detail: "calls workshopData.ai though the spec asks for no AI" });
+    expect(scoreBuild({ ...ok, usesAi: false }).pass).toBe(true);
+    expect(scoreBuild({ ...ok, ai: good, usesAi: true }).pass).toBe(true);
   });
 
   it("names the outside services a passing build reached (ticket 2.14)", () => {
@@ -821,10 +864,13 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     const readiness = parseReadinessExamples(READINESS_FILE);
     const build = parseReadinessExamples(BUILD_FILE);
     if ("error" in readiness || "error" in build) throw new Error("bad file");
-    expect(all).toEqual([...readiness, ...build]);
+    // Ticket 3.22: not the AI cases (the readiness prompt learns the AI tasks in ticket 3.23).
+    expect(all).toEqual([...readiness, ...build.filter((e) => aiKindOf(e.category) === undefined)]);
     expect(build.map((e) => [e.category, e.expected])).toEqual([
       ["photo", "ready"],
       ["voice", "ready"],
+      ["ai-tags", "ready"],
+      ["ai-receipt", "ready"],
     ]);
     expect(readinessSuiteExamples("nope", BUILD_FILE)).toEqual({ error: "readiness.json: the examples file is not JSON" });
     expect(readinessSuiteExamples(READINESS_FILE, '{"examples":[]}')).toEqual({ error: "build.json: the examples file has no examples list" });
