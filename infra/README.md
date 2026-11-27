@@ -918,8 +918,8 @@ tokens in and ~90 out, about $0.002 (live eval). A transcription costs $0.024 a 
 for the longest recording. Both count against $1 per app, $1 per signed-in writer across all apps and $10 for all apps
 each UTC day; at a cap every AI request answers 429 without calling anything.
 
-Worst case while the switch is on (details, prices and assumptions in `docs/decisions.md`, "(3.21) Cost"; **awaiting
-Franck's acceptance**), with POST held at its 2/s throttle (172,800 a day) and OPTIONS at 10/s (864,000 a day), since
+Worst case while the switch is on (details, prices and assumptions in `docs/decisions.md`, "(3.21) Cost"; **accepted by
+Franck 2026-11-27 05:25 UTC**), with POST held at its 2/s throttle (172,800 a day) and OPTIONS at 10/s (864,000 a day), since
 try 3; try 2's 5/s and 20/s (432,000 and 1.7 million a day) for comparison:
 
 | Part | Per day (2/s, 10/s) | Per day (5/s, 20/s) |
