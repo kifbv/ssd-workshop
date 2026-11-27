@@ -8,6 +8,15 @@
 //   await workshopData.remove("score");
 //   const me = await workshopData.whoAmI();           // the visitor's workshop nickname once signed in to save, or null
 //   workshopData.signInLink();                        // the address of the workshop's page that signs a visitor in to save
+// Photos and voice recordings (each at most 4 MB; anyone with the app's address can see and hear them):
+//   const address = await workshopData.savePhoto(file); // a File from <input type="file" accept="image/*">: shrunk to
+//                                                       // 2,560 px at most, saved as a JPEG; answers the photo's address
+//   const recording = await workshopData.recordVoice(); // call it from a click: records with the microphone, or opens
+//                                                       // the phone's own recorder where the browser refuses the microphone
+//   recording.stop();                                   // ends a microphone recording (it also ends by itself at 5 minutes)
+//   const voice = await recording.done;                 // the recording's address, once it is saved
+//   await workshopData.deleteMedia(address);            // deletes a photo or recording this app saved
+// Keep each address in the app's data with the item it belongs to, and show it with <img src> or <audio controls src>.
 // Keys use letters, digits, dashes and underscores. Every visitor of the app shares the same data.
 // Anyone can read. Saving needs the workshop's own sign-in: give the element that offers it (a button or a link
 // reading "Sign in to save", next to where the app saves) the attribute data-workshop-sign-in. This file shows such
@@ -23,6 +32,7 @@
   const replaceLocation = location.replace.bind(location);
   const openWindow = window.open.bind(window);
   const createObject = Object.create;
+  const randomValues = crypto.getRandomValues.bind(crypto);
   const startPath = location.pathname;
   const startSearch = location.search;
   const startHash = location.hash;
@@ -36,6 +46,23 @@
   const NICKNAME = /^[A-Za-z0-9-]{3,20}$/;
   const SIGN_IN = "[data-workshop-sign-in]";
   const SIGN_IN_TEXT = "Sign in to save";
+  // Photos and voice recordings (ticket 3.19): the media service's limits and the messages shown before asking it.
+  const MEDIA_ID = /^[A-Za-z0-9_-]{22}$/;
+  const PHOTO_SIDE = 2560;
+  const PHOTO_QUALITIES = [0.85, 0.7, 0.5];
+  const MAX_MEDIA_BYTES = 4 * 1024 * 1024;
+  const RECORDING_MS = 5 * 60 * 1000;
+  const RECORDING_BITS = 64000;
+  const RECORDING_TYPES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
+  const SIGN_IN_TO_SAVE = "Sign in to the workshop to save in this app.";
+  const NO_PHOTO = "Choose a photo first.";
+  const UNREADABLE_PHOTO = "This browser cannot read this photo. Try another photo, or take it again with the camera.";
+  const TOO_BIG = "This file is too big: a photo or recording can be at most 4 MB.";
+  const NO_RECORDING = "No recording was chosen.";
+  const NOTHING_RECORDED = "Nothing was recorded. Please try again.";
+  const NOT_OUR_MEDIA = "This is not the address of one of this app's photos or recordings.";
+  const ODD_ANSWER = "The workshop answered something unexpected. Please try again.";
+  const BROKEN_ID = "Something on this page stopped the upload. Please reload the page and try again.";
 
   // The app lives at /apps/<nickname>/; its data at /api/apps/<nickname>/data/<key> on the same server.
   const appMatch = /^\/apps\/([^/]+)\//.exec(startPath);
@@ -153,15 +180,10 @@
     return options;
   }
 
-  async function send(method, key, value, query) {
-    const options = requestOptions(method, method !== "GET");
-    if (method === "PUT") {
-      options.headers["content-type"] = "application/json";
-      options.body = JSON.stringify(value);
-    }
-    let response;
+  // Sends a request, turning a failed connection into a plain message.
+  async function reach(url, options) {
     try {
-      response = await nativeFetch(address(key) + (query || ""), options);
+      return await nativeFetch(url, options);
     } catch (error) {
       if (error instanceof TypeError) {
         throw new Error("The data service could not be reached. Check the connection and try again.", {
@@ -170,23 +192,252 @@
       }
       throw error;
     }
+  }
+
+  // The error for a refused request: the service's own message when it gives one. A refused write offers the sign-in.
+  async function refusal(response, write) {
     if (response.status === 404) {
-      throw new Error("This app is not live on the workshop yet, so it cannot load or save data.");
+      return new Error("This app is not live on the workshop yet, so it cannot load or save data.");
     }
-    if (!response.ok) {
-      let message = "The data service answered with an error (" + response.status + ").";
-      try {
-        const body = await response.json();
-        if (body && typeof body.message === "string") message = body.message;
-      } catch {
-        // Keep the general message.
-      }
-      // Not signed in to save (or the sign-in ended): offer the sign-in.
-      if (response.status === 401 && method !== "GET") signedOut();
-      throw new Error(message);
+    let message = "The data service answered with an error (" + response.status + ").";
+    try {
+      const body = await response.json();
+      if (body && typeof body.message === "string") message = body.message;
+    } catch {
+      // Keep the general message.
     }
+    // Not signed in to save (or the sign-in ended): offer the sign-in.
+    if (response.status === 401 && write) signedOut();
+    return new Error(message);
+  }
+
+  async function send(method, key, value, query) {
+    const options = requestOptions(method, method !== "GET");
+    if (method === "PUT") {
+      options.headers["content-type"] = "application/json";
+      options.body = JSON.stringify(value);
+    }
+    const response = await reach(address(key) + (query || ""), options);
+    if (!response.ok) throw await refusal(response, method !== "GET");
     // A key with no value answers null.
     return method === "GET" ? response.json() : undefined;
+  }
+
+  // ---- Photos and voice recordings (ticket 3.19) ----
+
+  // Uploading needs the sign-in: a visitor gets the sign-in offer at once, before anything is recorded or sent.
+  function needSignIn() {
+    if (pass !== null) return;
+    signedOut();
+    throw new Error(SIGN_IN_TO_SAVE);
+  }
+
+  // Where this app's files are served: the media service answers addresses under it.
+  function mediaFolder() {
+    return startServer + "/app-media/" + appName().toLowerCase() + "/";
+  }
+
+  // A new id for every upload, retries included (the media service never reuses one): 16 random bytes, base64url.
+  function newMediaId() {
+    const bytes = randomValues(new Uint8Array(16));
+    let text = "";
+    for (const byte of bytes) text += String.fromCharCode(byte);
+    return btoa(text).replace(/[+]/g, "-").replace(/[/]/g, "_").replace(/=+$/, "");
+  }
+
+  async function upload(body) {
+    needSignIn();
+    if (body.size > MAX_MEDIA_BYTES) throw new Error(TOO_BIG);
+    const options = requestOptions("PUT", true);
+    // The media service judges the bytes, never the declared type; this type keeps the body as it is on the way.
+    options.headers["content-type"] = "application/octet-stream";
+    options.body = body;
+    // App code shares this page and could replace btoa or replace: never send an id that is not 22 base64url characters.
+    const id = newMediaId();
+    if (typeof id !== "string" || !MEDIA_ID.test(id)) throw new Error(BROKEN_ID);
+    const response = await reach(startServer + "/api/apps/" + appName() + "/media/" + id, options);
+    if (!response.ok) throw await refusal(response, true);
+    let answer = null;
+    try {
+      answer = await response.json();
+    } catch {
+      // Checked below.
+    }
+    const folder = mediaFolder();
+    if (!answer || typeof answer.address !== "string" || !answer.address.startsWith(folder) || !MEDIA_ID.test(answer.address.slice(folder.length))) {
+      throw new Error(ODD_ANSWER);
+    }
+    return answer.address;
+  }
+
+  // A canvas of this size: an OffscreenCanvas where the browser draws on one, else a canvas element (never shown).
+  function canvasOf(width, height) {
+    if (typeof OffscreenCanvas === "function") {
+      const offscreen = new OffscreenCanvas(width, height);
+      const context = offscreen.getContext("2d");
+      if (context) return { canvas: offscreen, context: context };
+    }
+    const element = document.createElement("canvas");
+    element.width = width;
+    element.height = height;
+    return { canvas: element, context: element.getContext("2d") };
+  }
+
+  function jpegOf(canvas, quality) {
+    if (typeof canvas.convertToBlob === "function") return canvas.convertToBlob({ type: "image/jpeg", quality: quality });
+    return new Promise(function (resolve) {
+      canvas.toBlob(resolve, "image/jpeg", quality);
+    });
+  }
+
+  // Decodes the photo (turned the way the camera held it), draws it at most PHOTO_SIDE pixels on its long side on a
+  // white background, and encodes it as a JPEG under the size limit. No address is made for it (no blob: or data:).
+  async function shrinkPhoto(file) {
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error(UNREADABLE_PHOTO);
+    }
+    try {
+      const scale = Math.min(1, PHOTO_SIDE / Math.max(bitmap.width, bitmap.height));
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const drawn = canvasOf(width, height);
+      if (!drawn.context) throw new Error(UNREADABLE_PHOTO);
+      drawn.context.fillStyle = "#ffffff";
+      drawn.context.fillRect(0, 0, width, height);
+      drawn.context.drawImage(bitmap, 0, 0, width, height);
+      for (const quality of PHOTO_QUALITIES) {
+        const jpeg = await jpegOf(drawn.canvas, quality);
+        if (!jpeg || jpeg.type !== "image/jpeg") throw new Error(UNREADABLE_PHOTO);
+        if (jpeg.size <= MAX_MEDIA_BYTES) return jpeg;
+      }
+      throw new Error(TOO_BIG);
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  async function savePhoto(file) {
+    if (!(file instanceof Blob)) throw new Error(NO_PHOTO);
+    needSignIn();
+    if (typeof createImageBitmap !== "function") throw new Error(UNREADABLE_PHOTO);
+    return upload(await shrinkPhoto(file));
+  }
+
+  // A recording's handle: `done` is the promise of its address; `stop()` ends it and gives `done`. A failure nobody
+  // waits for yet is not reported as an error of the page: the app sees it when it awaits `done` or `stop()`.
+  function recordingOf(microphone, done, end) {
+    done.catch(function () {});
+    return Object.freeze({
+      microphone: microphone,
+      done: done,
+      stop: function () {
+        end();
+        return done;
+      },
+    });
+  }
+
+  // Where the browser refuses the microphone (Chromium does in the apps' sandbox): the phone's own recorder, through a
+  // file input. It opens only during a tap, so the app calls recordVoice() from a click.
+  function recorderPicker() {
+    let settle = null;
+    const picked = new Promise(function (resolve, reject) {
+      settle = { resolve: resolve, reject: reject };
+    });
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "audio/*";
+    input.setAttribute("capture", "");
+    input.hidden = true;
+    const end = function (file) {
+      input.remove();
+      if (file) settle.resolve(file);
+      else settle.reject(new Error(NO_RECORDING));
+    };
+    input.addEventListener("change", function () {
+      end(input.files && input.files[0]);
+    });
+    input.addEventListener("cancel", function () {
+      end(null);
+    });
+    document.body.append(input);
+    input.click();
+    return recordingOf(false, picked.then(upload), function () {
+      end(null);
+    });
+  }
+
+  function microphoneRecording(stream) {
+    const stopTracks = function () {
+      for (const track of stream.getTracks()) track.stop();
+    };
+    const type = RECORDING_TYPES.find(function (candidate) {
+      return MediaRecorder.isTypeSupported(candidate);
+    });
+    const options = { audioBitsPerSecond: RECORDING_BITS };
+    if (type) options.mimeType = type;
+    let recorder;
+    try {
+      recorder = new MediaRecorder(stream, options);
+    } catch {
+      stopTracks();
+      return null;
+    }
+    const chunks = [];
+    recorder.addEventListener("dataavailable", function (event) {
+      if (event.data && event.data.size > 0) chunks.push(event.data);
+    });
+    const stopped = new Promise(function (resolve, reject) {
+      recorder.addEventListener("stop", resolve);
+      recorder.addEventListener("error", function () {
+        reject(new Error(NOTHING_RECORDED));
+      });
+    });
+    let timer = null;
+    const end = function () {
+      clearTimeout(timer);
+      if (recorder.state !== "inactive") recorder.stop();
+    };
+    recorder.start();
+    // A recording is at most 5 minutes: it stops (and saves) by itself then.
+    timer = setTimeout(end, RECORDING_MS);
+    const done = stopped
+      .then(function () {
+        stopTracks();
+        const recording = new Blob(chunks, { type: recorder.mimeType || type || "" });
+        if (recording.size === 0) throw new Error(NOTHING_RECORDED);
+        return upload(recording);
+      })
+      .finally(stopTracks);
+    return recordingOf(true, done, end);
+  }
+
+  async function recordVoice() {
+    needSignIn();
+    const devices = navigator.mediaDevices;
+    if (devices && typeof devices.getUserMedia === "function" && typeof MediaRecorder === "function") {
+      let stream = null;
+      try {
+        stream = await devices.getUserMedia({ audio: true });
+      } catch {
+        // Refused (the sandbox, or the visitor said no) or no microphone: the phone's own recorder instead.
+      }
+      const recording = stream === null ? null : microphoneRecording(stream);
+      if (recording !== null) return recording;
+    }
+    return recorderPicker();
+  }
+
+  async function deleteMedia(mediaAddress) {
+    const folder = mediaFolder();
+    const id = typeof mediaAddress === "string" && mediaAddress.startsWith(folder) ? mediaAddress.slice(folder.length) : "";
+    if (!MEDIA_ID.test(id)) throw new Error(NOT_OUR_MEDIA);
+    needSignIn();
+    const response = await reach(startServer + "/api/apps/" + appName() + "/media/" + id, requestOptions("DELETE", true));
+    if (!response.ok) throw await refusal(response, true);
   }
 
   // Asks the data service whose token this is (`?whoami=1`), once, when the page opens with one. Until it answers, and
@@ -235,5 +486,8 @@
       return pass === null ? null : nickname;
     },
     signInLink: signInLink,
+    savePhoto: savePhoto,
+    recordVoice: recordVoice,
+    deleteMedia: deleteMedia,
   });
 })();

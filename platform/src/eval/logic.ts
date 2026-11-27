@@ -14,7 +14,7 @@ export const SUITES = ["guardrails", "clarify", "spec", "readiness", "build", "s
 export type Suite = (typeof SUITES)[number];
 
 export const USAGE = `Usage: npm run eval -- <suite>
-       npm run eval -- build [--model <eu.anthropic.* profile>] [--example <1-4>]
+       npm run eval -- build [--model <eu.anthropic.* profile>] [--example <1-6>]
 
 Suites:
   guardrails   every example in platform/api/eval/guardrails.json through the real guardrail check:
@@ -35,9 +35,14 @@ Suites:
                (GitHub, the table and the deploy queue in memory): each result must pass the deploy check,
                load at 375 px under the apps' sandbox CSP in Chromium (network open: the fourth reads
                Wikipedia) with no console error and nothing
-               scrolling sideways, and show its title and every screen its spec names; prints the duration,
-               tokens and cost of each. --model tries another EU profile (priced at the build role's prices),
-               --example runs one spec only
+               scrolling sideways, and show its title and every screen its spec names; then (ticket 3.19)
+               platform/api/eval/build.json's photo gallery and voice-message cases, which must also show a photo
+               or Record button and have a tag or topic filter (a list, a field, or buttons, links, tabs or radios
+               whose label, text, group or the element before them holds "tag"/"topic" with "filter", "show", "only",
+               "browse" or "search", or a list starting with "All"; a Tags field alone fails) and, signed in, upload a
+               photo or recording, keep its address in the data and show it; prints the duration, tokens and cost
+               of each. --model tries another EU profile (priced at the build role's prices), --example runs one
+               spec only
   suggestions  the readiness file's workshop example specs through the real suggestions call (ticket 3.6): each
                gets exactly three suggested changes, each under 80 characters, and each passes the real
                guardrail check as on-path (a suggestion is sent as a change request when tapped)
@@ -722,6 +727,50 @@ export function signInProblem(check: SignInCheck): string | undefined {
   return undefined;
 }
 
+/** Ticket 3.19: the media a build eval case keeps (its category in platform/api/eval/build.json). */
+export type MediaCase = "photo" | "voice";
+
+/** The filter a media case's app must have: photos by tag, voice messages by topic. */
+export const MEDIA_FILTER: Record<MediaCase, string> = { photo: "tag", voice: "topic" };
+
+export const mediaKindOf = (category: string): MediaCase | undefined => (category === "photo" || category === "voice" ? category : undefined);
+
+/**
+ * Ticket 3.19: what the build eval saw of a media case, signed in (src/eval/build.ts): the photo button (a file input
+ * accepting images) or a Record button; after picking a photo (or a recording, in the recorder Chromium opens in the
+ * sandbox), whether the media API stored it, whether a saved value of the data API holds its address, and whether the
+ * page then shows it (`<img>` or `<audio>` with that address); whether it has the case's filter (a control, below); console
+ * errors meanwhile. The filter is a list (`<select>`), a text or search field, or a button, link, tab, radio or checkbox
+ * whose own words (text, label, `aria-label`, `aria-labelledby`, title, placeholder, id, name, class, `data-*` names),
+ * the element just before it, or the group it sits in (fieldset and legend, `role=group|radiogroup|toolbar|tablist`,
+ * nav, menu, else its parent: their own words and the element just before them) hold the case's word ("tag", "topic")
+ * AND "filter", "show", "only", "browse" or "search"; a list whose first option starts with "All", "Any" or "Every" also
+ * counts as a filter. A Tags field in the add form, or a tag list without "All", does not.
+ */
+export interface MediaCheck {
+  kind: MediaCase;
+  button: boolean;
+  uploaded: boolean;
+  keptInData: boolean;
+  shown: boolean;
+  filter: boolean;
+  errors: string[];
+}
+
+/** The media problems of a published app, if any. */
+export function mediaProblem(check: MediaCheck): string | undefined {
+  const what = check.kind === "photo" ? "photo" : "recording";
+  const problems: string[] = [];
+  if (!check.button) problems.push(check.kind === "photo" ? "no photo button (a file input accepting images)" : "no Record button");
+  else if (!check.uploaded) problems.push(`the ${what} was not uploaded`);
+  else if (!check.keptInData) problems.push(`the ${what}'s address was not saved in the data`);
+  else if (!check.shown) problems.push(`the saved ${what} is not shown from its address`);
+  const word = MEDIA_FILTER[check.kind];
+  if (!check.filter) problems.push(`no ${word} filter (a list, buttons or a field named "filter", "show", "only", "browse" or "search", or a list starting with "All", together with "${word}")`);
+  if (check.errors.length > 0) problems.push(`${check.errors.length} console error(s) while uploading: ${check.errors.join(" | ").slice(0, 300)}`);
+  return problems.length === 0 ? undefined : problems.join("; ");
+}
+
 export interface BuildEvalOutcome {
   /** The runner's outcome. */
   outcome: string;
@@ -740,6 +789,8 @@ export interface BuildEvalOutcome {
   outsideHosts: string[];
   /** Ticket 3.25: the sign-in button a visitor sees (none checked before the app was published). */
   signIn: SignInCheck;
+  /** Ticket 3.19: a media case's check (photo or voice), signed in; undefined for the other examples. */
+  media?: MediaCheck;
   /** Pages the coding agent read with WebFetch while building (ticket 2.15), from the build feed. */
   fetches: number;
   /** The hosts it read them from, each once, sorted. */
@@ -782,6 +833,8 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
     if (outcome.missing.length > 0) problems.push(`missing ${outcome.missing.join(", ")}`);
     const signIn = signInProblem(outcome.signIn);
     if (signIn !== undefined) problems.push(signIn);
+    const media = outcome.media === undefined ? undefined : mediaProblem(outcome.media);
+    if (media !== undefined) problems.push(media);
   }
   return problems.length === 0
     ? {
@@ -790,7 +843,9 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
           outcome.signIn.opens === true ? " and opens the sign-in" : ""
         }${
           outcome.outsideHosts.length > 0 ? `, outside services: ${outcome.outsideHosts.join(", ")}` : ""
-        }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}`,
+        }${mustFetch ? `, fetched ${outcome.fetchHosts.join(", ")}` : ""}${
+          outcome.media === undefined ? "" : `, ${outcome.media.kind === "photo" ? "photo" : "Record"} button, upload kept in the data and shown from its address`
+        }`,
       }
     : { pass: false, detail: problems.join("; ") };
 }

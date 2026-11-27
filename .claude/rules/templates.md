@@ -77,3 +77,21 @@ paths:
   `workshop-data.js` shows only the sign-in elements present at `DOMContentLoaded`: AGENTS.md puts them in `index.html`.
 - The deploy check does not parse JavaScript; the builder's PostToolUse hook does (`scriptSyntaxProblem`, 3.25 try 3), so
   the agent hears of a syntax error (a `'` inside a `'...'` string: "missing ) after argument list") while it can fix it.
+- Microphone in apps (3.19): Chromium refuses `getUserMedia` in the apps' sandbox (`SecurityError: Invalid security
+  origin`, opaque origin), even with `--use-fake-ui-for-media-stream` and a fake device; no header changes that. Prove the
+  MediaRecorder path on the same page served WITHOUT `sandbox` (`template-media.test.ts`), and the sandbox path through
+  the fallback file input (`page.waitForEvent("filechooser")`, then `setFiles` with a real MediaRecorder recording).
+  A file input opens only with a user activation: `recordVoice()` must be called from a click, and its fallback clicks the
+  input after the awaited refusal (fine in Chromium's 5 s activation window).
+- Images in apps never get a `blob:` address (the CSP's `img-src` has none): decode with `createImageBitmap(file)` and draw
+  on an `OffscreenCanvas` (no URL at all), and show the uploaded address. Generate big test pictures and recordings in the
+  page (`OffscreenCanvas.convertToBlob`, `MediaRecorder` on an `AudioContext`) instead of committing binaries, and pass
+  them to `setInputFiles` as buffers. Under `page.clock.install()` the clock keeps running in real time: fast-forward a
+  5-minute timer in two steps with a margin of seconds on each side (296 s, then 5 s), not 299 s + 1.5 s.
+- A promise the client hands the app (`recording.done`) that can reject before the app awaits it gets a `.catch(() => {})`
+  branch inside the client, or Chromium reports an unhandled rejection as a page error.
+- A code example in AGENTS.md that apps copy (rule 15's Record/Stop handler) is tested by running the block itself, taken
+  from AGENTS.md (`RULE_APP` in `template-media.test.ts`), so a fix there (3.19 try 2: the `starting` guard against a
+  second tap during the microphone prompt) is proved; slow `getUserMedia` with an init script to open that window.
+- An eval check of a feature (3.19 try 2: the tag/topic filter) looks for the control itself (a select, field or buttons
+  named with "filter" and the word), never for the word in any label: a Tags field in the add form holds "tag" too.

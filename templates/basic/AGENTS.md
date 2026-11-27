@@ -19,7 +19,7 @@ shell and no package manager. You cannot run or preview the app, so check your w
   sign-in out of the app's reach.
 - `style.css`: all styles.
 - `app.js`: all behaviour. A classic script (no `import`/`export`), run after the page is parsed.
-- `workshop-data.js`: the data client and the workshop's sign-in to save. Do not change it: the
+- `workshop-data.js`: the data client (data, photos and voice recordings) and the workshop's sign-in to save. Do not change it: the
   workshop publishes its own current copy with the app, whatever this folder holds.
 - `SPEC.md`: the approved spec. Do not change it.
 - `README.md`: explains the files to the participant. If you add a file, add a row for it to the
@@ -155,6 +155,57 @@ shell and no package manager. You cannot run or preview the app, so check your w
     also come from https addresses (rule 3), and images from `data:` addresses. Forms never send to
     another site.
 13. Set the page's `<title>` and `<h1>` to the app's name from `SPEC.md`.
+14. Photos (only when `SPEC.md` asks for them). `workshop-data.js` keeps them on the workshop (at most 4 MB each, 500 MB
+    per app; anyone with the app's address can see them):
+   - The photo button is a file input that opens the camera on a phone:
+     `<input id="photo-input" class="file-input" type="file" accept="image/*" capture="environment">` with
+     `<label for="photo-input" class="button">Take a photo</label>` styled as a button, the input itself hidden by its
+     class in `style.css` (`position: absolute; width: 1px; height: 1px; opacity: 0;`). Put the sign-in button (rule 6)
+     on a line of its own just after it.
+   - When a photo is picked: `const address = await workshopData.savePhoto(input.files[0]);` shrinks it to 2,560 px at
+     most, saves it as a JPEG and gives its address. Show "Saving..." meanwhile, `error.message` if it fails, and set
+     `input.value = ""` afterwards so the same photo can be picked again.
+   - Keep the address in the data with the photo's other fields (for example a list of
+     `{ photo: address, tags: ["cat"], added: "2026-11-27" }` items under one key), never the picture itself.
+   - Show photos from their address only: `<img src="..." alt="..." loading="lazy">` for thumbnails (sized in CSS, with
+     `object-fit: cover`). Never `URL.createObjectURL`, `blob:` or `FileReader` previews: the security policy blocks
+     `blob:` images, and a photo shows once it is saved.
+   - Deleting a photo: `await workshopData.deleteMedia(address)`, then remove its item from the data.
+15. Voice recordings (only when `SPEC.md` asks for them), at most 5 minutes and 4 MB each:
+   - One button records and stops, from its click (the phone's own recorder opens only during a tap):
+
+     ```js
+     let recording = null;
+     let starting = false;
+     recordButton.addEventListener("click", async () => {
+       if (starting) return; // Still waiting for the microphone: a second tap must not start a second recording.
+       if (recording !== null) {
+         recording.stop();
+         return;
+       }
+       starting = true;
+       try {
+         recording = await workshopData.recordVoice();
+         starting = false;
+         recordButton.textContent = "Stop";
+         statusText.textContent = recording.microphone ? "Recording..." : "Record with the phone's recorder, then choose the recording.";
+         const address = await recording.done;
+         // Save the address with the message's other fields, then show it.
+       } catch (error) {
+         statusText.textContent = error.message;
+       } finally {
+         starting = false;
+         recording = null;
+         recordButton.textContent = "Record";
+       }
+     });
+     ```
+
+     `recordVoice()` records with the microphone (it stops by itself at 5 minutes) or, where the browser refuses the
+     microphone, opens the phone's own recorder (`recording.microphone` is then `false`). `recording.done` gives the
+     saved recording's address. Put the sign-in button (rule 6) on a line of its own just after the record button.
+   - Keep the address in the data with the recording's other fields, play it with
+     `<audio controls preload="none" src="...">`, and delete it with `await workshopData.deleteMedia(address)`.
 
 ## The deploy check
 

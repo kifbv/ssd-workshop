@@ -14,8 +14,9 @@ import { Agent, type AgentOptions } from "node:https";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { chromium, type Browser, type Route } from "playwright";
-import { APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
+import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
+import { APP_MEDIA_CONTENT_SECURITY_POLICY, APPS_CONTENT_SECURITY_POLICY } from "../../../infra/lib/config.js";
+import { inspectMedia, MEDIA_CONTENT_TYPES } from "../../api/app-media/formats.js";
 import { checkApp, type AppFile } from "../../api/build/check.js";
 import { contentTypeOf, DATA_CLIENT_PATH, withPlatformDataClient } from "../../api/deploy/deploy.js";
 import { downloadArchive } from "../../api/deploy/github.js";
@@ -31,9 +32,10 @@ import { ClaudeAgent, webProxyEnvironment } from "../../builder/agent.js";
 import type { BedrockProxyLogEntry } from "../../builder/bedrock-proxy.js";
 import { FakeBuildRecords, FakeDeployQueue } from "../../builder/fakes.js";
 import { runBuild, type BuilderLogEntry } from "../../builder/runner.js";
-import { missingScreens, screenNames, SIGN_IN_SCRIPT, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type SignInCheck } from "./logic.js";
+import { MEDIA_FILTER, missingScreens, screenNames, SIGN_IN_SCRIPT, specTitle, type BuildEvalOutcome, type ChangeEvalOutcome, type MediaCase, type MediaCheck, type SignInCheck } from "./logic.js";
 
 const NICKNAME = "eval-app";
+const EVAL_ORIGIN = "https://workshop.test";
 const REPOSITORY = "ssd-eval-app";
 const BUILD_ID = "eval-build-1";
 const CHANGE_BUILD_ID = "eval-build-2";
@@ -47,43 +49,86 @@ const SIGN_IN_TO_SAVE = JSON.stringify({ message: APP_SIGN_IN_TEXTS.signInToSave
 const LABELS_SCRIPT = `Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6,button,[role=tab],[role=button],a,label,legend,summary,[aria-label]"))
   .flatMap((el) => [el.textContent || "", el.getAttribute("aria-label") || ""]).filter((t) => t.trim() !== "")`;
 
+/** Ticket 3.19: the write token of the signed-in pass (a media case), and the nickname the in-memory API names for it. */
+const EVAL_TOKEN = Buffer.alloc(32, 5).toString("base64url");
+const EVAL_WRITER = "eval-writer";
+const MEDIA_ID = /^[A-Za-z0-9_-]{22}$/;
+const MEDIA_MESSAGES = { signInToSave: APP_SIGN_IN_TEXTS.signInToSave, unsupported: "Send a photo as a JPEG, or a voice recording as WebM, Ogg or MP4 audio." };
+
 /**
- * Opens the app's files at /apps/<nickname>/ in Chromium under the CSP, as a visitor (no token: ticket 3.25), and reads
- * what the title check and the sign-in check need.
+ * The in-memory workshop an app is opened on: its files under the apps' CSP, the data API (ticket 2.4) and, since ticket
+ * 3.19, the media API (ticket 3.18) and `/app-media/...`. Without a token (a visitor) every write is refused with 401 as
+ * the real API refuses it; with `token`, writes are stored, read back, and files are judged by the real format check and
+ * served back.
  */
-async function openInBrowser(
-  browser: Browser,
-  files: readonly AppFile[],
-): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[]; signIn: SignInCheck }> {
-  const origin = "https://workshop.test";
-  // Behind the session's proxy, HTTPS answers are re-signed by the proxy's own authority, which Chromium does not know.
-  const context = await browser.newContext({ viewport: PHONE, ignoreHTTPSErrors: proxyServer() !== undefined });
-  const page = await context.newPage();
-  const errors: string[] = [];
-  const outsideHosts = new Set<string>();
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.origin !== origin && url.protocol !== "data:") outsideHosts.add(url.host);
-  });
-  page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
-  });
-  page.on("pageerror", (error) => errors.push(error.message));
+interface EvalApi {
+  data: Map<string, string>;
+  media: Map<string, { bytes: Buffer; type: string }>;
+  /** Every data and media write the app sent: method, path, status, and for data the body. */
+  writes: { method: string; path: string; status: number; body: string }[];
+}
+
+async function routeApp(page: Page, files: readonly AppFile[], token: string | undefined): Promise<EvalApi> {
+  const api: EvalApi = { data: new Map(), media: new Map(), writes: [] };
   const byPath = new Map(files.filter((file) => file.kind === "file").map((file) => [file.path, file]));
-  await page.route(`${origin}/**`, async (route: Route) => {
+  const json = (route: Route, status: number, body: string) => route.fulfill({ status, headers: { ...CORS, "content-type": "application/json" }, body });
+  await page.route(`${EVAL_ORIGIN}/**`, async (route: Route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const url = new URL(request.url());
+    const path = url.pathname;
     const dataPrefix = `/api/apps/${NICKNAME}/data/`;
-    if (path.startsWith(dataPrefix)) {
+    const mediaPrefix = `/api/apps/${NICKNAME}/media/`;
+    const signedIn = token !== undefined && request.headers().authorization === `Bearer ${token}`;
+    if (path.startsWith(dataPrefix) || path.startsWith(mediaPrefix)) {
       if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
+      const write = request.method() === "PUT" || request.method() === "DELETE";
       // Ticket 3.24: a visitor has no token, so every write is refused as the real API refuses it (Chromium logs the
       // 401, so an app that saves without the visitor doing anything fails the console check: apps work read-only).
-      if (request.method() === "PUT" || request.method() === "DELETE") {
-        return route.fulfill({ status: 401, headers: { ...CORS, "content-type": "application/json" }, body: SIGN_IN_TO_SAVE });
+      if (write && !signedIn) {
+        api.writes.push({ method: request.method(), path, status: 401, body: "" });
+        return json(route, 401, SIGN_IN_TO_SAVE);
       }
-      // Nothing is ever stored (a visitor cannot save): every key reads null, with `?info=1` too.
-      const body = new URL(request.url()).searchParams.get("info") === "1" ? `{"value":null,"updatedBy":null,"updatedAt":null}` : "null";
-      return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body });
+      if (path.startsWith(mediaPrefix)) {
+        const id = path.slice(mediaPrefix.length);
+        if (!MEDIA_ID.test(id) || !write) return json(route, 400, JSON.stringify({ message: "Bad request." }));
+        if (request.method() === "DELETE") {
+          api.media.delete(id);
+          api.writes.push({ method: "DELETE", path, status: 204, body: "" });
+          return route.fulfill({ status: 204, headers: CORS });
+        }
+        const bytes = request.postDataBuffer() ?? Buffer.alloc(0);
+        const found = inspectMedia(bytes);
+        const status = found === undefined || api.media.has(id) ? 415 : 201;
+        api.writes.push({ method: "PUT", path, status, body: "" });
+        if (found === undefined || status !== 201) return json(route, 415, JSON.stringify({ message: MEDIA_MESSAGES.unsupported }));
+        const stored = found.kind === "jpeg" ? found.photo : bytes;
+        api.media.set(id, { bytes: stored, type: MEDIA_CONTENT_TYPES[found.kind] });
+        return json(route, 201, JSON.stringify({ address: `${EVAL_ORIGIN}/app-media/${NICKNAME}/${id}`, contentType: MEDIA_CONTENT_TYPES[found.kind], bytes: stored.length }));
+      }
+      const key = path.slice(dataPrefix.length);
+      if (url.searchParams.get("whoami") === "1") {
+        return signedIn ? json(route, 200, JSON.stringify({ nickname: EVAL_WRITER })) : json(route, 401, SIGN_IN_TO_SAVE);
+      }
+      if (request.method() === "PUT") {
+        const body = request.postData() ?? "";
+        api.data.set(key, body);
+        api.writes.push({ method: "PUT", path, status: 204, body });
+        return route.fulfill({ status: 204, headers: CORS });
+      }
+      if (request.method() === "DELETE") {
+        api.data.delete(key);
+        api.writes.push({ method: "DELETE", path, status: 204, body: "" });
+        return route.fulfill({ status: 204, headers: CORS });
+      }
+      // A visitor sees nothing stored (nobody could save): every key reads null, with `?info=1` too.
+      const value = api.data.get(key) ?? "null";
+      const by = api.data.has(key) ? JSON.stringify(EVAL_WRITER) : "null";
+      const body = url.searchParams.get("info") === "1" ? `{"value":${value},"updatedBy":${by},"updatedAt":${by === "null" ? "null" : '"2026-11-27T10:00:00.000Z"'}}` : value;
+      return json(route, 200, body);
+    }
+    const stored = path.startsWith(`/app-media/${NICKNAME}/`) ? api.media.get(path.slice(`/app-media/${NICKNAME}/`.length)) : undefined;
+    if (stored !== undefined) {
+      return route.fulfill({ status: 200, headers: { "content-type": stored.type, "content-security-policy": APP_MEDIA_CONTENT_SECURITY_POLICY, "x-content-type-options": "nosniff" }, body: stored.bytes });
     }
     const appPrefix = `/apps/${NICKNAME}/`;
     const relative = path.startsWith(appPrefix) ? path.slice(appPrefix.length) || "index.html" : "";
@@ -95,11 +140,42 @@ async function openInBrowser(
       body: Buffer.from(file.bytes),
     });
   });
+  return api;
+}
+
+/** A context at phone width and a page that collects console errors and the outside hosts it asked. */
+async function evalPage(browser: Browser): Promise<{ context: BrowserContext; page: Page; errors: string[]; outsideHosts: Set<string> }> {
+  // Behind the session's proxy, HTTPS answers are re-signed by the proxy's own authority, which Chromium does not know.
+  const context = await browser.newContext({ viewport: PHONE, ignoreHTTPSErrors: proxyServer() !== undefined });
+  const page = await context.newPage();
+  const errors: string[] = [];
+  const outsideHosts = new Set<string>();
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== EVAL_ORIGIN && url.protocol !== "data:") outsideHosts.add(url.host);
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("pageerror", (error) => errors.push(error.message));
+  return { context, page, errors, outsideHosts };
+}
+
+/**
+ * Opens the app's files at /apps/<nickname>/ in Chromium under the CSP, as a visitor (no token: ticket 3.25), and reads
+ * what the title check and the sign-in check need.
+ */
+async function openInBrowser(
+  browser: Browser,
+  files: readonly AppFile[],
+): Promise<{ errors: string[]; overflow: number; title: string; labels: string[]; outsideHosts: string[]; signIn: SignInCheck }> {
+  const { context, page, errors, outsideHosts } = await evalPage(browser);
+  await routeApp(page, files, undefined);
   // The tab the sign-in button opens: a stand-in for the workshop's hand-off page (its address is what is checked).
-  const handOff = `${origin}/app-sign-in/?app=${NICKNAME}`;
-  await context.route(`${origin}/app-sign-in/**`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Sign in</title>" }));
+  const handOff = `${EVAL_ORIGIN}/app-sign-in/?app=${NICKNAME}`;
+  await context.route(`${EVAL_ORIGIN}/app-sign-in/**`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Sign in</title>" }));
   try {
-    await page.goto(`${origin}/apps/${NICKNAME}/`, { waitUntil: "load" });
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/`, { waitUntil: "load" });
     await page.waitForLoadState("networkidle").catch(() => undefined);
     await page.waitForTimeout(500);
     const overflow = await page.evaluate<number>(`Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - document.documentElement.clientWidth`);
@@ -117,6 +193,240 @@ async function openInBrowser(
     return { errors, overflow: Math.max(0, overflow), title, labels, outsideHosts: [...outsideHosts].sort(), signIn: { ...found, opens } };
   } finally {
     await context.close();
+  }
+}
+
+/**
+ * Ticket 3.19: a photo (a 2,000 x 1,500 JPEG) and a voice recording (about 1.5 s of a tone, MediaRecorder's WebM/Opus)
+ * made in Chromium, on a page of the eval's origin WITHOUT the sandbox (an AudioContext needs no microphone).
+ */
+async function mediaSamples(browser: Browser): Promise<{ photo: Buffer; recording: Buffer }> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.route(`${EVAL_ORIGIN}/eval-samples`, (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>samples</title>" }));
+  try {
+    await page.goto(`${EVAL_ORIGIN}/eval-samples`);
+    const made = await page.evaluate<{ photo: string; recording: string }>(`(async () => {
+      const base64 = async (blob) => {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let text = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(text);
+      };
+      const canvas = new OffscreenCanvas(2000, 1500);
+      const drawing = canvas.getContext("2d");
+      const gradient = drawing.createLinearGradient(0, 0, 2000, 1500);
+      gradient.addColorStop(0, "#f2c94c");
+      gradient.addColorStop(1, "#2f5bd3");
+      drawing.fillStyle = gradient;
+      drawing.fillRect(0, 0, 2000, 1500);
+      const photo = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
+      const audio = new AudioContext();
+      await audio.resume();
+      const tone = audio.createOscillator();
+      const out = audio.createMediaStreamDestination();
+      tone.connect(out);
+      tone.start();
+      const recorder = new MediaRecorder(out.stream, { mimeType: "audio/webm;codecs=opus" });
+      const chunks = [];
+      recorder.ondataavailable = (event) => chunks.push(event.data);
+      const stopped = new Promise((resolve) => (recorder.onstop = resolve));
+      recorder.start();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      recorder.stop();
+      await stopped;
+      tone.stop();
+      await audio.close();
+      return { photo: await base64(photo), recording: await base64(new Blob(chunks)) };
+    })()`);
+    return { photo: Buffer.from(made.photo, "base64"), recording: Buffer.from(made.recording, "base64") };
+  } finally {
+    await context.close();
+  }
+}
+
+/**
+ * Marks (`data-eval-save`) the button that saves next to the element marked `data-eval-media`, after filling every empty
+ * text field around it with `word` (a tag, a title): the closest form, dialog or section, else the page. Returns whether
+ * one was found. Run in the page.
+ */
+const SAVE_NEXT_TO_MEDIA = `((word) => {
+  const media = document.querySelector("[data-eval-media]");
+  if (media === null) return false;
+  const area = media.closest("form, dialog, [role=dialog], section, article") || document.body;
+  const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+  for (const field of area.querySelectorAll("input:not([type]), input[type=text], input[type=search], textarea")) {
+    if (field.value.trim() === "" && seen(field)) {
+      field.value = word;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+  const buttons = Array.from(area.querySelectorAll("button, input[type=submit]")).filter((b) => !b.hasAttribute("data-workshop-sign-in") && !b.disabled && seen(b));
+  const save = buttons.find((b) => /save|add|upload|post|send|keep|submit/i.test(b.textContent || b.value || ""));
+  if (save === undefined) return false;
+  save.setAttribute("data-eval-save", "");
+  return true;
+})`;
+
+/**
+ * Marks (`data-eval-open`) the tab, link or button that opens the screen holding the element marked `data-eval-media`,
+ * when that screen is hidden (apps hide screens until chosen): one whose `aria-controls`, `href` or `data-*` names an
+ * ancestor's id, else one whose text matches `words`. Returns whether one was marked. Run in the page.
+ */
+const OPENER_OF_MEDIA = `((words) => {
+  const media = document.querySelector("[data-eval-media]");
+  if (media === null) return false;
+  const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+  const area = media.closest("form, dialog, [role=dialog], [role=tabpanel], section, article") || media.parentElement || media;
+  if (seen(area)) return false;
+  const ids = [];
+  for (let el = media; el !== null; el = el.parentElement) if (el.id) ids.push(el.id);
+  const names = (el) => [el.getAttribute("aria-controls"), (el.getAttribute("href") || "").replace(/^#/, ""), ...Object.values(el.dataset)].filter(Boolean);
+  const openers = Array.from(document.querySelectorAll("button, [role=tab], a")).filter((el) => el !== media && !area.contains(el) && !el.hasAttribute("data-workshop-sign-in") && seen(el));
+  const pattern = new RegExp(words, "i");
+  const opener = openers.find((el) => names(el).some((name) => ids.some((id) => id === name || id === "screen-" + name || id === name + "-screen"))) ||
+    openers.find((el) => pattern.test(el.textContent || ""));
+  if (opener === undefined) return false;
+  opener.setAttribute("data-eval-open", "");
+  return true;
+})`;
+
+/**
+ * Whether the page has a filter by `word` ("tag", "topic"): a `<select>`, a text or search field, or a button, link,
+ * tab, radio or checkbox whose own words, the element just before it, or its group's words hold `word` together with
+ * "filter", "show", "only", "browse" or "search", or a `<select>` whose first option starts with All/Any/Every and whose
+ * words hold `word` (`MediaCheck` in ./logic.ts says it in full). A Tags field in the add form does not count. Hidden
+ * controls count (the filter may sit on a screen the app has not opened). Run in the page.
+ */
+const HAS_FILTER = `((word) => {
+  const text = (el) => (el === null || el === undefined ? "" : el.textContent || "");
+  const own = (el) => [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("placeholder"), el.id, el.getAttribute("name"), el.getAttribute("class"), ...Object.keys(el.dataset || {})]
+    .filter(Boolean).join(" ") + " " + (el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => text(document.getElementById(id))).join(" ");
+  const groupOf = (el) => (el.parentElement && el.parentElement.closest("fieldset, [role=group], [role=radiogroup], [role=toolbar], [role=tablist], nav, menu")) || el.parentElement;
+  const words = (el, withText) => {
+    const group = groupOf(el);
+    const legend = group === null ? null : group.querySelector(":scope > legend");
+    return [own(el), withText ? text(el) : "", ...Array.from(el.labels || []).map(text), text(el.previousElementSibling),
+      group === null ? "" : own(group) + " " + text(legend) + " " + text(group.previousElementSibling)].join(" ").toLowerCase();
+  };
+  const filtering = /filter|\\bshow|\\bonly\\b|\\bbrowse|search/;
+  const controls = Array.from(document.querySelectorAll("select, input, button, a, [role=tab], [role=radio], [role=button], [role=option]"))
+    .filter((el) => !el.hasAttribute("data-workshop-sign-in") && !/^(file|hidden|submit|image|reset|password|email|date|number)$/i.test(el.getAttribute("type") || ""));
+  return controls.some((el) => {
+    const said = words(el, el.tagName !== "SELECT" && el.tagName !== "INPUT");
+    if (!said.includes(word)) return false;
+    if (filtering.test(said)) return true;
+    return el.tagName === "SELECT" && el.options.length > 0 && /^\\s*(all|any|every)/i.test(el.options[0].textContent || "");
+  });
+})`;
+
+/** Opens the screen holding the marked media element when it is hidden (OPENER_OF_MEDIA), with a real click. */
+async function openMediaScreen(page: Page, kind: MediaCase): Promise<void> {
+  const words = kind === "photo" ? "add|take|new|upload|photo" : "record|new|add";
+  if (await page.evaluate<boolean>(`${OPENER_OF_MEDIA}(${JSON.stringify(words)})`)) {
+    await page.click("[data-eval-open]", { timeout: 5_000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+  }
+}
+
+/**
+ * Ticket 3.19: a media case, signed in (the app opened with a write token, as after the workshop's sign-in): finds the
+ * photo button (a file input accepting images) or the Record button, picks the sample photo there (or, in the phone's
+ * recorder that recordVoice() opens where Chromium refuses the microphone in the sandbox, the sample recording), presses
+ * the save button next to it when the app saves only then, and checks that the media API stored a file, that a saved
+ * value holds its address and that the page shows it from that address; then looks for the case's filter (HAS_FILTER),
+ * once the saved item is drawn.
+ */
+export async function exerciseMedia(browser: Browser, files: readonly AppFile[], kind: MediaCase): Promise<MediaCheck> {
+  const samples = await mediaSamples(browser);
+  const { context, page, errors } = await evalPage(browser);
+  const api = await routeApp(page, files, EVAL_TOKEN);
+  const check: MediaCheck = { kind, button: false, uploaded: false, keptInData: false, shown: false, filter: false, errors };
+  const uploadedAddresses = (): string[] =>
+    api.writes.filter((w) => w.method === "PUT" && w.status === 201).map((w) => `${EVAL_ORIGIN}/app-media/${NICKNAME}/${w.path.split("/").pop() ?? ""}`);
+  const waitForUpload = (ms: number) => waitUntil(() => uploadedAddresses().length > 0, ms);
+  try {
+    await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+    await page.waitForLoadState("networkidle").catch(() => undefined);
+    await page.waitForTimeout(500);
+    if (kind === "photo") {
+      check.button = await page.evaluate<boolean>(`(() => {
+        const input = Array.from(document.querySelectorAll("input[type=file]")).find((el) => /image/.test(el.accept || ""));
+        if (input === undefined) return false;
+        input.setAttribute("data-eval-media", "");
+        return true;
+      })()`);
+      if (check.button) {
+        // The photo screen may be hidden until chosen (live eval run 1): open it as a visitor would.
+        await openMediaScreen(page, kind);
+        await page.setInputFiles("[data-eval-media]", { name: "drawing.jpg", mimeType: "image/jpeg", buffer: samples.photo });
+      }
+    } else {
+      check.button = await page.evaluate<boolean>(`(() => {
+        const seen = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) && el.getBoundingClientRect().height > 0;
+        const reads = (el) => /record/i.test((el.textContent || "") + " " + (el.getAttribute("aria-label") || ""));
+        // The button that records, not a tab or link that opens the Record screen (live eval run 1: a "Record" tab).
+        const opens = (el) => el.getAttribute("role") === "tab" || el.hasAttribute("aria-controls") || el.closest("nav, [role=tablist]") !== null;
+        const buttons = Array.from(document.querySelectorAll("button, [role=button]")).filter((el) => reads(el) && !opens(el));
+        const button = buttons.find(seen) || buttons[0];
+        if (button === undefined) return false;
+        button.setAttribute("data-eval-media", "");
+        return true;
+      })()`);
+      if (check.button) {
+        // A Record button on a screen the app shows later: open the tab or button that names the screen first.
+        await openMediaScreen(page, kind);
+        const chooser = page.waitForEvent("filechooser", { timeout: 8_000 }).catch(() => undefined);
+        await page.click("[data-eval-media]", { timeout: 5_000 }).catch(() => undefined);
+        const picker = await chooser;
+        if (picker !== undefined) await picker.setFiles({ name: "Voice 001.webm", mimeType: "audio/webm", buffer: samples.recording });
+      }
+    }
+    if (check.button && !(await waitForUpload(3_000))) {
+      if (await page.evaluate<boolean>(`${SAVE_NEXT_TO_MEDIA}(${JSON.stringify(kind === "photo" ? "cat" : "Ideas")})`)) {
+        await page.click("[data-eval-save]", { timeout: 5_000 }).catch(() => undefined);
+        await waitForUpload(8_000);
+      }
+    }
+    check.uploaded = uploadedAddresses().length > 0;
+    if (check.uploaded) {
+      // The address saved with the item's other fields, then shown: wait for the app to save and draw it.
+      const kept = () => api.writes.some((w) => w.status === 204 && w.method === "PUT" && uploadedAddresses().some((address) => w.body.includes(address)));
+      if (!(await waitUntil(kept, 4_000))) {
+        if (await page.evaluate<boolean>(`${SAVE_NEXT_TO_MEDIA}(${JSON.stringify(kind === "photo" ? "cat" : "Ideas")})`)) {
+          await page.click("[data-eval-save]", { timeout: 5_000 }).catch(() => undefined);
+          await waitUntil(kept, 6_000);
+        }
+      }
+      check.keptInData = kept();
+      const addresses = JSON.stringify(uploadedAddresses());
+      const shownScript = kind === "photo"
+        ? `Array.from(document.querySelectorAll("img")).some((el) => ${addresses}.includes(el.src))`
+        : `Array.from(document.querySelectorAll("audio, audio source")).some((el) => ${addresses}.includes(el.src))`;
+      check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 3_000);
+      if (!check.shown) {
+        // Some apps draw the list again only when its screen is opened (live eval run 1): open the app afresh, as the
+        // next visitor would, and look again (the in-memory workshop keeps what was saved).
+        await page.goto("about:blank");
+        await page.goto(`${EVAL_ORIGIN}/apps/${NICKNAME}/#wt=${EVAL_TOKEN}`, { waitUntil: "load" });
+        check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
+      }
+    }
+    check.filter = await page.evaluate<boolean>(`${HAS_FILTER}(${JSON.stringify(MEDIA_FILTER[kind])})`);
+    return check;
+  } finally {
+    await context.close();
+  }
+}
+
+/** Polls `test` every 200 ms until it holds or `ms` pass; answers whether it held. */
+async function waitUntil(test: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (await test()) return true;
+    if (Date.now() >= end) return false;
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
 
@@ -258,7 +568,7 @@ async function dumpPublished(files: readonly AppFile[]): Promise<void> {
 }
 
 /** A first build of `spec` in `world`: the repository starts as the launcher prepares it (template and spec). */
-async function firstBuild(world: EvalWorld, spec: string, browser: Browser): Promise<{ outcome: BuildEvalOutcome; commit?: string }> {
+async function firstBuild(world: EvalWorld, spec: string, browser: Browser, media?: MediaCase): Promise<{ outcome: BuildEvalOutcome; commit?: string }> {
   const files = withSpec(await loadTemplateFiles(), spec);
   const baseCommit = world.github.seedCommit(REPOSITORY, Object.fromEntries(files.map((file) => [file.path, new TextDecoder().decode(file.bytes)])), FIRST_COMMIT_MESSAGE);
   // As the launcher leaves it (ticket 2.9): building under one launch.
@@ -268,11 +578,25 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser): Pro
   if (run.published === undefined) return { outcome: run.outcome };
   await dumpPublished(run.published);
   const checked = await checkPublished(browser, run.published, spec);
-  return { outcome: { ...run.outcome, checkPassed: checked.checkPassed, consoleErrors: checked.consoleErrors, overflow: checked.overflow, missing: checked.missing, outsideHosts: checked.outsideHosts, signIn: checked.signIn }, ...(run.commit === undefined ? {} : { commit: run.commit }) };
+  // Ticket 3.19: a media case is also opened signed in, and a photo or recording uploaded through it.
+  const mediaCheck = media === undefined ? undefined : await exerciseMedia(browser, run.published, media);
+  return {
+    outcome: {
+      ...run.outcome,
+      checkPassed: checked.checkPassed,
+      consoleErrors: checked.consoleErrors,
+      overflow: checked.overflow,
+      missing: checked.missing,
+      outsideHosts: checked.outsideHosts,
+      signIn: checked.signIn,
+      ...(mediaCheck === undefined ? {} : { media: mediaCheck }),
+    },
+    ...(run.commit === undefined ? {} : { commit: run.commit }),
+  };
 }
 
 /**
- * Runs one spec end to end. `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
+ * Runs one spec end to end (`media`: a photo or voice case of platform/api/eval/build.json, ticket 3.19). `log` receives the runner's phase lines (counts only) and the Bedrock proxy's lines (a
  * path's shape and a status). The caller's AWS credentials stay in this process (the proxy signs with them); the
  * agent's process gets none.
  */
@@ -281,8 +605,9 @@ export async function evalBuild(
   model: ModelSetting,
   browser: Browser,
   log: (entry: BuilderLogEntry | BedrockProxyLogEntry) => void,
+  media?: MediaCase,
 ): Promise<BuildEvalOutcome> {
-  return (await firstBuild(evalWorld(model, log), spec, browser)).outcome;
+  return (await firstBuild(evalWorld(model, log), spec, browser, media)).outcome;
 }
 
 /**
@@ -343,5 +668,8 @@ const proxyServer = (): string | undefined => process.env.HTTPS_PROXY || process
 
 export const launchBrowser = (): Promise<Browser> => {
   const server = proxyServer();
-  return chromium.launch(server === undefined ? {} : { proxy: { server } });
+  // Ticket 3.19: a fake microphone with the prompt answered yes (the apps' sandbox refuses it anyway, so voice apps use
+  // the phone's recorder there), and sound without a tap, for the media samples made with an AudioContext.
+  const args = ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"];
+  return chromium.launch(server === undefined ? { args } : { args, proxy: { server } });
 };

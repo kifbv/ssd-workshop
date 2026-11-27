@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, describe, expect, it } from "vitest";
-import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
+import { AGENT_SETTINGS, agentEnvironment, agentOptions, buildPrompt, changePrompt, fetchSucceeded, scriptSyntaxProblem, SIGN_IN_GUIDANCE, MEDIA_GUIDANCE, MAX_WEB_FETCHES, missCode, preToolUse, TokenTracker, webProxyEnvironment, writtenPath } from "./agent.js";
 import type { WebFetchMiss } from "./agent.js";
 
 const ws = mkdtempSync(join(tmpdir(), "ssd-agent-test-"));
@@ -209,6 +209,24 @@ describe("the agent's settings (criterion 2)", () => {
     }
     expect(buildPrompt(ws)).toContain(SIGN_IN_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(SIGN_IN_GUIDANCE);
+  });
+
+  it("ticket 3.19: both prompts and AGENTS.md tell the agent how apps keep photos and recordings (savePhoto, recordVoice, deleteMedia, addresses in the data, no blob:)", () => {
+    const agents = readFileSync(new URL("../../templates/basic/AGENTS.md", import.meta.url), "utf8");
+    const client = readFileSync(new URL("../../templates/basic/workshop-data.js", import.meta.url), "utf8");
+    for (const name of ["savePhoto(", "recordVoice()", "recording.stop()", "recording.done", "deleteMedia(", 'accept="image/*" capture="environment"', 'loading="lazy"', "<audio controls", "blob:"]) {
+      expect(agents, name).toContain(name);
+      expect(MEDIA_GUIDANCE, name).toContain(name);
+    }
+    for (const name of ["savePhoto", "recordVoice", "deleteMedia"]) expect(client).toContain(`${name}: ${name},`);
+    expect(MEDIA_GUIDANCE).toMatch(/from a click/);
+    expect(MEDIA_GUIDANCE).toMatch(/still starting/);
+    expect(agents).toContain("if (starting) return;");
+    expect(MEDIA_GUIDANCE).toMatch(/sign-in button/);
+    expect(buildPrompt(ws)).toContain(MEDIA_GUIDANCE);
+    expect(changePrompt(ws, { number: 1, whatChanges: ["Add photos"] })).toContain(MEDIA_GUIDANCE);
+    // After the sign-in rule, which comes after the WebFetch lines (3.25: placed before them, one example skipped WebFetch).
+    expect(buildPrompt(ws).indexOf(MEDIA_GUIDANCE)).toBeGreaterThan(buildPrompt(ws).indexOf(SIGN_IN_GUIDANCE));
   });
 
   it("ticket 3.25 try 2: both AGENTS.md and the guidance say workshop-data.js is index.html's first script, as the template has it and the deploy check requires", () => {

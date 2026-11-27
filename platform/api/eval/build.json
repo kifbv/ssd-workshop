@@ -1,0 +1,17 @@
+{
+  "description": "Ticket 3.19: build eval cases beyond the readiness file's workshop examples (`npm run eval -- build` runs them after those, as examples 5 and 6). Same shape as platform/api/eval/readiness.json; the category names the media the app keeps: `photo` (the build must show a photo button, a file input accepting images, and a tag filter (a list, buttons or a field named with \"filter\", \"show\", \"only\", \"browse\" or \"search\" and \"tag\", or a list starting with \"All\"); signed in, a photo picked there is uploaded, its address saved in the data and shown) or `voice` (a Record button and a topic filter, the same way; signed in, the recording made with the phone's recorder, which Chromium opens in the apps' sandbox, is uploaded, saved in the data and shown in an audio player).",
+  "examples": [
+    {
+      "name": "drawing gallery with tags (photos)",
+      "category": "photo",
+      "expected": "ready",
+      "spec": "# Drawing Gallery\n\n```mermaid\nflowchart TD\n  gallery[Gallery] -->|take a photo| add[Add a photo]\n  add -->|saves the photo and its tags| photos[(Photos)]\n  photos -->|filter by tag| gallery\n```\n\n## What it does\nA shared gallery of the team's drawings. Someone signed in to the workshop takes a photo of a drawing with the phone camera (or picks one from the phone), gives it one or more tags, and saves it. The gallery shows the photos as thumbnails, newest first, and a tag filter shows only the photos with the chosen tag.\n\n## Screens\n- Gallery: thumbnails of all photos, newest first, each with its tags, and a tag filter above them (All, or one tag).\n- Add a photo: a button to take or pick a photo, a field for its tags separated by commas, and a Save button.\n\n## Data it keeps\n- Photos: the photo, its tags and the date it was added."
+    },
+    {
+      "name": "voice messages by topic (recordings)",
+      "category": "voice",
+      "expected": "ready",
+      "spec": "# Voice Notes\n\n```mermaid\nflowchart TD\n  messages[Messages] -->|record a message| record[Record]\n  record -->|saves the recording and its topic| notes[(Voice messages)]\n  notes -->|filter by topic| messages\n```\n\n## What it does\nShort voice messages for the team. Someone signed in to the workshop records a voice message with the phone (up to 5 minutes), picks its topic from a short list (Ideas, Questions, News), and saves it. The messages screen lists the messages, newest first, each with its topic and a player, and a topic filter shows only one topic.\n\n## Screens\n- Messages: the list of voice messages, newest first, each with its topic, date and a player, and a topic filter above them (All, Ideas, Questions or News).\n- Record: a Record button that becomes Stop while recording, a topic choice (Ideas, Questions, News) and a Save button.\n\n## Data it keeps\n- Voice messages: the recording, its topic and the date it was recorded."
+    }
+  ]
+}

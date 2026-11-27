@@ -771,6 +771,51 @@ newid() { head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='; }
    "Deleted N photos and recordings; CloudFront stops serving the app's media within minutes." and the media addresses
    answer the 404 page a few minutes later.
 
+## Live check of photos and voice recordings on phones (ticket 3.19)
+
+```mermaid
+flowchart TD
+  tap["Visitor taps Record (signed in)"] --> rv["workshopData.recordVoice()"]
+  rv -->|"getUserMedia allowed"| mic["MediaRecorder: records until Stop (5:00 at most)"]
+  rv -->|"refused: Chromium refuses it in the apps' sandbox (opaque origin)"| pick["input type=file accept=audio/* capture: the phone's own recorder or a file"]
+  mic --> up["PUT /api/apps/nick/media/new id (octet-stream, Bearer)"]
+  pick --> up
+  up --> play["audio controls src=https://workshop.rankly.games/app-media/nick/id"]
+  photo["Visitor picks or takes a photo"] --> sp["workshopData.savePhoto(file): decode, 2,560 px, JPEG"] --> up
+```
+
+Nothing to deploy beyond the platform: every deploy publishes the platform's `workshop-data.js` (3.25), which now has
+`savePhoto`, `recordVoice` and `deleteMedia` (older apps never call them, so `npm run apps -- refresh` is not needed).
+In Chromium (desktop, Playwright) the apps' sandbox refuses the microphone with `SecurityError: Invalid security origin`
+even when the permission is granted, and no response header changes that (the apps send no `Permissions-Policy`; the
+refusal comes from the opaque origin itself). So Chrome on Android is expected to use the fallback: the phone's own
+recorder through a file input. Safari on iPhone is not known yet. This check tells which path each phone takes.
+
+You need a live test app that keeps photos and voice messages: as a test participant, build one from an idea such as
+"a gallery of our drawings, taken with the phone camera, with tags, and short voice notes sorted by topic" (the build
+eval's cases in `platform/api/eval/build.json` are two such specs), and open it from its QR code on each phone, signed
+in to save ("Sign in to save", then back to the app).
+
+1. iPhone (Safari), photos: take a photo with the photo button, and pick one from the library (iPhone photos are HEIC;
+   Safari decodes them). Expect each to appear within a few seconds, upright, and to open at most 2,560 px wide (long
+   press, open the image in a new tab: its address is `https://workshop.rankly.games/app-media/<nick>/<22 characters>`).
+2. iPhone, voice: press Record. Either (a) Safari asks for the microphone; allow it, speak 10 seconds, press Stop: the
+   message appears with a player that plays it (the microphone path, MP4/AAC); or (b) a sheet opens to choose a file
+   (the fallback: iOS ignores `capture` for audio and offers Files, where a Voice Memos recording shared to Files can be
+   chosen): choose one under 4 MB; it appears and plays. Note which one happened, and that pressing Stop (or Cancel in
+   the sheet) without a recording shows "No recording was chosen."
+3. Android phone (Chrome), photos: as step 1 (the camera opens directly from the photo button).
+4. Android, voice: press Record. Expected (b): Chrome opens the phone's sound recorder, or a file chooser where the
+   phone has none; record 10 seconds, confirm, and the message appears and plays. A recorder that saves `.m4a`/`.aac`
+   in MP4 or `.ogg`/`.webm` Opus is accepted; one that saves AMR or 3GP gets "Send a photo as a JPEG, or a voice
+   recording as WebM, Ogg or MP4 audio." (note the recorder app and the file type). If Chrome asks for the microphone
+   instead (a), allow it and record as on the iPhone.
+5. On either phone, signed out (a private tab without the hand-off): pressing the photo or Record button shows "Sign in
+   to the workshop to save in this app." and the sign-in button, and nothing is recorded or sent.
+6. Tell Claude, for each phone, which path recording took ((a) or (b)) and any message shown. If neither phone records
+   well, the next step is a follow-up ticket (for example a small recorder page outside the sandbox), not a change to
+   the apps' sandbox.
+
 ## Check after the apps deploy (ticket 2.5)
 
 ```mermaid

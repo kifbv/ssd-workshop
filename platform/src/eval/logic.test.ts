@@ -10,6 +10,9 @@ import {
   missingScreens,
   scoreBuild,
   signInProblem,
+  mediaProblem,
+  mediaKindOf,
+  MEDIA_FILTER,
   scoreChange,
   formatChangeResult,
   type ChangeEvalOutcome,
@@ -480,6 +483,38 @@ describe("scoreBuild", () => {
     expect(scoreBuild({ ...ok, signIn: { shown: 0, visible: 0, opens: undefined } })).toEqual({ pass: false, detail: 'no "Sign in to save" button (data-workshop-sign-in) for a visitor' });
     expect(scoreBuild({ ...ok, signIn: { shown: 1, visible: 1, opens: false } })).toEqual({ pass: false, detail: "the sign-in button does not open the workshop's sign-in page in a new tab" });
     expect(signInProblem({ shown: 1, visible: 1, opens: true })).toBeUndefined();
+  });
+
+  it("ticket 3.19: a media case also needs its photo or Record button, an upload kept in the data and shown from its address, a tag or topic filter and no console error", () => {
+    const media = { kind: "photo" as const, button: true, uploaded: true, keptInData: true, shown: true, filter: true, errors: [] };
+    expect(mediaProblem(media)).toBeUndefined();
+    expect(scoreBuild({ ...ok, media })).toEqual({ pass: true, detail: expect.stringMatching(/, photo button, upload kept in the data and shown from its address$/) as unknown });
+    expect(mediaProblem({ ...media, button: false })).toBe("no photo button (a file input accepting images)");
+    expect(mediaProblem({ ...media, kind: "voice", button: false })).toBe("no Record button");
+    expect(mediaProblem({ ...media, uploaded: false })).toBe("the photo was not uploaded");
+    expect(mediaProblem({ ...media, keptInData: false })).toBe("the photo's address was not saved in the data");
+    expect(mediaProblem({ ...media, kind: "voice", shown: false })).toBe("the saved recording is not shown from its address");
+    expect(mediaProblem({ ...media, filter: false })).toBe('no tag filter (a list, buttons or a field named "filter", "show", "only", "browse" or "search", or a list starting with "All", together with "tag")');
+    expect(mediaProblem({ ...media, kind: "voice", filter: false })).toMatch(/^no topic filter \(.*together with "topic"\)$/);
+    expect(mediaProblem({ ...media, errors: ["boom"] })).toBe("1 console error(s) while uploading: boom");
+    expect(mediaProblem({ ...media, button: false, filter: false })).toMatch(/^no photo button \(a file input accepting images\); no tag filter \(/);
+    expect(scoreBuild({ ...ok, media: { ...media, shown: false } })).toEqual({ pass: false, detail: "the saved photo is not shown from its address" });
+    expect(mediaKindOf("photo")).toBe("photo");
+    expect(mediaKindOf("voice")).toBe("voice");
+    expect(mediaKindOf("example")).toBeUndefined();
+    expect(MEDIA_FILTER).toEqual({ photo: "tag", voice: "topic" });
+  });
+
+  it("ticket 3.19: the build file's media cases are specs of the right shape, one photo gallery and one voice-message app", () => {
+    const parsed = parseReadinessExamples(readFileSync(new URL("../../api/eval/build.json", import.meta.url), "utf8"));
+    if ("error" in parsed) throw new Error(parsed.error);
+    expect(parsed.map((example) => example.category)).toEqual(["photo", "voice"]);
+    for (const example of parsed) {
+      expect(example.expected).toBe("ready");
+      expect(example.spec.toLowerCase()).toContain(`${MEDIA_FILTER[mediaKindOf(example.category) ?? "photo"]} filter`);
+      expect(screenNames(example.spec).length).toBeGreaterThanOrEqual(2);
+      expect(expectsWebFetch(example.spec)).toBe(false);
+    }
   });
 
   it("names the outside services a passing build reached (ticket 2.14)", () => {
