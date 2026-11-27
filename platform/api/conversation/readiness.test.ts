@@ -202,6 +202,8 @@ describe("parseReadinessAnswer", () => {
     // Do not invent problems: a spec silent on the AI being off is not an open question.
     expect(READINESS_SYSTEM_PROMPT).toContain("A spec that does not say what happens when the AI is not available is not an open question");
     expect(READINESS_SYSTEM_PROMPT).toContain("uses the workshop's AI only for these four tasks");
+    // Run 1 (e1232d8) let a business-card reader through as a fields-from-a-photo task: named as the exception.
+    expect(READINESS_SYSTEM_PROMPT).toContain("Business cards are the exception to reading fields from a photo: a spec whose AI reads a business card, or people's names, phone numbers or email addresses from a photo, is not ready (outside service)");
   });
 
   it("asks for reasons in the participant's language, each ending with the problem's English word in brackets (readiness-v3, ticket 3.16)", () => {
