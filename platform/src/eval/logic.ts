@@ -875,6 +875,8 @@ export interface BuildEvalOutcome {
   media?: MediaCheck;
   /** Ticket 3.22: an AI case's check (tag suggestions or a receipt read), signed in; undefined for the other examples. */
   ai?: AiCheck;
+  /** Ticket 3.22: whether the app's code calls a `workshopData.ai` helper (only an AI case's spec asks for AI). */
+  usesAi?: boolean;
   /** Pages the coding agent read with WebFetch while building (ticket 2.15), from the build feed. */
   fetches: number;
   /** The hosts it read them from, each once, sorted. */
@@ -921,6 +923,8 @@ export function scoreBuild(outcome: BuildEvalOutcome, mustFetch = false): Clarif
     if (media !== undefined) problems.push(media);
     const ai = outcome.ai === undefined ? undefined : aiProblem(outcome.ai);
     if (ai !== undefined) problems.push(ai);
+    // Live eval run 1: the drawing gallery (tags typed by the visitor) asked the AI for tags though its spec asks for no AI.
+    if (outcome.ai === undefined && outcome.usesAi === true) problems.push("calls workshopData.ai though the spec asks for no AI");
   }
   return problems.length === 0
     ? {

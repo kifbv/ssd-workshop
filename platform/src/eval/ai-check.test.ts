@@ -8,7 +8,7 @@ import type { Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseAppAiRequest } from "../../api/app-ai/tasks.js";
 import type { AppFile } from "../../api/build/check.js";
-import { exerciseAi, launchBrowser, standInAnswer, STAND_IN_RECEIPT, STAND_IN_TAGS } from "./build.js";
+import { callsAi, exerciseAi, launchBrowser, standInAnswer, STAND_IN_RECEIPT, STAND_IN_TAGS } from "./build.js";
 import { aiProblem } from "./logic.js";
 
 const CLIENT = readFileSync(new URL("../../../templates/basic/workshop-data.js", import.meta.url));
@@ -169,6 +169,12 @@ describe("the build eval's AI check (exerciseAi, ticket 3.22)", () => {
     expect(check.savedEarly).toBe(true);
     expect(aiProblem(check)).toBe("the AI's suggestion was saved before the visitor accepted it");
   }, 60_000);
+
+  it("WHEN the app's code calls a workshopData.ai helper THEN callsAi says so (the workshop's own client does not count)", () => {
+    expect(callsAi(gallery(SUGGEST))).toBe(true);
+    expect(callsAi(RECEIPTS)).toBe(true);
+    expect(callsAi(gallery(""))).toBe(false);
+  });
 
   it("WHEN the app never asks the AI THEN the check fails on the helper and on the AI request", async () => {
     const check = await exerciseAi(browser, gallery(""), "ai-tags");

@@ -476,7 +476,9 @@ export async function exerciseMedia(browser: Browser, files: readonly AppFile[],
         check.shown = await waitUntil(() => page.evaluate<boolean>(shownScript), 6_000);
       }
     }
-    check.filter = await page.evaluate<boolean>(`${HAS_FILTER}(${JSON.stringify(MEDIA_FILTER[kind])})`);
+    // Ticket 3.22 (live eval run 1): the app may still be drawing after its save (the check above can pass on a preview
+    // showing the address while the save is under way), so give the filter a moment to appear.
+    check.filter = await waitUntil(() => page.evaluate<boolean>(`${HAS_FILTER}(${JSON.stringify(MEDIA_FILTER[kind])})`), 3_000);
     return check;
   } finally {
     await context.close();
@@ -582,12 +584,19 @@ const SAVE_AFTER_SUGGESTION = `((word) => {
  * that the answer shows and that nothing holding it was saved yet, accepts it as a visitor would (fields already hold it;
  * else an Accept button or the suggested tags), presses Save and checks that a saved value holds it.
  */
-export async function exerciseAi(browser: Browser, files: readonly AppFile[], kind: AiCase): Promise<AiCheck> {
-  const { helper, task } = AI_HELPER[kind];
-  const code = files
+/** Ticket 3.22: the app's own code (not the workshop's data client), all its JavaScript files joined. */
+const appCode = (files: readonly AppFile[]): string =>
+  files
     .filter((file) => file.kind === "file" && file.path.endsWith(".js") && file.path !== DATA_CLIENT_PATH)
     .map((file) => new TextDecoder().decode(file.bytes))
     .join("\n");
+
+/** Ticket 3.22: whether the app's code uses the AI helpers (`workshopData.ai`), which only an AI case may. */
+export const callsAi = (files: readonly AppFile[]): boolean => /\bai\s*\.\s*(tagPhoto|readPhoto|sortText|transcribe)\s*\(/.test(appCode(files));
+
+export async function exerciseAi(browser: Browser, files: readonly AppFile[], kind: AiCase): Promise<AiCheck> {
+  const { helper, task } = AI_HELPER[kind];
+  const code = appCode(files);
   const photo = kind === "ai-receipt" ? await receiptPhoto(browser, RECEIPT_CASES[0] as (typeof RECEIPT_CASES)[number]) : (await mediaSamples(browser)).photo;
   const { context, page, errors } = await evalPage(browser);
   const api = await routeApp(page, files, EVAL_TOKEN);
@@ -812,6 +821,7 @@ async function firstBuild(world: EvalWorld, spec: string, browser: Browser, medi
       signIn: checked.signIn,
       ...(mediaCheck === undefined ? {} : { media: mediaCheck }),
       ...(aiCheck === undefined ? {} : { ai: aiCheck }),
+      usesAi: callsAi(run.published),
     },
     ...(run.commit === undefined ? {} : { commit: run.commit }),
   };

@@ -108,3 +108,7 @@ paths:
 - An eval check of AI suggestions (3.22, `exerciseAi`) gives the stand-in route distinctive fixed answers (`sunflower`,
   12.40) and looks for them in field values and the page's text, in saved bodies only before vs after the eval presses
   Save; tap suggested tag chips or an Accept button only when no field holds the suggestion yet.
+- A new optional feature in AGENTS.md (3.22's AI rule) leaks into specs that do not ask for it (run 1: a gallery whose tags
+  the visitor types got AI tag suggestions): say in the rule what a spec without it keeps ("stays a plain field"), and
+  make the build eval fail the other cases when they use it (`callsAi`). A check that reads the page right after a write
+  was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.

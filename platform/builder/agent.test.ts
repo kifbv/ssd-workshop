@@ -239,6 +239,8 @@ describe("the agent's settings (criterion 2)", () => {
     for (const name of ["tagPhoto", "readPhoto", "sortText", "transcribe"]) expect(client).toContain(`${name}: ${name},`);
     expect(AI_GUIDANCE).toMatch(/only when SPEC\.md asks for them/);
     expect(AI_GUIDANCE).toMatch(/presses Save/);
+    // Live eval run 1: the drawing gallery (tags typed by the visitor) asked the AI unasked.
+    for (const text of [agents, AI_GUIDANCE]) expect(text).toMatch(/a tags field.*stays a plain field the visitor fills/);
     expect(buildPrompt(ws)).toContain(AI_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Suggest tags"] })).toContain(AI_GUIDANCE);
     // Last, after the media guidance (new prompt lines go after the WebFetch lines, 3.25).

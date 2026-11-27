@@ -208,7 +208,9 @@ shell and no package manager. You cannot run or preview the app, so check your w
      `<audio controls preload="none" src="...">`, and delete it with `await workshopData.deleteMedia(address)`.
 16. AI suggestions (only when `SPEC.md` asks for them). The workshop's AI can suggest tags for a photo, read fields from
     a photo (a receipt's shop, date and total), sort a text into categories and turn a voice recording into text; nothing
-    else (no chat, no writing texts, no free questions). Each call needs the sign-in (rule 6), like saving:
+    else (no chat, no writing texts, no free questions). Each call needs the sign-in (rule 6), like saving. Use AI only
+    when `SPEC.md` says the AI suggests, reads or sorts something: a tags field, a form or a list in a spec that does not
+    ask for AI stays a plain field the visitor fills, with no AI call.
    - `await workshopData.ai.tagPhoto(address)` gives up to 5 suggested tags for a photo of this app (the address
      `savePhoto` gave); `await workshopData.ai.tagPhoto(address, ["Portrait", "Pencil"])` gives those of up to 20 tags
      that fit.

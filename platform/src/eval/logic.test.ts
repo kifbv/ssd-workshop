@@ -567,6 +567,10 @@ describe("scoreBuild", () => {
     expect(aiProblem({ ...good, saved: false })).toBe("the suggestion was not saved after the visitor accepted it (Save)");
     expect(aiProblem({ ...good, errors: ["x"] })).toBe("1 console error(s) while using AI: x");
     expect(scoreBuild({ ...ok, ai: { ...good, savedEarly: true } })).toEqual({ pass: false, detail: "the AI's suggestion was saved before the visitor accepted it" });
+    // Only an AI case may use AI (live eval run 1: the drawing gallery suggested tags unasked).
+    expect(scoreBuild({ ...ok, usesAi: true })).toEqual({ pass: false, detail: "calls workshopData.ai though the spec asks for no AI" });
+    expect(scoreBuild({ ...ok, usesAi: false }).pass).toBe(true);
+    expect(scoreBuild({ ...ok, ai: good, usesAi: true }).pass).toBe(true);
   });
 
   it("names the outside services a passing build reached (ticket 2.14)", () => {
