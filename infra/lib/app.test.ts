@@ -24,6 +24,13 @@ import {
   APP_MEDIA_MEMORY_MB,
   APP_MEDIA_METHODS,
   APP_MEDIA_PATH,
+  APP_AI_PATH,
+  APP_AI_PREFLIGHT_THROTTLE,
+  APP_AI_THROTTLE,
+  APP_AI_TIMEOUT_SECONDS,
+  APP_AI_MEMORY_MB,
+  APP_AI_BEDROCK_INVOKE_RESOURCES,
+  APP_AI_TRANSCRIPTION_JOBS,
   APP_MEDIA_PREFLIGHT_THROTTLE,
   APP_MEDIA_TIMEOUT_SECONDS,
   APP_MEDIA_UPLOAD_THROTTLE,
@@ -69,6 +76,16 @@ import {
   APP_MEDIA_BUCKET_REGIONAL_DOMAIN,
   APP_MEDIA_CONTENT_SECURITY_POLICY,
   APP_MEDIA_FUNCTION_NAME,
+  APP_AI_FUNCTION_NAME,
+  APP_AI_FOUNDATION_MODEL_ID,
+  APP_AI_MODEL_ID,
+  APP_AI_ROLE_ARN,
+  APP_AI_TRANSCRIPTS_PREFIX,
+  WAF_AI_RATE_BODY,
+  WAF_AI_RATE_BODY_KEY,
+  WAF_AI_RATE_LIMIT,
+  WAF_AI_RATE_METHODS,
+  WAF_AI_RATE_RULE_NAME,
   APP_MEDIA_HEADERS_POLICY_NAME,
   APP_MEDIA_KEY_PREFIX,
   APP_MEDIA_PATH_PATTERN,
@@ -173,7 +190,7 @@ import { PARTICIPANT_ROUTES as PARTICIPANT_ROUTE_KEYS } from "../../platform/api
 import { ADMIN_ROUTES as ADMIN_ROUTE_KEYS } from "../../platform/api/admin/admin.js";
 import { BUILD_RETRIES_PK, SETTINGS_PK } from "../../platform/api/keys.js";
 import { FACILITATOR_ROUTES as FACILITATOR_ROUTE_KEYS } from "../../platform/api/facilitator/facilitator.js";
-import { BY_TYPE_INDEX_KEY as PLATFORM_BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME } from "../../platform/api/settings.js";
+import { BY_TYPE_INDEX_KEY as PLATFORM_BY_TYPE_INDEX_KEY, BY_TYPE_INDEX_NAME as PLATFORM_BY_TYPE_INDEX_NAME, MODELS as PLATFORM_MODELS } from "../../platform/api/settings.js";
 import { ANSWER_AFTER_MS } from "../../platform/api/sign-in/code-request.js";
 import {
   APP_MEDIA_MESSAGES,
@@ -185,6 +202,7 @@ import {
   mediaAddress,
 } from "../../platform/api/app-media/media.js";
 import { S3_TIMEOUTS } from "../../platform/api/handlers/app-media.js";
+import { AI_PREFLIGHT_HEADERS, APP_AI_ROUTES as APP_AI_ROUTE_KEYS } from "../../platform/api/app-ai/ai.js";
 import { WEB_BUILD_FOLDER, WEB_DIR } from "./site-stack.js";
 import {
   APP_MEDIA_OBJECT_WRITE_ACTIONS,
@@ -824,11 +842,11 @@ describe("CloudFront /api/apps/* behaviour: every data API answer readable by sa
     expect(appsPolicy).toEqual({ Ref: policy()?.[1] });
   });
 
-  it("names the policy ssd-workshop-app-data-v2 in the edge stack (v2 since ticket 3.24 allows `authorization`), retained, versioned in its logical id", () => {
+  it("names the policy ssd-workshop-app-data-v3 in the edge stack (v2 since ticket 3.24 allows `authorization`, v3 since 3.21 `POST`), retained, versioned in its logical id", () => {
     const [stackName, id, resource] = policy() ?? [];
     expect(stackName).toBe(STACK_NAMES.edge);
-    expect(APP_DATA_HEADERS_POLICY_NAME).toBe("ssd-workshop-app-data-v2");
-    expect(id).toMatch(/^AppDataHeadersV2[0-9A-F]{8}$/);
+    expect(APP_DATA_HEADERS_POLICY_NAME).toBe("ssd-workshop-app-data-v3");
+    expect(id).toMatch(/^AppDataHeadersV3[0-9A-F]{8}$/);
     expect(resource?.DeletionPolicy).toBe("Retain");
     expect(resource?.UpdateReplacePolicy).toBe("Retain");
   });
@@ -837,14 +855,19 @@ describe("CloudFront /api/apps/* behaviour: every data API answer readable by sa
     expect(config().CorsConfig).toEqual({
       AccessControlAllowOrigins: { Items: ["*"] },
       AccessControlAllowCredentials: false,
-      AccessControlAllowMethods: { Items: ["GET", "PUT", "DELETE"] },
+      // Ticket 3.21: POST for the AI tasks.
+      AccessControlAllowMethods: { Items: ["GET", "PUT", "DELETE", "POST"] },
       // Ticket 3.24 criterion 6: `authorization` (app write tokens), and never credentials (below).
       AccessControlAllowHeaders: { Items: ["content-type", "accept", "authorization"] },
       AccessControlMaxAgeSec: 600,
       OriginOverride: true,
     });
-    // The same values the function answers the preflight with.
-    expect((config().CorsConfig?.AccessControlAllowMethods as { Items: string[] }).Items.join(", ")).toBe(PREFLIGHT_HEADERS["access-control-allow-methods"]);
+    // Every method and header the functions under /api/apps/* allow in their preflights (data, media, AI), and the data API's max age.
+    const methods = (config().CorsConfig?.AccessControlAllowMethods as { Items: string[] }).Items;
+    for (const preflight of [PREFLIGHT_HEADERS, MEDIA_PREFLIGHT_HEADERS, AI_PREFLIGHT_HEADERS]) {
+      for (const method of preflight["access-control-allow-methods"].split(", ")) expect(methods).toContain(method);
+      expect(preflight["access-control-allow-headers"]).toBe(PREFLIGHT_HEADERS["access-control-allow-headers"]);
+    }
     expect((config().CorsConfig?.AccessControlAllowHeaders as { Items: string[] }).Items.join(", ")).toBe(PREFLIGHT_HEADERS["access-control-allow-headers"]);
     expect(String(config().CorsConfig?.AccessControlMaxAgeSec)).toBe(PREFLIGHT_HEADERS["access-control-max-age"]);
     expect(PREFLIGHT_HEADERS["access-control-allow-origin"]).toBe("*");
@@ -1052,6 +1075,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "PUT /api/admin/settings",
       "POST /api/admin/stop",
       "POST /api/admin/resume",
+      "PUT /api/admin/app-ai",
       "POST /api/conversation/messages",
       "GET /api/conversation/messages/{id}",
       "GET /api/conversation",
@@ -1072,13 +1096,14 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       "PUT /api/apps/{nickname}/media/{id}",
       "DELETE /api/apps/{nickname}/media/{id}",
       "OPTIONS /api/apps/{nickname}/media/{id}",
+      ...APP_AI_ROUTE_KEYS,
     ]);
     const health = routes.find(([, , r]) => r.Properties?.RouteKey === "GET /api/health")?.[2];
     const integrationId = (health?.Properties?.Target as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1][1] as {
       Ref: string;
     };
     const integration = apiResources().find(([id]) => id === integrationId.Ref)?.[1];
-    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(9);
+    expect(ofType("AWS::ApiGatewayV2::Integration")).toHaveLength(10);
     const fnId = apiResources().find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[0];
     expect(integration?.Properties).toMatchObject({
       IntegrationType: "AWS_PROXY",
@@ -1136,6 +1161,7 @@ describe("api stack: HTTP API and health function (ticket 1.1 criteria 1, 2, 3)"
       FACILITATOR_FUNCTION_NAME,
       APP_DATA_FUNCTION_NAME,
       APP_MEDIA_FUNCTION_NAME,
+      APP_AI_FUNCTION_NAME,
     ]);
     expect(fns.find(([, r]) => r.Properties?.FunctionName === HEALTH_FUNCTION_NAME)?.[1].Properties).toMatchObject({
       Runtime: "nodejs22.x",
@@ -1739,6 +1765,8 @@ describe("api stack: participant function (ticket 1.5)", () => {
       [
         `${APP_DATA_FUNCTION_NAME} dynamodb:GetItem`,
         `${APP_MEDIA_FUNCTION_NAME} dynamodb:GetItem`,
+        // Ticket 3.21: the AI tasks check the same token.
+        `${APP_AI_FUNCTION_NAME} dynamodb:GetItem`,
         `${PARTICIPANT_FUNCTION_NAME} dynamodb:DeleteItem`,
         `${PARTICIPANT_FUNCTION_NAME} dynamodb:PutItem`,
       ].sort(),
@@ -1748,6 +1776,7 @@ describe("api stack: participant function (ticket 1.5)", () => {
     );
     expect(JSON.stringify(apiFunction(APP_DATA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
     expect(JSON.stringify(apiFunction(APP_MEDIA_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
+    expect(JSON.stringify(apiFunction(APP_AI_FUNCTION_NAME).statements())).not.toContain("TOKENS#");
   });
 
   it("bundles the handler into a self-contained index.js that answers a call without a session 401", async () => {
@@ -1773,7 +1802,7 @@ describe("api stack: admin function (ticket 3.2)", () => {
   });
 
   it("routes GET and PUT /api/admin/settings and (ticket 3.5) POST /api/admin/stop and /api/admin/resume to it, invoked only by this API", () => {
-    expect([...ADMIN_ROUTE_KEYS]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings", "POST /api/admin/stop", "POST /api/admin/resume"]);
+    expect([...ADMIN_ROUTE_KEYS]).toEqual(["GET /api/admin/settings", "PUT /api/admin/settings", "POST /api/admin/stop", "POST /api/admin/resume", "PUT /api/admin/app-ai"]);
     for (const routeKey of ADMIN_ROUTE_KEYS) {
       expect(f.integrationOf(routeKey), routeKey).toMatchObject({
         IntegrationType: "AWS_PROXY",
@@ -1804,7 +1833,7 @@ describe("api stack: admin function (ticket 3.2)", () => {
         Condition: {
           "ForAllValues:StringEquals": {
             "dynamodb:LeadingKeys": ["SETTINGS"],
-            "dynamodb:Attributes": ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt", "stopped", "stoppedAt", "resumedAt"],
+            "dynamodb:Attributes": ["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt", "stopped", "stoppedAt", "resumedAt", "appAiEnabled", "appAiChangedAt"],
           },
           StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE"] },
         },
@@ -1929,7 +1958,7 @@ function settingsReadStatement(tableArn: unknown) {
     Condition: {
       "ForAllValues:StringEquals": {
         "dynamodb:LeadingKeys": ["SETTINGS"],
-        "dynamodb:Attributes": ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"],
+        "dynamodb:Attributes": ["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt", "appAiEnabled"],
       },
       StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
     },
@@ -1965,7 +1994,8 @@ function slotReleaseExpected(tableArn: unknown) {
 
 describe("SETTINGS readers (ticket 3.3)", () => {
   it("WHEN the synthesized stack is inspected THEN the AI worker and the conversation function read SETTINGS only projected to the listed attributes, and the participant function not at all", () => {
-    expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt"]);
+    // Ticket 3.21: and the switch "Apps may use AI".
+    expect([...SETTINGS_READ_ATTRIBUTES]).toEqual(["pk", "sk", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "stopped", "resumedAt", "appAiEnabled"]);
     for (const name of [AI_WORKER_FUNCTION_NAME, CONVERSATION_FUNCTION_NAME]) {
       const reads = apiFunction(name).statements().filter((st) => JSON.stringify(st).includes('"SETTINGS"'));
       expect(reads, name).toEqual([settingsReadStatement(apiFunction(name).tableArn())]);
@@ -1997,8 +2027,8 @@ describe("SETTINGS item (ticket 3.2 criterion 5)", () => {
     const admin = apiFunction(ADMIN_FUNCTION_NAME).roleEntry()?.[0];
     expect(admin).toBeDefined();
     expect(writers).toEqual([{ roles: JSON.stringify([{ Ref: admin }]), actions: ["dynamodb:UpdateItem"], attributes: [...SETTINGS_UPDATE_ATTRIBUTES] }]);
-    // Ticket 3.5: the global Stop is written by the admin function only (its Stop and Resume routes).
-    expect([...SETTINGS_UPDATE_ATTRIBUTES]).toEqual(["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt", "stopped", "stoppedAt", "resumedAt"]);
+    // Ticket 3.5: the global Stop is written by the admin function only (its Stop and Resume routes); 3.21: and the switch.
+    expect([...SETTINGS_UPDATE_ATTRIBUTES]).toEqual(["pk", "sk", "type", "aiBudgetUsd", "changeRequestsPerPerson", "buildsAtOnce", "updatedAt", "stopped", "stoppedAt", "resumedAt", "appAiEnabled", "appAiChangedAt"]);
   });
 
   it("counts a partition pattern that matches SETTINGS, wildcards included, as reaching it", () => {
@@ -2256,8 +2286,11 @@ describe("api stack: data API for apps (ticket 2.4)", () => {
     expect(APP_DATA_READ_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     expect(APP_DATA_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
     const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
-    // Every route setting of the stage, exactly: the sign-in routes', the data API's and (ticket 3.18) the media API's.
+    // Every route setting of the stage, exactly: the sign-in routes', the data API's, (ticket 3.18) the media API's and
+    // (ticket 3.21) the AI tasks'.
     expect(stage?.Properties?.RouteSettings).toEqual({
+      [`POST ${APP_AI_PATH}`]: { ThrottlingRateLimit: 5, ThrottlingBurstLimit: 10 },
+      [`OPTIONS ${APP_AI_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
       [`PUT ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 2, ThrottlingBurstLimit: 10 },
       [`DELETE ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 10, ThrottlingBurstLimit: 20 },
       [`OPTIONS ${APP_MEDIA_PATH}`]: { ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40 },
@@ -3695,7 +3728,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
     expect(resource.Properties?.Description).toMatch(/^[a-zA-Z0-9=:#@/\-,.][a-zA-Z0-9+=:#@/\-,.\s]+[a-zA-Z0-9+=:#@/\-,.]{1,256}$/);
   });
 
-  it("has exactly five rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401; try 3: at most 150 uploads and deletes per address in 5 minutes; after its access review: at most 300 media preflights per address in 5 minutes", () => {
+  it("has exactly six rules: per address, at most the limit of requests to /api/* (3.18: and apart, to /app-media/*) in 5 minutes, then blocked (429); 3.18 try 2: media writes without a Bearer token answered 401; try 3: at most 150 uploads and deletes per address in 5 minutes; after its access review: at most 300 media preflights per address in 5 minutes; 3.21: at most 150 AI requests per address in 5 minutes", () => {
     const rules = acl()[2].Properties?.Rules as Record<string, unknown>[];
     expect(rules).toEqual([
       {
@@ -3848,7 +3881,49 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
         },
         VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME, SampledRequestsEnabled: true },
       },
+      {
+        Name: WAF_AI_RATE_RULE_NAME,
+        Priority: 5,
+        Action: {
+          Block: {
+            CustomResponse: { ResponseCode: 429, CustomResponseBodyKey: WAF_AI_RATE_BODY_KEY, ResponseHeaders: [{ Name: "access-control-allow-origin", Value: "*" }] },
+          },
+        },
+        Statement: {
+          RateBasedStatement: {
+            Limit: 150,
+            EvaluationWindowSec: 300,
+            AggregateKeyType: "IP",
+            ScopeDownStatement: {
+              AndStatement: {
+                Statements: [
+                  {
+                    OrStatement: {
+                      Statements: ["POST", "OPTIONS"].map((method) => ({
+                        ByteMatchStatement: { FieldToMatch: { Method: {} }, PositionalConstraint: "EXACTLY", SearchString: method, TextTransformations: [{ Priority: 0, Type: "NONE" }] },
+                      })),
+                    },
+                  },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "STARTS_WITH", SearchString: "/api/apps/", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
+                  },
+                  {
+                    ByteMatchStatement: { FieldToMatch: { UriPath: {} }, PositionalConstraint: "ENDS_WITH", SearchString: "/ai", TextTransformations: [{ Priority: 0, Type: "URL_DECODE" }, { Priority: 1, Type: "NORMALIZE_PATH" }] },
+                  },
+                ],
+              },
+            },
+          },
+        },
+        VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: WAF_AI_RATE_RULE_NAME, SampledRequestsEnabled: true },
+      },
     ]);
+    // Ticket 3.21: the AI route's shared throttles (POST 5/s, OPTIONS 20/s) take at least 3 addresses to fill (10 and 40).
+    expect(WAF_AI_RATE_RULE_NAME).toBe("ssd-workshop-ai-rate");
+    expect(WAF_AI_RATE_LIMIT).toBe(150);
+    expect([...WAF_AI_RATE_METHODS]).toEqual(["POST", "OPTIONS"]);
+    for (const throttle of [APP_AI_THROTTLE, APP_AI_PREFLIGHT_THROTTLE]) expect(WAF_AI_RATE_LIMIT / WAF_RATE_WINDOW_SECONDS).toBeLessThan(throttle.rateLimit / 3);
+    expect(JSON.parse(WAF_AI_RATE_BODY)).toEqual({ message: "Too many AI requests from this address. Please wait a few minutes and try again." });
     // Try 3: one address (a made-up `Bearer x` passes the junk filter) can no longer hold the shared 2/s upload
     // throttle at 429 for every app: 150 per 5 minutes is 0.5/s, so filling the throttle takes at least 4 addresses.
     expect(WAF_MEDIA_WRITE_RATE_RULE_NAME).toBe("ssd-workshop-media-write-rate");
@@ -3901,6 +3976,7 @@ describe("WAF web ACL on the distribution (ticket 3.13 criterion 1)", () => {
       [WAF_BLOCK_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_BLOCK_BODY },
       [WAF_MEDIA_AUTH_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_MEDIA_AUTH_BODY },
       [WAF_MEDIA_WRITE_RATE_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_MEDIA_WRITE_RATE_BODY },
+      [WAF_AI_RATE_BODY_KEY]: { ContentType: "APPLICATION_JSON", Content: WAF_AI_RATE_BODY },
     });
     expect(JSON.parse(WAF_BLOCK_BODY)).toEqual({ message: "Too Many Requests" });
     // A room behind one venue address must never reach it: ~45 people polling every 2 s (150 requests per 5 minutes
@@ -4022,7 +4098,7 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
       },
     });
     expect(tagsOf(resource)[TAG_KEY]).toBe(TAG_VALUE);
-    // No website, CORS, lifecycle, logging or notification settings.
+    // No website, CORS, logging or notification settings (3.21: its one lifecycle rule expires transcripts/, tested below).
     for (const prop of ["WebsiteConfiguration", "CorsConfiguration", "LoggingConfiguration", "NotificationConfiguration", "ReplicationConfiguration"]) {
       expect(resource.Properties?.[prop], prop).toBeUndefined();
     }
@@ -4036,7 +4112,8 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
         Effect: "Allow",
         Action: "s3:GetObject",
         Principal: { Service: "cloudfront.amazonaws.com" },
-        Resource: { "Fn::Join": ["", [bucketArn(), "/*"]] },
+        // Ticket 3.21: the served files only, never Transcribe's results under `transcripts/`.
+        Resource: { "Fn::Join": ["", [bucketArn(), "/app-media/*"]] },
         Condition: { StringEquals: { "AWS:SourceAccount": ACCOUNT, "AWS:SourceArn": `arn:aws:cloudfront::${ACCOUNT}:distribution/${DISTRIBUTION_ID}` } },
       },
     ]);
@@ -4053,7 +4130,8 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
       Effect: "Deny",
       Action: [...APP_MEDIA_OBJECT_WRITE_ACTIONS],
       Principal: { AWS: "*" },
-      Resource: { "Fn::Join": ["", [bucketArn(), "/*"]] },
+      // Ticket 3.21: everything but `transcripts/` (never served), where Amazon Transcribe writes for the AI function.
+      NotResource: { "Fn::Join": ["", [bucketArn(), "/transcripts/*"]] },
       Condition: { ArnNotEquals: { "aws:PrincipalArn": [APP_MEDIA_ROLE_ARN, APP_MEDIA_ROLE_ARN_WITHOUT_PATH] } },
     });
     for (const action of ["s3:PutObject", "s3:PutObjectAcl", "s3:PutObjectTagging", "s3:RestoreObject", "s3:ReplicateObject"]) {
@@ -4065,15 +4143,19 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     expect(f.roleEntry()?.[1].Properties).toMatchObject({ RoleName: APP_MEDIA_FUNCTION_NAME, Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
   });
 
-  it("criterion 9: no IAM policy in any stack, other than the media function's, may write or delete in the media bucket", () => {
+  it("criterion 9: no IAM policy in any stack, other than the media function's (3.21: and the AI function's under transcripts/ only), may write or delete in the media bucket", () => {
     const writes = (action: string): boolean => action === "*" || /^s3:(\*|Put|Delete|Restore|Replicate|Abort|Object)/i.test(action) || /^s3:.*\*/.test(action);
     for (const pattern of ["*", "arn:aws:s3:::ssd-*", "arn:aws:s3:::*/app-media/*", "arn:aws:s3:::ssd-workshop-app-?edia-*/*"]) expect(reachesMedia(pattern), pattern).toBe(true);
     expect(reachesMedia(`arn:aws:s3:::${APPS_BUCKET_NAME}/apps/*`)).toBe(false);
     const mediaRole = f.roleEntry()?.[0];
+    const aiRole = apiFunction(APP_AI_FUNCTION_NAME).roleEntry()?.[0];
+    const transcripts = `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/transcripts/*`;
     let checked = 0;
     let own = 0;
+    let ai = 0;
     for (const [s, id, r] of [...ofType("AWS::IAM::Policy"), ...ofType("AWS::IAM::ManagedPolicy")]) {
       const forMedia = s === STACK_NAMES.api && JSON.stringify(r.Properties?.Roles) === JSON.stringify([{ Ref: mediaRole }]);
+      const forAi = s === STACK_NAMES.api && JSON.stringify(r.Properties?.Roles) === JSON.stringify([{ Ref: aiRole }]);
       for (const st of (r.Properties?.PolicyDocument as { Statement: Record<string, unknown>[] }).Statement) {
         assertNoExclusions(`${s}/${id}`, st);
         if (st.Effect !== "Allow") continue;
@@ -4083,10 +4165,16 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
           own += 1;
           continue;
         }
+        if (forAi && JSON.stringify([st.Resource].flat()) === JSON.stringify([transcripts])) {
+          expect(st.Action).toEqual(["s3:PutObject", "s3:DeleteObject"]);
+          ai += 1;
+          continue;
+        }
         for (const resource of [st.Resource].flat()) expect(reachesMedia(resource), `${s}/${id}: ${JSON.stringify(st)}`).toBe(false);
       }
     }
     expect(own).toBe(1);
+    expect(ai).toBe(1);
     expect(checked).toBeGreaterThanOrEqual(3);
   });
 
@@ -4255,5 +4343,124 @@ describe("ticket 3.18: the media bucket, the media function and /app-media/*", (
     const answer = await quietly(() => bundle.handler({ routeKey: `OPTIONS ${APP_MEDIA_PATH}` }));
     expect(answer.statusCode).toBe(204);
     expect(answer.headers?.["access-control-allow-origin"]).toBe("*");
+  });
+});
+
+describe("ticket 3.21: the AI tasks for apps (function, role, routes, transcripts)", () => {
+  const f = apiFunction(APP_AI_FUNCTION_NAME);
+  const mediaBucket = () => resources(STACK_NAMES.apps).find(([, r]) => r.Type === "AWS::S3::Bucket" && r.Properties?.BucketName === APP_MEDIA_BUCKET_NAME);
+
+  it("names the function, role and log group ssd-workshop-api-app-ai; Node.js 22 arm64, 512 MB, 28 s (under API Gateway's 30 s); role on the path with the boundary", () => {
+    expect(APP_AI_FUNCTION_NAME).toBe("ssd-workshop-api-app-ai");
+    expect(f.fnEntry()?.[1].Properties).toMatchObject({ Runtime: "nodejs22.x", Architectures: ["arm64"], MemorySize: APP_AI_MEMORY_MB, Timeout: APP_AI_TIMEOUT_SECONDS, Code: { S3Bucket: ASSETS_BUCKET_NAME } });
+    expect(APP_AI_TIMEOUT_SECONDS).toBeLessThan(30);
+    expect(f.roleEntry()?.[1].Properties).toMatchObject({ RoleName: APP_AI_FUNCTION_NAME, Path: IAM_PATH, PermissionsBoundary: BOUNDARY_ARN });
+    expect(APP_AI_ROLE_ARN).toBe(`arn:aws:iam::${ACCOUNT}:role/ssd-workshop/ssd-workshop-api-app-ai`);
+    expect(f.logGroupId()).toBeDefined();
+  });
+
+  it("criterion 9: WHEN npm run synth runs THEN the role may invoke only the Haiku 4.5 EU profile (and its foundation models), read only ssd-workshop-app-media, run only its own Transcribe jobs and update only its two day counters", () => {
+    const table = f.tableArn();
+    const media = (suffix: string) => `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/${suffix}`;
+    expect(f.statements()).toEqual([
+      { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: { "Fn::GetAtt": [f.logGroupId(), "Arn"] } },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: table,
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APP#*"] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "liveAt"] }, StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: table,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPTOKEN#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "app", "nickname", "expiresAt"] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      settingsReadStatement(table),
+      {
+        Effect: "Allow",
+        Action: "dynamodb:GetItem",
+        Resource: table,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPAI#*", "APPAI_TOTAL"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "day", "costUsd"] },
+          StringEquals: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "dynamodb:UpdateItem",
+        Resource: table,
+        Condition: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["APPAI#*", "APPAI_TOTAL"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "type", "day", "costUsd", "updatedAt"] },
+          StringEqualsIfExists: { "dynamodb:ReturnValues": ["NONE", "UPDATED_OLD", "UPDATED_NEW"] },
+        },
+      },
+      {
+        Effect: "Allow",
+        Action: "bedrock:InvokeModel",
+        Resource: [
+          `arn:aws:bedrock:eu-central-1:${ACCOUNT}:inference-profile/eu.anthropic.claude-haiku-4-5-20251001-v1:0`,
+          "arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+        ],
+      },
+      { Effect: "Allow", Action: "s3:GetObject", Resource: [media("app-media/*"), media("transcripts/*")] },
+      { Effect: "Allow", Action: ["s3:PutObject", "s3:DeleteObject"], Resource: media("transcripts/*") },
+      {
+        Effect: "Allow",
+        Action: "transcribe:StartTranscriptionJob",
+        Resource: "*",
+        Condition: { StringEquals: { "aws:RequestedRegion": "eu-central-1", "transcribe:OutputBucketName": APP_MEDIA_BUCKET_NAME }, StringLike: { "transcribe:OutputKey": "transcripts/*" } },
+      },
+      {
+        Effect: "Allow",
+        Action: ["transcribe:GetTranscriptionJob", "transcribe:DeleteTranscriptionJob"],
+        Resource: `arn:aws:transcribe:eu-central-1:${ACCOUNT}:transcription-job/ssd-workshop-app-ai-*`,
+      },
+    ]);
+    expect([...APP_AI_BEDROCK_INVOKE_RESOURCES].join(" ")).toContain(APP_AI_MODEL_ID);
+    expect(APP_AI_MODEL_ID).toBe(PLATFORM_MODELS.appAi.modelId);
+    expect(APP_AI_FOUNDATION_MODEL_ID).toBe(APP_AI_MODEL_ID.replace(/^eu\./, ""));
+    expect(APP_AI_TRANSCRIPTION_JOBS.endsWith("transcription-job/ssd-workshop-app-ai-*")).toBe(true);
+    // Every S3 resource it names is in the media bucket; no other bucket and no bucket-level action.
+    const s3 = f.statements().filter((st) => JSON.stringify(st.Action).includes("s3:"));
+    for (const st of s3) for (const resource of [st.Resource].flat()) expect(String(resource).startsWith(`arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/`), String(resource)).toBe(true);
+    // The counters' partitions cannot overlap the live marker's, the data's, the media's or the tokens'.
+    for (const other of ["APP#ada", "APPDATA#ada", "APPMEDIA#ada", "APPTOKEN#x", "SETTINGS"]) for (const pattern of ["APPAI#*", "APPAI_TOTAL"]) expect(actionCovers(pattern, other), `${pattern} ${other}`).toBe(false);
+  });
+
+  it("routes POST and OPTIONS /api/apps/{nickname}/ai to it (one permission for this API) and throttles them, after the routes exist", () => {
+    for (const routeKey of APP_AI_ROUTE_KEYS) {
+      const integration = f.integrationOf(routeKey);
+      expect(integration, routeKey).toBeDefined();
+      expect(JSON.stringify(integration?.IntegrationUri)).toContain(f.fnEntry()?.[0] ?? "?");
+    }
+    expect(f.permissions()).toHaveLength(1);
+    expect(APP_AI_THROTTLE).toEqual({ rateLimit: 5, burstLimit: 10 });
+    expect(APP_AI_PREFLIGHT_THROTTLE).toEqual({ rateLimit: 20, burstLimit: 40 });
+    const [, stage] = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Stage") ?? [];
+    for (const method of ["POST", "OPTIONS"]) {
+      const routeId = f.apiResources().find(([, r]) => r.Type === "AWS::ApiGatewayV2::Route" && r.Properties?.RouteKey === `${method} ${APP_AI_PATH}`)?.[0];
+      expect([stage?.DependsOn].flat(), method).toContain(routeId);
+    }
+  });
+
+  it("keeps Transcribe's results apart: written only under transcripts/, never served, expired after a day", () => {
+    expect(APP_AI_TRANSCRIPTS_PREFIX).toBe("transcripts/");
+    expect(mediaBucket()?.[1].Properties?.LifecycleConfiguration).toEqual({ Rules: [{ Id: "ssd-workshop-transcripts-expiry", Prefix: "transcripts/", ExpirationInDays: 1, Status: "Enabled" }] });
+    const config = ofType("AWS::CloudFront::Distribution")[0]?.[2].Properties?.DistributionConfig as { CacheBehaviors: { PathPattern: string }[] };
+    expect(config.CacheBehaviors.map((b) => b.PathPattern).filter((p) => p.includes("transcripts"))).toEqual([]);
+  });
+
+  it("bundles the handler into a self-contained index.js that answers the preflight with CORS for POST, without the table, Bedrock or Transcribe", async () => {
+    const bundle = f.bundle<{ handler: (event: { routeKey: string }) => Promise<{ statusCode: number; headers?: Record<string, string> }> }>();
+    const answer = await quietly(() => bundle.handler({ routeKey: `OPTIONS ${APP_AI_PATH}` }));
+    expect(answer.statusCode).toBe(204);
+    expect(answer.headers).toEqual({ ...AI_PREFLIGHT_HEADERS });
   });
 });

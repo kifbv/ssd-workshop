@@ -77,6 +77,12 @@ import {
   WAF_MEDIA_PATH_TRANSFORMATIONS,
   WAF_MEDIA_PREFLIGHT_RATE_LIMIT,
   WAF_MEDIA_PREFLIGHT_RATE_METHOD,
+  WAF_AI_PATH_SUFFIX,
+  WAF_AI_RATE_BODY,
+  WAF_AI_RATE_BODY_KEY,
+  WAF_AI_RATE_LIMIT,
+  WAF_AI_RATE_METHODS,
+  WAF_AI_RATE_RULE_NAME,
   WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME,
   WAF_MEDIA_WRITE_RATE_RULE_NAME,
   WAF_RATE_WINDOW_SECONDS,
@@ -162,7 +168,8 @@ export class EdgeStack extends Stack {
       corsBehavior: {
         accessControlAllowOrigins: ["*"],
         accessControlAllowCredentials: false,
-        accessControlAllowMethods: ["GET", "PUT", "DELETE"],
+        // Ticket 3.21 (policy v3): the AI tasks are a POST.
+        accessControlAllowMethods: ["GET", "PUT", "DELETE", "POST"],
         // Ticket 3.24 (policy v2): writes carry `Authorization: Bearer <app write token>`; still never credentials.
         accessControlAllowHeaders: ["content-type", "accept", "authorization"],
         accessControlMaxAge: Duration.seconds(600),
@@ -305,12 +312,13 @@ export class EdgeStack extends Stack {
     const webAcl = new CfnWebACL(this, "WebAcl", {
       name: WEB_ACL_NAME,
       scope: "CLOUDFRONT",
-      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX}, ${WAF_MEDIA_PATH_PREFIX} and media uploads and preflights, media writes need a Bearer token`,
+      description: `${PREFIX}: per-address rate limits on ${WAF_API_PATH_PREFIX}, ${WAF_MEDIA_PATH_PREFIX} and media uploads and preflights and AI tasks, media writes need a Bearer token`,
       defaultAction: { allow: {} },
       customResponseBodies: {
         [WAF_BLOCK_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_BLOCK_BODY },
         [WAF_MEDIA_AUTH_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_AUTH_BODY },
         [WAF_MEDIA_WRITE_RATE_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_MEDIA_WRITE_RATE_BODY },
+        [WAF_AI_RATE_BODY_KEY]: { contentType: "APPLICATION_JSON", content: WAF_AI_RATE_BODY },
       },
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WEB_ACL_NAME, sampledRequestsEnabled: true },
       rules: [
@@ -519,6 +527,58 @@ export class EdgeStack extends Stack {
             },
           },
           visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_MEDIA_PREFLIGHT_RATE_RULE_NAME, sampledRequestsEnabled: true },
+        },
+        // Ticket 3.21: AI tasks per address, so one address cannot hold the AI route's shared throttles at 429 for every
+        // app (see WAF_AI_RATE_LIMIT).
+        {
+          name: WAF_AI_RATE_RULE_NAME,
+          priority: 5,
+          action: {
+            block: {
+              customResponse: {
+                responseCode: WAF_BLOCK_STATUS,
+                customResponseBodyKey: WAF_AI_RATE_BODY_KEY,
+                responseHeaders: [{ name: "access-control-allow-origin", value: "*" }],
+              },
+            },
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: WAF_AI_RATE_LIMIT,
+              evaluationWindowSec: WAF_RATE_WINDOW_SECONDS,
+              aggregateKeyType: "IP",
+              scopeDownStatement: {
+                andStatement: {
+                  statements: [
+                    {
+                      orStatement: {
+                        statements: WAF_AI_RATE_METHODS.map((method) => ({
+                          byteMatchStatement: { fieldToMatch: { method: {} }, positionalConstraint: "EXACTLY", searchString: method, textTransformations: [{ priority: 0, type: "NONE" }] },
+                        })),
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "STARTS_WITH",
+                        searchString: WAF_MEDIA_API_PREFIX,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: "ENDS_WITH",
+                        searchString: WAF_AI_PATH_SUFFIX,
+                        textTransformations: WAF_MEDIA_PATH_TRANSFORMATIONS,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: WAF_AI_RATE_RULE_NAME, sampledRequestsEnabled: true },
         },
       ],
     });

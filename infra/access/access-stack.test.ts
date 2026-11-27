@@ -7,6 +7,9 @@ import { parse, type Scalar, type ScalarTag, type CollectionTag, type YAMLSeq } 
 import {
   ACCOUNT,
   AI_WORKER_FUNCTION_NAME,
+  APP_AI_FUNCTION_NAME,
+  APP_AI_ROLE_ARN,
+  APP_MEDIA_BUCKET_NAME,
   APPS_BUCKET_NAME,
   ASSETS_BUCKET_NAME,
   BUILD_CHECK_QUEUE_NAME,
@@ -172,10 +175,12 @@ const BOUNDARY_ALLOW_LIST: Record<string, string> = {
   "Bedrock/bedrock:InvokeModel": "calls Anthropic models only; no resource is changed",
   "Bedrock/bedrock:InvokeModelWithResponseStream": "calls Anthropic models only; no resource is changed",
   "SendCodes/ses:SendEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop-email configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
-  "SendCodes/ses:SendRawEmail": "identities ssd-workshop@rankly.games and rankly.games and the ssd-workshop-email configuration set only, sender pinned by ses:FromAddress (sesScopeGaps)",
   "AccountWideServiceCalls/ecr:GetAuthorizationToken": "account-wide registry login token; image pulls stay scoped to ssd-workshop-* repositories",
   "AccountWideServiceCalls/xray:PutTraceSegments": "X-Ray has no resource scope; writes trace data only",
   "AccountWideServiceCalls/ecs:ListTasks": "returns task ARNs only (no overrides); the launcher's own grant is limited to the builds cluster with ecs:cluster (ticket 3.14, Franck's yes 2026-11-26)",
+  "Transcribe/transcribe:StartTranscriptionJob": "names no resource (Service Authorization Reference); this region only; the AI function's role limits its output to the media bucket's transcripts/ (ticket 3.21)",
+  "Transcribe/transcribe:GetTranscriptionJob": "this region only; the AI function's role names its own jobs, ssd-workshop-app-ai-* (ticket 3.21)",
+  "Transcribe/transcribe:DeleteTranscriptionJob": "this region only; the AI function's role names its own jobs, ssd-workshop-app-ai-* (ticket 3.21)",
   "WorkshopMetrics/cloudwatch:PutMetricData": "limited by cloudwatch:namespace to ssd-workshop",
   "K3sNodeChannels/ssmmessages:*": "Session Manager channels of the calling instance; no resource scope exists",
   "K3sNodeChannels/ec2messages:*": "Run Command channel of the calling instance; no resource scope exists",
@@ -2320,5 +2325,71 @@ describe("access stack: ECR Public login for the deploy workflow (ticket 2.9 fol
     }
     expect(JSON.stringify(template.Resources.DeployRole?.Properties.ManagedPolicyArns)).toContain("DeployPolicyEc2");
     expect(JSON.stringify(template.Resources.ClaudeUser?.Properties.ManagedPolicyArns)).not.toContain("DeployPolicyEc2");
+  });
+});
+
+describe("ticket 3.21: Amazon Transcribe for the AI tasks", () => {
+  const deploy = deployStatements(template);
+  const boundary = boundaryStatements(template);
+  const claude = [...statements(template, "DeployPolicyRead"), ...statements(template, "SessionPolicy")];
+  const TRANSCRIBE = ["transcribe:StartTranscriptionJob", "transcribe:GetTranscriptionJob", "transcribe:DeleteTranscriptionJob"];
+  const JOB = `arn:aws:transcribe:${REGION}:${ACCOUNT}:transcription-job/ssd-workshop-app-ai-ada-42-AbCdEfGhIjKlMnOpQrStUv`;
+  // The test reads a `!Ref X` value as "Ref:X" (see the launcher tests above).
+  const AI = { "aws:PrincipalArn": APP_AI_ROLE_ARN, "aws:RequestedRegion": REGION, "aws:ResourceAccount": "Ref:AWS::AccountId" };
+
+  it("WHEN the access stack is checked THEN the boundary allows the AI function's role only StartTranscriptionJob, GetTranscriptionJob and DeleteTranscriptionJob, in eu-central-1 only", () => {
+    expect(APP_AI_ROLE_ARN).toBe(`arn:aws:iam::${ACCOUNT}:role${IAM_PATH}${APP_AI_FUNCTION_NAME}`);
+    for (const action of TRANSCRIBE) {
+      expect(allowedBy(boundary, action, action.endsWith("StartTranscriptionJob") ? "*" : JOB, AI), action).toBe(true);
+      expect(allowedBy(boundary, action, JOB, { ...AI, "aws:RequestedRegion": "us-east-1" }), `${action} us-east-1`).toBe(false);
+      expect(allowedBy(boundary, action, JOB, { ...AI, "aws:RequestedRegion": "eu-west-1" }), `${action} eu-west-1`).toBe(false);
+    }
+    for (const action of [
+      "transcribe:StartMedicalTranscriptionJob",
+      "transcribe:ListTranscriptionJobs",
+      "transcribe:StartStreamTranscription",
+      "transcribe:CreateVocabulary",
+      "transcribe:StartCallAnalyticsJob",
+      "transcribe:TagResource",
+    ]) {
+      expect(allowedBy(boundary, action, "*", AI), action).toBe(false);
+    }
+    const transcribeStatements = boundary.filter((st) => JSON.stringify(st).includes("transcribe:"));
+    expect(transcribeStatements.map((st) => st.Sid)).toEqual(["Transcribe"]);
+    expect(list(transcribeStatements[0]?.Action)).toEqual(TRANSCRIBE);
+  });
+
+  it("WHEN the access stack is checked THEN the boundary lets the role read the media bucket and write its transcripts/ prefix (S3 on ssd-workshop-* in this account)", () => {
+    expect(allowedBy(boundary, "s3:GetObject", `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/app-media/ada-42/x`, AI)).toBe(true);
+    expect(allowedBy(boundary, "s3:PutObject", `arn:aws:s3:::${APP_MEDIA_BUCKET_NAME}/transcripts/ada-42/x.json`, AI)).toBe(true);
+    expect(allowedBy(boundary, "s3:PutObject", "arn:aws:s3:::someone-elses-bucket/transcripts/x.json", AI)).toBe(false);
+  });
+
+  it("the deploy policies grant no Transcribe action (CloudFormation creates no Transcribe resource) and the Claude user none either", () => {
+    for (const action of [...TRANSCRIBE, "transcribe:ListTranscriptionJobs"]) {
+      expect(allowedBy(deploy, action, "*", { "aws:RequestedRegion": REGION }), action).toBe(false);
+      expect(allowedBy(deploy, action, JOB, { "aws:RequestedRegion": REGION }), action).toBe(false);
+      expect(allowedBy(claude, action, JOB, { "aws:PrincipalArn": `arn:aws:iam::${ACCOUNT}:user/ssd-workshop-claude`, "aws:RequestedRegion": REGION }), action).toBe(false);
+    }
+  });
+
+  it("the boundary's launcher-only key read (role*/ form, compacted for room) still lets only the launcher through, look-alikes refused", () => {
+    const read = "secretsmanager:GetSecretValue";
+    const SECRET = `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:ssd-workshop-github-app-key-AbCdEf`;
+    for (const role of [BUILD_LAUNCHER_ROLE_ARN, `arn:aws:iam::${ACCOUNT}:role/${BUILD_LAUNCHER_FUNCTION_NAME}`]) {
+      expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": role }), role).toBe(true);
+    }
+    for (const name of [`x-${BUILD_LAUNCHER_FUNCTION_NAME}`, `${BUILD_LAUNCHER_FUNCTION_NAME}x`, `${BUILD_LAUNCHER_FUNCTION_NAME}-execution`, APP_AI_FUNCTION_NAME]) {
+      for (const role of [`arn:aws:iam::${ACCOUNT}:role/ssd-workshop/${name}`, `arn:aws:iam::${ACCOUNT}:role/${name}`]) {
+        expect(allowedBy(boundary, read, SECRET, { "aws:PrincipalArn": role }), role).toBe(false);
+      }
+    }
+  });
+
+  it("drops ses:SendRawEmail from the boundary (no platform code sends raw email); SendEmail stays as it was", () => {
+    const ctx = { "ses:FromAddress": "ssd-workshop@rankly.games" };
+    const identity = `arn:aws:ses:${REGION}:${ACCOUNT}:identity/ssd-workshop@rankly.games`;
+    expect(allowedBy(boundary, "ses:SendEmail", identity, ctx)).toBe(true);
+    expect(allowedBy(boundary, "ses:SendRawEmail", identity, ctx)).toBe(false);
   });
 });
