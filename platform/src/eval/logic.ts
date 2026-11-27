@@ -21,14 +21,17 @@ Suites:
                off-path examples must be declined, in-scope ones pass, unusual ones are flagged
   clarify      every example in platform/api/eval/clarify.json through the real step 1 answer call:
                a first reply holds 3 to 5 numbered questions (and names its mentions, none of its
-               avoids), a changed idea gets questions about
+               avoids, and each atMostOnce word at most once: ticket 3.20's photo reminder), a changed
+               idea gets questions about
                the new idea only, and a fully answered idea gets the offer to write the spec
   spec         every example in platform/api/eval/spec.json through the real step 2 answer call:
                a new spec has the sections and a Mermaid diagram that parses and draws (Mermaid in
                Chromium, the page's own diagram.js), a question leaves the spec unchanged, and a
                change request gives a new version
-  readiness    every approved spec in platform/api/eval/readiness.json through the real readiness check:
-               the workshop's four example specs and specs reading a free keyless service pass, and specs
+  readiness    every approved spec in platform/api/eval/readiness.json, then platform/api/eval/build.json's
+               photo and voice specs (ticket 3.20), through the real readiness check: the workshop's four
+               example specs, specs reading a free keyless service and apps keeping photos or voice messages
+               pass, and specs
                needing a login, a payment, an outside service (a key, a sign-in elsewhere, emails,
                notifications, AI) or a server, or leaving a question open, fail with a reason that names it
   build        the readiness file's four workshop example specs through the real runner and coding agent
@@ -232,6 +235,8 @@ export interface ClarifyExample {
   avoids: string[];
   /** Any check (ticket 3.16): for each group, the reply names at least one of its words (start of a word, any case). */
   mentionsEach?: string[][];
+  /** Any check (ticket 3.20): each of these words is named at most once (start of a word, any case): a reminder said once. */
+  atMostOnce?: string[];
 }
 
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim() !== "");
@@ -248,7 +253,7 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
   if (!Array.isArray(examples) || examples.length === 0) return { error: "the examples file has no examples list" };
   const result: ClarifyExample[] = [];
   for (const [i, e] of examples.entries()) {
-    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [], avoids = [], mentionsEach = [] } = (e ?? {}) as Record<string, unknown>;
+    const { name, check, history = [], text, newKeywords = [], oldKeywords = [], mentions = [], avoids = [], mentionsEach = [], atMostOnce = [] } = (e ?? {}) as Record<string, unknown>;
     const historyOk =
       Array.isArray(history) &&
       history.every((h) => {
@@ -266,16 +271,20 @@ export function parseClarifyExamples(json: string): ClarifyExample[] | { error: 
       !isStringList(oldKeywords) ||
       !isStringList(mentions) ||
       !isStringList(avoids) ||
+      !isStringList(atMostOnce) ||
       !Array.isArray(mentionsEach) ||
       !mentionsEach.every((group) => isStringList(group) && group.length > 0) ||
       (check === "answers-question" && (history as unknown[]).length === 0) ||
       (check === "change-of-mind" && (newKeywords.length === 0 || oldKeywords.length === 0 || (history as unknown[]).length === 0));
     if (bad) {
       return {
-        error: `example ${i + 1} needs a name, a check (first-reply, change-of-mind, offers-spec or answers-question), a text, a history of question/answer pairs, for change-of-mind and answers-question a history, for change-of-mind new and old keywords, and mentionsEach as non-empty word lists`,
+        error: `example ${i + 1} needs a name, a check (first-reply, change-of-mind, offers-spec or answers-question), a text, a history of question/answer pairs, for change-of-mind and answers-question a history, for change-of-mind new and old keywords, mentionsEach as non-empty word lists, and atMostOnce as a word list`,
       };
     }
-    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions, avoids, ...(mentionsEach.length > 0 ? { mentionsEach: mentionsEach as string[][] } : {}) });
+    result.push({ name, check: check as ClarifyCheck, history: history as Exchange[], text, newKeywords, oldKeywords, mentions, avoids,
+      ...(mentionsEach.length > 0 ? { mentionsEach: mentionsEach as string[][] } : {}),
+      ...(atMostOnce.length > 0 ? { atMostOnce } : {}),
+    });
   }
   return result;
 }
@@ -293,6 +302,8 @@ export function numberedItems(text: string): { number: number; text: string }[] 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** The word starts with the keyword ("water" matches "watering"). */
 const startsWord = (text: string, keyword: string): boolean => new RegExp(`\\b${escapeRegExp(keyword)}`, "i").test(text);
+/** How many words start with the keyword (ticket 3.20). */
+const countWords = (text: string, keyword: string): number => text.match(new RegExp(`\\b${escapeRegExp(keyword)}`, "gi"))?.length ?? 0;
 /** The keyword as a whole word, plural allowed ("film" matches "films", "rate" does not match "separate"). */
 const wholeWord = (text: string, keyword: string): boolean => new RegExp(`\\b${escapeRegExp(keyword)}(s|es)?\\b`, "i").test(text);
 
@@ -331,6 +342,8 @@ export function scoreClarify(example: ClarifyExample, answer: Pick<ClarifyAnswer
   for (const group of example.mentionsEach ?? []) {
     if (!group.some((k) => startsWord(answer.text, k))) problems.push(`never mentions (${group.join(", ")})`);
   }
+  const repeated = (example.atMostOnce ?? []).map((k) => [k, countWords(answer.text, k)] as const).filter(([, n]) => n > 1);
+  if (repeated.length > 0) problems.push(`says more than once (${repeated.map(([k, n]) => `${k} ${n} times`).join(", ")})`);
   const avoided = example.avoids.filter((k) => startsWord(answer.text, k));
   if (avoided.length > 0) problems.push(`says what it should not (${avoided.join(", ")})`);
   if (example.check === "change-of-mind") {
@@ -579,6 +592,18 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
     result.push({ name, category, expected, spec, keywords, ...(languageWords.length > 0 ? { languageWords } : {}), ...(typeof participantText === "string" ? { participantText } : {}) });
   }
   return result;
+}
+
+/**
+ * The readiness suite's examples (ticket 3.20): the readiness file's, then the build file's media specs (a photo gallery,
+ * voice messages), which the builder is proved to build, so the check must let them through. An error names the file.
+ */
+export function readinessSuiteExamples(readinessJson: string, buildJson: string): ReadinessExample[] | { error: string } {
+  const readiness = parseReadinessExamples(readinessJson);
+  if ("error" in readiness) return { error: `readiness.json: ${readiness.error}` };
+  const build = parseReadinessExamples(buildJson);
+  if ("error" in build) return { error: `build.json: ${build.error}` };
+  return [...readiness, ...build];
 }
 
 export interface ReadinessOutcome {

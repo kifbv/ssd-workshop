@@ -100,7 +100,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
   });
 
   it("asks for numbered questions about a new idea, follows a changed idea and names the marker in the prompt", () => {
-    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v5");
+    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v6");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("3 to 5 questions as a numbered list");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("drop the old idea completely");
     expect(CLARIFY_SYSTEM_PROMPT).toContain(`end your reply with this exact line on its own: ${READY_MARKER}`);
@@ -130,6 +130,17 @@ describe("the ready marker (clarify-v2 and later)", () => {
     expect(CLARIFY_SYSTEM_PROMPT).toContain("never discuss servers, hosting, programming languages or code");
   });
 
+  it("knows apps keep photos and voice messages, not videos, and reminds once about people and confidential papers (clarify-v6, ticket 3.20)", () => {
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("apps can take a photo with the phone's camera or pick one from the phone, and record a voice message with the phone (up to 5 minutes)");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("everyone who has the app's link can see the photos and hear the recordings");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Apps cannot keep videos");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("so it is best not to photograph people or confidential papers");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("if an earlier reply already said it, do not say it again");
+    // The storage facts of clarify-v5 stay.
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Nothing stays only on the participant's phone or browser");
+    expect(CLARIFY_SYSTEM_PROMPT).not.toContain("plain English");
+  });
+
   it("treats a reply that is only the marker as empty (the worker then fails it with the neutral reply)", async () => {
     const model = new FakeModel([{ text: READY_MARKER, inputTokens: 1, outputTokens: 1 }]);
     await expect(answerMessage(model, "clarify", [], "hi")).rejects.toMatchObject({ name: "EmptyAnswer" });
@@ -142,7 +153,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
     const replies = [...must(s.table.replies.get("me-1")).values()];
     expect(replies.map((r) => r.offersSpec)).toEqual([undefined, true]);
     expect(replies[1]?.text).not.toContain("READY");
-    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v5", "clarify-v5"]);
+    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v6", "clarify-v6"]);
     // The history sent to the model holds the stored text, never the marker.
     s.model.push(verdictReply("on-path"), { text: "Sure.", inputTokens: 1, outputTokens: 1 });
     await s.call(send("one more thing"));

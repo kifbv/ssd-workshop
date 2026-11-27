@@ -1,5 +1,5 @@
 {
-  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v4). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example. Ticket 3.16: a spec written in French (with the participant's latest message, `participantText`, sent along for the language) must fail with reasons that each name one of `languageWords` (French) and end with the problem in the agreed form, e.g. \"(outside service)\".",
+  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v5). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example. Ticket 3.16: a spec written in French (with the participant's latest message, `participantText`, sent along for the language) must fail with reasons that each name one of `languageWords` (French) and end with the problem in the agreed form, e.g. \"(outside service)\". Ticket 3.20: an app that keeps photos taken or picked on the phone (category photo) or voice messages (category voice) is ready; an app that uploads videos is not ready, with a reason naming (server). The readiness suite then also runs platform/api/eval/build.json's photo and voice specs, all expected ready.",
   "examples": [
     {
       "name": "fitness tracker (example)",
@@ -179,6 +179,27 @@
       ],
       "participantText": "Parfait, on garde le calcul de nuit.",
       "spec": "# Partage des dépenses\n\n```mermaid\nflowchart TD\n  home[Accueil] -->|ajouter| add[Ajouter une dépense]\n  add -->|enregistre| exp[(Dépenses)]\n  exp -->|soldes| home\n```\n\n## What it does\nUne appli pour partager les dépenses d'un week-end entre amis. Chaque nuit, un programme tourne sur notre propre ordinateur pour recalculer les soldes de tout le monde, même quand personne n'ouvre l'appli.\n\n## Screens\n- Accueil : les soldes de chacun.\n- Ajouter une dépense : qui a payé, combien et pour quoi.\n\n## Data it keeps\n- Dépenses : qui a payé, le montant et la description."
+    },
+    {
+      "name": "a gallery of my drawings, taken with the phone camera, with my own tags",
+      "category": "photo",
+      "expected": "ready",
+      "spec": "# My Drawing Gallery\n\n```mermaid\nflowchart TD\n  gallery[Gallery] -->|add a drawing| add[Add a drawing]\n  add -->|saves the photo and tags| drawings[(Drawings)]\n  drawings -->|thumbnails| gallery\n  gallery -->|pick a tag| tagged[Drawings with a tag]\n  drawings -->|filtered| tagged\n```\n\n## What it does\nA gallery of my drawings. I take a photo of each drawing with the phone camera, or pick one from my phone, and give it my own tags such as portrait, landscape or sketchbook. I can then browse the drawings and see only those with one tag.\n\n## Screens\n- Gallery: thumbnails of all my drawings, newest first, and the list of my tags.\n- Add a drawing: a button to take or pick the photo, a title and the tags.\n- Drawings with a tag: only the drawings with the chosen tag.\n\n## Data it keeps\n- Drawings: the photo, its title, its tags and the day it was added.\n"
+    },
+    {
+      "name": "team voice board by topic",
+      "category": "voice",
+      "expected": "ready",
+      "spec": "# Team Voice Board\n\n```mermaid\nflowchart TD\n  board[Board] -->|record a message| record[Record a message]\n  record -->|saves the recording and topic| messages[(Voice messages)]\n  messages -->|newest first| board\n  board -->|choose a topic| topic[One topic]\n  messages -->|filtered| topic\n```\n\n## What it does\nA board of short voice messages for our team. Someone records a voice message with the phone, up to five minutes, picks a topic such as Ideas, Questions or News, and adds their name. Everyone who opens the app can listen to the messages.\n\n## Screens\n- Board: the messages, newest first, each with its topic, the name and a play button.\n- Record a message: a record and stop button, the topic and the name.\n- One topic: only the messages about the chosen topic.\n\n## Data it keeps\n- Voice messages: the recording, its topic, the name of who recorded it and the day.\n"
+    },
+    {
+      "name": "team videos uploaded from the phone",
+      "category": "server",
+      "expected": "not-ready",
+      "keywords": [
+        "server"
+      ],
+      "spec": "# Team Video Wall\n\n```mermaid\nflowchart TD\n  wall[Video wall] -->|add a video| upload[Upload a video]\n  upload -->|saves the video| videos[(Videos)]\n  videos -->|plays| wall\n```\n\n## What it does\nTeam members film short videos of their projects with the phone and upload them, a few minutes each. Everyone who opens the app can watch the videos on the wall.\n\n## Screens\n- Video wall: the videos, newest first, each with its title and a player.\n- Upload a video: film or pick a video on the phone, give it a title and upload it.\n\n## Data it keeps\n- Videos: the video file, its title and the day it was uploaded.\n"
     }
   ]
 }

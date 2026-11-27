@@ -3,7 +3,9 @@
 // AI has enough it offers to write the spec and ends with READY_MARKER, which is stripped from the
 // stored text and kept as `offersSpec` on the reply. Ticket 3.16 (clarify-v5): the real storage facts (kept by the
 // workshop, shared by everyone with the link, nothing only on the phone), an in-page version of "send" ideas (a
-// message board on the app's page), and replies in the participant's language.
+// message board on the app's page), and replies in the participant's language. Ticket 3.20 (clarify-v6): apps take or pick
+// photos and record voice messages (up to 5 minutes), kept by the workshop and seen by everyone with the link; no videos;
+// one reminder, the first time photos come up, not to photograph people or confidential papers.
 // Step 2 (Spec, ticket 1.9): the spec prompt with the current spec; an answer may carry a whole new
 // version in a `<spec>` block, which is split off the shown text and checked (./spec.ts).
 import type { Step } from "../types.js";
@@ -18,7 +20,7 @@ export const ANSWER_TEMPERATURE = 0.4;
 /** Earlier messages sent along as context, at most (participant and assistant counted separately). */
 export const HISTORY_LIMIT = 20;
 
-export const CLARIFY_PROMPT_VERSION = "clarify-v5";
+export const CLARIFY_PROMPT_VERSION = "clarify-v6";
 
 /** The line the model ends a reply with when it offers to write the spec (never shown to the participant). */
 export const READY_MARKER = "[READY_FOR_SPEC]";
@@ -33,6 +35,7 @@ How to reply:
 - Apps can show information from free public services that need no key: for example summaries and pictures from Wikipedia (film posters included), books and covers from Open Library, weather from Open-Meteo, exchange rates from Frankfurter, TV shows from TVMaze, facts about countries from REST Countries. When the idea wants such information, that is fine: say in plain words where it can come from (for example "the posters can come from Wikipedia, which is free and needs no key"). Apps cannot use services that need a key, an account or a sign-in, or that cost money, and cannot send emails, texts or notifications. When the idea needs one of those, say so kindly in one plain sentence right after your restatement, suggest a free service that needs no key or that people type the information in themselves, and keep going. Never send them away or stop because of it. Never ask technical questions about services, addresses, keys or APIs: you pick the source.
 - When the idea sends emails, texts or notifications (reminders, announcements, messages to a list of people), offer a version people read on the app's own page instead: for example a message board on the page where the messages are posted and everyone who opens the app reads them. Then ask your questions about that version. Never ask for email addresses, phone numbers or contact lists, and never ask about mail servers or sending.
 - Where the app's information is kept: the workshop keeps it for the app, in the workshop's own storage, and everyone who has the app's link (its address) sees the same information and can change it; there are no personal accounts. Nothing stays only on the participant's phone or browser: apps cannot keep anything in the phone's or the browser's own storage. When the participant asks where their data is kept, or wants it private or only on their phone, say this plainly. Never promise that anything stays on their phone, is private, or is seen only by them.
+- Photos and voice messages: apps can take a photo with the phone's camera or pick one from the phone, and record a voice message with the phone (up to 5 minutes). The workshop keeps them with the app, like the other information (photos are made smaller and their location data is removed), and everyone who has the app's link can see the photos and hear the recordings. Apps cannot keep videos: suggest photos or voice messages instead. When the idea takes photos, remind the participant once, in one short sentence, that anyone with the app's link can see the photos, so it is best not to photograph people or confidential papers. Say it only the first time photos come up: if an earlier reply already said it, do not say it again.
 - If the participant asks something about the workshop or a word you used, answer it in plain language, then continue.
 - A short spec only needs the big picture. Never ask about small details (units, the first day of the week, whether old entries are kept, wording, colours, sorting, edge cases): the spec picks sensible defaults for them, and the participant can change them in step 2.
 - As soon as you know who it is for, the main things it does, the information it keeps, and what the first version leaves out, or when the participant asks for the spec, you have enough: do not ask any more questions, not even "just one more thing" (whether past entries are listed, whether a total is all-time or weekly, and similar points are details the spec decides). Instead: summarise the app in two or three short sentences, say you have enough to write the spec, and tell them to press the "Write my spec" button when they are ready (they can still add details first). Then end your reply with this exact line on its own: ${READY_MARKER}

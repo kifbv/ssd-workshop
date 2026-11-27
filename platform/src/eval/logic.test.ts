@@ -43,6 +43,7 @@ import {
   formatReadinessResult,
   formatReadinessSummary,
   parseReadinessExamples,
+  readinessSuiteExamples,
   runReadinessEval,
   scoreReadiness,
   formatSuggestionsResult,
@@ -153,6 +154,8 @@ describe("clarify.json (ticket 1.8 criteria 1 and 2)", () => {
       "movies with posters from a free API",
       "reminders sent by email",
       "idea in French",
+      "drawing gallery with phone photos",
+      "photo idea in French",
     ]);
     // Ticket 2.14: the outside-service idea must hear about a free service that needs no key, never that it is impossible,
     // and get no technical question.
@@ -261,6 +264,14 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       { text: `Friday reminders, shown on the app's page as a board your team opens.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
       { text: "No: the workshop keeps it, and anyone with the app's link can see it.\n1. What can wait?", inputTokens: 100, outputTokens: 50 },
       { text: "Un suivi des plantes du bureau.\n1. Qui va arroser vos plantes ?\n2. Quoi noter ?\n3. Quels rappels ?", inputTokens: 100, outputTokens: 50 },
+      // Ticket 3.20: the photo reminder, said once; then not again; then in French.
+      { text: `A gallery of your drawings. Anyone with the link can see the photos, so avoid photographing people or confidential papers.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
+      { text: "Yes, you can pick photos already on your phone.\n1. What can wait?", inputTokens: 100, outputTokens: 50 },
+      {
+        text: "Des photos des tableaux blancs. Tout le monde avec le lien voit les photos : évitez de photographier des personnes ou des documents confidentiels.\n1. Qui ?\n2. Quels projets ?\n3. Quoi d'autre ?",
+        inputTokens: 100,
+        outputTokens: 50,
+      },
     ]);
     const seen: string[] = [];
     const results = await runClarifyEval(
@@ -271,7 +282,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       },
       (r, i) => seen.push(formatClarifyResult(r, i)),
     );
-    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true]);
+    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true, true, true, true]);
     expect(results[2]?.detail).toBe("error Error");
     // The history goes to the model before the new message.
     expect(model.requests[3]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
@@ -279,12 +290,12 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
     expect(seen[0]).toContain("     | 1. Who is it for?");
     expect(seen[4]).toContain("(offers to write the spec)");
     expect(formatClarifySummary(results)).toEqual([
-      "Clarify: 8/9 passed",
-      `Tokens: 800 in, 400 out, cost $${usageOf({ inputTokens: 800, outputTokens: 400 }).costUsd.toFixed(4)}`,
-      "  first-reply: 5/6",
+      "Clarify: 11/12 passed",
+      `Tokens: 1100 in, 550 out, cost $${usageOf({ inputTokens: 1100, outputTokens: 550 }).costUsd.toFixed(4)}`,
+      "  first-reply: 7/8",
       "  change-of-mind: 1/1",
       "  offers-spec: 1/1",
-      "  answers-question: 1/1",
+      "  answers-question: 2/2",
     ]);
     expect(exitCode(results)).toBe(1);
     expect(exitCode(results.filter((r) => r.pass))).toBe(0);
@@ -309,6 +320,8 @@ describe("spec suite (ticket 1.9)", () => {
       ["keeps-spec", "question about the diagram"],
       ["keeps-spec", "question about a word"],
       ["new-spec", "change: add a screen"],
+      ["new-spec", "drawing gallery: first spec"],
+      ["new-spec", "voice messages: first spec"],
     ]);
     expect(parseSpecExamples("{}")).toEqual({ error: "the examples file has no examples list" });
     expect(parseSpecExamples(JSON.stringify({ examples: [{ name: "x", check: "keeps-spec", text: "Why?" }] }))).toHaveProperty("error");
@@ -362,7 +375,7 @@ describe("readiness (ticket 2.7)", () => {
     const examples = parseReadinessExamples(READINESS_FILE);
     if ("error" in examples) throw new Error(examples.error);
     const ready = examples.filter((e) => e.expected === "ready");
-    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example", "example", "free service", "free service"]);
+    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example", "example", "free service", "free service", "photo", "voice"]);
     for (const idea of ["fitness tracker", "movie tracker", "nutrition calculator", "movie watchlist with posters from Wikipedia"]) {
       expect(ready.some((e) => e.name.includes(idea)), idea).toBe(true);
     }
@@ -732,5 +745,70 @@ describe("ticket 3.16 eval cases", () => {
     expect(scoreReadiness(mail, { verdict: "not-ready", reasons: ["Votre spec envoie un e-mail chaque matin (service extérieur)."] }).detail).toContain(
       "no reason names (outside service)",
     );
+  });
+});
+
+describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => {
+  const READINESS_FILE = readFileSync(new URL("../../api/eval/readiness.json", import.meta.url), "utf8");
+  const BUILD_FILE = readFileSync(new URL("../../api/eval/build.json", import.meta.url), "utf8");
+
+  it("clarify: atMostOnce fails a reply that names one of its words twice (the reminder is said once)", () => {
+    const photo = example({ atMostOnce: ["confidential", "people"] });
+    const once = `A drawing gallery. Anyone with the link can see the photos, so avoid photographing people or confidential papers.\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(photo, { text: once, offersSpec: false })).toEqual({ pass: true, detail: "4 numbered questions" });
+    const twice = `${once}\n(Again: no People, nothing Confidential.)`;
+    expect(scoreClarify(photo, { text: twice, offersSpec: false }).detail).toBe("says more than once (confidential 2 times, people 2 times)");
+    // Start of a word, any case: "confidentiality" counts, "unconfidential" does not.
+    expect(scoreClarify(example({ atMostOnce: ["confidential"] }), { text: `Confidential, confidentiality.\n${FOUR_QUESTIONS}`, offersSpec: false }).pass).toBe(false);
+    expect(scoreClarify(example({ atMostOnce: ["confidential"] }), { text: `Confidential, unconfidential.\n${FOUR_QUESTIONS}`, offersSpec: false }).pass).toBe(true);
+    expect(parseClarifyExamples('{"examples":[{"name":"x","check":"first-reply","text":"hi","atMostOnce":[""]}]}')).toMatchObject({ error: expect.stringContaining("example 1") });
+    expect(parseClarifyExamples('{"examples":[{"name":"x","check":"first-reply","text":"hi","atMostOnce":"people"}]}')).toMatchObject({ error: expect.stringContaining("example 1") });
+  });
+
+  it("clarify.json: a photo idea hears once that anyone with the link sees the photos and to avoid people and confidential papers; a later reply does not repeat it", () => {
+    const examples = parseClarifyExamples(CLARIFY_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const gallery = must(examples.find((e) => e.name === "drawing gallery with phone photos"));
+    expect(gallery.check).toBe("first-reply");
+    expect(gallery.mentionsEach).toEqual([
+      ["anyone", "everyone", "everybody", "whoever"],
+      ["link", "address"],
+      ["people", "person", "faces", "someone"],
+      ["confidential", "private", "sensitive", "secret"],
+    ]);
+    expect(gallery.atMostOnce).toEqual(["confidential", "private", "sensitive", "secret"]);
+    const later = must(examples.find((e) => e.name === "photo reminder not repeated"));
+    expect(later.check).toBe("answers-question");
+    expect(later.history.some((h) => /confidential papers/.test(h.answer))).toBe(true);
+    expect(later.avoids).toEqual(expect.arrayContaining(["confidential", "photograph people", "photos of people"]));
+    const french = must(examples.find((e) => e.name === "photo idea in French"));
+    expect(french.mentionsEach?.length).toBe(4);
+  });
+
+  it("readiness.json: the drawing gallery and the voice board are ready, video uploads are not ready with a server reason", () => {
+    const examples = parseReadinessExamples(READINESS_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const gallery = must(examples.find((e) => e.name === "a gallery of my drawings, taken with the phone camera, with my own tags"));
+    expect([gallery.category, gallery.expected]).toEqual(["photo", "ready"]);
+    expect(must(examples.find((e) => e.category === "voice")).expected).toBe("ready");
+    const video = must(examples.find((e) => e.name === "team videos uploaded from the phone"));
+    expect([video.category, video.expected, video.keywords]).toEqual(["server", "not-ready", ["server"]]);
+    expect(scoreReadiness(video, { verdict: "not-ready", reasons: ["Your spec uploads videos; keep photos instead (server)."] }).pass).toBe(true);
+    expect(scoreReadiness(video, { verdict: "not-ready", reasons: ["Your spec uploads videos (outside service)."] }).pass).toBe(false);
+  });
+
+  it("the readiness suite also runs the build file's photo and voice specs (all expected ready); the build suite still builds only the examples", () => {
+    const all = readinessSuiteExamples(READINESS_FILE, BUILD_FILE);
+    if ("error" in all) throw new Error(all.error);
+    const readiness = parseReadinessExamples(READINESS_FILE);
+    const build = parseReadinessExamples(BUILD_FILE);
+    if ("error" in readiness || "error" in build) throw new Error("bad file");
+    expect(all).toEqual([...readiness, ...build]);
+    expect(build.map((e) => [e.category, e.expected])).toEqual([
+      ["photo", "ready"],
+      ["voice", "ready"],
+    ]);
+    expect(readinessSuiteExamples("nope", BUILD_FILE)).toEqual({ error: "readiness.json: the examples file is not JSON" });
+    expect(readinessSuiteExamples(READINESS_FILE, '{"examples":[]}')).toEqual({ error: "build.json: the examples file has no examples list" });
   });
 });

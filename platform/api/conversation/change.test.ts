@@ -184,7 +184,7 @@ async function proposeChart(s: ReturnType<typeof setup>): Promise<string> {
   return json(res)["id"] as string;
 }
 
-describe("the change answer (change-v2)", () => {
+describe("the change answer (change-v3)", () => {
   it("splits the words, the new spec and the What changes list; a question has neither; broken answers throw", () => {
     expect(readChangeAnswer(changeReply(CHART_SPEC, ["Adds a weekly chart screen", "  Keeps   everything\telse "]).text)).toEqual({
       text: "I added a weekly chart.",
@@ -213,6 +213,8 @@ describe("the change answer (change-v2)", () => {
   it("sends the live spec and the open proposal with the change prompt, which shares the spec's format and rules", async () => {
     expect(SPEC_SYSTEM_PROMPT.endsWith(SPEC_FORMAT_AND_RULES)).toBe(true);
     expect(CHANGE_SYSTEM_PROMPT).toContain(SPEC_FORMAT_AND_RULES);
+    // Ticket 3.20: the shared rules learned about photos and voice messages, so the change prompt's version moved too.
+    expect(CHANGE_PROMPT_VERSION).toBe("change-v3");
     const model = new FakeModel([changeReply(PACE_SPEC, ["Shows the pace of each run"])]);
     const answer = await answerChange(model, [{ question: "q", answer: "a" }], "also show my pace", SPEC, CHART_SPEC);
     const request = must(model.requests[0]);
