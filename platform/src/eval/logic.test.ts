@@ -160,6 +160,8 @@ describe("clarify.json (ticket 1.8 criteria 1 and 2)", () => {
       "idea in French",
       "drawing gallery with phone photos",
       "photo idea in French",
+      "team prototype gallery: may offer suggested tags",
+      "team chatbot: steered to answers people write",
     ]);
     // Ticket 2.14: the outside-service idea must hear about a free service that needs no key, never that it is impossible,
     // and get no technical question.
@@ -276,6 +278,9 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
         inputTokens: 100,
         outputTokens: 50,
       },
+      // Ticket 3.23: the AI may suggest tags; a chatbot becomes questions and answers people write.
+      { text: "Paper prototypes in a gallery.\n1. Should the AI suggest tags for each photo, which you can keep or change?\n2. Who adds them?\n3. What can wait?", inputTokens: 100, outputTokens: 50 },
+      { text: `The workshop's AI cannot chat, but a page of questions and answers your team writes works.\n${FOUR_QUESTIONS}`, inputTokens: 100, outputTokens: 50 },
     ]);
     const seen: string[] = [];
     const results = await runClarifyEval(
@@ -286,7 +291,7 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
       },
       (r, i) => seen.push(formatClarifyResult(r, i)),
     );
-    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true, true, true, true]);
+    expect(results.map((r) => r.pass)).toEqual([true, true, false, true, true, true, true, true, true, true, true, true, true, true]);
     expect(results[2]?.detail).toBe("error Error");
     // The history goes to the model before the new message.
     expect(model.requests[3]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
@@ -294,9 +299,9 @@ describe("runClarifyEval (fake model through the real answer call)", () => {
     expect(seen[0]).toContain("     | 1. Who is it for?");
     expect(seen[4]).toContain("(offers to write the spec)");
     expect(formatClarifySummary(results)).toEqual([
-      "Clarify: 11/12 passed",
-      `Tokens: 1100 in, 550 out, cost $${usageOf({ inputTokens: 1100, outputTokens: 550 }).costUsd.toFixed(4)}`,
-      "  first-reply: 7/8",
+      "Clarify: 13/14 passed",
+      `Tokens: 1300 in, 650 out, cost $${usageOf({ inputTokens: 1300, outputTokens: 650 }).costUsd.toFixed(4)}`,
+      "  first-reply: 9/10",
       "  change-of-mind: 1/1",
       "  offers-spec: 1/1",
       "  answers-question: 2/2",
@@ -326,6 +331,7 @@ describe("spec suite (ticket 1.9)", () => {
       ["new-spec", "change: add a screen"],
       ["new-spec", "drawing gallery: first spec"],
       ["new-spec", "voice messages: first spec"],
+      ["new-spec", "sketch wall with suggested tags: first spec"],
     ]);
     expect(parseSpecExamples("{}")).toEqual({ error: "the examples file has no examples list" });
     expect(parseSpecExamples(JSON.stringify({ examples: [{ name: "x", check: "keeps-spec", text: "Why?" }] }))).toHaveProperty("error");
@@ -379,7 +385,7 @@ describe("readiness (ticket 2.7)", () => {
     const examples = parseReadinessExamples(READINESS_FILE);
     if ("error" in examples) throw new Error(examples.error);
     const ready = examples.filter((e) => e.expected === "ready");
-    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example", "example", "free service", "free service", "photo", "voice"]);
+    expect(ready.map((e) => e.category)).toEqual(["example", "example", "example", "example", "free service", "free service", "photo", "voice", "ai"]);
     for (const idea of ["fitness tracker", "movie tracker", "nutrition calculator", "movie watchlist with posters from Wikipedia"]) {
       expect(ready.some((e) => e.name.includes(idea)), idea).toBe(true);
     }
@@ -393,6 +399,16 @@ describe("readiness (ticket 2.7)", () => {
     for (const category of ["login", "payment", "outside service", "open question"]) expect(failing, category).toContain(category);
     // Every failing example's keywords include its category's own word, so a passing reason names it.
     for (const e of examples.filter((x) => x.expected === "not-ready")) expect(e.keywords.join(" ").toLowerCase(), e.name).toContain(e.category.split(" ")[0]);
+  });
+
+  it("readiness.json (ticket 3.23): an app using an AI task the workshop offers is ready; a chatbot, written texts and read business cards are outside services", () => {
+    const examples = parseReadinessExamples(READINESS_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const byName = (name: string) => must(examples.find((e) => e.name === name));
+    expect(byName("an expense log that reads the total from a receipt photo")).toMatchObject({ category: "ai", expected: "ready" });
+    for (const name of ["a chatbot that answers questions about our team", "a newsletter whose texts the AI writes for me", "contact list read from business card photos"]) {
+      expect(byName(name), name).toMatchObject({ category: "outside service", expected: "not-ready", keywords: ["outside service"] });
+    }
   });
 
   it("refuses a malformed file or a spec of the wrong shape", () => {
@@ -846,6 +862,23 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     expect(scoreClarify(french, { text: frenchNoReminder, offersSpec: false }).detail).toContain("never mentions (photographier des personnes");
   });
 
+  it("clarify.json (ticket 3.23): a gallery hears the AI can suggest tags; a chatbot is steered to written answers, as phrases", () => {
+    const examples = parseClarifyExamples(CLARIFY_FILE);
+    if ("error" in examples) throw new Error(examples.error);
+    const gallery = must(examples.find((e) => e.name === "team prototype gallery: may offer suggested tags"));
+    const offer = (line: string): string => `Paper prototypes in a gallery.\n1. ${line}\n2. Who adds them?\n3. What can wait?`;
+    expect(scoreClarify(gallery, { text: offer("Should the workshop's AI suggest tags for each photo, which you can keep or change?"), offersSpec: false }).pass).toBe(true);
+    expect(scoreClarify(gallery, { text: offer("Would you like tag suggestions from the AI?"), offersSpec: false }).pass).toBe(true);
+    // Tags typed by hand alone are not the offer.
+    expect(scoreClarify(gallery, { text: offer("Which tags do you want to add?"), offersSpec: false }).detail).toContain("never mentions (suggest tags");
+    const chatbot = must(examples.find((e) => e.name === "team chatbot: steered to answers people write"));
+    const steer = (line: string): string => `Holiday rules for colleagues. ${line}\n${FOUR_QUESTIONS}`;
+    expect(scoreClarify(chatbot, { text: steer("The AI cannot chat, but a page of questions and answers your team writes works."), offersSpec: false }).pass).toBe(true);
+    // The false claim fails even with the steer.
+    expect(scoreClarify(chatbot, { text: steer("A page of questions and answers, and the AI can answer the rest."), offersSpec: false }).detail).toContain("says what it should not");
+    expect(scoreClarify(chatbot, { text: steer("A page about holidays."), offersSpec: false }).detail).toContain("never mentions (questions and answers");
+  });
+
   it("readiness.json: the drawing gallery and the voice board are ready, video uploads are not ready with a server reason", () => {
     const examples = parseReadinessExamples(READINESS_FILE);
     if ("error" in examples) throw new Error(examples.error);
@@ -858,14 +891,15 @@ describe("ticket 3.20: the AI knows apps can keep photos and recordings", () => 
     expect(scoreReadiness(video, { verdict: "not-ready", reasons: ["Your spec uploads videos (outside service)."] }).pass).toBe(false);
   });
 
-  it("the readiness suite also runs the build file's photo and voice specs (all expected ready); the build suite still builds only the examples", () => {
+  it("the readiness suite also runs every build file spec, the AI ones included (all expected ready); the build suite still builds only the examples", () => {
     const all = readinessSuiteExamples(READINESS_FILE, BUILD_FILE);
     if ("error" in all) throw new Error(all.error);
     const readiness = parseReadinessExamples(READINESS_FILE);
     const build = parseReadinessExamples(BUILD_FILE);
     if ("error" in readiness || "error" in build) throw new Error("bad file");
-    // Ticket 3.22: not the AI cases (the readiness prompt learns the AI tasks in ticket 3.23).
-    expect(all).toEqual([...readiness, ...build.filter((e) => aiKindOf(e.category) === undefined)]);
+    // Ticket 3.23: the readiness prompt knows the AI tasks, so the build file's AI cases (ticket 3.22) join the suite.
+    expect(all).toEqual([...readiness, ...build]);
+    expect(all.filter((e) => aiKindOf(e.category) !== undefined).map((e) => e.name)).toEqual(["sketch wall with suggested tags (AI)", "expense log that reads receipts (AI)"]);
     expect(build.map((e) => [e.category, e.expected])).toEqual([
       ["photo", "ready"],
       ["voice", "ready"],

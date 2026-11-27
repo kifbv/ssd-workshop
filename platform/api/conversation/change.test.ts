@@ -184,7 +184,7 @@ async function proposeChart(s: ReturnType<typeof setup>): Promise<string> {
   return json(res)["id"] as string;
 }
 
-describe("the change answer (change-v3)", () => {
+describe("the change answer (change-v4)", () => {
   it("splits the words, the new spec and the What changes list; a question has neither; broken answers throw", () => {
     expect(readChangeAnswer(changeReply(CHART_SPEC, ["Adds a weekly chart screen", "  Keeps   everything\telse "]).text)).toEqual({
       text: "I added a weekly chart.",
@@ -213,8 +213,10 @@ describe("the change answer (change-v3)", () => {
   it("sends the live spec and the open proposal with the change prompt, which shares the spec's format and rules", async () => {
     expect(SPEC_SYSTEM_PROMPT.endsWith(SPEC_FORMAT_AND_RULES)).toBe(true);
     expect(CHANGE_SYSTEM_PROMPT).toContain(SPEC_FORMAT_AND_RULES);
-    // Ticket 3.20: the shared rules learned about photos and voice messages, so the change prompt's version moved too.
-    expect(CHANGE_PROMPT_VERSION).toBe("change-v3");
+    // Ticket 3.20: the shared rules learned about photos and voice messages, so the change prompt's version moved too;
+    // ticket 3.23: they learned the AI tasks, and the change prompt's own list of what cannot be built names other AI.
+    expect(CHANGE_PROMPT_VERSION).toBe("change-v4");
+    expect(CHANGE_SYSTEM_PROMPT).toContain("AI other than the workshop's four AI tasks (a chat, writing texts, answering free questions)");
     const model = new FakeModel([changeReply(PACE_SPEC, ["Shows the pace of each run"])]);
     const answer = await answerChange(model, [{ question: "q", answer: "a" }], "also show my pace", SPEC, CHART_SPEC);
     const request = must(model.requests[0]);

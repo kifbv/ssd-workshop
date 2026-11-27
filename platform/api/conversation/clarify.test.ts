@@ -100,7 +100,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
   });
 
   it("asks for numbered questions about a new idea, follows a changed idea and names the marker in the prompt", () => {
-    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v6");
+    expect(CLARIFY_PROMPT_VERSION).toBe("clarify-v7");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("3 to 5 questions as a numbered list");
     expect(CLARIFY_SYSTEM_PROMPT).toContain("drop the old idea completely");
     expect(CLARIFY_SYSTEM_PROMPT).toContain(`end your reply with this exact line on its own: ${READY_MARKER}`);
@@ -143,6 +143,20 @@ describe("the ready marker (clarify-v2 and later)", () => {
     expect(CLARIFY_SYSTEM_PROMPT).not.toContain("plain English");
   });
 
+  it("may offer the workshop's four AI tasks, as suggestions the person keeps or changes, and nothing else with AI (clarify-v7, ticket 3.23)", () => {
+    expect(CLARIFY_SYSTEM_PROMPT).toContain(
+      "apps may use it for four tasks only: suggest tags for a photo, read named fields from a photo (a receipt's shop, date and total, a label's text), sort a text into categories, and turn a voice recording into text",
+    );
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("the person sees the suggestion and keeps or changes it before it is saved");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("you may offer this in one of your questions");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("Should the AI suggest tags for each photo, which you can keep or change?");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("no chat or chatbot, no writing or rewriting texts, no answering free questions, and it never reads business cards or other people's contact details");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("when the AI is not available, people type it themselves");
+    // 3.20's lessons stay: no sign-in claim of its own, the photo reminder and the storage facts.
+    expect(CLARIFY_SYSTEM_PROMPT).not.toContain("never say it needs a sign-in");
+    expect(CLARIFY_SYSTEM_PROMPT).toContain("it is best not to photograph people or confidential papers");
+  });
+
   it("treats a reply that is only the marker as empty (the worker then fails it with the neutral reply)", async () => {
     const model = new FakeModel([{ text: READY_MARKER, inputTokens: 1, outputTokens: 1 }]);
     await expect(answerMessage(model, "clarify", [], "hi")).rejects.toMatchObject({ name: "EmptyAnswer" });
@@ -155,7 +169,7 @@ describe("the ready marker (clarify-v2 and later)", () => {
     const replies = [...must(s.table.replies.get("me-1")).values()];
     expect(replies.map((r) => r.offersSpec)).toEqual([undefined, true]);
     expect(replies[1]?.text).not.toContain("READY");
-    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v6", "clarify-v6"]);
+    expect(replies.map((r) => r.promptVersion)).toEqual(["clarify-v7", "clarify-v7"]);
     // The history sent to the model holds the stored text, never the marker.
     s.model.push(verdictReply("on-path"), { text: "Sure.", inputTokens: 1, outputTokens: 1 });
     await s.call(send("one more thing"));

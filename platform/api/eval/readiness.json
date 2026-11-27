@@ -1,5 +1,5 @@
 {
-  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v5). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example. Ticket 3.16: a spec written in French (with the participant's latest message, `participantText`, sent along for the language) must fail with reasons that each name one of `languageWords` (French) and end with the problem in the agreed form, e.g. \"(outside service)\". Ticket 3.20: an app that keeps photos taken or picked on the phone (category photo) or voice messages (category voice) is ready; an app that uploads videos is not ready, with a reason naming (server). The readiness suite then also runs platform/api/eval/build.json's photo and voice specs, all expected ready.",
+  "description": "Readiness check examples (tickets 2.7 and 2.14): `npm run eval -- readiness` sends each approved spec to the real readiness check (prompt readiness-v6). The workshop example specs (the fourth reads movie posters and summaries from Wikipedia) and the specs that read from a free public service that needs no key must pass (verdict ready); each spec needing a login, a payment, an outside service (a key, a sign-in with another service, emails, notifications, an AI service), a server of its own or leaving a question open must fail (verdict not-ready) with a reason that names the problem (one of the example's keywords, any case). The build suite (`npm run eval -- build`) builds the examples of category example. Ticket 3.16: a spec written in French (with the participant's latest message, `participantText`, sent along for the language) must fail with reasons that each name one of `languageWords` (French) and end with the problem in the agreed form, e.g. \"(outside service)\". Ticket 3.20: an app that keeps photos taken or picked on the phone (category photo) or voice messages (category voice) is ready; an app that uploads videos is not ready, with a reason naming (server). The readiness suite then also runs platform/api/eval/build.json's specs, all expected ready (ticket 3.23: its AI cases too). Ticket 3.23: an app that uses one of the workshop's AI tasks (category ai: the total read from a receipt photo) is ready; a chatbot, texts written by the AI and contact details read from business cards are not, with a reason naming (outside service).",
   "examples": [
     {
       "name": "fitness tracker (example)",
@@ -200,6 +200,39 @@
         "server"
       ],
       "spec": "# Team Video Wall\n\n```mermaid\nflowchart TD\n  wall[Video wall] -->|add a video| upload[Upload a video]\n  upload -->|saves the video| videos[(Videos)]\n  videos -->|plays| wall\n```\n\n## What it does\nTeam members film short videos of their projects with the phone and upload them, a few minutes each. Everyone who opens the app can watch the videos on the wall.\n\n## Screens\n- Video wall: the videos, newest first, each with its title and a player.\n- Upload a video: film or pick a video on the phone, give it a title and upload it.\n\n## Data it keeps\n- Videos: the video file, its title and the day it was uploaded.\n"
+    },
+    {
+      "name": "an expense log that reads the total from a receipt photo",
+      "category": "ai",
+      "expected": "ready",
+      "spec": "# Receipt Log\n\n```mermaid\nflowchart TD\n  log[Expenses] -->|add an expense| add[Add an expense]\n  add -->|photo of the receipt| total[AI reads the total]\n  total -->|check then Save| expenses[(Expenses)]\n  expenses -->|monthly sum| log\n```\n\n## What it does\nA shared log of what our team spends on office supplies. Someone signed in to the workshop takes a photo of a receipt, and the workshop's AI reads the total from it and puts it in the form. The person checks or corrects the total, adds what was bought and presses Save. When the AI is not available, the person types the total. The expenses screen shows this month's sum.\n\n## Screens\n- Expenses: this month's sum and the list of expenses, newest first, each with what was bought, its total and a thumbnail of the receipt.\n- Add an expense: a button to take a photo of the receipt, the total read by the AI, a field for what was bought, and a Save button.\n\n## Data it keeps\n- Expenses: the receipt photo, what was bought, the total and the day it was added."
+    },
+    {
+      "name": "a chatbot that answers questions about our team",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service"
+      ],
+      "spec": "# Team Helper\n\n```mermaid\nflowchart TD\n  chat[Chat] -->|ask a question| bot[Chatbot]\n  bot -->|answer| chat\n  admin[Team facts] -->|saves| facts[(Facts)]\n  facts -->|used for answers| bot\n```\n\n## What it does\nA chatbot for new colleagues. They type any question about our team, such as who works on what or where the meeting rooms are, and an AI chatbot writes an answer from the facts the team leader typed in.\n\n## Screens\n- Chat: a box to type a question and the chatbot's answers below it.\n- Team facts: the team leader types facts about the team, such as names, roles and rooms.\n\n## Data it keeps\n- Facts: short texts about the team typed by the team leader."
+    },
+    {
+      "name": "a newsletter whose texts the AI writes for me",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service"
+      ],
+      "spec": "# Team Newsletter\n\n```mermaid\nflowchart TD\n  notes[Notes] -->|write it for me| ai[AI writes the newsletter]\n  ai -->|saves| issues[(Newsletters)]\n  issues -->|latest first| read[Read]\n```\n\n## What it does\nA weekly team newsletter that writes itself. I type a few notes in bullet points, and the AI writes the whole newsletter from them: a title, a friendly introduction and a paragraph for each note. Colleagues read the newsletters on the page.\n\n## Screens\n- Notes: a box for this week's notes and a Write it for me button that shows the text the AI wrote.\n- Read: the newsletters, newest first.\n\n## Data it keeps\n- Newsletters: the notes, the text the AI wrote and the week."
+    },
+    {
+      "name": "contact list read from business card photos",
+      "category": "outside service",
+      "expected": "not-ready",
+      "keywords": [
+        "outside service"
+      ],
+      "spec": "# Card Scanner\n\n```mermaid\nflowchart TD\n  list[Contacts] -->|add a card| add[Photo of a business card]\n  add -->|AI reads name phone and email| form[Contact form]\n  form -->|Save| contacts[(Contacts)]\n  contacts --> list\n```\n\n## What it does\nA shared list of the people our sales team meets at fairs. Someone signed in to the workshop takes a photo of a business card, and the workshop's AI reads the person's name, company, phone number and email address from it and fills the form; they check it and press Save.\n\n## Screens\n- Contacts: everyone met so far, with name, company, phone number and email address.\n- Add a card: a button to take a photo of a business card, the fields read by the AI and a Save button.\n\n## Data it keeps\n- Contacts: the card photo, the person's name, company, phone number and email address."
     }
   ]
 }

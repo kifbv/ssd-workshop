@@ -598,17 +598,16 @@ export function parseReadinessExamples(json: string): ReadinessExample[] | { err
 }
 
 /**
- * The readiness suite's examples (ticket 3.20): the readiness file's, then the build file's media specs (a photo gallery,
- * voice messages), which the builder is proved to build, so the check must let them through. An error names the file.
- * The build file's AI cases (ticket 3.22) are left out until ticket 3.23 teaches the readiness prompt the AI tasks.
+ * The readiness suite's examples (ticket 3.20): the readiness file's, then every build file spec (a photo gallery, voice
+ * messages and, since ticket 3.23 taught the readiness prompt the AI tasks, the AI cases of ticket 3.22), which the
+ * builder is proved to build, so the check must let them through. An error names the file.
  */
 export function readinessSuiteExamples(readinessJson: string, buildJson: string): ReadinessExample[] | { error: string } {
   const readiness = parseReadinessExamples(readinessJson);
   if ("error" in readiness) return { error: `readiness.json: ${readiness.error}` };
   const build = parseReadinessExamples(buildJson);
   if ("error" in build) return { error: `build.json: ${build.error}` };
-  // Ticket 3.22: not the AI cases yet: the readiness prompt learns about the AI tasks in ticket 3.23.
-  return [...readiness, ...build.filter((example) => aiKindOf(example.category) === undefined)];
+  return [...readiness, ...build];
 }
 
 export interface ReadinessOutcome {
