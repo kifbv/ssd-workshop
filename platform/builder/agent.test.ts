@@ -209,6 +209,12 @@ describe("the agent's settings (criterion 2)", () => {
     }
     expect(buildPrompt(ws)).toContain(SIGN_IN_GUIDANCE);
     expect(changePrompt(ws, { number: 1, whatChanges: ["Add a tag filter"] })).toContain(SIGN_IN_GUIDANCE);
+    // Sign-in fix (2026-11-27): a live app had its only sign-in button on a hidden detail screen, while the list's Add
+    // buttons saved too.
+    for (const text of [agents, SIGN_IN_GUIDANCE].map((t) => t.replace(/\s+/g, " ").toLowerCase())) {
+      expect(text).toContain("by every form or button that saves, on every screen that saves");
+      expect(text).toContain("a list whose items have add or save buttons too");
+    }
   });
 
   it("ticket 3.19: both prompts and AGENTS.md tell the agent how apps keep photos and recordings (savePhoto, recordVoice, deleteMedia, addresses in the data, no blob:)", () => {

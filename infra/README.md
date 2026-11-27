@@ -626,6 +626,34 @@ Rights: the command needs Franck's `dynamodb:Scan` on `ssd-workshop-data` and `s
 `ssd-workshop-deploys.fifo` (both already used by `npm run builds` and the manual deploy below). Claude sessions are
 refused both (access stack), so it never runs from a session.
 
+## After the floating sign-in fix deploy: refresh the live apps
+
+```mermaid
+flowchart LR
+  m["merge to main"] --> dep["deploy workflow<br/>(deployer bundles the new workshop-data.js)"]
+  dep --> new["new builds: get it at once"]
+  dep --> f["Franck: npm run -s apps -- refresh"]
+  f -->|"one {refresh: nick} per live app"| d[Deployer]
+  d -->|"puts workshop-data.js, invalidates it<br/>(up-to-date when already the same)"| live["apps already live"]
+```
+
+The fix lives in the shared `templates/basic/workshop-data.js`, which the deployer publishes in every app: a save,
+upload, delete or AI call refused for lack of sign-in now shows a floating "Sign in to save" button whenever none of the
+app's own sign-in elements can be seen (none at all, or only on a hidden screen, a closed `<details>` or a part hidden by
+CSS). New deploys get it at once; the apps already live get it from the same refresh command as 3.25, run once after the
+deploy (safe to repeat; it changes nothing but `workshop-data.js` and records no build):
+
+```sh
+AWS_PROFILE=franck npm run -s apps -- refresh
+# expect: one "<nick>: refresh queued" line per live app, then
+#         "Asked the deployer to refresh N of N live apps; each gets the platform's workshop-data.js within a minute."
+```
+
+Then `ssd-workshop-apps-deployer` logs `"outcome":"refreshed"` once per app, and
+`curl -sS https://workshop.rankly.games/apps/<nick>/workshop-data.js | grep -c checkVisibility` prints a number above `0` (the old file has none). On a phone,
+open an app whose sign-in button is on another screen than a saving button, without signing in, and press that saving
+button: "Sign in to save" appears at the bottom right and opens the workshop's sign-in in a new tab.
+
 ## Check after the media deploy (ticket 3.18)
 
 ```mermaid

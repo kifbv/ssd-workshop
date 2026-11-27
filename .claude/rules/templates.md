@@ -112,3 +112,11 @@ paths:
   the visitor types got AI tag suggestions): say in the rule what a spec without it keeps ("stays a plain field"), and
   make the build eval fail the other cases when they use it (`callsAi`). A check that reads the page right after a write
   was recorded must wait for the app to finish drawing (`waitUntil`), as the route records the write before answering.
+- An app may hide the screen that holds its only sign-in button while another screen saves (live, 2026-11-27): "the page
+  has a sign-in element" is not "the visitor can see one". `workshop-data.js` checks visibility at the refusal
+  (`checkVisibility` with `visibilityProperty`/`opacityProperty`, else `getClientRects().length > 0`). A closed
+  `<details>` needs its own check: Chromium hides its content with `content-visibility`, which `checkVisibility` sees but
+  `getClientRects()` does not (the fallback failed only there). Test such client behaviour on generic hand-written apps
+  of several shapes (`shapeApp` in `template.test.ts`), never on one participant's app; a page with its own `index.html`
+  routes every file, `workshop-data.js` too, and a fallback test deletes `Element.prototype.checkVisibility` in an init
+  script.
