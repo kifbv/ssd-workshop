@@ -155,7 +155,7 @@ describe("parseReadinessAnswer", () => {
   });
 
   it("lets a spec read from a free public service that needs no key, and still refuses keys, accounts, sending and AI (readiness-v2, ticket 2.14)", () => {
-    expect(READINESS_PROMPT_VERSION).toBe("readiness-v4");
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v5");
     expect(READINESS_SYSTEM_PROMPT).toContain("information read from a free public service that needs no key and no account");
     for (const service of ["Wikipedia", "Open Library", "Open-Meteo", "Frankfurter", "TVMaze", "REST Countries"]) expect(READINESS_SYSTEM_PROMPT).toContain(service);
     expect(READINESS_SYSTEM_PROMPT).toContain(
@@ -165,10 +165,24 @@ describe("parseReadinessAnswer", () => {
   });
 
   it("states the data API's room as 10 MB per app (readiness-v4, ticket 3.17)", () => {
-    expect(READINESS_PROMPT_VERSION).toBe("readiness-v4");
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v5");
     expect(READINESS_SYSTEM_PROMPT).toContain("kept by the workshop's own small storage service: up to 10 MB per app, shared by everyone");
     expect(READINESS_SYSTEM_PROMPT).not.toContain("1 MB");
     expect(READINESS_SYSTEM_PROMPT).toContain("when one part of the spec has two problems, write two reasons, one bracket each");
+  });
+
+  it("knows apps take, keep and show photos and voice messages, and still refuses videos as a server (readiness-v5, ticket 3.20)", () => {
+    expect(READINESS_PROMPT_VERSION).toBe("readiness-v5");
+    expect(READINESS_SYSTEM_PROMPT).toContain("photos taken with the phone's camera or picked from the phone, and voice messages recorded with the phone (up to 5 minutes each)");
+    expect(READINESS_SYSTEM_PROMPT).toContain("up to 500 MB of photos and voice messages per app");
+    expect(READINESS_SYSTEM_PROMPT).toContain("everyone who opens the app's address can see the photos and hear the recordings");
+    expect(READINESS_SYSTEM_PROMPT).toContain("up to 10 MB per app");
+    // The workshop's own sign-in to save (3.24) is built in, so a spec naming it is not a login problem.
+    expect(READINESS_SYSTEM_PROMPT).toContain("the workshop's own sign-in to save, which every app already has, is not a login problem");
+    expect(READINESS_SYSTEM_PROMPT).toContain("server: a server or database of its own, programs running in the background or on a schedule when nobody has the page open, videos");
+    expect(READINESS_SYSTEM_PROMPT).toContain("files other than photos and voice messages");
+    expect(READINESS_SYSTEM_PROMPT).not.toContain("uploads of large files or videos");
+    expect(READINESS_SYSTEM_PROMPT).toContain("a spec that keeps its data, photos or voice messages in the app");
   });
 
   it("asks for reasons in the participant's language, each ending with the problem's English word in brackets (readiness-v3, ticket 3.16)", () => {

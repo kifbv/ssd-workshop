@@ -23,6 +23,7 @@ import {
   DEFAULT_SPEC_ANSWER,
   extractSpec,
   parseSpec,
+  SPEC_FORMAT_AND_RULES,
   SPEC_PROMPT_VERSION,
   SPEC_SECTIONS,
   SPEC_SYSTEM_PROMPT,
@@ -105,7 +106,7 @@ describe("the spec format (criterion 1)", () => {
   });
 
   it("asks for the format, the diagram and question-versus-change in the prompt, with the current spec", () => {
-    expect(SPEC_PROMPT_VERSION).toBe("spec-v2");
+    expect(SPEC_PROMPT_VERSION).toBe("spec-v3");
     // Ticket 2.14: an outside source is named in plain words, never with an address or a key.
     expect(SPEC_SYSTEM_PROMPT).toContain('name the information and its source in plain words where the app uses it (for example "movie posters and summaries from Wikipedia")');
     expect(SPEC_SYSTEM_PROMPT).toContain("Never write web addresses, keys or technical words about it.");
@@ -114,6 +115,15 @@ describe("the spec format (criterion 1)", () => {
     }
     expect(specSystemPrompt(undefined)).toContain("There is no current spec yet");
     expect(specSystemPrompt(SPEC_V1)).toContain(`<current_spec>\n${SPEC_V1}\n</current_spec>`);
+  });
+
+  it("lets the spec keep photos and voice messages, never videos (spec-v3, ticket 3.20)", () => {
+    expect(SPEC_FORMAT_AND_RULES).toContain("The app may take photos with the phone's camera or pick them from the phone, and record voice messages with the phone (up to 5 minutes each)");
+    expect(SPEC_FORMAT_AND_RULES).toContain("up to 500 MB of photos and voice messages per app, beside up to 10 MB of other information");
+    expect(SPEC_FORMAT_AND_RULES).toContain("everyone with the app's link can see and hear them");
+    expect(SPEC_FORMAT_AND_RULES).toContain('say so in "Data it keeps"');
+    expect(SPEC_FORMAT_AND_RULES).toContain("Never videos");
+    expect(SPEC_SYSTEM_PROMPT.endsWith(SPEC_FORMAT_AND_RULES)).toBe(true);
   });
 
   it("reads a step 2 answer: a checked new spec, the words alone, or an error", () => {
@@ -128,7 +138,7 @@ describe("the spec format (criterion 1)", () => {
   it("sends the spec prompt with the current spec and a larger token limit", async () => {
     const model = new FakeModel([{ text: "Screens are views.", inputTokens: 5, outputTokens: 5 }]);
     const answer = await answerMessage(model, "spec", [{ question: "a run log", answer: "Who for?" }], "What is a screen?", undefined, SPEC_V1);
-    expect(answer).toMatchObject({ text: "Screens are views.", promptVersion: "spec-v2", offersSpec: false, historyCount: 2 });
+    expect(answer).toMatchObject({ text: "Screens are views.", promptVersion: "spec-v3", offersSpec: false, historyCount: 2 });
     expect(answer.spec).toBeUndefined();
     expect(model.requests[0]).toMatchObject({ maxTokens: SPEC_MAX_TOKENS, system: specSystemPrompt(SPEC_V1) });
   });
@@ -228,7 +238,7 @@ describe("criterion 1 and 2: the spec is written, explained and changed", () => 
     expect(request.messages.map((m) => m.text)).toEqual(["a run log for me", "Who is it for?", WRITE_SPEC_REQUEST]);
     expect(s.model.requests).toHaveLength(5);
     expect(s.table.specs.get("me-1")).toEqual([{ version: 1, text: SPEC_V1, messageId: id, createdAt: expect.any(String) as unknown }]);
-    expect(s.table.replies.get("me-1")?.get(id)).toMatchObject({ text: "Here is your spec.", specVersion: 1, promptVersion: "spec-v2" });
+    expect(s.table.replies.get("me-1")?.get(id)).toMatchObject({ text: "Here is your spec.", specVersion: 1, promptVersion: "spec-v3" });
     // The spec is never kept in the reply's text, so it never goes back to the model as history.
     expect(s.table.replies.get("me-1")?.get(id)?.text).not.toContain("flowchart");
 

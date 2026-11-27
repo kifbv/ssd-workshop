@@ -10,7 +10,8 @@ import type { ModelClient, ModelReply, ModelRequest } from "./model.js";
 import { notReadyReasonsList } from "./readiness.js";
 import { checkSpec, extractSpec, SPEC_FORMAT_AND_RULES } from "./spec.js";
 
-export const CHANGE_PROMPT_VERSION = "change-v2";
+// Ticket 3.20 (change-v3): only the shared spec rules changed (photos and voice messages, never videos).
+export const CHANGE_PROMPT_VERSION = "change-v3";
 /** A whole spec (about 300 words and the diagram), a few sentences and the list. */
 export const CHANGE_MAX_TOKENS = 3500;
 /** At most this many "What changes" lines are kept, each cut to CHANGE_LINE_CHARS characters on one line. */

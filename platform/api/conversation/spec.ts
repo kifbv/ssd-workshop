@@ -18,7 +18,9 @@
 // The model writes a whole new version between a `<spec>` line and a `</spec>` line, after a short
 // answer; an answer to a question has no such block, so the spec stays as it is.
 
-export const SPEC_PROMPT_VERSION = "spec-v2";
+// Ticket 3.20 (spec-v3): the shared rules say apps take or pick photos and record voice messages, kept by the workshop
+// (up to 500 MB per app, beside 10 MB of other information, seen by everyone with the link), never videos.
+export const SPEC_PROMPT_VERSION = "spec-v3";
 
 /** The sections every spec has, in this order (criterion 1). */
 export const SPEC_SECTIONS = ["What it does", "Screens", "Data it keeps"] as const;
@@ -38,7 +40,7 @@ export const DEFAULT_SPEC_ANSWER = "Here is your spec. Ask me anything about it,
 
 /**
  * The spec's format and rules, shared by the step 2 prompt and the change prompt (ticket 3.6, ./change.ts), so both
- * write the same shape. Joined into SPEC_SYSTEM_PROMPT exactly as before (`spec-v2` is unchanged).
+ * write the same shape (a change here moves both versions: `spec-v3` and `change-v3`, ticket 3.20).
  */
 export const SPEC_FORMAT_AND_RULES = `The spec goes between a line that is exactly <spec> and a line that is exactly </spec>, in this format:
 <spec>
@@ -68,6 +70,7 @@ Rules for the spec:
 - Lists use "- " at the start of the line. No bold, italics, tables or code apart from the diagram.
 - Plain English for people who are not developers: no technical words (database, API, framework, server). About 300 words at most.
 - The app may show information from a free public service that needs no key (for example summaries and pictures from Wikipedia, film posters included, books and covers from Open Library, weather from Open-Meteo, exchange rates from Frankfurter, TV shows from TVMaze, facts about countries from REST Countries). When it does, name the information and its source in plain words where the app uses it (for example "movie posters and summaries from Wikipedia"), and say that the app shows a friendly message when the source does not answer. Never write web addresses, keys or technical words about it. Never use a service that needs a key, an account or a sign-in, or that costs money, and never send emails, texts or notifications.
+- The app may take photos with the phone's camera or pick them from the phone, and record voice messages with the phone (up to 5 minutes each). The workshop keeps them with the app (up to 500 MB of photos and voice messages per app, beside up to 10 MB of other information), and everyone with the app's link can see and hear them. When the app keeps photos or voice messages, say so in "Data it keeps" with the details kept with each one (for example "- Drawings: the photo, its tags and the day it was added"), and say in "Screens" where they are taken or recorded. Never videos.
 - Never invent personal data about real people, and never write code.`;
 
 export const SPEC_SYSTEM_PROMPT = `You are the friendly guide of a one-day workshop in which non-developers turn an idea into a small single-page web app. This is step 2, Spec: you write a short spec of the participant's app from the conversation so far, then explain it and change it as often as they like. When they are happy they press the "Approve spec" button, and the app is then built from the spec. The workshop builds and hosts the app; never discuss servers, hosting, programming languages, frameworks or code.

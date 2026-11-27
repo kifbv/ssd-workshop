@@ -365,3 +365,11 @@ paths:
 - Media in sandboxed apps: `<img>` and `<audio>` from the workshop's own `/app-media/...` load under the apps' CSP
   (`img-src 'self'`, `media-src` falling back to `default-src 'self'`): `'self'` is the served address, not the opaque
   origin (proved in Chromium, ticket 3.18).
+- A prompt rule that must show up in a reply (3.20's photo reminder) says WHERE and in which language ("right after your
+  restatement, in one short sentence in the participant's language"), or the model skips it in other languages; a
+  "say it once" rule is checked by a case whose history already holds it (`avoids`) plus `atMostOnce` on the first reply.
+  A new paragraph of facts can make the model invent problems from neighbouring rules (3.20: "a personal gallery needs a
+  sign-in"): say what NOT to conclude without contradicting a signed-off fact (3.20 try 2: "never say it needs a sign-in" clashed with 3.24's
+  sign-in to save; "a login of its own" does not), and give the eval case `avoids` for the false claim as phrases, not a word a
+  correct reply may use. A `mentionsEach` group that stands for a reminder is phrase-level too ("photograph people", not "people").
+- A change to `SPEC_FORMAT_AND_RULES` moves two prompt versions: the spec prompt's and the change prompt's, which embeds it.

@@ -1,5 +1,5 @@
 {
-  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer, and name one of its `mentions` when it has some (ticket 2.14: an idea that wants outside information hears about a free service that needs no key); any reply must name none of its `avoids` (never that outside services are impossible, no technical question); after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec. Ticket 3.16: `mentionsEach` lists word groups the reply must each name (an idea that sends emails gets a version read on the app's page, with no question about servers or addresses; a question about data on the phone hears that the workshop keeps it and anyone with the link sees it; an idea in French gets a French reply); an `answers-question` example is a question in the middle of a conversation.",
+  "description": "Step 1 (Clarify) examples (ticket 1.8): `npm run eval -- clarify` sends each one to the real answer call with the clarify system prompt. A first reply to an idea must hold 3 to 5 numbered questions and no offer, and name one of its `mentions` when it has some (ticket 2.14: an idea that wants outside information hears about a free service that needs no key); any reply must name none of its `avoids` (never that outside services are impossible, no technical question); after a change of mind the numbered questions must be about the new idea only; with everything answered the reply must offer to write the spec. Ticket 3.16: `mentionsEach` lists word groups the reply must each name (an idea that sends emails gets a version read on the app's page, with no question about servers or addresses; a question about data on the phone hears that the workshop keeps it and anyone with the link sees it; an idea in French gets a French reply); an `answers-question` example is a question in the middle of a conversation. Ticket 3.20: a photo idea must hear once (`atMostOnce`: each of its words named at most once) that anyone with the link can see the photos, so not to photograph people or confidential papers (`mentionsEach`), in English and in French; a later reply, after the reminder was given, must not say it again (`avoids`).",
   "examples": [
     {
       "name": "fitness tracker",
@@ -72,6 +72,34 @@
       "check": "first-reply",
       "text": "Je voudrais une appli pour suivre les plantes du bureau et savoir quand les arroser.",
       "mentionsEach": [["vous", "votre", "vos", "tu", "ton", "tes"], ["plante", "arros"]]
+    },
+    {
+      "name": "drawing gallery with phone photos",
+      "check": "first-reply",
+      "text": "I'd like a gallery of my drawings: I take a photo of each drawing with my phone and give it my own tags, so I can find them by tag later.",
+      "mentionsEach": [["anyone", "everyone", "everybody", "whoever"], ["link", "address"], ["photograph people", "photographing people", "photos of people", "photo of people", "pictures of people", "picture of people", "photograph anyone", "photograph someone", "people's faces", "faces of people"], ["confidential", "private", "sensitive", "secret"]],
+      "atMostOnce": ["confidential"],
+      "avoids": ["server", "megabyte", "needs a sign-in", "need a sign-in", "requires a sign-in", "needs a login", "need a login", "private account", "personal account", "separate from others"]
+    },
+    {
+      "name": "photo reminder not repeated",
+      "check": "answers-question",
+      "history": [
+        {
+          "question": "I'd like a gallery of my drawings: I take a photo of each drawing with my phone and give it my own tags, so I can find them by tag later.",
+          "answer": "A shared gallery of your drawings, each photographed with the phone and given your own tags. Anyone with the app's link can see the photos, so it is best not to photograph people or confidential papers.\n1. Is the gallery just for you, or do colleagues add drawings too?\n2. Which tags do you have in mind, or do you add them as you go?\n3. Besides the photo and its tags, what should each drawing keep: a title, a date?\n4. What can a first version leave out?"
+        }
+      ],
+      "text": "Just for me. Tags like portrait, landscape and sketchbook, plus a title. Can I also add photos I already have on my phone?",
+      "mentionsEach": [["yes", "can", "pick", "choose", "library", "gallery"]],
+      "avoids": ["confidential", "sensitive", "photograph people", "photos of people", "pictures of people", "faces"]
+    },
+    {
+      "name": "photo idea in French",
+      "check": "first-reply",
+      "text": "Je voudrais une appli où l'équipe prend en photo les tableaux blancs après les réunions, avec des étiquettes par projet.",
+      "mentionsEach": [["tout le monde", "toute personne", "quiconque", "n'importe qui", "chacun"], ["lien", "adresse"], ["photographier des personnes", "photographier les personnes", "photographier des gens", "photographier les gens", "photographier vos collègues", "photographier des collègues", "photos de personnes", "photo de personnes", "photos de gens", "photos des personnes", "photos de collègues", "photos de visages", "des visages"], ["confidenti", "document", "papier", "sensible"]],
+      "atMostOnce": ["confidenti"]
     }
   ]
 }

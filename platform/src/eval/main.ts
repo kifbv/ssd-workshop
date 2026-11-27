@@ -39,6 +39,7 @@ import {
   formatSuggestionsSummary,
   runSuggestionsEval,
   parseReadinessExamples,
+  readinessSuiteExamples,
   runReadinessEval,
   parseClarifyExamples,
   parseSpecExamples,
@@ -200,7 +201,8 @@ async function main(): Promise<number> {
     }
   }
   if (parsed.suite === "readiness") {
-    const examples = parseReadinessExamples(file);
+    // Ticket 3.20: the build file's photo and voice specs too, so a spec the builder is proved to build also passes the check.
+    const examples = readinessSuiteExamples(file, readFileSync(examplesFile("build"), "utf8"));
     if ("error" in examples) {
       console.error(examples.error);
       return 1;

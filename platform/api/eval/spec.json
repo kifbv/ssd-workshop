@@ -1,5 +1,5 @@
 {
-  "description": "Step 2 (Spec) examples (ticket 1.9): `npm run eval -- spec` sends each one to the real answer call with the spec system prompt. A new-spec example must give a spec with a title, the sections \"What it does\", \"Screens\" and \"Data it keeps\", and one Mermaid flowchart that Mermaid parses and draws (in Chromium, with the page's own diagram.js), naming the keywords; a keeps-spec example (a question) must be answered without a new spec.",
+  "description": "Step 2 (Spec) examples (ticket 1.9): `npm run eval -- spec` sends each one to the real answer call with the spec system prompt. A new-spec example must give a spec with a title, the sections \"What it does\", \"Screens\" and \"Data it keeps\", and one Mermaid flowchart that Mermaid parses and draws (in Chromium, with the page's own diagram.js), naming the keywords; a keeps-spec example (a question) must be answered without a new spec. Ticket 3.20: an app that keeps photos (a drawing gallery) or voice messages (a team board) gets a spec of the same shape naming them.",
   "examples": [
     {
       "name": "fitness tracker: first spec",
@@ -122,6 +122,44 @@
       "keywords": [
         "longest",
         "weekly"
+      ]
+    },
+    {
+      "name": "drawing gallery: first spec",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "I'd like a gallery of my drawings: I take a photo of each drawing with my phone and give it my own tags, so I can find them by tag later.",
+          "answer": "A shared gallery of your drawings, each photographed with the phone and given your own tags. Anyone with the app's link can see the photos, so it is best not to photograph people or confidential papers.\n1. Is the gallery just for you, or do colleagues add drawings too?\n2. Which tags do you have in mind, or do you add them as you go?\n3. Besides the photo and its tags, what should each drawing keep: a title, a date?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Just for me. Tags like portrait, landscape and sketchbook, plus a title for each drawing. Leave out comments and sharing.",
+          "answer": "A personal gallery of your drawings: a photo taken or picked on the phone, a title and your tags, and a way to see only one tag. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        }
+      ],
+      "text": "Please write my spec.",
+      "keywords": [
+        "photo",
+        "tag"
+      ]
+    },
+    {
+      "name": "voice messages: first spec",
+      "check": "new-spec",
+      "history": [
+        {
+          "question": "A voice message board for my team: we record short voice messages about our project and sort them by topic.",
+          "answer": "A board of short voice messages for your team, sorted by topic. Everyone with the app's link can hear the recordings.\n1. Who records messages: anyone in the team?\n2. Which topics do you have in mind?\n3. Besides the recording and its topic, should each message show who recorded it?\n4. What can a first version leave out?"
+        },
+        {
+          "question": "Anyone in the team. Topics: Ideas, Questions and News. Yes, show the name typed by whoever records. Leave out replies and likes.",
+          "answer": "A team board of voice messages up to five minutes, each with its topic and the name of who recorded it, and a way to listen to one topic only. I have enough to write your spec: press \"Write my spec\" when you are ready."
+        }
+      ],
+      "text": "Please write my spec.",
+      "keywords": [
+        "record",
+        "topic"
       ]
     }
   ]
