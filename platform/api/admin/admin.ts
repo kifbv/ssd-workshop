@@ -20,7 +20,12 @@ export const SETTINGS_GET_ROUTE = "GET /api/admin/settings";
 export const SETTINGS_PUT_ROUTE = "PUT /api/admin/settings";
 export const STOP_ROUTE = "POST /api/admin/stop";
 export const RESUME_ROUTE = "POST /api/admin/resume";
-export const ADMIN_ROUTES = [SETTINGS_GET_ROUTE, SETTINGS_PUT_ROUTE, STOP_ROUTE, RESUME_ROUTE] as const;
+/** Ticket 3.21: the switch "Apps may use AI" (`{"enabled": true|false}`). */
+export const APP_AI_ROUTE = "PUT /api/admin/app-ai";
+export const ADMIN_ROUTES = [SETTINGS_GET_ROUTE, SETTINGS_PUT_ROUTE, STOP_ROUTE, RESUME_ROUTE, APP_AI_ROUTE] as const;
+
+/** Ticket 3.21: the 400 answer of the switch route. */
+export const BAD_APP_AI_MESSAGE = "Send enabled: true or false, as JSON.";
 
 /** The 400 answer, naming the allowed ranges (never echoing what was sent). */
 export const BAD_SETTINGS_MESSAGE =
@@ -28,8 +33,8 @@ export const BAD_SETTINGS_MESSAGE =
   `changeRequestsPerPerson (${CAP_RANGES.changeRequestsPerPerson.min} to ${CAP_RANGES.changeRequestsPerPerson.max}) and ` +
   `buildsAtOnce (${CAP_RANGES.buildsAtOnce.min} to ${CAP_RANGES.buildsAtOnce.max}), as numbers.`;
 
-export type AdminRoute = "settings-get" | "settings-put" | "stop" | "resume" | "unknown";
-export type AdminOutcome = "ok" | "saved" | "stopped" | "resumed" | "unauthorized" | "removed" | "not-found" | "invalid-request" | "unsupported-media-type" | "failed";
+export type AdminRoute = "settings-get" | "settings-put" | "stop" | "resume" | "app-ai" | "unknown";
+export type AdminOutcome = "ok" | "saved" | "stopped" | "resumed" | "app-ai-on" | "app-ai-off" | "unauthorized" | "removed" | "not-found" | "invalid-request" | "unsupported-media-type" | "failed";
 
 /** The only things ever logged: route and outcome (no id, no values, no body). */
 export interface AdminLogEntry {
@@ -53,6 +58,7 @@ export function settingsBody(settings: WorkshopSettings): Record<string, unknown
     changeRequestsPerPerson: settings.changeRequestsPerPerson,
     buildsAtOnce: settings.buildsAtOnce,
     stopped: settings.stopped,
+    appAiEnabled: settings.appAiEnabled,
   };
 }
 
@@ -61,6 +67,7 @@ function routeOf(request: HttpRequest): AdminRoute {
   if (request.routeKey === SETTINGS_PUT_ROUTE) return "settings-put";
   if (request.routeKey === STOP_ROUTE) return "stop";
   if (request.routeKey === RESUME_ROUTE) return "resume";
+  if (request.routeKey === APP_AI_ROUTE) return "app-ai";
   return "unknown";
 }
 
@@ -76,6 +83,12 @@ async function route(request: HttpRequest, deps: AdminDeps, which: AdminRoute): 
     // The body is not read: pressing Stop (or Resume) twice is harmless.
     await deps.settings.setStopped(which === "stop", deps.now().toISOString());
     return { outcome: which === "stop" ? "stopped" : "resumed", response: jsonResponse(200, settingsBody(await deps.settings.getSettings())) };
+  }
+  if (which === "app-ai") {
+    const enabled = readJsonObject(request)?.["enabled"];
+    if (typeof enabled !== "boolean") return { outcome: "invalid-request", response: jsonResponse(400, { message: BAD_APP_AI_MESSAGE }) };
+    await deps.settings.setAppAi(enabled, deps.now().toISOString());
+    return { outcome: enabled ? "app-ai-on" : "app-ai-off", response: jsonResponse(200, settingsBody(await deps.settings.getSettings())) };
   }
   const body = readJsonObject(request);
   const parsed = body === undefined ? undefined : parseCaps(body);

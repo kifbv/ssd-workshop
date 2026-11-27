@@ -202,6 +202,11 @@ export const ADMIN_TEXTS = {
   offline: "We couldn't reach the workshop. Check your connection and try again.",
   switchFailed: "That did not work, or its answer was lost. The state below was read again: check it before trying again.",
   switchUnknown: "That did not work, and the state could not be read again. Reload the page to see whether the workshop is paused.",
+  /** Ticket 3.21: the state line beside the switch "Apps may use AI" (off by default; the global Stop also stops it). */
+  appAiOn: "Apps may use AI tasks now (at most $1 per app and $10 for all apps each day).",
+  appAiOff: "Apps may not use AI tasks. Their AI buttons answer that AI is switched off.",
+  appAiStopped: "Apps may use AI tasks, but the workshop is stopped, so they are off until you press Resume.",
+  appAiFailed: "The switch did not change, or its answer was lost. The state beside it was read again: check it before trying again.",
 } as const;
 
 /** Ticket 3.12: the error beside one cap's field, from the API's own ranges (decision "(3.2) PUT rules"). */
@@ -238,3 +243,33 @@ export function appSignInNoteText(app: string): string {
 export function saveAsText(app: string, nickname: string): string {
   return `Save in ${app}'s app as ${nickname}?`;
 }
+
+/**
+ * Ticket 3.21: the `message` of each answer of the AI tasks for apps (`POST /api/apps/{nickname}/ai`), which apps show
+ * their visitors (3.22's helpers show it on a refusal). Plain text, no amount spent, no address.
+ */
+export const APP_AI_TEXTS = {
+  /** The admin's switch "Apps may use AI" is off, or the global Stop is on (503, no AI call). */
+  switchedOff: "AI is switched off for apps right now.",
+  /** This app's $1 for the UTC day is used (429, no AI call). */
+  appBudget: "This app has used its AI allowance for today. AI tasks work again tomorrow.",
+  /** All apps' $10 for the UTC day is used (429, no AI call). */
+  workshopBudget: "The workshop's AI allowance for apps is used up for today. AI tasks work again tomorrow.",
+  /** The model's answer had none of what was asked in a usable form (502). */
+  unreadable: "The AI could not read this.",
+  badRequest:
+    "Send JSON with a task: tag-photo (photo, and up to 20 tags or none), read-photo (photo and 1 to 12 fields, each with a name and a type: text, number, date or money), sort-text (text of up to 2,000 characters and 1 to 20 categories) or transcribe (recording). Nothing else.",
+  photoNotInApp: "Send the address of a photo of this app: /app-media/<this app's nickname>/<id>.",
+  recordingNotInApp: "Send the address of a voice recording of this app: /app-media/<this app's nickname>/<id>.",
+  mediaNotFound: "This photo or recording is not in this app (it may have been deleted).",
+  notAPhoto: "This file is not a photo.",
+  notARecording: "This file is not a voice recording.",
+  photoTooBig: "This photo is too big for the AI: send one of at most 3.75 MB.",
+  recordingTooLong: "This recording is too long for the AI: at most 5 minutes.",
+  /** transcribe: Amazon Transcribe is still working (202); asking again with the same recording gets the text. */
+  working: "The recording is being turned into text. Ask again in a few seconds.",
+  /** transcribe: the job failed (the format, silence). */
+  transcribeFailed: "The recording could not be turned into text.",
+  conflict: "Many AI tasks were asked at the same moment. Please try again.",
+  failed: "The AI service had a problem. Please try again in a moment.",
+} as const;

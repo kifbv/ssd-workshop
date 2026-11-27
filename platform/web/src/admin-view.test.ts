@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ADMIN_TEXTS, capErrorText } from "../../api/workshop/texts.js";
-import { capsBody, fieldValue, parseSettings, saveResult, settingsResult, stateText, switchResult } from "./admin-view.js";
+import { APP_AI_PATH, appAiText, capsBody, fieldValue, parseSettings, saveResult, settingsResult, stateText, switchResult } from "./admin-view.js";
 
-const settings = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false };
+const settings = { aiBudgetUsd: 5, changeRequestsPerPerson: 5, buildsAtOnce: 15, stopped: false, appAiEnabled: false };
 
 describe("admin view (ticket 3.12)", () => {
   it("reads the settings only in the API's shape", () => {
@@ -61,5 +61,29 @@ describe("admin view (ticket 3.12)", () => {
     expect(capErrorText("aiBudgetUsd")).toBe("Enter an amount from $0 to $50.");
     expect(capErrorText("changeRequestsPerPerson")).toBe("Enter a whole number from 0 to 20.");
     expect(capErrorText("buildsAtOnce")).toBe("Enter a whole number from 1 to 30.");
+  });
+});
+
+describe("admin view: the switch \"Apps may use AI\" (ticket 3.21)", () => {
+  it("reads the switch from the settings, off unless the API says true", () => {
+    expect(parseSettings({ ...settings, appAiEnabled: true })?.appAiEnabled).toBe(true);
+    expect(parseSettings({ ...settings, appAiEnabled: "true" })?.appAiEnabled).toBe(false);
+    const older: Record<string, unknown> = { ...settings };
+    delete older["appAiEnabled"];
+    expect(parseSettings(older)?.appAiEnabled).toBe(false);
+  });
+
+  it("puts to /api/admin/app-ai and reads its answer like Stop's: the settings, or read again", () => {
+    expect(APP_AI_PATH).toBe("/api/admin/app-ai");
+    expect(switchResult({ status: 200, body: { ...settings, appAiEnabled: true } })).toEqual({ kind: "switched", settings: { ...settings, appAiEnabled: true } });
+    expect(switchResult({ status: 400, body: { message: "Send enabled: true or false, as JSON." } })).toEqual({ kind: "reread" });
+    expect(switchResult({ status: 0, body: null })).toEqual({ kind: "reread" });
+  });
+
+  it("says on, off, or held off by the global Stop", () => {
+    expect(appAiText({ appAiEnabled: true, stopped: false })).toBe(ADMIN_TEXTS.appAiOn);
+    expect(appAiText({ appAiEnabled: false, stopped: false })).toBe(ADMIN_TEXTS.appAiOff);
+    expect(appAiText({ appAiEnabled: false, stopped: true })).toBe(ADMIN_TEXTS.appAiOff);
+    expect(appAiText({ appAiEnabled: true, stopped: true })).toBe(ADMIN_TEXTS.appAiStopped);
   });
 });

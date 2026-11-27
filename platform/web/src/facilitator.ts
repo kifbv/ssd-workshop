@@ -26,10 +26,12 @@ import {
   type Row,
 } from "./dashboard-view.js";
 import {
+  APP_AI_PATH,
   CAP_FIELDS,
   RESUME_PATH,
   SETTINGS_PATH,
   STOP_PATH,
+  appAiText,
   capsBody,
   fieldValue,
   saveResult,
@@ -513,6 +515,7 @@ async function loadAdmin(): Promise<void> {
   }
   fillCaps(result.settings);
   showStopped(result.settings.stopped);
+  showAppAi(result.settings.appAiEnabled);
   adminState = "shown";
   byId("admin").hidden = false;
 }
@@ -552,7 +555,52 @@ async function saveCaps(): Promise<void> {
   if (result.kind === "error") return say("message-caps", result.message, "error");
   fillCaps(result.settings);
   showStopped(result.settings.stopped);
+  showAppAi(result.settings.appAiEnabled);
   say("message-caps", result.message, "info");
+}
+
+// ---- Ticket 3.21: the switch "Apps may use AI". ----
+
+/** The switch's state as the admin routes last gave it. */
+let knownAppAi = false;
+let switchingAppAi = false;
+
+/** Shows the switch and its line (which also says when the global Stop holds the AI tasks off). */
+function showAppAi(enabled: boolean): void {
+  knownAppAi = enabled;
+  byId<HTMLInputElement>("app-ai-switch").checked = enabled;
+  byId("app-ai-state").textContent = appAiText({ appAiEnabled: enabled, stopped: knownStopped ?? false });
+}
+
+/** Turns the switch; after any answer but a good one the settings are read again before a state is shown (as Stop). */
+async function switchAppAi(): Promise<void> {
+  const box = byId<HTMLInputElement>("app-ai-switch");
+  const wanted = box.checked;
+  if (switchingAppAi) {
+    box.checked = !wanted;
+    return;
+  }
+  switchingAppAi = true;
+  box.disabled = true;
+  byId("message-app-ai").textContent = "";
+  try {
+    const result = switchResult(await call("PUT", APP_AI_PATH, { enabled: wanted }));
+    if (result.kind === "signed-out") return goToSignIn();
+    if (result.kind === "not-admin") return hideAdmin("denied");
+    if (result.kind === "switched") {
+      showStopped(result.settings.stopped);
+      showAppAi(result.settings.appAiEnabled);
+      return;
+    }
+    const reread = settingsResult(await call("GET", SETTINGS_PATH));
+    if (reread.kind === "signed-out") return goToSignIn();
+    if (reread.kind === "not-admin") return hideAdmin("denied");
+    showAppAi(reread.kind === "settings" ? reread.settings.appAiEnabled : knownAppAi);
+    say("message-app-ai", ADMIN_TEXTS.appAiFailed, "error");
+  } finally {
+    box.disabled = false;
+    switchingAppAi = false;
+  }
 }
 
 /** Shows the Stop state: Stop (or its confirmation) while running, Resume while stopped; the banner follows. */
@@ -567,6 +615,8 @@ function showStopped(stopped: boolean): void {
   byId<HTMLButtonElement>("resume-button").hidden = !stopped;
   if (list !== undefined) list.stopped = stopped;
   renderStoppedBanner(stopped);
+  // The AI switch's line says when the Stop holds the AI tasks off (ticket 3.21).
+  byId("app-ai-state").textContent = appAiText({ appAiEnabled: knownAppAi, stopped });
 }
 
 function askToStop(): void {
@@ -622,6 +672,7 @@ byId("stop-button").addEventListener("click", askToStop);
 byId("stop-cancel").addEventListener("click", cancelStop);
 byId<HTMLButtonElement>("stop-yes").addEventListener("click", () => void switchWorkshop("stop", byId<HTMLButtonElement>("stop-yes")));
 byId<HTMLButtonElement>("resume-button").addEventListener("click", () => void switchWorkshop("resume", byId<HTMLButtonElement>("resume-button")));
+byId<HTMLInputElement>("app-ai-switch").addEventListener("change", () => void switchAppAi());
 byId<HTMLFormElement>("caps-form").addEventListener("submit", (event) => {
   event.preventDefault();
   void saveCaps();

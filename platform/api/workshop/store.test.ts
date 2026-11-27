@@ -32,19 +32,21 @@ describe("DynamoSettingsStore (ticket 3.2)", () => {
       changeRequestsPerPerson: 5,
       buildsAtOnce: 15,
       stopped: false,
+      appAiEnabled: false,
     });
     expect(sent[0]).toBeInstanceOf(GetItemCommand);
     expect(sent[0]?.input).toEqual({
       TableName: TABLE,
       Key: KEY,
       ConsistentRead: true,
-      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped, #resumedAt",
+      ProjectionExpression: "#aiBudgetUsd, #changeRequestsPerPerson, #buildsAtOnce, #stopped, #resumedAt, #appAiEnabled",
       ExpressionAttributeNames: {
         "#aiBudgetUsd": "aiBudgetUsd",
         "#changeRequestsPerPerson": "changeRequestsPerPerson",
         "#buildsAtOnce": "buildsAtOnce",
         "#stopped": "stopped",
         "#resumedAt": "resumedAt",
+        "#appAiEnabled": "appAiEnabled",
       },
     });
     expect(SETTINGS_PK).toBe(SETTINGS_PARTITION);
@@ -56,7 +58,7 @@ describe("DynamoSettingsStore (ticket 3.2)", () => {
       { Item: { aiBudgetUsd: { N: "8.5" } } },
     ]);
     const store = new DynamoSettingsStore(client, TABLE);
-    await expect(store.getSettings()).resolves.toEqual({ aiBudgetUsd: 8.5, changeRequestsPerPerson: 3, buildsAtOnce: 10, stopped: true });
+    await expect(store.getSettings()).resolves.toEqual({ aiBudgetUsd: 8.5, changeRequestsPerPerson: 3, buildsAtOnce: 10, stopped: true, appAiEnabled: false });
     await expect(store.getSettings()).resolves.toEqual({ ...DEFAULT_SETTINGS, aiBudgetUsd: 8.5 });
   });
 
@@ -117,5 +119,23 @@ describe("DynamoSettingsStore (ticket 3.2)", () => {
       for (const name of ["pk", "sk", ...Object.values((command as UpdateItemCommand).input.ExpressionAttributeNames ?? {})]) expect(SETTINGS_UPDATE_ATTRIBUTES, name).toContain(name);
     }
     await expect(store.setStopped(true, "x")).rejects.toThrow("down");
+  });
+
+  it("turns the switch Apps may use AI on and off (ticket 3.21) with one UpdateItem naming only SETTINGS_UPDATE_ATTRIBUTES", async () => {
+    const { client, sent } = stubClient([{}, {}]);
+    const store = new DynamoSettingsStore(client, TABLE);
+    await store.setAppAi(true, "2026-11-27T10:00:00.000Z");
+    await store.setAppAi(false, "2026-11-27T10:05:00.000Z");
+    expect(sent[0]?.input).toEqual({
+      TableName: TABLE,
+      Key: KEY,
+      UpdateExpression: "SET #type = :type, #appAiEnabled = :enabled, #appAiChangedAt = :now, #updatedAt = :now",
+      ExpressionAttributeNames: { "#type": "type", "#appAiEnabled": "appAiEnabled", "#appAiChangedAt": "appAiChangedAt", "#updatedAt": "updatedAt" },
+      ExpressionAttributeValues: { ":type": { S: "settings" }, ":enabled": { BOOL: true }, ":now": { S: "2026-11-27T10:00:00.000Z" } },
+    });
+    expect((sent[1] as UpdateItemCommand).input.ExpressionAttributeValues?.[":enabled"]).toEqual({ BOOL: false });
+    for (const command of sent) {
+      for (const name of ["pk", "sk", ...Object.values((command as UpdateItemCommand).input.ExpressionAttributeNames ?? {})]) expect(SETTINGS_UPDATE_ATTRIBUTES, name).toContain(name);
+    }
   });
 });

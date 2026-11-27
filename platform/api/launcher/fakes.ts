@@ -141,6 +141,7 @@ export class FakeBuildTable implements LaunchRecords {
       changeRequestsPerPerson: 5,
       buildsAtOnce: this.buildsAtOnce,
       stopped: this.stopped,
+      appAiEnabled: false,
       ...(this.resumedAt === undefined ? {} : { resumedAt: this.resumedAt }),
     };
   }

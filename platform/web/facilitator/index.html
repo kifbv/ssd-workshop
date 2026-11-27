@@ -49,6 +49,13 @@
             <p id="message-stop" class="message" role="status" aria-live="polite"></p>
           </div>
 
+          <!-- Ticket 3.21: the AI tasks for apps, off by default; the global Stop also holds them off. -->
+          <div id="admin-app-ai-box" class="admin-app-ai">
+            <label for="app-ai-switch"><input id="app-ai-switch" type="checkbox" /> Apps may use AI</label>
+            <p id="app-ai-state" class="workshop-state" role="status" aria-live="polite"></p>
+            <p id="message-app-ai" class="message" role="status" aria-live="polite"></p>
+          </div>
+
           <form id="caps-form" class="caps" novalidate>
             <h4>Caps</h4>
             <div class="cap">

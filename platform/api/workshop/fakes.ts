@@ -33,4 +33,10 @@ export class FakeSettingsTable implements SettingsStore {
     this.writes++;
     this.item = { ...this.item, type: { S: "settings" }, stopped: { BOOL: stopped }, [stopped ? "stoppedAt" : "resumedAt"]: { S: nowIso }, updatedAt: { S: nowIso } };
   }
+
+  async setAppAi(enabled: boolean, nowIso: string): Promise<void> {
+    if (this.failure !== undefined) throw this.failure;
+    this.writes++;
+    this.item = { ...this.item, type: { S: "settings" }, appAiEnabled: { BOOL: enabled }, appAiChangedAt: { S: nowIso }, updatedAt: { S: nowIso } };
+  }
 }
