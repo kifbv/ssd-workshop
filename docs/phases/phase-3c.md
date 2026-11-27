@@ -2,7 +2,7 @@
 
 Spec sections: 5 (Security: who can save in an app), and the phase 3b decisions "(3.24)" and "(3.25)" with
 questions 11 to 13 of `docs/phases/phase-3b.md`. Spec: [AI Workshop Platform: Spec](https://claude.ai/artifact/6mNkKPKQysWNoj7eL6Gyus).
-Status: draft, waiting for Franck's answers.
+Status: questions answered 2026-11-27 (all as suggested, except question 2: no admin switch; see `docs/decisions.md`); ready for approval.
 
 Goal: saving in an app needs no sign-in step. The builder opens their app from the workshop page (link or QR
 code) and can save at once, on the computer and on the phone. Anyone holding that link or QR code can save
@@ -62,11 +62,10 @@ flowchart LR
 Each live app gets one edit secret (32 random bytes, base64url, like the 3.24 token), kept so step 4 can
 show it again, with only its SHA-256 used by the write check. Every write route (data `PUT`/`DELETE`, media,
 AI tasks) accepts it as `Authorization: Bearer`, with the app's builder as the writer; the per-person tokens,
-`POST /api/app-tokens` and their revocation on sign-out go. The builder can ask for a new one, an admin
-switch "Apps are read-only" (off by default) refuses every app write, and `npm run participant -- reset`
-deletes the secret.
+`POST /api/app-tokens` and their revocation on sign-out go. The builder can ask for a new one, and
+`npm run participant -- reset` deletes the secret.
 
-Depends on: none. Areas: api, infra (IAM for the new items), platform CLI, admin.
+Depends on: none. Areas: api, infra (IAM for the new items), platform CLI.
 
 Acceptance criteria (each starts as FAIL):
 
@@ -74,7 +73,6 @@ Acceptance criteria (each starts as FAIL):
 - WHEN it carries no secret, another app's secret or an old secret replaced by "New edit link" THEN the route answers 401 with "This link is view only." and stores nothing, while `GET` still answers (unit tests).
 - WHEN the signed-in builder asks `GET /api/build` THEN the answer holds `editUrl` = `/apps/<nick>/#edit=<secret>`, and no other participant's request ever holds it (unit test, access review).
 - WHEN the builder asks for a new edit link THEN a new secret is made, the old one answers 401 at once, and `GET /api/build` gives the new `editUrl` (unit test).
-- WHEN an admin turns on "Apps are read-only" THEN every app write answers 401 "This app is view only now." until it is turned off; a non-admin cannot change it (unit tests).
 - WHEN `npm run participant -- reset <nick> --yes` runs THEN the app's edit secret is deleted (unit test).
 - WHEN a secret is checked or made THEN no log line holds the secret or its hash (unit test on the log entries).
 
@@ -116,7 +114,7 @@ Acceptance criteria (each starts as FAIL):
 ## Questions for Franck
 
 1. Approve the spec delta above (anyone holding an app's edit link can save in it; the plain address is view only; per-person sign-in to save and `/app-sign-in/` are removed). Suggested: yes.
-2. How long an edit link lasts. Suggested: it does not expire by itself. The builder's "New edit link" ends the old one, `npm run participant -- reset` deletes it, and a new admin switch "Apps are read-only" (off by default) stops every app write at once: you turn it on after the workshop, until phase 5 removes the apps.
+2. How long an edit link lasts. Suggested: it does not expire by itself. The builder's "New edit link" ends the old one, `npm run participant -- reset` deletes it, and a new admin switch "Apps are read-only" (off by default) stops every app write at once: you turn it on after the workshop, until phase 5 removes the apps. **Answered:** yes, but no admin switch.
 3. What visitors with the plain address see. Suggested: apps hide their Add, Save and Delete controls when `workshopData.canSave()` is false and may show a small "View only" line (new `AGENTS.md` rule, checked by the build eval). Apps already live keep their buttons visible; pressing one says "This link is view only.".
 4. Who saved. Everyone using the edit link saves as the app's builder: "Last saved by" shows the builder's nickname, `whoAmI()` gives it, and app AI use counts against the builder's $1 a day. An app that wants each person's name asks them to type it (a plain field, not checked). Suggested: yes.
 5. Residual risk (Stop-and-ask 6). The edit link sits in the address bar, in the browser's history (synced history too) and in any photo of the QR code. Whoever holds it can save, upload and use the builder's AI allowance in that one app until "New edit link". The caps you already accepted still bound it (50 MB of writes and 500 MB of uploads per app a day, $1 of AI per builder and $10 for all apps a day, the WAF and throttles; under a flood about $24 a day, as in "(3.18) Cost"). Strangers with only the plain address still cannot write, so the stranger-flood case removed by 3.24 stays removed. Suggested: accept.
@@ -124,4 +122,4 @@ Acceptance criteria (each starts as FAIL):
 
 ## Blocked
 
-- All three tickets wait on Franck's answers and the merge of this brief.
+- All three tickets wait on the merge of this brief.

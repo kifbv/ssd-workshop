@@ -15,6 +15,13 @@ Choices made while building that the specification left open. Newest phase first
 ## Phase 3c: one edit link per app
 
 - **Direction (Franck, 2026-11-27 09:02 UTC, decision card in the project thread):** "One edit link per app" replaces the per-person sign-in to save of 3.24/3.25 (alternatives declined: keep personal sign-in and fix the flow; a separate address per app). Brief and questions: `docs/phases/phase-3c.md`; the spec delta waits for Franck's yes there.
+- **Answers to the brief (Franck, 2026-11-27 09:08 UTC, project thread):** "yes to all, but for 2. there's no need for an admin switch".
+- **Spec delta (approved by Franck 2026-11-27):** CHANGED section 5 Security: "... visible to anyone with the app's URL. Saving, uploading and AI tasks need the app's edit link, which its builder gets on the workshop page as a link and a QR code and may share: anyone holding the edit link can save. Apps have no logins and no private per-person data." CHANGED phase 3b question 11: anyone holding the app's edit link may save in it (was: any signed-in participant). REMOVED (3.24/3.25): the per-person app write token, `/app-sign-in/` and the "Sign in to save" button with its floating fallback.
+- **Edit link life:** no expiry of its own; the builder's "New edit link" ends the old one, `npm run participant -- reset` deletes it. No admin switch (Franck: not needed).
+- **View only:** apps hide their saving controls when `workshopData.canSave()` is false; apps already live keep their buttons, and a save says "This link is view only.".
+- **Writer:** every save through the edit link is the app's builder's (`updatedBy`, `whoAmI()`), and app AI use counts against the builder's $1 a day.
+- **Residual risk (accepted):** a leaked edit link lets its holder write in that one app within the existing caps until "New edit link"; the plain address cannot write.
+- **Switch-over:** 3.26 and 3.28 merge together (or 3.28 right after), then `AWS_PROFILE=franck npm run -s apps -- refresh` once.
 
 ## Phase 3b: photos in apps, more storage, clearer refusals
 
