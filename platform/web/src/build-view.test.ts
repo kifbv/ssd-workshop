@@ -6,6 +6,7 @@ import {
   buildResult,
   commitUrl,
   currentStage,
+  editLinkResult,
   feedLines,
   isRunning,
   nowText,
@@ -14,6 +15,7 @@ import {
   type Build,
 } from "./build-view.js";
 import { MESSAGES, screenFor } from "./flow.js";
+import { APP_EDIT_LINK_TEXTS } from "../../api/workshop/texts.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const REPO = "https://github.com/ssd-workshop-apps/ssd-ada-l";
@@ -154,5 +156,41 @@ describe("stages, lines and the behind-the-scenes part", () => {
 
   it("sends a participant at step building to the step 3 screen", () => {
     expect(screenFor({ id: "p-1", nickname: "ada", role: "participant", group: "g1", step: "building" })).toBe("build");
+  });
+});
+
+describe("ticket 3.27: the edit link", () => {
+  const APP = "https://workshop.rankly.games/apps/ada-l/";
+  const SECRET = "fake-test-secret_".padEnd(43, "Z");
+  const EDIT = `${APP}#edit=${SECRET}`;
+  const live = { buildId: "b-1", status: "live", appUrl: APP };
+
+  it("keeps editUrl only when it is this app's address with a 43-character secret in the fragment", () => {
+    expect(parseBuild({ ...live, editUrl: EDIT })?.editUrl).toBe(EDIT);
+    for (const bad of [
+      `https://workshop.rankly.games/apps/bob-x/#edit=${SECRET}`,
+      `${APP}#edit=${SECRET}x`,
+      `${APP}#edit=${SECRET.slice(1)}`,
+      `${APP}#edit=${SECRET}&x=1`,
+      `${APP}?a=1#edit=${SECRET}`,
+      `http://workshop.rankly.games/apps/ada-l/#edit=${SECRET}`,
+      `javascript:alert(1)//workshop.rankly.games/apps/ada-l/#edit=${SECRET}`,
+      42,
+    ]) {
+      expect(parseBuild({ ...live, editUrl: bad }), String(bad)).not.toHaveProperty("editUrl");
+    }
+    // Never without a trusted app address.
+    expect(parseBuild({ ...live, appUrl: undefined, editUrl: EDIT })).not.toHaveProperty("editUrl");
+  });
+
+  it("reads New edit link's answer: the new link, signed out, the API's words, or unsure (read the build again)", () => {
+    expect(editLinkResult({ status: 200, body: { editUrl: EDIT } }, APP)).toEqual({ kind: "link", editUrl: EDIT });
+    expect(editLinkResult({ status: 200, body: { editUrl: EDIT.replace("ada-l", "bob-x") } }, APP)).toEqual({ kind: "show", message: MESSAGES.failed, tone: "error", unsure: true });
+    expect(editLinkResult({ status: 401, body: {} }, APP)).toEqual({ kind: "signed-out" });
+    expect(editLinkResult({ status: 404, body: { message: APP_EDIT_LINK_TEXTS.notLive } }, APP)).toEqual({ kind: "show", message: APP_EDIT_LINK_TEXTS.notLive, tone: "error", unsure: false });
+    expect(editLinkResult({ status: 404, body: {} }, APP)).toMatchObject({ message: APP_EDIT_LINK_TEXTS.notLive, unsure: false });
+    expect(editLinkResult({ status: 429, body: {} }, APP)).toEqual({ kind: "show", message: MESSAGES.retry, tone: "info", unsure: false });
+    expect(editLinkResult({ status: 0, body: null }, APP)).toEqual({ kind: "show", message: MESSAGES.offline, tone: "error", unsure: true });
+    expect(editLinkResult({ status: 503, body: {} }, APP)).toEqual({ kind: "show", message: MESSAGES.failed, tone: "error", unsure: true });
   });
 });

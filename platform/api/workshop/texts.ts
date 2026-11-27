@@ -226,31 +226,20 @@ export const APP_EDIT_LINK_TEXTS = {
 } as const;
 
 /**
- * Ticket 3.24: saving in apps needs the workshop's sign-in. The data API's 401 (and 3.18's and 3.21's), and the lines of
- * the hand-off page `/app-sign-in` and its token route. Button labels stay in the web code.
+ * Ticket 3.27: step 4's lines about the edit link (button labels stay in the web code). `editLabel` comes before the edit
+ * link, `plainLabel` before the plain address when the edit link could not be read.
  */
-export const APP_SIGN_IN_TEXTS = {
-  signInToSave: "Sign in to the workshop to save in this app.",
-  notLive: "This app is not live.",
-  signInFirst: "Sign in to the workshop first, then you come back here.",
-  noNickname: "Choose your workshop nickname first, then open this page again from the app.",
-  tooMany: "You have signed in to save in many apps today. Sign out of the workshop and sign in again to start over.",
-  conflict: "Something changed at the same moment. Please press Continue again.",
-  failed: "Something went wrong. Please try again in a moment.",
-  offline: "We couldn't reach the workshop. Check your connection and try again.",
-  opening: "Opening the app…",
-  /** Under the question: what Continue does. */
-  explainer: "The app can then save as you for 12 hours, or until you sign out of the workshop. Everyone with the app's link sees what you save, with your nickname.",
+export const STEP_FOUR_LINK_TEXTS = {
+  editLabel: "Open your app with its edit link:",
+  plainLabel: "Open it at",
+  qrLabel: "QR code of your app's edit link",
+  renewed: "Your new edit link is ready. The old link and QR code no longer save.",
+  copied: "View-only link copied. People who open it can look, not save.",
 } as const;
 
-/** Ticket 3.24: on the workshop's sign-in when an app sent the person there ("Sign in to save in ada's app."). */
-export function appSignInNoteText(app: string): string {
-  return `Sign in to save in ${app}'s app. You come back to it afterwards.`;
-}
-
-/** Ticket 3.24: the hand-off page's question ("Save in ada's app as Bob?"). */
-export function saveAsText(app: string, nickname: string): string {
-  return `Save in ${app}'s app as ${nickname}?`;
+/** Ticket 3.27: when the browser would not copy, the view-only link to copy by hand. */
+export function copyFailedText(viewUrl: string): string {
+  return `Copying did not work here. Your view-only link is ${viewUrl}`;
 }
 
 /**

@@ -11,21 +11,19 @@ export const WEB_SOURCE_DIR = fileURLToPath(new URL(".", import.meta.url));
  * shows for an address that does not exist (S3 answers a missing key with 403; the distribution turns it into
  * this page with status 404), under `/apps/*` and on the site alike: no script, no stylesheet.
  * `facilitator/index.html` (ticket 3.11) is the facilitator dashboard at `/facilitator/` (the distribution's
- * `ssd-workshop-site-index` function asks the bucket for `index.html` in that folder). `app-sign-in/index.html`
- * (ticket 3.24) is the hand-off page for saving in apps at `/app-sign-in/`, served the same way.
+ * `ssd-workshop-site-index` function asks the bucket for `index.html` in that folder). Ticket 3.27 removed 3.24's
+ * hand-off page `app-sign-in/index.html`: `/app-sign-in` now redirects to the home page.
  */
-export const STATIC_FILES = ["index.html", "style.css", "404.html", "facilitator/index.html", "app-sign-in/index.html"] as const;
+export const STATIC_FILES = ["index.html", "style.css", "404.html", "facilitator/index.html"] as const;
 
 /**
  * The scripts esbuild bundles: the page's own, the diagram drawer (Mermaid, ticket 1.9), loaded only at step 2, and
- * the facilitator dashboard's (ticket 3.11), loaded only by its page, and the hand-off page's (ticket 3.24).
+ * the facilitator dashboard's (ticket 3.11), loaded only by its page.
  */
 export const SCRIPTS = {
   "app.js": "main.ts",
   "diagram.js": "diagram.ts",
   "facilitator/dashboard.js": "facilitator.ts",
-  // Ticket 3.24: the hand-off page's own script.
-  "app-sign-in/app-sign-in.js": "app-sign-in.ts",
 } as const;
 
 /**

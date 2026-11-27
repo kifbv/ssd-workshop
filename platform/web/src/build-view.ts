@@ -4,8 +4,8 @@
 // File paths, hosts, commit messages and failure reasons are anyone's text (the coding agent's, a participant's
 // files): the page shows them with `textContent` only, and puts into a link only what passes the checks below.
 // Ticket 3.4: the queue's place text is shared with the API (phase 3 texts, ticket 3.2): plain functions, no Node.js.
-import { queuePositionText } from "../../api/workshop/texts.js";
-import { MESSAGES, type ApiAnswer, type Show, type Tone } from "./flow.js";
+import { APP_EDIT_LINK_TEXTS, queuePositionText } from "../../api/workshop/texts.js";
+import { MESSAGES, messageOf, type ApiAnswer, type Show, type Tone } from "./flow.js";
 
 /** The step 3 page asks for news of the build this often while it runs. */
 export const BUILD_POLL_INTERVAL_MS = 2000;
@@ -31,6 +31,11 @@ export interface Build {
   feed: FeedEvent[];
   repositoryUrl?: string;
   appUrl?: string;
+  /**
+   * Ticket 3.26/3.27: the app's edit link (`appUrl` + `#edit=<secret>`), only in the builder's own answer once the app
+   * is live. Shown on step 4 only, as its link and QR code; never logged, stored or put anywhere else.
+   */
+  editUrl?: string;
   failureReasons?: string[];
   /** Ticket 3.4: while queued, how many builds wait ahead of it (once the launcher has placed it). */
   ahead?: number;
@@ -79,6 +84,13 @@ export const COMMIT_SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY_URL = /^https:\/\/github\.com\/ssd-workshop-apps\/ssd-[a-z0-9-]{3,20}$/;
 /** A live app's address on the workshop's own site (ticket 2.5). */
 const APP_URL = /^https:\/\/workshop\.rankly\.games\/apps\/[a-z0-9-]{3,20}\/$/;
+/** Ticket 3.27: the app's edit link: its address with the secret (43 base64url characters) in the fragment, nothing else. */
+const EDIT_URL = /^https:\/\/workshop\.rankly\.games\/apps\/[a-z0-9-]{3,20}\/#edit=[A-Za-z0-9_-]{43}$/;
+
+/** The edit link when it is one the page trusts and for this very app (`appUrl` followed by the fragment), else undefined. */
+export function trustedEditUrl(value: unknown, appUrl: string | undefined): string | undefined {
+  return text(value) && appUrl !== undefined && EDIT_URL.test(value) && value.startsWith(`${appUrl}#`) ? value : undefined;
+}
 
 function parseEvent(value: unknown): FeedEvent | undefined {
   const e = record(value);
@@ -97,12 +109,15 @@ export function parseBuild(body: unknown): Build | undefined {
   if (b === undefined || !text(b["buildId"]) || !(STATUSES as readonly unknown[]).includes(b["status"])) return undefined;
   const feed = Array.isArray(b["feed"]) ? b["feed"].flatMap((e) => parseEvent(e) ?? []) : [];
   const reasons = Array.isArray(b["failureReasons"]) ? b["failureReasons"].filter(text) : undefined;
+  const appUrl = text(b["appUrl"]) && APP_URL.test(b["appUrl"]) ? b["appUrl"] : undefined;
+  const editUrl = trustedEditUrl(b["editUrl"], appUrl);
   return {
     buildId: b["buildId"],
     status: b["status"] as BuildStatus,
     feed,
     ...(text(b["repositoryUrl"]) && REPOSITORY_URL.test(b["repositoryUrl"]) ? { repositoryUrl: b["repositoryUrl"] } : {}),
-    ...(text(b["appUrl"]) && APP_URL.test(b["appUrl"]) ? { appUrl: b["appUrl"] } : {}),
+    ...(appUrl === undefined ? {} : { appUrl }),
+    ...(editUrl === undefined ? {} : { editUrl }),
     ...(reasons === undefined ? {} : { failureReasons: reasons }),
     ...(typeof b["ahead"] === "number" && Number.isInteger(b["ahead"]) && b["ahead"] >= 0 ? { ahead: b["ahead"] } : {}),
     ...(b["paused"] === true ? { paused: true as const } : {}),
@@ -135,6 +150,26 @@ export function buildResult(answer: ApiAnswer): { kind: "build"; build: Build } 
   if (answer.status === 429) return show(MESSAGES.retry, "info");
   if (answer.status === 0) return show(MESSAGES.offline);
   return show(MESSAGES.failed);
+}
+
+/**
+ * Ticket 3.27, `POST /api/build/edit-link` (New edit link): the new link when the answer holds one for this app;
+ * signed out; or a message, with `unsure` when the answer may have been lost after the server made a new link (the page
+ * then reads the build again to show the link that works).
+ */
+export function editLinkResult(
+  answer: ApiAnswer,
+  appUrl: string | undefined,
+): { kind: "link"; editUrl: string } | { kind: "signed-out" } | (Show & { unsure: boolean }) {
+  if (answer.status === 200) {
+    const editUrl = trustedEditUrl(record(answer.body)?.["editUrl"], appUrl);
+    return editUrl === undefined ? { ...show(MESSAGES.failed), unsure: true } : { kind: "link", editUrl };
+  }
+  if (answer.status === 401) return { kind: "signed-out" };
+  if (answer.status === 404) return { ...show(messageOf(answer.body) ?? APP_EDIT_LINK_TEXTS.notLive), unsure: false };
+  if (answer.status === 400 || answer.status === 415) return { ...show(messageOf(answer.body) ?? MESSAGES.failed), unsure: false };
+  if (answer.status === 429) return { ...show(MESSAGES.retry, "info"), unsure: false };
+  return { ...show(answer.status === 0 ? MESSAGES.offline : MESSAGES.failed), unsure: true };
 }
 
 /** True while the build still runs: the page keeps polling (it stops on live and on failed). */

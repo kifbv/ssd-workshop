@@ -140,11 +140,12 @@ export const PAGES_CONTENT_SECURITY_POLICY = [
  * only to itself, and `http:` stays blocked. Tested in Chromium in `platform/api/build/template.test.ts`.
  * Ticket 3.24 try 2 (spec delta, approved by Franck 2026-11-26): `allow-popups-to-escape-sandbox`, so a tab an app opens (the
  * "Sign in to save" hand-off page `/app-sign-in`) is a normal page under its own CSP, not sandboxed in an opaque origin
- * where it could not see the workshop's session. The app itself stays sandboxed and cannot read the tab
- * (`platform/web/app-sign-in-popup.test.ts`).
+ * where it could not see the workshop's session. The app itself stays sandboxed and cannot read the tab.
+ * Ticket 3.27 (spec delta: 3.24's "Popups escape the sandbox" REMOVED again): `allow-popups-to-escape-sandbox` is gone, its
+ * only reason (`/app-sign-in`) with it: a tab an app opens is sandboxed like the app (opaque origin, no cookies).
  */
 export const APPS_CONTENT_SECURITY_POLICY = [
-  "sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox",
+  "sandbox allow-scripts allow-forms allow-modals allow-popups",
   "default-src 'self'",
   "connect-src 'self' https:",
   "img-src 'self' data: https:",
@@ -478,8 +479,10 @@ export const DEPLOYER_LIVE_UPDATE_ATTRIBUTES = ["pk", "sk", "type", "nickname", 
  * (retained) for Franck to delete once v2 is live.
  * Version 3 (ticket 3.24 try 2): `allow-popups-to-escape-sandbox` added to the sandbox; `ssd-workshop-apps-v2` stays
  * (retained) for Franck to delete once v3 is live.
+ * Version 4 (ticket 3.27): `allow-popups-to-escape-sandbox` removed again (`/app-sign-in` is gone); `ssd-workshop-apps-v3`
+ * stays (retained) for Franck to delete once v4 is live.
  */
-export const APPS_HEADERS_POLICY_VERSION = 3;
+export const APPS_HEADERS_POLICY_VERSION = 4;
 export const APPS_HEADERS_POLICY_NAME = `${PREFIX}-apps-v${APPS_HEADERS_POLICY_VERSION}`;
 /** The CloudFront Function on `/apps/*` (viewer request): trailing slash and lower-case redirects, `index.html` for folders. */
 export const APPS_INDEX_FUNCTION_NAME = `${PREFIX}-apps-index`;

@@ -298,7 +298,7 @@ export class EdgeStack extends Stack {
     // gets its slash, the folder its index.html. Same origin, cache and headers as the other pages.
     const siteIndex = new CloudFrontFunction(this, "SiteIndexFunction", {
       functionName: SITE_INDEX_FUNCTION_NAME,
-      comment: `${PREFIX} site: slash redirect and index.html for /facilitator/ and /app-sign-in/`,
+      comment: `${PREFIX} site: slash redirect and index.html for /facilitator/, /app-sign-in to home`,
       runtime: FunctionRuntime.JS_2_0,
       code: FunctionCode.fromFile({ filePath: SITE_INDEX_FUNCTION_FILE }),
     });
@@ -601,7 +601,7 @@ export class EdgeStack extends Stack {
         "/apps/*": apps,
         [APP_MEDIA_PATH_PATTERN]: media,
         "/facilitator*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
-        // Ticket 3.24: the hand-off page for saving in apps, /app-sign-in/ (top level, the pages' CSP), like the dashboard.
+        // Ticket 3.24's hand-off page for saving in apps; since ticket 3.27 the function sends its address to the home page.
         "/app-sign-in*": { ...site, functionAssociations: [{ function: siteIndex, eventType: FunctionEventType.VIEWER_REQUEST }] },
       },
       // Ticket 2.5: S3 behind an origin access control answers a missing key with 403 (CloudFront may not

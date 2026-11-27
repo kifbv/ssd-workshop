@@ -32,15 +32,16 @@ describe("CloudFront Function ssd-workshop-site-index (ticket 3.11)", () => {
     });
   });
 
-  it("ticket 3.24: redirects /app-sign-in to /app-sign-in/ keeping the app, and serves the folder's index.html", () => {
-    expect(run("/app-sign-in", { app: { value: "ada" } })).toEqual({
-      statusCode: 301,
-      statusDescription: "Moved Permanently",
-      headers: { location: { value: "/app-sign-in/?app=ada" } },
-    });
-    expect(run("/app-sign-in/", { app: { value: "ada" } })).toMatchObject({ uri: "/app-sign-in/index.html" });
-    expect(run("/app-sign-in/app-sign-in.js")).toMatchObject({ uri: "/app-sign-in/app-sign-in.js" });
+  it("ticket 3.27: WHEN anyone opens /app-sign-in/?app=<nick> THEN they land on the home page (302 to /, the query left out)", () => {
+    const home = { statusCode: 302, statusDescription: "Found", headers: { location: { value: "/" } } };
+    for (const uri of ["/app-sign-in/", "/app-sign-in", "/app-sign-in/index.html", "/app-sign-in/app-sign-in.js"]) {
+      expect(run(uri, { app: { value: "ada" } })).toEqual(home);
+      expect(run(uri)).toEqual(home);
+    }
+    expect(run("/app-sign-in/", { app: { value: "ada", multiValue: [{ value: "ada" }, { value: "bob" }] }, wt: { value: "x" } })).toEqual(home);
+    // Only that page's addresses: a longer name is any other missing file.
     expect(run("/app-sign-inx")).toMatchObject({ uri: "/app-sign-inx" });
+    expect(run("/app-sign-ins/")).toMatchObject({ uri: "/app-sign-ins/index.html" });
   });
 
   it("stays small (CloudFront Functions take at most 10 KB of code)", () => {

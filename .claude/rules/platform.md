@@ -314,8 +314,12 @@ paths:
   adds a header for apps adds it to the function's preflight AND bumps CloudFront's `ssd-workshop-app-data-v<N>` policy
   (it cannot be updated).
 - A tab a sandboxed app opens inherits the app's sandbox (opaque origin, no cookies) unless the apps' CSP has
-  `allow-popups-to-escape-sandbox` (ticket 3.24 try 2): a platform page an app opens must be proved in Playwright with the
-  REAL apps CSP on the opener (`platform/web/app-sign-in-popup.test.ts`), not only opened directly.
+  `allow-popups-to-escape-sandbox` (3.24 added it for `/app-sign-in`; 3.27 removed both): a platform page an app opens
+  sees no session. Prove any such page in Playwright with the REAL apps CSP on the opener, not only opened directly.
+- An edit secret on a page (step 4's edit link, ticket 3.27) goes only into its link and QR code: name the QR code for
+  screen readers without the address (`aria-label`), never put it in the title, a log or storage, and drop a build read
+  sent before "New edit link" answered (`editLinkRound` in `main.ts`), or a slow answer brings back the dead link. Test
+  clipboard copies with `context.grantPermissions(["clipboard-read", "clipboard-write"])` and `navigator.clipboard.readText()`.
 - An optimistic lock on a list item (3.24's `TOKENS#<id>`) uses a `version` that every writer raises by one and every
   write is conditional on, never a size (an add and a remove leave the size unchanged), and the item is emptied, not
   deleted, so the version never goes back. Something that must stop once a session ends (a token create) checks the
