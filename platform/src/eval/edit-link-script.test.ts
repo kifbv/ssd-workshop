@@ -381,7 +381,8 @@ describe("exerciseEditLink with a real outside service (ticket 3.28 try 2)", () 
     });
     await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
     serviceOrigin = `https://127.0.0.1:${(service.address() as AddressInfo).port}`;
-    browser = await chromium.launch({ args: ["--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults,LocalNetworkAccessChecks"] });
+    // The service's certificate is self-signed: Chromium must accept it with or without the session proxy (CI has none).
+    browser = await chromium.launch({ args: ["--ignore-certificate-errors", "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults,LocalNetworkAccessChecks"] });
   }, 60_000);
 
   afterAll(async () => {

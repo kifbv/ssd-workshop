@@ -140,3 +140,4 @@ paths:
   `<details>` hides its content with `content-visibility`, which `checkVisibility` sees but `getClientRects()` does not.
 - `expect.poll` waits 1 s by default: a poll that waits on a big picture being decoded and re-encoded (12 megapixels)
   gets `{ timeout: 15_000 }` and its test a 30 s limit, or a busy runner fails it (deploy run 69).
+- In a Playwright test against a local HTTPS server with a self-signed certificate, launch Chromium with `--ignore-certificate-errors` (or a context with `ignoreHTTPSErrors: true`): the session proxy makes the eval ignore certificate errors, so such a test passes in a session and fails in CI (ticket 3.28, CI run on PR 79). Run it once with `env -u HTTPS_PROXY -u https_proxy` before pushing.
